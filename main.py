@@ -1,7 +1,6 @@
 from typing import Optional, List, Dict, Any
 import os
 import asyncio
-import getpass
 import json
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
@@ -9,9 +8,9 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import WebDriverException
-import pyperclip  # You'll need to run: uv add pyperclip
-import os
+import pyperclip
 import subprocess
+import inquirer
 
 # Import LinkedIn scraper components
 from linkedin_scraper import Person, Company, Job, JobSearch, actions
@@ -35,11 +34,11 @@ def setup_credentials() -> Dict[str, str]:
         except Exception as e:
             print(f"Error reading credentials file: {e}")
 
-    print("LinkedIn credentials are required for the scraper to work.")
-    email = input("LinkedIn Email: ")
-    password = getpass.getpass("LinkedIn Password: ")
-
-    credentials = {"email": email, "password": password}
+    questions = [
+        inquirer.Text("email", message="LinkedIn Email"),
+        inquirer.Password("password", message="LinkedIn Password"),
+    ]
+    credentials = inquirer.prompt(questions)
 
     # Store credentials securely
     try:
@@ -48,9 +47,9 @@ def setup_credentials() -> Dict[str, str]:
 
         # Set permissions to user-only read/write
         os.chmod(credentials_file, 0o600)
-        print(f"Credentials stored securely at {credentials_file}")
+        print(f"✅ Credentials stored with user-only read/write at {credentials_file}")
     except Exception as e:
-        print(f"Warning: Could not store credentials: {e}")
+        print(f"⚠️ Warning: Could not store credentials: {e}")
 
     return credentials
 
@@ -83,13 +82,28 @@ async def initialize_driver() -> None:
     # Validate chromedriver can be found
     chromedriver_path = get_chromedriver_path()
     if not chromedriver_path:
-        print("WARNING: ChromeDriver not found in PATH or common locations.")
-        print(
-            "Please set the CHROMEDRIVER environment variable to your ChromeDriver path."
-        )
-        print("Continuing with automatic detection (may fail)...")
+        print("⚠️ ChromeDriver not found in PATH or common locations.")
+
+        questions = [
+            inquirer.Path(
+                "chromedriver_path",
+                message="Please enter ChromeDriver path (or leave empty for auto-detection)",
+                path_type=inquirer.Path.FILE,
+                exists=True,
+                validate=lambda _, p: os.access(p, os.X_OK) if p else True,
+            ),
+        ]
+        answers = inquirer.prompt(questions)
+
+        if answers["chromedriver_path"]:
+            chromedriver_path = answers["chromedriver_path"]
+            print(f"✅ Using specified ChromeDriver at: {chromedriver_path}")
+            # Set as environment variable for this session
+            os.environ["CHROMEDRIVER"] = chromedriver_path
+        else:
+            print("⚠️ Continuing with automatic detection (may fail)...")
     else:
-        print(f"Using ChromeDriver at: {chromedriver_path}")
+        print(f"✅ Using ChromeDriver at: {chromedriver_path}")
 
     try:
         driver = await get_or_create_driver(headless=True)
@@ -100,10 +114,36 @@ async def initialize_driver() -> None:
             print("✅ Successfully logged in to LinkedIn")
         except Exception as e:
             print(f"❌ Failed to login: {str(e)}")
-            print("Please check your credentials and try again.")
+
+            questions = [
+                inquirer.Confirm(
+                    "retry",
+                    message="Would you like to try with different credentials?",
+                    default=True,
+                ),
+            ]
+            answers = inquirer.prompt(questions)
+
+            if answers["retry"]:
+                # Remove old credentials and try again
+                if credentials_file.exists():
+                    os.remove(credentials_file)
+                return await initialize_driver()
+            else:
+                print("Please check your credentials and try again.")
+                sys.exit(1)
+
     except WebDriverException as e:
         print(f"❌ Failed to initialize web driver: {str(e)}")
         print("Please ensure ChromeDriver is properly installed and in your PATH.")
+
+        questions = [
+            inquirer.Confirm("exit", message="Exit now?", default=True),
+        ]
+        answers = inquirer.prompt(questions)
+
+        if answers["exit"]:
+            sys.exit(1)
 
 
 async def get_or_create_driver(headless: bool = True) -> webdriver.Chrome:
@@ -156,7 +196,7 @@ async def get_person_profile(linkedin_url: str) -> Dict[str, Any]:
     driver = await get_or_create_driver()
 
     try:
-        print(f"Scraping profile: {linkedin_url}")
+        print(f"🔍 Scraping profile: {linkedin_url}")
         person = Person(linkedin_url, driver=driver, close_on_complete=False)
 
         # Convert person object to a dictionary
@@ -203,7 +243,7 @@ async def get_person_profile(linkedin_url: str) -> Dict[str, Any]:
             "open_to_work": getattr(person, "open_to_work", False),
         }
     except Exception as e:
-        print(f"Error scraping profile: {e}")
+        print(f"❌ Error scraping profile: {e}")
         return {"error": f"Failed to scrape profile: {str(e)}"}
 
 
@@ -220,7 +260,10 @@ async def get_company_profile(
     driver = await get_or_create_driver()
 
     try:
-        print(f"Scraping company: {linkedin_url}")
+        print(f"🏢 Scraping company: {linkedin_url}")
+        if get_employees:
+            print("⚠️ Fetching employees may take a while...")
+
         company = Company(
             linkedin_url,
             driver=driver,
@@ -264,7 +307,7 @@ async def get_company_profile(
 
         return result
     except Exception as e:
-        print(f"Error scraping company: {e}")
+        print(f"❌ Error scraping company: {e}")
         return {"error": f"Failed to scrape company profile: {str(e)}"}
 
 
@@ -278,13 +321,13 @@ async def get_job_details(job_url: str) -> Dict[str, Any]:
     driver = await get_or_create_driver()
 
     try:
-        print(f"Scraping job: {job_url}")
+        print(f"💼 Scraping job: {job_url}")
         job = Job(job_url, driver=driver, close_on_complete=False)
 
         # Convert job object to a dictionary
         return job.to_dict()
     except Exception as e:
-        print(f"Error scraping job: {e}")
+        print(f"❌ Error scraping job: {e}")
         return {"error": f"Failed to scrape job posting: {str(e)}"}
 
 
@@ -298,14 +341,14 @@ async def search_jobs(search_term: str) -> List[Dict[str, Any]]:
     driver = await get_or_create_driver()
 
     try:
-        print(f"Searching jobs: {search_term}")
+        print(f"🔍 Searching jobs: {search_term}")
         job_search = JobSearch(driver=driver, close_on_complete=False, scrape=False)
         jobs = job_search.search(search_term)
 
         # Convert job objects to dictionaries
         return [job.to_dict() for job in jobs]
     except Exception as e:
-        print(f"Error searching jobs: {e}")
+        print(f"❌ Error searching jobs: {e}")
         return [{"error": f"Failed to search jobs: {str(e)}"}]
 
 
@@ -315,7 +358,7 @@ async def get_recommended_jobs() -> List[Dict[str, Any]]:
     driver = await get_or_create_driver()
 
     try:
-        print("Getting recommended jobs")
+        print("📋 Getting recommended jobs")
         job_search = JobSearch(
             driver=driver,
             close_on_complete=False,
@@ -329,7 +372,7 @@ async def get_recommended_jobs() -> List[Dict[str, Any]]:
         else:
             return []
     except Exception as e:
-        print(f"Error getting recommended jobs: {e}")
+        print(f"❌ Error getting recommended jobs: {e}")
         return [{"error": f"Failed to get recommended jobs: {str(e)}"}]
 
 
@@ -344,7 +387,7 @@ async def close_session() -> str:
             del active_drivers[session_id]
             return "Successfully closed the browser session"
         except Exception as e:
-            print(f"Error closing browser session: {e}")
+            print(f"❌ Error closing browser session: {e}")
             return f"Error closing browser session: {str(e)}"
     else:
         return "No active browser session to close"
@@ -357,7 +400,7 @@ async def shutdown_handler():
             driver.quit()
             del active_drivers[session_id]
         except Exception as e:
-            print(f"Error closing driver during shutdown: {e}")
+            print(f"❌ Error closing driver during shutdown: {e}")
 
 
 def print_claude_config():
@@ -367,7 +410,7 @@ def print_claude_config():
     # Find the full path to uv executable
     try:
         uv_path = subprocess.check_output(["which", "uv"], text=True).strip()
-        print(f"Found uv at: {uv_path}")
+        print(f"🔍 Found uv at: {uv_path}")
     except subprocess.CalledProcessError:
         # Fallback if which uv fails
         uv_path = "uv"
@@ -391,19 +434,27 @@ def print_claude_config():
     try:
         pyperclip.copy(config_str)
         print("\n✅ Claude configuration copied to clipboard!")
+    except ImportError:
+        print(
+            "\n⚠️ pyperclip not installed. To copy configuration automatically, run: uv add pyperclip"
+        )
     except Exception as e:
         print(f"\n❌ Could not copy to clipboard: {e}")
 
     # Print the final configuration
-    print("\nYour final Claude configuration should look like:")
+    print("\n📋 Your final Claude configuration should look like:")
     print(config_str)
     print(
-        "\nAdd this to your Claude Desktop configuration in Settings > Developer > Edit Config"
+        "\n🔧 Add this to your Claude Desktop configuration in Settings > Developer > Edit Config"
     )
 
 
 if __name__ == "__main__":
     try:
+        # Terminal aesthetics
+        print("🔗 LinkedIn MCP Server 🔗")
+        print("=" * 40)
+
         # Run the initialization before starting the MCP server
         asyncio.run(initialize_driver())
 
@@ -411,11 +462,11 @@ if __name__ == "__main__":
         print_claude_config()
 
         # Run the MCP server with stdio transport
-        print("\nStarting LinkedIn MCP server...")
+        print("\n🚀 Starting LinkedIn MCP server...")
         mcp.run(transport="stdio")
     except KeyboardInterrupt:
-        print("\nShutting down LinkedIn MCP server...")
+        print("\n👋 Shutting down LinkedIn MCP server...")
         asyncio.run(shutdown_handler())
     except Exception as e:
-        print(f"Error running MCP server: {e}")
+        print(f"❌ Error running MCP server: {e}")
         asyncio.run(shutdown_handler())
