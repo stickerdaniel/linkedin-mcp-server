@@ -11,6 +11,7 @@ from selenium.common.exceptions import WebDriverException
 import pyperclip
 import subprocess
 import inquirer
+import sys
 
 # Import LinkedIn scraper components
 from linkedin_scraper import Person, Company, Job, JobSearch, actions
@@ -66,10 +67,16 @@ def get_chromedriver_path() -> Optional[str]:
         os.path.join(os.path.expanduser("~"), "chromedriver"),
         "/usr/local/bin/chromedriver",
         "/usr/bin/chromedriver",
+        # Common MacOS paths
+        "/opt/homebrew/bin/chromedriver",
+        "/Applications/chromedriver",
+        # Common Windows paths
+        "C:\\Program Files\\chromedriver.exe",
+        "C:\\Program Files (x86)\\chromedriver.exe",
     ]
 
     for path in possible_paths:
-        if os.path.exists(path):
+        if os.path.exists(path) and (os.access(path, os.X_OK) or path.endswith(".exe")):
             return path
 
     return None
@@ -81,29 +88,16 @@ async def initialize_driver() -> None:
 
     # Validate chromedriver can be found
     chromedriver_path = get_chromedriver_path()
-    if not chromedriver_path:
-        print("⚠️ ChromeDriver not found in PATH or common locations.")
 
-        questions = [
-            inquirer.Path(
-                "chromedriver_path",
-                message="Please enter ChromeDriver path (or leave empty for auto-detection)",
-                path_type=inquirer.Path.FILE,
-                exists=True,
-                validate=lambda _, p: os.access(p, os.X_OK) if p else True,
-            ),
-        ]
-        answers = inquirer.prompt(questions)
-
-        if answers["chromedriver_path"]:
-            chromedriver_path = answers["chromedriver_path"]
-            print(f"✅ Using specified ChromeDriver at: {chromedriver_path}")
-            # Set as environment variable for this session
-            os.environ["CHROMEDRIVER"] = chromedriver_path
-        else:
-            print("⚠️ Continuing with automatic detection (may fail)...")
+    if chromedriver_path:
+        print(f"✅ ChromeDriver found at: {chromedriver_path}")
+        os.environ["CHROMEDRIVER"] = chromedriver_path
     else:
-        print(f"✅ Using ChromeDriver at: {chromedriver_path}")
+        print("⚠️ ChromeDriver not found in common locations.")
+        print("⚡ Continuing with automatic detection...")
+        print(
+            "💡 Tip: For better results, install ChromeDriver and set the CHROMEDRIVER environment variable"
+        )
 
     try:
         driver = await get_or_create_driver(headless=True)
@@ -135,15 +129,54 @@ async def initialize_driver() -> None:
 
     except WebDriverException as e:
         print(f"❌ Failed to initialize web driver: {str(e)}")
-        print("Please ensure ChromeDriver is properly installed and in your PATH.")
 
         questions = [
-            inquirer.Confirm("exit", message="Exit now?", default=True),
+            inquirer.List(
+                "chromedriver_action",
+                message="What would you like to do?",
+                choices=[
+                    ("Specify ChromeDriver path manually", "specify"),
+                    ("Get help installing ChromeDriver", "help"),
+                    ("Exit", "exit"),
+                ],
+            ),
         ]
         answers = inquirer.prompt(questions)
 
-        if answers["exit"]:
-            sys.exit(1)
+        if answers["chromedriver_action"] == "specify":
+            path = inquirer.prompt(
+                [inquirer.Text("custom_path", message="Enter ChromeDriver path")]
+            )["custom_path"]
+
+            if os.path.exists(path):
+                os.environ["CHROMEDRIVER"] = path
+                print(f"✅ ChromeDriver path set to: {path}")
+                return await initialize_driver()
+            else:
+                print(f"⚠️ Warning: The specified path does not exist: {path}")
+                return await initialize_driver()
+
+        elif answers["chromedriver_action"] == "help":
+            print("\n📋 ChromeDriver Installation Guide:")
+            print(
+                "1. Find your Chrome version: Chrome menu > Help > About Google Chrome"
+            )
+            print(
+                "2. Download matching ChromeDriver: https://chromedriver.chromium.org/downloads"
+            )
+            print("3. Place ChromeDriver in a location on your PATH")
+            print("   - macOS/Linux: /usr/local/bin/ is recommended")
+            print(
+                "   - Windows: Add to a directory in your PATH or specify the full path\n"
+            )
+
+            if inquirer.prompt(
+                [inquirer.Confirm("try_again", message="Try again?", default=True)]
+            )["try_again"]:
+                return await initialize_driver()
+
+        print("❌ ChromeDriver is required for this application to work properly.")
+        sys.exit(1)
 
 
 async def get_or_create_driver(headless: bool = True) -> webdriver.Chrome:
