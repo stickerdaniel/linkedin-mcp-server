@@ -16,7 +16,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import WebDriverException
 
-from src.linkedin_mcp_server.credentials import setup_credentials
+from linkedin_mcp_server.credentials import setup_credentials
 
 # Global driver storage to reuse sessions
 active_drivers: Dict[str, webdriver.Chrome] = {}

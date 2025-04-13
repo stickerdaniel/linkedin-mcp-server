@@ -70,10 +70,10 @@ def print_claude_config() -> None:
     # Copy to clipboard
     try:
         pyperclip.copy(config_str)  # Only copy the JSON, not the comments
-        print("\n✅ Claude configuration copied to clipboard!")
+        print("✅ Claude configuration copied to clipboard!")
     except ImportError:
         print(
-            "\n⚠️ pyperclip not installed. To copy configuration automatically, run: uv add pyperclip"
+            "⚠️ pyperclip not installed. To copy configuration automatically, run: uv add pyperclip"
         )
     except Exception as e:
-        print(f"\n❌ Could not copy to clipboard: {e}")
+        print(f"❌ Could not copy to clipboard: {e}")

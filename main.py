@@ -9,10 +9,10 @@ import sys
 import logging
 from typing import NoReturn
 
-from src.linkedin_mcp_server.arguments import parse_arguments
-from src.linkedin_mcp_server.cli import print_claude_config
-from src.linkedin_mcp_server.drivers.chrome import initialize_driver
-from src.linkedin_mcp_server.server import create_mcp_server, shutdown_handler
+from linkedin_mcp_server.arguments import parse_arguments
+from linkedin_mcp_server.cli import print_claude_config
+from linkedin_mcp_server.drivers.chrome import initialize_driver
+from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
 
 
 def main() -> None:

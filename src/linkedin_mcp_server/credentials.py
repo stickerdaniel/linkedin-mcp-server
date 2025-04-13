@@ -5,7 +5,7 @@ Credential management for LinkedIn MCP server.
 This module handles the secure storage and retrieval of LinkedIn credentials.
 """
 
-from typing import Dict, Any
+from typing import Dict
 import os
 import json
 from pathlib import Path

@@ -8,10 +8,10 @@ This module creates the MCP server and registers all the LinkedIn tools.
 from typing import Dict, Any
 from mcp.server.fastmcp import FastMCP
 
-from src.linkedin_mcp_server.drivers.chrome import active_drivers
-from src.linkedin_mcp_server.tools.person import register_person_tools
-from src.linkedin_mcp_server.tools.company import register_company_tools
-from src.linkedin_mcp_server.tools.job import register_job_tools
+from linkedin_mcp_server.drivers.chrome import active_drivers
+from linkedin_mcp_server.tools.person import register_person_tools
+from linkedin_mcp_server.tools.company import register_company_tools
+from linkedin_mcp_server.tools.job import register_job_tools
 
 
 def create_mcp_server() -> FastMCP:
