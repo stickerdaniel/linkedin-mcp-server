@@ -102,12 +102,24 @@ async def initialize_driver() -> None:
     try:
         driver = await get_or_create_driver(headless=True)
 
+        # status on driver
+        if driver is None:
+            print("❌ Failed to create or retrieve the web driver.")
+            return
+        print("✅ Web driver initialized successfully")
+
         # Login to LinkedIn
         try:
+            # login start
+            print("🔑 Logging in to LinkedIn...")
             actions.login(driver, credentials["email"], credentials["password"])
             print("✅ Successfully logged in to LinkedIn")
         except Exception as e:
             print(f"❌ Failed to login: {str(e)}")
+            # confirm in mobile app might be required
+            print(
+                "⚠️ You might need to confirm the login in your LinkedIn mobile app. Please try again and confirm the login. You can also try to run this script with headless mode disabled for easier debugging. (change 'get_or_create_driver(headless=True)' to False)"
+            )
 
             questions = [
                 inquirer.Confirm(
@@ -475,7 +487,7 @@ def print_claude_config():
         print(f"\n❌ Could not copy to clipboard: {e}")
 
     # Print the final configuration
-    print("\n📋 Your final Claude configuration should look like:")
+    print("\n📋 Your Claude configuration should look like:")
     print(config_str)
     print(
         "\n🔧 Add this to your Claude Desktop configuration in Settings > Developer > Edit Config"
