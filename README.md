@@ -128,7 +128,8 @@ If login fails:
 2. Check if your account has two-factor authentication enabled
 3. Try logging in manually to LinkedIn first, then run the server
 4. Check your LinkedIn mobile app for a login request after running the server
-5. Try to run the server with `--headless` to see where the login fails
+5. Try to run the server with `--no-headless` to see where the login fails
+6. Try to run the server with `--debug` to see more detailed logs
 
 ### Connection Issues
 
