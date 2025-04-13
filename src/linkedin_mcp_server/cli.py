@@ -10,7 +10,7 @@ import os
 import json
 import subprocess
 import logging
-import pyperclip
+import pyperclip  # type: ignore
 
 logger = logging.getLogger(__name__)
 
