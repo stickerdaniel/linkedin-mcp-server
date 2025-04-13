@@ -39,7 +39,13 @@ def print_claude_config() -> None:
         )
 
     # Include useful command-line arguments in the default args
-    args: List[str] = ["--directory", current_dir, "run", "main.py", "--no-setup"]
+    args: List[str] = [
+        "--directory",
+        current_dir,
+        "run",
+        "main.py",
+        "--no-setup",
+    ]  # , "--no-lazy-init"]
 
     config_json: Dict[str, Any] = {
         "mcpServers": {

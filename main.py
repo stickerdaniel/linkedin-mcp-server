@@ -24,7 +24,7 @@ def main() -> None:
     args = parse_arguments()
 
     # Configure logging
-    log_level = logging.DEBUG if args.debug else logging.INFO
+    log_level = logging.DEBUG if args.debug else logging.ERROR
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -33,8 +33,8 @@ def main() -> None:
     logger = logging.getLogger("linkedin_mcp_server")
     logger.debug(f"Server arguments: {args}")
 
-    # Initialize the driver before starting the server
-    initialize_driver(headless=args.headless)
+    # Initialize the driver - with lazy initialization if specified
+    initialize_driver(headless=args.headless, lazy_init=args.lazy_init)
 
     # Print configuration for Claude if in setup mode
     if args.setup:

@@ -75,38 +75,58 @@ ChromeDriver is required for Selenium to interact with Chrome. You need to insta
 
 ## 🚀 Running the Server
 
-1. **Start the server**:
+1. **Start the server once manually**:
 
 ```bash
 # Using uv (recommended)
-uv run main.py
+uv run main.py --no-lazy-init --no-headless
 ```
 
-2. **First-run setup**:
-   - You'll be prompted for your LinkedIn credentials on first run
-   - Credentials are stored on your local machine with user-only permissions
-   - ChromeDriver will be detected or you'll be prompted to specify its location
+2. **Lazy initialization (default behavior)**:
+   - The server uses lazy initialization, meaning it will only create the Chrome driver and log in when a tool is actually used
+   - You can set environment variables for non-interactive use:
+     ```bash
+     export LINKEDIN_EMAIL=your.email@example.com
+     export LINKEDIN_PASSWORD=your_password
+     ```
 
 3. **Configure Claude Desktop**:
    - The server will display and copy to your clipboard the configuration needed for Claude Desktop
    - Open Claude Desktop and go to Settings > Developer > Edit Config
    - Paste the configuration provided by the server
+   - Edit the configuration to include your LinkedIn credentials as environment variables
+
+Example Claude Desktop configuration:
+```json
+{
+  "mcpServers": {
+    "linkedin-scraper": {
+      "command": "/path/to/uv",
+      "args": ["--directory", "/path/to/project", "run", "main.py", "--no-setup"],
+      "env": {
+        "LINKEDIN_EMAIL": "your.email@example.com",
+        "LINKEDIN_PASSWORD": "your_password"
+      }
+    }
+  }
+}
+```
 
 ## 🔄 Using with Claude Desktop
 
 1. **After adding the configuration** to Claude Desktop, restart the application
 2. **Start a conversation** with Claude
-3. **You'll see tools available** in the tools menu (hammer icon) after a few seconds (server checks chromedriver
+3. **You'll see tools available** in the tools menu (hammer icon)
 4. **You can now ask Claude** to retrieve LinkedIn profiles, search for jobs, etc.
 
 Examples of what you can ask Claude:
-- "Can you tell me about Daniels work experience? His LinkedIn profile is https://www.linkedin.com/in/stickerdaniel/
+- "Can you tell me about Daniels work experience? His LinkedIn profile is https://www.linkedin.com/in/stickerdaniel/"
 - "Search for machine learning engineer jobs on LinkedIn"
 - "Tell me about Google as a company based on their LinkedIn page"
 
 ## 🔐 Security and Privacy
 
-- Your LinkedIn credentials are stored locally at `~/.linkedin_mcp_credentials.json` with user-only permissions
+- Your LinkedIn credentials can be provided through environment variables or stored locally at `~/.linkedin_mcp_credentials.json` with user-only permissions
 - Credentials are never exposed to Claude or any other AI and are only used for the LinkedIn login to scrape data
 - The server runs on your local machine, not in the cloud
 - All LinkedIn scraping happens through your account - be aware that profile visits are visible to other users
@@ -138,11 +158,11 @@ If Claude cannot connect to the server:
 2. Verify the configuration in Claude Desktop is correct
 3. Restart Claude Desktop
 
-## 📜 License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 - Based on the [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by joeyism
 - Uses the Model Context Protocol (MCP) for integration with AI assistants

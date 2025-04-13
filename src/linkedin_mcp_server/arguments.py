@@ -16,6 +16,7 @@ class ServerArguments:
     headless: bool
     setup: bool
     debug: bool
+    lazy_init: bool
 
 
 def parse_arguments() -> ServerArguments:
@@ -44,7 +45,13 @@ def parse_arguments() -> ServerArguments:
     parser.add_argument(
         "--no-setup",
         action="store_true",
-        help="Enable debug mode with additional logging",
+        help="Skip printing configuration information",
+    )
+
+    parser.add_argument(
+        "--no-lazy-init",
+        action="store_true",
+        help="Initialize Chrome driver and login immediately (not recommended for most users)",
     )
 
     args = parser.parse_args()
@@ -53,4 +60,5 @@ def parse_arguments() -> ServerArguments:
         headless=not args.no_headless,
         setup=not args.no_setup,
         debug=args.debug,
+        lazy_init=not args.no_lazy_init,  # Default to lazy init
     )
