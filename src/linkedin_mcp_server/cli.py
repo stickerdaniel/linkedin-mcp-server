@@ -60,6 +60,13 @@ def print_claude_config() -> None:
     # Convert to string for clipboard
     config_str = json.dumps(config_json, indent=2)
 
+    # Print the final configuration
+    print("\n📋 Your Claude configuration should look like:")
+    print(config_str)
+    print(
+        "\n🔧 Add this to your Claude Desktop configuration in Settings > Developer > Edit Config"
+    )
+
     # Copy to clipboard
     try:
         pyperclip.copy(config_str)  # Only copy the JSON, not the comments
@@ -70,10 +77,3 @@ def print_claude_config() -> None:
         )
     except Exception as e:
         print(f"\n❌ Could not copy to clipboard: {e}")
-
-    # Print the final configuration
-    print("\n📋 Your Claude configuration should look like:")
-    print(config_str)
-    print(
-        "\n🔧 Add this to your Claude Desktop configuration in Settings > Developer > Edit Config"
-    )
