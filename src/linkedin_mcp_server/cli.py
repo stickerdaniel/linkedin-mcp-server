@@ -4,21 +4,27 @@ CLI utilities for LinkedIn MCP server.
 
 This module handles the command-line interface and configuration management.
 """
-from typing import Dict, Any
+
+from typing import Dict, Any, List
 import os
 import json
 import subprocess
+import logging
 import pyperclip
+
+logger = logging.getLogger(__name__)
 
 
 def print_claude_config() -> None:
     """
     Print Claude configuration and copy to clipboard.
-    
+
     This function generates the configuration needed for Claude Desktop
     and copies it to the clipboard for easy pasting.
     """
-    current_dir = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    current_dir = os.path.abspath(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    )
 
     # Find the full path to uv executable
     try:
@@ -32,11 +38,21 @@ def print_claude_config() -> None:
             "This may not work in Claude Desktop."
         )
 
+    # Include useful command-line arguments in the default args
+    args: List[str] = ["--directory", current_dir, "run", "main.py"]
+
     config_json: Dict[str, Any] = {
         "mcpServers": {
             "linkedin_scraper": {
                 "command": uv_path,
-                "args": ["--directory", current_dir, "run", "main.py"],
+                "args": args,
+                "disabled": False,
+                "requiredTools": [
+                    "get_person_profile",
+                    "get_company_profile",
+                    "get_job_details",
+                    "search_jobs",
+                ],
             }
         }
     }
@@ -46,7 +62,7 @@ def print_claude_config() -> None:
 
     # Copy to clipboard
     try:
-        pyperclip.copy(config_str)
+        pyperclip.copy(config_str)  # Only copy the JSON, not the comments
         print("\n✅ Claude configuration copied to clipboard!")
     except ImportError:
         print(

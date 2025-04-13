@@ -4,10 +4,12 @@ Chrome driver management for LinkedIn scraping.
 
 This module handles the creation and management of Chrome WebDriver instances.
 """
+
 from typing import Dict, Optional, List
 import os
-from pathlib import Path
 import sys
+import logging
+from pathlib import Path
 import inquirer
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -18,12 +20,13 @@ from src.linkedin_mcp_server.credentials import setup_credentials
 
 # Global driver storage to reuse sessions
 active_drivers: Dict[str, webdriver.Chrome] = {}
+logger = logging.getLogger(__name__)
 
 
 def get_chromedriver_path() -> Optional[str]:
     """
     Get the ChromeDriver path from environment variable or default locations.
-    
+
     Returns:
         Optional[str]: Path to the ChromeDriver executable if found, None otherwise
     """
@@ -55,13 +58,13 @@ def get_chromedriver_path() -> Optional[str]:
 def get_or_create_driver(headless: bool = True) -> webdriver.Chrome:
     """
     Get existing driver or create a new one.
-    
+
     Args:
-        headless (bool): Whether to run Chrome in headless mode
-        
+        headless: Whether to run Chrome in headless mode
+
     Returns:
         webdriver.Chrome: Chrome WebDriver instance
-        
+
     Raises:
         WebDriverException: If the driver cannot be created
     """
@@ -73,7 +76,10 @@ def get_or_create_driver(headless: bool = True) -> webdriver.Chrome:
     # Set up Chrome options
     chrome_options = Options()
     if headless:
+        logger.debug("Running Chrome in headless mode")
         chrome_options.add_argument("--headless=new")
+    else:
+        logger.debug("Running Chrome with visible browser window")
 
     # Add additional options for stability
     chrome_options.add_argument("--no-sandbox")
@@ -88,9 +94,11 @@ def get_or_create_driver(headless: bool = True) -> webdriver.Chrome:
     try:
         chromedriver_path = get_chromedriver_path()
         if chromedriver_path:
+            logger.debug(f"Using ChromeDriver at path: {chromedriver_path}")
             service = Service(executable_path=chromedriver_path)
             driver = webdriver.Chrome(service=service, options=chrome_options)
         else:
+            logger.debug("Using auto-detected ChromeDriver")
             driver = webdriver.Chrome(options=chrome_options)
 
         # Add a page load timeout for safety
@@ -99,14 +107,17 @@ def get_or_create_driver(headless: bool = True) -> webdriver.Chrome:
         active_drivers[session_id] = driver
         return driver
     except Exception as e:
-        print(f"Error creating web driver: {e}")
+        logger.error(f"Error creating web driver: {e}")
         raise
 
 
-def initialize_driver() -> None:
+def initialize_driver(headless: bool = True) -> None:
     """
     Initialize the driver and log in at server start.
-    
+
+    Args:
+        headless: Whether to run Chrome in headless mode
+
     This function is called at server startup to set up the Chrome driver
     and log in to LinkedIn.
     """
@@ -126,15 +137,15 @@ def initialize_driver() -> None:
         )
 
     try:
-        driver = get_or_create_driver(headless=True)
+        driver = get_or_create_driver(headless=headless)
 
         # status on driver
         if driver is None:
             print("❌ Failed to create or retrieve the web driver.")
             return
         print("✅ Web driver initialized successfully")
+        print(f"🌐 Browser is running in {'headless' if headless else 'visible'} mode")
 
-        # Import here to avoid circular imports
         from linkedin_scraper import actions
 
         # Login to LinkedIn
@@ -148,9 +159,14 @@ def initialize_driver() -> None:
             # confirm in mobile app might be required
             print(
                 "⚠️ You might need to confirm the login in your LinkedIn mobile app. "
-                "Please try again and confirm the login. You can also try to run this script "
-                "with headless mode disabled for easier debugging."
+                "Please try again and confirm the login."
             )
+
+            if headless:
+                print(
+                    "🔍 Try running with visible browser window to see what's happening: "
+                    "uv run main.py --no-headless"
+                )
 
             questions = [
                 inquirer.Confirm(
@@ -167,7 +183,7 @@ def initialize_driver() -> None:
                 if credentials_file.exists():
                     os.remove(credentials_file)
                 # Start over with new credentials
-                return initialize_driver()
+                return initialize_driver(headless=headless)
             else:
                 print("Please check your credentials and try again.")
                 sys.exit(1)
@@ -197,10 +213,10 @@ def initialize_driver() -> None:
                 os.environ["CHROMEDRIVER"] = path
                 print(f"✅ ChromeDriver path set to: {path}")
                 # Try again with the new path
-                return initialize_driver()
+                return initialize_driver(headless=headless)
             else:
                 print(f"⚠️ Warning: The specified path does not exist: {path}")
-                return initialize_driver()
+                return initialize_driver(headless=headless)
 
         elif answers["chromedriver_action"] == "help":
             print("\n📋 ChromeDriver Installation Guide:")
@@ -219,7 +235,7 @@ def initialize_driver() -> None:
             if inquirer.prompt(
                 [inquirer.Confirm("try_again", message="Try again?", default=True)]
             )["try_again"]:
-                return initialize_driver()
+                return initialize_driver(headless=headless)
 
         print("❌ ChromeDriver is required for this application to work properly.")
         sys.exit(1)

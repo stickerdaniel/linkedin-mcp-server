@@ -4,6 +4,7 @@ Credential management for LinkedIn MCP server.
 
 This module handles the secure storage and retrieval of LinkedIn credentials.
 """
+
 from typing import Dict, Any
 import os
 import json
@@ -14,12 +15,12 @@ import inquirer
 def setup_credentials() -> Dict[str, str]:
     """
     Ask for LinkedIn credentials during setup and store them securely.
-    
+
     Returns:
         Dict[str, str]: Dictionary containing email and password
     """
     credentials_file = Path.home() / ".linkedin_mcp_credentials.json"
-    
+
     if credentials_file.exists():
         try:
             with open(credentials_file, "r") as f:

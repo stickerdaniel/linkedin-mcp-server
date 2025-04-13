@@ -4,8 +4,12 @@ LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration.
 
 This is the main entry point that runs the LinkedIn MCP server.
 """
-import sys
 
+import sys
+import logging
+from typing import NoReturn
+
+from src.linkedin_mcp_server.arguments import parse_arguments
 from src.linkedin_mcp_server.cli import print_claude_config
 from src.linkedin_mcp_server.drivers.chrome import initialize_driver
 from src.linkedin_mcp_server.server import create_mcp_server, shutdown_handler
@@ -16,26 +20,48 @@ def main() -> None:
     print("🔗 LinkedIn MCP Server 🔗")
     print("=" * 40)
 
+    # Parse command-line arguments
+    args = parse_arguments()
+
+    # Configure logging
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    logger = logging.getLogger("linkedin_mcp_server")
+    logger.debug(f"Server arguments: {args}")
+
     # Initialize the driver before starting the server
-    initialize_driver()
+    initialize_driver(headless=args.headless)
 
     # Print configuration for Claude
     print_claude_config()
 
     # Create and run the MCP server
     mcp = create_mcp_server()
-    print("\n🚀 Starting LinkedIn MCP server...")
+    print("\n🚀 Running LinkedIn MCP server...")
     mcp.run(transport="stdio")
+
+
+def exit_gracefully(exit_code: int = 0) -> NoReturn:
+    """
+    Exit the application gracefully, cleaning up resources.
+
+    Args:
+        exit_code: The exit code to use when terminating
+    """
+    print("\n👋 Shutting down LinkedIn MCP server...")
+    shutdown_handler()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n👋 Shutting down LinkedIn MCP server...")
-        shutdown_handler()
-        sys.exit(0)
+        exit_gracefully(0)
     except Exception as e:
         print(f"❌ Error running MCP server: {e}")
-        shutdown_handler()
-        sys.exit(1)
+        exit_gracefully(1)

@@ -4,6 +4,7 @@ Person profile tools for LinkedIn MCP server.
 
 This module provides tools for scraping LinkedIn person profiles.
 """
+
 from typing import Dict, Any, List
 from mcp.server.fastmcp import FastMCP
 from linkedin_scraper import Person
@@ -14,28 +15,28 @@ from src.linkedin_mcp_server.drivers.chrome import get_or_create_driver
 def register_person_tools(mcp: FastMCP) -> None:
     """
     Register all person-related tools with the MCP server.
-    
+
     Args:
         mcp (FastMCP): The MCP server instance
     """
-    
+
     @mcp.tool()
     async def get_person_profile(linkedin_url: str) -> Dict[str, Any]:
         """
         Scrape a person's LinkedIn profile.
-    
+
         Args:
             linkedin_url (str): The LinkedIn URL of the person's profile
-            
+
         Returns:
             Dict[str, Any]: Structured data from the person's profile
         """
         driver = get_or_create_driver()
-    
+
         try:
             print(f"🔍 Scraping profile: {linkedin_url}")
             person = Person(linkedin_url, driver=driver, close_on_complete=False)
-    
+
             # Convert experiences to structured dictionaries
             experiences: List[Dict[str, Any]] = [
                 {
@@ -49,7 +50,7 @@ def register_person_tools(mcp: FastMCP) -> None:
                 }
                 for exp in person.experiences
             ]
-            
+
             # Convert educations to structured dictionaries
             educations: List[Dict[str, Any]] = [
                 {
@@ -61,16 +62,16 @@ def register_person_tools(mcp: FastMCP) -> None:
                 }
                 for edu in person.educations
             ]
-            
+
             # Convert interests to list of titles
             interests: List[str] = [interest.title for interest in person.interests]
-            
+
             # Convert accomplishments to structured dictionaries
             accomplishments: List[Dict[str, str]] = [
                 {"category": acc.category, "title": acc.title}
                 for acc in person.accomplishments
             ]
-            
+
             # Convert contacts to structured dictionaries
             contacts: List[Dict[str, str]] = [
                 {
@@ -80,7 +81,7 @@ def register_person_tools(mcp: FastMCP) -> None:
                 }
                 for contact in person.contacts
             ]
-    
+
             # Return the complete profile data
             return {
                 "name": person.name,
