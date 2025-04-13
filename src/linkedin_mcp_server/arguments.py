@@ -14,6 +14,7 @@ class ServerArguments:
     """Command-line arguments for the LinkedIn MCP server."""
 
     headless: bool
+    setup: bool
     debug: bool
 
 
@@ -40,9 +41,16 @@ def parse_arguments() -> ServerArguments:
         help="Enable debug mode with additional logging",
     )
 
+    parser.add_argument(
+        "--no-setup",
+        action="store_true",
+        help="Enable debug mode with additional logging",
+    )
+
     args = parser.parse_args()
 
     return ServerArguments(
         headless=not args.no_headless,
+        setup=not args.no_setup,
         debug=args.debug,
     )

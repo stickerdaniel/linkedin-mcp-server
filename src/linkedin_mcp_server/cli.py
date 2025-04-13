@@ -39,11 +39,11 @@ def print_claude_config() -> None:
         )
 
     # Include useful command-line arguments in the default args
-    args: List[str] = ["--directory", current_dir, "run", "main.py"]
+    args: List[str] = ["--directory", current_dir, "run", "main.py", "--no-setup"]
 
     config_json: Dict[str, Any] = {
         "mcpServers": {
-            "linkedin_scraper": {
+            "linkedin-scraper": {
                 "command": uv_path,
                 "args": args,
                 "disabled": False,

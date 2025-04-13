@@ -36,8 +36,9 @@ def main() -> None:
     # Initialize the driver before starting the server
     initialize_driver(headless=args.headless)
 
-    # Print configuration for Claude
-    print_claude_config()
+    # Print configuration for Claude if in setup mode
+    if args.setup:
+        print_claude_config()
 
     # Create and run the MCP server
     mcp = create_mcp_server()
