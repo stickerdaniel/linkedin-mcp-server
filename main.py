@@ -9,6 +9,9 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import WebDriverException
+import pyperclip  # You'll need to run: uv add pyperclip
+import os
+import subprocess
 
 # Import LinkedIn scraper components
 from linkedin_scraper import Person, Company, Job, JobSearch, actions
@@ -331,15 +334,61 @@ async def shutdown_handler():
             del active_drivers[session_id]
         except Exception as e:
             print(f"Error closing driver during shutdown: {e}")
+            
 
+def print_claude_config():
+    """Print Claude configuration and copy to clipboard."""
+    current_dir = os.path.abspath(os.path.dirname(__file__))
+    
+    # Find the full path to uv executable
+    try:
+        uv_path = subprocess.check_output(["which", "uv"], text=True).strip()
+        print(f"Found uv at: {uv_path}")
+    except subprocess.CalledProcessError:
+        # Fallback if which uv fails
+        uv_path = "uv"
+        print("⚠️ Could not find full path to uv, using 'uv' directly. This may not work in Claude Desktop.")
+    
+    config_json = {
+        "mcpServers": {
+            "linkedin_scraper": {
+                "command": uv_path,
+                "args": [
+                    "--directory",
+                    current_dir,
+                    "run",
+                    "main.py"
+                ]
+            }
+        }
+    }
+    
+    # Convert to string for clipboard
+    config_str = json.dumps(config_json, indent=2)
+    
+    # Copy to clipboard
+    try:
+        pyperclip.copy(config_str)
+        print("\n✅ Claude configuration copied to clipboard!")
+    except Exception as e:
+        print(f"\n❌ Could not copy to clipboard: {e}")
+    
+    # Print the final configuration
+    print("\nYour final Claude configuration should look like:")
+    print(config_str)
+    print("\nAdd this to your Claude Desktop configuration in Settings > Developer > Edit Config")
+    
 
 if __name__ == "__main__":
     try:
         # Run the initialization before starting the MCP server
         asyncio.run(initialize_driver())
         
+        # Print configuration for Claude
+        print_claude_config()
+        
         # Run the MCP server with stdio transport
-        print("Starting LinkedIn MCP server...")
+        print("\nStarting LinkedIn MCP server...")
         mcp.run(transport="stdio")
     except KeyboardInterrupt:
         print("\nShutting down LinkedIn MCP server...")

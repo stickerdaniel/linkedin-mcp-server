@@ -177,6 +177,7 @@ dependencies = [
     { name = "httpx" },
     { name = "linkedin-scraper" },
     { name = "mcp", extra = ["cli"] },
+    { name = "pyperclip" },
 ]
 
 [package.metadata]
@@ -184,6 +185,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "linkedin-scraper", git = "https://github.com/stickerdaniel/linkedin_scraper.git" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.6.0" },
+    { name = "pyperclip", specifier = ">=1.9.0" },
 ]
 
 [[package]]
@@ -383,6 +385,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/7c/2d/c3338d48ea6cc0feb
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8a/0b/9fcc47d19c48b59121088dd6da2488a49d5f72dacf8262e2790a1d2c7d15/pygments-2.19.1-py3-none-any.whl", hash = "sha256:9ea1544ad55cecf4b8242fab6dd35a93bbce657034b0611ee383099054ab6d8c", size = 1225293 },
 ]
+
+[[package]]
+name = "pyperclip"
+version = "1.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/23/2f0a3efc4d6a32f3b63cdff36cd398d9701d26cda58e3ab97ac79fb5e60d/pyperclip-1.9.0.tar.gz", hash = "sha256:b7de0142ddc81bfc5c7507eea19da920b92252b548b96186caf94a5e2527d310", size = 20961 }
 
 [[package]]
 name = "pysocks"
