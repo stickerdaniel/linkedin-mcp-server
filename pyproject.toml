@@ -1,0 +1,14 @@
+[project]
+name = "linkedin-mcp-server"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "linkedin-scraper",
+    "mcp[cli]>=1.6.0",
+]
+
+[tool.uv.sources]
+linkedin-scraper = { git = "https://github.com/stickerdaniel/linkedin_scraper.git" }
