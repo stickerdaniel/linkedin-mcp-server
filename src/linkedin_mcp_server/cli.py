@@ -50,8 +50,8 @@ def print_claude_config() -> None:
                 "command": python_path,
                 "args": args,
                 "env": {
-                    "LINKEDIN_EMAIL": "your.email@example.com",
-                    "LINKEDIN_PASSWORD": "your_password_here",
+                    "LINKEDIN_LI_AT": "your_li_at_cookie_here",
+                    "LINKEDIN_JSESSIONID": "your_jsessionid_cookie_here",
                 },
             }
         }
@@ -67,7 +67,10 @@ def print_claude_config() -> None:
         "\n🔧 Add this to your Claude Desktop configuration in Settings > Developer > Edit Config"
     )
     print(
-        "\n⚠️ Be sure to update LINKEDIN_EMAIL and LINKEDIN_PASSWORD with your actual credentials"
+        "\n⚠️ Be sure to update LINKEDIN_LI_AT and LINKEDIN_JSESSIONID with your actual LinkedIn cookies"
+    )
+    print(
+        "\n💡 To get these cookies, log into LinkedIn in your browser and examine the cookies in developer tools"
     )
 
     # Copy to clipboard
