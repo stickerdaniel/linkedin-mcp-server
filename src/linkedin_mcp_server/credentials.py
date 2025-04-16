@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import logging
 import inquirer
+from requests.cookies import RequestsCookieJar
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +65,39 @@ def prompt_for_credentials() -> Dict[str, str]:
         Dict[str, str]: Dictionary containing email and password
     """
     print("🔑 LinkedIn credentials required")
-    questions = [
-        inquirer.Text("email", message="LinkedIn Email"),
-        inquirer.Password("password", message="LinkedIn Password"),
-    ]
-    credentials = inquirer.prompt(questions)
+
+    # First ask if the user wants to use cookie-based authentication or email/password
+    auth_type = inquirer.prompt(
+        [
+            inquirer.List(
+                "auth_type",
+                message="Authentication method",
+                choices=[
+                    ("Email and password", "email_password"),
+                    ("Cookies (li_at and JSESSIONID)", "cookies"),
+                ],
+            )
+        ]
+    )["auth_type"]
+
+    credentials = {}
+
+    if auth_type == "email_password":
+        credentials = inquirer.prompt(
+            [
+                inquirer.Text("email", message="LinkedIn Email"),
+                inquirer.Password("password", message="LinkedIn Password"),
+            ]
+        )
+    else:  # auth_type == "cookies"
+        credentials = inquirer.prompt(
+            [
+                inquirer.Text("email", message="LinkedIn Email (for reference)"),
+                inquirer.Text("li_at", message="LinkedIn li_at cookie value"),
+                inquirer.Text("jsessionid", message="LinkedIn JSESSIONID cookie value"),
+            ]
+        )
+        credentials["auth_type"] = "cookies"
 
     # Store credentials securely
     try:
@@ -84,3 +113,28 @@ def prompt_for_credentials() -> Dict[str, str]:
         print(f"⚠️ Warning: Could not store credentials: {e}")
 
     return credentials
+
+
+def get_cookies_from_credentials(
+    credentials: Dict[str, str],
+) -> Optional[RequestsCookieJar]:
+    """
+    Create a RequestsCookieJar from credential data if auth_type is 'cookies'.
+
+    Args:
+        credentials (Dict[str, str]): Credentials dictionary
+
+    Returns:
+        Optional[RequestsCookieJar]: Cookie jar or None if not cookie-based auth
+    """
+    if credentials.get("auth_type") != "cookies" or not credentials.get("li_at"):
+        return None
+
+    cookies = RequestsCookieJar()
+    cookies.set("li_at", credentials["li_at"], domain="www.linkedin.com")
+    if credentials.get("jsessionid"):
+        cookies.set(
+            "JSESSIONID", f"ajax:{credentials['jsessionid']}", domain="www.linkedin.com"
+        )
+
+    return cookies

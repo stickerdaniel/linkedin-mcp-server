@@ -13,10 +13,9 @@ from dataclasses import dataclass
 class ServerArguments:
     """Command-line arguments for the LinkedIn MCP server."""
 
-    headless: bool
     setup: bool
     debug: bool
-    lazy_init: bool
+    cache: bool
 
 
 def parse_arguments() -> ServerArguments:
@@ -28,12 +27,6 @@ def parse_arguments() -> ServerArguments:
     """
     parser = argparse.ArgumentParser(
         description="LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration"
-    )
-
-    parser.add_argument(
-        "--no-headless",
-        action="store_true",
-        help="Run Chrome with a visible browser window (useful for debugging)",
     )
 
     parser.add_argument(
@@ -49,16 +42,15 @@ def parse_arguments() -> ServerArguments:
     )
 
     parser.add_argument(
-        "--no-lazy-init",
+        "--no-cache",
         action="store_true",
-        help="Initialize Chrome driver and login immediately (not recommended for most users)",
+        help="Don't use cached credentials or cookies",
     )
 
     args = parser.parse_args()
 
     return ServerArguments(
-        headless=not args.no_headless,
         setup=not args.no_setup,
         debug=args.debug,
-        lazy_init=not args.no_lazy_init,  # Default to lazy init
+        cache=not args.no_cache,
     )

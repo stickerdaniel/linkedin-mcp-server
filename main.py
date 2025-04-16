@@ -11,7 +11,6 @@ from typing import NoReturn
 
 from linkedin_mcp_server.arguments import parse_arguments
 from linkedin_mcp_server.cli import print_claude_config
-from linkedin_mcp_server.drivers.chrome import initialize_driver
 from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
 
 
@@ -32,9 +31,6 @@ def main() -> None:
 
     logger = logging.getLogger("linkedin_mcp_server")
     logger.debug(f"Server arguments: {args}")
-
-    # Initialize the driver - with lazy initialization if specified
-    initialize_driver(headless=args.headless, lazy_init=args.lazy_init)
 
     # Print configuration for Claude if in setup mode
     if args.setup:

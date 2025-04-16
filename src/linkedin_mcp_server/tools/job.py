@@ -2,14 +2,16 @@
 """
 Job-related tools for LinkedIn MCP server.
 
-This module provides tools for scraping LinkedIn job postings and searches.
+This module provides tools for accessing LinkedIn job postings and searches.
 """
 
 from typing import Dict, Any, List
+import logging
 from mcp.server.fastmcp import FastMCP
-from linkedin_scraper import Job, JobSearch
 
-from linkedin_mcp_server.drivers.chrome import get_or_create_driver
+from linkedin_mcp_server.client import LinkedInClientManager
+
+logger = logging.getLogger(__name__)
 
 
 def register_job_tools(mcp: FastMCP) -> None:
@@ -31,17 +33,32 @@ def register_job_tools(mcp: FastMCP) -> None:
         Returns:
             Dict[str, Any]: Structured data from the job posting
         """
-        driver = get_or_create_driver()
-
         try:
-            print(f"💼 Scraping job: {job_url}")
-            job = Job(job_url, driver=driver, close_on_complete=False)
+            client = LinkedInClientManager.get_client()
 
-            # Convert job object to a dictionary
-            return job.to_dict()
+            # Extract job ID from URL
+            if "/jobs/view/" in job_url:
+                job_id = job_url.split("/jobs/view/")[1].split("/")[0]
+            else:
+                job_id = job_url  # Assume it's already a job ID
+
+            print(f"💼 Retrieving job: {job_id}")
+
+            # Get job details
+            job = client.get_job(job_id)
+
+            # Try to get job skills
+            try:
+                job_skills = client.get_job_skills(job_id)
+                if job_skills:
+                    job["skills"] = job_skills
+            except Exception as skills_e:
+                logger.warning(f"Could not retrieve job skills: {skills_e}")
+
+            return job
         except Exception as e:
-            print(f"❌ Error scraping job: {e}")
-            return {"error": f"Failed to scrape job posting: {str(e)}"}
+            logger.error(f"Error retrieving job: {e}")
+            return {"error": f"Failed to retrieve job details: {str(e)}"}
 
     @mcp.tool()
     async def search_jobs(search_term: str) -> List[Dict[str, Any]]:
@@ -54,17 +71,16 @@ def register_job_tools(mcp: FastMCP) -> None:
         Returns:
             List[Dict[str, Any]]: List of job search results
         """
-        driver = get_or_create_driver()
-
         try:
-            print(f"🔍 Searching jobs: {search_term}")
-            job_search = JobSearch(driver=driver, close_on_complete=False, scrape=False)
-            jobs = job_search.search(search_term)
+            client = LinkedInClientManager.get_client()
 
-            # Convert job objects to dictionaries
-            return [job.to_dict() for job in jobs]
+            print(f"🔍 Searching jobs: {search_term}")
+
+            # Search for jobs
+            jobs = client.search_jobs(search_term=search_term)
+            return jobs
         except Exception as e:
-            print(f"❌ Error searching jobs: {e}")
+            logger.error(f"Error searching jobs: {e}")
             return [{"error": f"Failed to search jobs: {str(e)}"}]
 
     @mcp.tool()
@@ -75,22 +91,14 @@ def register_job_tools(mcp: FastMCP) -> None:
         Returns:
             List[Dict[str, Any]]: List of recommended jobs
         """
-        driver = get_or_create_driver()
-
         try:
-            print("📋 Getting recommended jobs")
-            job_search = JobSearch(
-                driver=driver,
-                close_on_complete=False,
-                scrape=True,
-                scrape_recommended_jobs=True,
-            )
+            client = LinkedInClientManager.get_client()
 
-            # Get recommended jobs and convert to dictionaries
-            if hasattr(job_search, "recommended_jobs"):
-                return [job.to_dict() for job in job_search.recommended_jobs]
-            else:
-                return []
+            print("📋 Getting recommended jobs")
+
+            # Get recommended jobs
+            jobs = client.get_recommended_jobs()
+            return jobs
         except Exception as e:
-            print(f"❌ Error getting recommended jobs: {e}")
+            logger.error(f"Error getting recommended jobs: {e}")
             return [{"error": f"Failed to get recommended jobs: {str(e)}"}]

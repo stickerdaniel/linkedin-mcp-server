@@ -5,10 +5,10 @@ CLI utilities for LinkedIn MCP server.
 This module handles the command-line interface and configuration management.
 """
 
+import sys
 from typing import Dict, Any, List
 import os
 import json
-import subprocess
 import logging
 import pyperclip  # type: ignore
 
@@ -26,39 +26,33 @@ def print_claude_config() -> None:
         os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
     )
 
-    # Find the full path to uv executable
+    # Find the full path to python executable
     try:
-        uv_path = subprocess.check_output(["which", "uv"], text=True).strip()
-        print(f"🔍 Found uv at: {uv_path}")
-    except subprocess.CalledProcessError:
-        # Fallback if which uv fails
-        uv_path = "uv"
+        python_path = sys.executable
+        print(f"🔍 Found Python executable at: {python_path}")
+    except NameError:
+        # Fallback if sys is not imported
+        python_path = "python"
         print(
-            "⚠️ Could not find full path to uv, using 'uv' directly. "
+            "⚠️ Could not find full path to Python, using 'python' directly. "
             "This may not work in Claude Desktop."
         )
 
     # Include useful command-line arguments in the default args
     args: List[str] = [
-        "--directory",
-        current_dir,
-        "run",
-        "main.py",
+        os.path.join(current_dir, "main.py"),
         "--no-setup",
-    ]  # , "--no-lazy-init"]
+    ]
 
     config_json: Dict[str, Any] = {
         "mcpServers": {
             "linkedin-scraper": {
-                "command": uv_path,
+                "command": python_path,
                 "args": args,
-                "disabled": False,
-                "requiredTools": [
-                    "get_person_profile",
-                    "get_company_profile",
-                    "get_job_details",
-                    "search_jobs",
-                ],
+                "env": {
+                    "LINKEDIN_EMAIL": "your.email@example.com",
+                    "LINKEDIN_PASSWORD": "your_password_here",
+                },
             }
         }
     }
@@ -71,6 +65,9 @@ def print_claude_config() -> None:
     print(config_str)
     print(
         "\n🔧 Add this to your Claude Desktop configuration in Settings > Developer > Edit Config"
+    )
+    print(
+        "\n⚠️ Be sure to update LINKEDIN_EMAIL and LINKEDIN_PASSWORD with your actual credentials"
     )
 
     # Copy to clipboard

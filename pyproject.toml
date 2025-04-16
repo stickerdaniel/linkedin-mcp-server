@@ -10,6 +10,7 @@ dependencies = [
     "linkedin-scraper",
     "mcp[cli]>=1.6.0",
     "mypy>=1.15.0",
+    "open-linkedin-api>=2.3.1",
     "pre-commit>=4.2.0",
     "pyperclip>=1.9.0",
 ]

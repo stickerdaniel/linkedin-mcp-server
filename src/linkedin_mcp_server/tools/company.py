@@ -2,14 +2,16 @@
 """
 Company profile tools for LinkedIn MCP server.
 
-This module provides tools for scraping LinkedIn company profiles.
+This module provides tools for accessing LinkedIn company profiles.
 """
 
 from typing import Dict, Any, List
+import logging
 from mcp.server.fastmcp import FastMCP
-from linkedin_scraper import Company
 
-from linkedin_mcp_server.drivers.chrome import get_or_create_driver
+from linkedin_mcp_server.client import LinkedInClientManager
+
+logger = logging.getLogger(__name__)
 
 
 def register_company_tools(mcp: FastMCP) -> None:
@@ -34,62 +36,84 @@ def register_company_tools(mcp: FastMCP) -> None:
         Returns:
             Dict[str, Any]: Structured data from the company's profile
         """
-        driver = get_or_create_driver()
-
         try:
-            print(f"🏢 Scraping company: {linkedin_url}")
-            if get_employees:
-                print("⚠️ Fetching employees may take a while...")
+            client = LinkedInClientManager.get_client()
 
-            company = Company(
-                linkedin_url,
-                driver=driver,
-                get_employees=get_employees,
-                close_on_complete=False,
-            )
+            # Extract company name/ID from URL
+            if "/company/" in linkedin_url:
+                company_id = linkedin_url.split("/company/")[1].split("/")[0]
+            else:
+                company_id = linkedin_url  # Assume it's already a company ID
 
-            # Convert showcase pages to structured dictionaries
-            showcase_pages: List[Dict[str, Any]] = [
-                {
-                    "name": page.name,
-                    "linkedin_url": page.linkedin_url,
-                    "followers": page.followers,
-                }
-                for page in company.showcase_pages
-            ]
+            print(f"🏢 Retrieving company: {company_id}")
 
-            # Convert affiliated companies to structured dictionaries
-            affiliated_companies: List[Dict[str, Any]] = [
-                {
-                    "name": affiliated.name,
-                    "linkedin_url": affiliated.linkedin_url,
-                    "followers": affiliated.followers,
-                }
-                for affiliated in company.affiliated_companies
-            ]
+            # Get comprehensive company data
+            company = client.get_company(company_id)
 
-            # Build the result dictionary
-            result: Dict[str, Any] = {
-                "name": company.name,
-                "about_us": company.about_us,
-                "website": company.website,
-                "phone": company.phone,
-                "headquarters": company.headquarters,
-                "founded": company.founded,
-                "industry": company.industry,
-                "company_type": company.company_type,
-                "company_size": company.company_size,
-                "specialties": company.specialties,
-                "showcase_pages": showcase_pages,
-                "affiliated_companies": affiliated_companies,
-                "headcount": company.headcount,
-            }
+            # Get updates if available
+            try:
+                updates = client.get_company_updates(
+                    public_id=company_id, max_results=10
+                )
+                if updates:
+                    company["recent_updates"] = updates
+            except Exception as updates_e:
+                logger.warning(f"Could not retrieve company updates: {updates_e}")
 
-            # Add employees if requested and available
-            if get_employees and company.employees:
-                result["employees"] = company.employees
-
-            return result
+            return company
         except Exception as e:
-            print(f"❌ Error scraping company: {e}")
-            return {"error": f"Failed to scrape company profile: {str(e)}"}
+            logger.error(f"Error retrieving company: {e}")
+            return {"error": f"Failed to retrieve company profile: {str(e)}"}
+
+    @mcp.tool()
+    async def search_companies(keywords: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Search for companies on LinkedIn.
+
+        Args:
+            keywords (str): Search terms
+            limit (int): Maximum number of results to return
+
+        Returns:
+            List[Dict[str, Any]]: List of company search results
+        """
+        try:
+            client = LinkedInClientManager.get_client()
+
+            print(f"🔍 Searching companies: {keywords}")
+
+            # Search for companies with the given keywords
+            companies = client.search_companies(keywords=keywords, limit=limit)
+            return companies
+        except Exception as e:
+            logger.error(f"Error searching companies: {e}")
+            return [{"error": f"Failed to search companies: {str(e)}"}]
+
+    @mcp.tool()
+    async def get_school(linkedin_url: str) -> Dict[str, Any]:
+        """
+        Get information about a school/university from LinkedIn.
+
+        Args:
+            linkedin_url (str): The LinkedIn URL of the school/university
+
+        Returns:
+            Dict[str, Any]: Structured data about the school
+        """
+        try:
+            client = LinkedInClientManager.get_client()
+
+            # Extract school name/ID from URL
+            if "/school/" in linkedin_url:
+                school_id = linkedin_url.split("/school/")[1].split("/")[0]
+            else:
+                school_id = linkedin_url  # Assume it's already a school ID
+
+            print(f"🏫 Retrieving school: {school_id}")
+
+            # Get school data
+            school = client.get_school(school_id)
+            return school
+        except Exception as e:
+            logger.error(f"Error retrieving school: {e}")
+            return {"error": f"Failed to retrieve school information: {str(e)}"}
