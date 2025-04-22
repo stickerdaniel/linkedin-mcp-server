@@ -4,6 +4,10 @@
 
 A Model Context Protocol (MCP) server that enables interaction with LinkedIn through Claude and other AI assistants. This server allows you to scrape LinkedIn profiles, companies, jobs, and perform job searches.
 
+
+https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
+
+
 ## 📋 Features
 
 - **Profile Scraping**: Get detailed information from LinkedIn profiles
