@@ -7,13 +7,18 @@ This is the main entry point that runs the LinkedIn MCP server.
 
 import sys
 import logging
+import uvicorn
 from typing import NoReturn
 
+from fastapi import FastAPI
 from linkedin_mcp_server.arguments import parse_arguments
 from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.drivers.chrome import initialize_driver
 from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
 
+
+# Initialize FastAPI app
+app = FastAPI()
 
 def main() -> None:
     """Initialize and run the LinkedIn MCP server."""
@@ -42,8 +47,22 @@ def main() -> None:
 
     # Create and run the MCP server
     mcp = create_mcp_server()
-    print("\n🚀 Running LinkedIn MCP server...")
-    mcp.run(transport="stdio")
+
+    # Ask the user which mode they want
+    print("\nChoose transport mode:")
+    print("1. stdio (default)")
+    print("2. sse (Server-Sent Events)")
+
+    choice = input("Enter 1 or 2 [1]: ").strip() or "1"
+
+    if choice == "2":
+        # Run the FastAPI SSE server
+        print("\n🚀 Running LinkedIn MCP server (SSE mode)...")
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    else:
+        # Run using stdio
+        print("\n🚀 Running LinkedIn MCP server (STDIO mode)...")
+        mcp.run(transport="stdio")
 
 
 def exit_gracefully(exit_code: int = 0) -> NoReturn:
