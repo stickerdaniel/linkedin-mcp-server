@@ -260,7 +260,7 @@ def initialize_driver(headless: bool = True, lazy_init: bool = False) -> None:
         print("⚠️ ChromeDriver not found in common locations.")
         print("⚡ Continuing with automatic detection...")
         print(
-            "💡 Tip: For better results, install ChromeDriver and set the CHROMEDRIVER environment variable"
+            "💡 Tip: install ChromeDriver and set the CHROMEDRIVER environment variable"
         )
 
     # Create driver and log in
