@@ -16,14 +16,6 @@ https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 
 ## 🔧 Installation
 
-### Installing via Smithery
-
-To install LinkedIn MCP Server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@stickerdaniel/linkedin-mcp-server):
-
-```bash
-npx -y @smithery/cli install @stickerdaniel/linkedin-mcp-server --client claude
-```
-
 ### Prerequisites
 
 - Python 3.8 or higher
