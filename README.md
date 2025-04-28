@@ -54,6 +54,7 @@ Using `uv`:
 ```bash
 uv add "mcp[cli]" selenium httpx inquirer pyperclip
 uv add "git+https://github.com/stickerdaniel/linkedin_scraper.git"
+uv pip install -e .
 ```
 
 ### Step 4: Install ChromeDriver
