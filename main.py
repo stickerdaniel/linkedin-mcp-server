@@ -8,6 +8,7 @@ This is the main entry point that runs the LinkedIn MCP server.
 import sys
 import logging
 import uvicorn
+import inquirer
 from typing import NoReturn
 
 from fastapi import FastAPI
@@ -48,14 +49,21 @@ def main() -> None:
     # Create and run the MCP server
     mcp = create_mcp_server()
 
-    # Ask the user which mode they want
-    print("\nChoose transport mode:")
-    print("1. stdio (default)")
-    print("2. sse (Server-Sent Events)")
+    questions = [
+        inquirer.List(
+            "transport",
+            message="Choose transport mode",
+            choices=[
+                ("stdio (Default CLI mode)", "stdio"),
+                ("sse (Server-Sent Events HTTP mode)", "sse")
+            ],
+            default="stdio"
+        )
+    ]
+    answers = inquirer.prompt(questions)
+    transport_choice = answers["transport"]
 
-    choice = input("Enter 1 or 2 [1]: ").strip() or "1"
-
-    if choice == "2":
+    if transport_choice == "sse":
         # Run the FastAPI SSE server
         print("\n🚀 Running LinkedIn MCP server (SSE mode)...")
         uvicorn.run(app, host="0.0.0.0", port=8000)
