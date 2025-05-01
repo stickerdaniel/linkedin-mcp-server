@@ -54,6 +54,12 @@ def parse_arguments() -> ServerArguments:
         help="Initialize Chrome driver and login immediately (not recommended for most users)",
     )
 
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Enable interactive setup mode"
+    )
+
     args = parser.parse_args()
 
     return ServerArguments(
