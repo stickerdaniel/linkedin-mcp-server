@@ -20,6 +20,7 @@ from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
 # Initialize FastAPI app
 app = FastAPI()
 
+
 def choose_transport_interactive() -> str:
     """Prompt user for transport mode using inquirer."""
     questions = [
@@ -28,13 +29,14 @@ def choose_transport_interactive() -> str:
             message="Choose transport mode",
             choices=[
                 ("stdio (Default CLI mode)", "stdio"),
-                ("sse (Server-Sent Events HTTP mode)", "sse")
+                ("sse (Server-Sent Events HTTP mode)", "sse"),
             ],
-            default="stdio"
+            default="stdio",
         )
     ]
     answers = inquirer.prompt(questions)
     return answers["transport"]
+
 
 def main() -> None:
     """Initialize and run the LinkedIn MCP server."""
