@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi[standard]>=0.115.12",
     "httpx>=0.28.1",
     "inquirer>=3.4.0",
     "linkedin-scraper",
@@ -16,3 +17,6 @@ dependencies = [
 
 [tool.uv.sources]
 linkedin-scraper = { git = "https://github.com/stickerdaniel/linkedin_scraper.git" }
+
+[tool.setuptools.package-data]
+linkedin_mcp_server = ["py.typed"]

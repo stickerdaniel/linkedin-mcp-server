@@ -45,7 +45,7 @@ def parse_arguments() -> ServerArguments:
     parser.add_argument(
         "--no-setup",
         action="store_true",
-        help="Skip printing configuration information",
+        help="Skip printing configuration information and interactive setup",
     )
 
     parser.add_argument(
