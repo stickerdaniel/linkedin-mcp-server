@@ -10,7 +10,7 @@ import os
 import sys
 import logging
 from pathlib import Path
-import inquirer
+import inquirer  # type: ignore
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
