@@ -7,12 +7,35 @@ This is the main entry point that runs the LinkedIn MCP server.
 
 import sys
 import logging
+import uvicorn
+import inquirer  # type: ignore  # third-party package without type stubs
 from typing import NoReturn
-
+from fastapi import FastAPI
 from linkedin_mcp_server.arguments import parse_arguments
 from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.drivers.chrome import initialize_driver
 from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
+
+
+# Initialize FastAPI app
+app = FastAPI()
+
+
+def choose_transport_interactive() -> str:
+    """Prompt user for transport mode using inquirer."""
+    questions = [
+        inquirer.List(
+            "transport",
+            message="Choose transport mode",
+            choices=[
+                ("stdio (Default CLI mode)", "stdio"),
+                ("sse (Server-Sent Events HTTP mode)", "sse"),
+            ],
+            default="stdio",
+        )
+    ]
+    answers = inquirer.prompt(questions)
+    return answers["transport"]
 
 
 def main() -> None:
@@ -42,8 +65,21 @@ def main() -> None:
 
     # Create and run the MCP server
     mcp = create_mcp_server()
-    print("\n🚀 Running LinkedIn MCP server...")
-    mcp.run(transport="stdio")
+
+    # Decide transport
+    if args.setup:
+        transport = choose_transport_interactive()
+    else:
+        transport = "stdio"  # Default to stdio without prompt
+
+    # Start server
+    if transport == "sse":
+        print("\n🚀 Running LinkedIn MCP server (SSE mode)...")
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    else:
+        # Run using stdio
+        print("\n🚀 Running LinkedIn MCP server (STDIO mode)...")
+        mcp.run(transport="stdio")
 
 
 def exit_gracefully(exit_code: int = 0) -> NoReturn:
