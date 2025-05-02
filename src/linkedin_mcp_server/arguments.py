@@ -45,19 +45,13 @@ def parse_arguments() -> ServerArguments:
     parser.add_argument(
         "--no-setup",
         action="store_true",
-        help="Skip printing configuration information",
+        help="Skip printing configuration information and interactive setup",
     )
 
     parser.add_argument(
         "--no-lazy-init",
         action="store_true",
         help="Initialize Chrome driver and login immediately (not recommended for most users)",
-    )
-
-    parser.add_argument(
-        "--setup",
-        action="store_true",
-        help="Enable interactive setup mode"
     )
 
     args = parser.parse_args()

@@ -8,9 +8,8 @@ This is the main entry point that runs the LinkedIn MCP server.
 import sys
 import logging
 import uvicorn
-import inquirer
+import inquirer  # type: ignore  # third-party package without type stubs
 from typing import NoReturn
-
 from fastapi import FastAPI
 from linkedin_mcp_server.arguments import parse_arguments
 from linkedin_mcp_server.cli import print_claude_config
