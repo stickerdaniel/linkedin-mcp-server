@@ -21,7 +21,7 @@
             "label": "Run main.py",
             "type": "shell",
             "command": "uv",
-            "args": ["run", "main.py"],
+            "args": ["run", "main.py", "--no-headless", "--no-lazy-init", "--debug"],
             "group": {
                 "kind": "build",
                 "isDefault": true
