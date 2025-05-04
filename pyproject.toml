@@ -8,6 +8,7 @@ dependencies = [
     "fastapi[standard]>=0.115.12",
     "httpx>=0.28.1",
     "inquirer>=3.4.0",
+    "keyring>=25.6.0",
     "linkedin-scraper",
     "mcp[cli]>=1.6.0",
     "mypy>=1.15.0",
