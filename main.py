@@ -20,7 +20,7 @@ def choose_transport_interactive() -> Literal["stdio", "sse"]:
     questions = [
         inquirer.List(
             "transport",
-            message="Choose transport mode",
+            message="Choose mcp transport mode",
             choices=[
                 ("stdio (Default CLI mode)", "stdio"),
                 ("sse (Server-Sent Events HTTP mode)", "sse"),

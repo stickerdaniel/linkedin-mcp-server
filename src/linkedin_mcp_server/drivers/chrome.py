@@ -9,14 +9,13 @@ from typing import Dict, Optional, List, Any
 import os
 import sys
 import logging
-from pathlib import Path
 import inquirer  # type: ignore
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import WebDriverException
-
-from linkedin_mcp_server.credentials import get_credentials
+from linkedin_mcp_server.secrets import get_credentials
+from linkedin_scraper import actions
 
 # Global driver storage to reuse sessions
 active_drivers: Dict[str, webdriver.Chrome] = {}
@@ -152,6 +151,7 @@ def get_or_create_driver() -> Optional[webdriver.Chrome]:
         raise WebDriverException(error_msg)
 
 
+# src/linkedin_mcp_server/drivers/chrome.py (update function)
 def login_to_linkedin(driver: webdriver.Chrome, non_interactive: bool = False) -> bool:
     """
     Log in to LinkedIn using stored or provided credentials.
@@ -167,33 +167,22 @@ def login_to_linkedin(driver: webdriver.Chrome, non_interactive: bool = False) -
     credentials = get_credentials(non_interactive=non_interactive)
 
     if not credentials:
-        if non_interactive:
-            logger.error("No credentials available in non-interactive mode")
-            return False
-        else:
-            logger.error("Failed to obtain LinkedIn credentials")
-            return False
+        print("❌ No credentials available")
+        return False
 
     try:
-        from linkedin_scraper import actions
-
         # Login to LinkedIn
-        logger.info("Logging in to LinkedIn...")
-        if not non_interactive:
-            print("🔑 Logging in to LinkedIn...")
+        print("🔑 Logging in to LinkedIn...")
 
         actions.login(driver, credentials["email"], credentials["password"])
 
-        if not non_interactive:
-            print("✅ Successfully logged in to LinkedIn")
-        logger.info("Successfully logged in to LinkedIn")
+        print("✅ Successfully logged in to LinkedIn")
         return True
     except Exception as e:
         error_msg = f"Failed to login: {str(e)}"
-        logger.error(error_msg)
+        print(f"❌ {error_msg}")
 
         if not non_interactive:
-            print(f"❌ {error_msg}")
             print(
                 "⚠️ You might need to confirm the login in your LinkedIn mobile app. "
                 "Please try again and confirm the login."
@@ -216,10 +205,10 @@ def login_to_linkedin(driver: webdriver.Chrome, non_interactive: bool = False) -
             )
 
             if retry and retry.get("retry", False):
-                # Remove old credentials and try again
-                credentials_file = Path.home() / ".linkedin_mcp_credentials.json"
-                if credentials_file.exists():
-                    os.remove(credentials_file)
+                # Clear credentials from keyring and try again
+                from linkedin_mcp_server.secrets import clear_credentials
+
+                clear_credentials()
                 # Try again with new credentials
                 return login_to_linkedin(driver, non_interactive)
 
