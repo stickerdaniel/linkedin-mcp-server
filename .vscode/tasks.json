@@ -32,6 +32,19 @@
                 "focus": true
             },
             "problemMatcher": []
+        },
+        {
+            "label": "Follow Logs",
+            "type": "shell",
+            "command": "tail",
+            "args": ["-n", "20", "-F", "~/Library/Logs/Claude/mcp*.log"],
+            "isBackground": true,
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": false
+            },
+            "problemMatcher": []
         }
     ]
 }
