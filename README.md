@@ -105,21 +105,21 @@ uv run main.py --no-lazy-init --no-headless
    - Paste the configuration provided by the server
    - Edit the configuration to include your LinkedIn credentials as environment variables
 
-Example Claude Desktop configuration:
-```json
-{
-  "mcpServers": {
-    "linkedin-scraper": {
-      "command": "/path/to/uv",
-      "args": ["--directory", "/path/to/project", "run", "main.py", "--no-setup"],
-      "env": {
-        "LINKEDIN_EMAIL": "your.email@example.com",
-        "LINKEDIN_PASSWORD": "your_password"
-      }
-    }
-  }
-}
-```
+   Example Claude Desktop configuration:
+   ```json
+   {
+     "mcpServers": {
+       "linkedin-scraper": {
+         "command": "/path/to/uv",
+         "args": ["--directory", "/path/to/project", "run", "main.py", "--no-setup"],
+         "env": {
+           "LINKEDIN_EMAIL": "your.email@example.com",
+           "LINKEDIN_PASSWORD": "your_password"
+         }
+       }
+     }
+   }
+   ```
 
 ## ⚙️ Configuration System
 
@@ -185,7 +185,7 @@ Once specified, the ChromeDriver path is used for the current session but not st
 
 1. **After adding the configuration** to Claude Desktop, restart the application
 2. **Start a conversation** with Claude
-3. **You'll see tools available** in the tools menu (hammer icon)
+3. **You'll see tools available** in the tools menu (settings icon)
 4. **You can now ask Claude** to retrieve LinkedIn profiles, search for jobs, etc.
 
 Examples of what you can ask Claude:
