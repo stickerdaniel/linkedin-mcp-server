@@ -18,10 +18,25 @@
             "problemMatcher": []
         },
         {
-            "label": "Run main.py",
+            "label": "Run main.py (debug)",
             "type": "shell",
             "command": "uv",
             "args": ["run", "main.py", "--no-headless", "--no-lazy-init", "--debug"],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": true
+            },
+            "problemMatcher": []
+        },        {
+            "label": "Run main.py",
+            "type": "shell",
+            "command": "uv",
+            "args": ["run", "main.py", "--no-headless", "--no-lazy-init"],
             "group": {
                 "kind": "build",
                 "isDefault": true
