@@ -1,15 +1,15 @@
 # main.py
 """
 LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration.
-
-This is the main entry point that runs the LinkedIn MCP server.
 """
 
 import sys
 import logging
-import inquirer  # type: ignore  # third-party package without type stubs
+import inquirer  # type: ignore
 from typing import Literal, NoReturn
-from linkedin_mcp_server.arguments import parse_arguments
+
+# Import the new centralized configuration
+from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.drivers.chrome import initialize_driver
 from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
@@ -37,30 +37,29 @@ def main() -> None:
     print("🔗 LinkedIn MCP Server 🔗")
     print("=" * 40)
 
-    # Parse command-line arguments
-    args = parse_arguments()
+    # Get configuration using the new centralized system
+    config = get_config()
 
     # Configure logging
-    log_level = logging.DEBUG if args.debug else logging.ERROR
+    log_level = logging.DEBUG if config.server.debug else logging.ERROR
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
     logger = logging.getLogger("linkedin_mcp_server")
-    logger.debug(f"Server arguments: {args}")
+    logger.debug(f"Server configuration: {config}")
 
-    # Initialize the driver - with lazy initialization if specified
-    initialize_driver(headless=args.headless, lazy_init=args.lazy_init)
+    # Initialize the driver with configuration
+    initialize_driver()
 
     # Decide transport
-    if args.setup:
-        transport: Literal["stdio", "sse"] = choose_transport_interactive()
-    else:
-        transport = "stdio"  # Default to stdio without prompt
+    transport = config.server.transport
+    if config.server.setup:
+        transport = choose_transport_interactive()
 
     # Print configuration for Claude if in setup mode
-    if args.setup:
+    if config.server.setup:
         print_claude_config()
 
     # Create and run the MCP server
@@ -72,12 +71,7 @@ def main() -> None:
 
 
 def exit_gracefully(exit_code: int = 0) -> NoReturn:
-    """
-    Exit the application gracefully, cleaning up resources.
-
-    Args:
-        exit_code: The exit code to use when terminating
-    """
+    """Exit the application gracefully, cleaning up resources."""
     print("\n👋 Shutting down LinkedIn MCP server...")
     shutdown_handler()
     sys.exit(exit_code)
