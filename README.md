@@ -97,6 +97,7 @@ uv run main.py --no-lazy-init --no-headless
      export LINKEDIN_EMAIL=your.email@example.com
      export LINKEDIN_PASSWORD=your_password
      ```
+   - Alternatively, you can run the server once manually and you'll be prompted for credentials, which will then be stored securely in your system's keychain (macOS Keychain, Windows Credential Locker, etc.)
 
 3. **Configure Claude Desktop**:
    - The server will display and copy to your clipboard the configuration needed for Claude Desktop
@@ -120,6 +121,66 @@ Example Claude Desktop configuration:
 }
 ```
 
+## ⚙️ Configuration System
+
+### Configuration Hierarchy
+
+Configuration values are loaded with the following precedence (highest to lowest):
+
+1. **Command-line arguments**:
+   ```bash
+   uv run main.py --no-headless --debug
+   ```
+
+2. **Environment variables**:
+   ```bash
+   export LINKEDIN_EMAIL=your.email@example.com
+   export LINKEDIN_PASSWORD=your_password
+   export CHROMEDRIVER=/path/to/chromedriver
+   ```
+   *Note: Environment variables always override credentials stored in the system keychain*
+
+3. **System keychain**: Securely stored credentials from previous sessions
+
+4. **Default values**: Built-in fallback values
+
+### Command-line Options
+
+| Option | Description |
+|--------|-------------|
+| `--no-headless` | Run Chrome with a visible browser window |
+| `--debug` | Enable debug mode with additional logging |
+| `--no-setup` | Skip configuration setup prompts |
+| `--no-lazy-init` | Initialize Chrome driver immediately (instead of on first use) |
+
+### Credential Storage
+
+Your LinkedIn credentials are stored securely using your system's native keychain/credential manager:
+
+- **macOS**: macOS Keychain
+- **Windows**: Windows Credential Locker
+- **Linux**: Native keyring (varies by distribution)
+
+Credentials are managed as follows:
+
+1. First, the application checks for credentials in environment variables
+2. Next, it checks the system keychain for stored credentials
+3. If no credentials are found, you'll be prompted to enter them (in interactive mode)
+4. Entered credentials are securely stored in your system keychain for future use
+
+### Clearing Stored Credentials
+
+If you need to change your stored credentials, run the application with the `--no-lazy-init` flag and when prompted about login failure, select "Yes" to try with different credentials.
+
+### ChromeDriver Configuration
+
+The ChromeDriver path is found in this order:
+1. From the `CHROMEDRIVER` environment variable
+2. Auto-detected from common locations
+3. Manually specified when prompted (if auto-detection fails)
+
+Once specified, the ChromeDriver path is used for the current session but not stored persistently.
+
 ## 🔄 Using with Claude Desktop
 
 1. **After adding the configuration** to Claude Desktop, restart the application
@@ -134,7 +195,7 @@ Examples of what you can ask Claude:
 
 ## 🔐 Security and Privacy
 
-- Your LinkedIn credentials can be provided through environment variables or stored locally at `~/.linkedin_mcp_credentials.json` with user-only permissions
+- Your LinkedIn credentials are securely stored in your system's native keychain/credential manager with user-only permissions
 - Credentials are never exposed to Claude or any other AI and are only used for the LinkedIn login to scrape data
 - The server runs on your local machine, not in the cloud
 - All LinkedIn scraping happens through your account - be aware that profile visits are visible to other users
