@@ -25,47 +25,46 @@ https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python 3.12 or higher
 - Chrome browser installed
-- ChromeDriver matching your Chrome version
+- ChromeDriver matching your Chrome version (we'll help you set this up)
 - A LinkedIn account
 
-### Step 1: Clone or Download the Repository
+### Quick Start (Recommended)
 
 ```bash
+# 1. Clone the repository
 git clone https://github.com/stickerdaniel/linkedin-mcp-server
 cd linkedin-mcp-server
-```
 
-Or download and extract the zip file.
-
-### Step 2: Set Up a Virtual Environment
-
-Using `uv` (recommended):
-
-```bash
-# Install uv if you don't have it
+# 2. Install UV if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Create and activate virtual environment
-uv venv
-source .venv/bin/activate  # On macOS/Linux
-# OR
-.venv\Scripts\activate     # On Windows
+# 3. Install the project and all dependencies
+uv sync
+
+# 4. Run the server for initial setup (this will prompt you for credentials)
+uv run main.py --no-lazy-init --no-headless
 ```
 
-### Step 3: Install Dependencies
+That's it! UV will:
+- Automatically create a virtual environment
+- Install all dependencies from `pyproject.toml`
+- Handle the [LinkedIn scraper](https://github.com/joeyism/linkedin_scraper) git dependency
 
-Using `uv`:
+#### For Development
+
+If you want to contribute or modify the code:
 
 ```bash
-uv add "mcp[cli]" selenium httpx inquirer pyperclip
-uv add "git+https://github.com/stickerdaniel/linkedin_scraper.git"
-uv pip install -e .
-pre-commit install
+# Install with development dependencies
+uv sync --group dev
+
+# Install pre-commit hooks
+uv run pre-commit install
 ```
 
-### Step 4: Install ChromeDriver
+### ChromeDriver Setup
 
 ChromeDriver is required for Selenium to interact with Chrome. You need to install the version that matches your Chrome browser.
 
@@ -90,35 +89,45 @@ ChromeDriver is required for Selenium to interact with Chrome. You need to insta
 
 ## 🚀 Running the Server
 
-1. **Start the server once manually**:
+### Quick Start
+
+After installation, simply run:
 
 ```bash
-# Using uv (recommended)
+# Start the server (first time setup)
 uv run main.py --no-lazy-init --no-headless
 ```
 
-2. **Lazy initialization (default behavior)**:
-   - The server uses lazy initialization, meaning it will only create the Chrome driver and log in when a tool is actually used
-   - You can set environment variables for non-interactive use:
-     ```bash
-     export LINKEDIN_EMAIL=your.email@example.com
-     export LINKEDIN_PASSWORD=your_password
-     ```
-   - Alternatively, you can run the server once manually and you'll be prompted for credentials, which will then be stored securely in your system's keychain (macOS Keychain, Windows Credential Locker, etc.)
+### Running Options
 
-3. **Configure Claude Desktop**:
-   - The server will display and copy to your clipboard the configuration needed for Claude Desktop
+```bash
+# Normal operation (lazy initialization)
+uv run main.py
+
+# Debug mode with visible browser
+uv run main.py --no-headless --debug
+
+# Skip setup prompts (for automation)
+uv run main.py --no-setup
+```
+
+### Configuration for Claude Desktop
+
+1. **The server will automatically**:
+   - Display the configuration needed for Claude Desktop
+   - Copy it to your clipboard for easy pasting
+
+2. **Add to Claude Desktop**:
    - Open Claude Desktop and go to Settings > Developer > Edit Config
    - Paste the configuration provided by the server
-   - Edit the configuration to include your LinkedIn credentials as environment variables
 
    Example Claude Desktop configuration:
    ```json
    {
      "mcpServers": {
        "linkedin-scraper": {
-         "command": "/path/to/uv",
-         "args": ["--directory", "/path/to/project", "run", "main.py", "--no-setup"],
+         "command": "uv",
+         "args": ["--directory", "/path/to/linkedin-mcp-server", "run", "main.py", "--no-setup"],
          "env": {
            "LINKEDIN_EMAIL": "your.email@example.com",
            "LINKEDIN_PASSWORD": "your_password"
@@ -127,6 +136,17 @@ uv run main.py --no-lazy-init --no-headless
      }
    }
    ```
+
+### Credential Management
+
+- **Lazy initialization (default behavior)**:
+  - The server uses lazy initialization, meaning it will only create the Chrome driver and log in when a tool is actually used
+  - You can set environment variables for non-interactive use:
+    ```bash
+    export LINKEDIN_EMAIL=your.email@example.com
+    export LINKEDIN_PASSWORD=your_password
+    ```
+  - Alternatively, you can run the server once manually and you'll be prompted for credentials, which will then be stored securely in your system's keychain (macOS Keychain, Windows Credential Locker, etc.)
 
 ## ⚙️ Configuration System
 
