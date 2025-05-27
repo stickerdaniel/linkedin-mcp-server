@@ -490,7 +490,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "inquirer", specifier = ">=3.4.0" },
     { name = "keyring", specifier = ">=25.6.0" },
-    { name = "linkedin-scraper", git = "https://github.com/stickerdaniel/linkedin_scraper.git" },
+    { name = "linkedin-scraper", git = "https://github.com/joeyism/linkedin_scraper.git" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.6.0" },
     { name = "mypy", specifier = ">=1.15.0" },
     { name = "pre-commit", specifier = ">=4.2.0" },
@@ -500,7 +500,7 @@ requires-dist = [
 [[package]]
 name = "linkedin-scraper"
 version = "2.11.5"
-source = { git = "https://github.com/stickerdaniel/linkedin_scraper.git#23ee0ece83c2ed2b97e697ead2aadc4708e8fa8a" }
+source = { git = "https://github.com/joeyism/linkedin_scraper.git#44eafb893e691732474e37a20123c5cc9007e0ad" }
 dependencies = [
     { name = "lxml" },
     { name = "requests" },
