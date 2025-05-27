@@ -5,9 +5,10 @@ Job-related tools for LinkedIn MCP server.
 This module provides tools for scraping LinkedIn job postings and searches.
 """
 
-from typing import Dict, Any, List
-from mcp.server.fastmcp import FastMCP
+from typing import Any, Dict, List
+
 from linkedin_scraper import Job, JobSearch
+from mcp.server.fastmcp import FastMCP
 
 from linkedin_mcp_server.drivers.chrome import get_or_create_driver
 
@@ -25,11 +26,22 @@ def register_job_tools(mcp: FastMCP) -> None:
         """
         Scrape job details from a LinkedIn job posting.
 
+        IMPORTANT: Only use direct LinkedIn job URLs in the format:
+        https://www.linkedin.com/jobs/view/[JOB_ID]
+
+        DO NOT use collection URLs like:
+        - /collections/recommended/?currentJobId=
+        - /jobs/search/?keywords=
+
+        If you have a collection URL, extract the job ID and convert it to the direct format.
+        Example: If you see currentJobId=1234567890, use https://www.linkedin.com/jobs/view/1234567890
+
         Args:
-            job_url (str): The LinkedIn URL of the job posting
+            job_url (str): The direct LinkedIn job URL (must be /jobs/view/[ID] format)
 
         Returns:
-            Dict[str, Any]: Structured data from the job posting
+            Dict[str, Any]: Structured job data including title, company, location, posting date,
+                          application count, and job description (may be empty if content is protected)
         """
         driver = get_or_create_driver()
 
