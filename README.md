@@ -42,15 +42,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 3. Install the project and all dependencies
 uv sync
-
-# 4. Run the server for initial setup (this will prompt you for credentials)
-uv run main.py --no-lazy-init --no-headless
 ```
-
-That's it! UV will:
-- Automatically create a virtual environment
-- Install all dependencies from `pyproject.toml`
-- Handle the [LinkedIn scraper](https://github.com/joeyism/linkedin_scraper) git dependency
 
 #### For Development
 
@@ -91,7 +83,7 @@ ChromeDriver is required for Selenium to interact with Chrome. You need to insta
 
 ### Quick Start
 
-After installation, simply run:
+After installation, run:
 
 ```bash
 # Start the server (first time setup)
@@ -104,8 +96,8 @@ uv run main.py --no-lazy-init --no-headless
 # Normal operation (lazy initialization)
 uv run main.py
 
-# Debug mode with visible browser
-uv run main.py --no-headless --debug
+# Debug mode with visible browser and direct startup
+uv run main.py --no-headless --debug --no-lazy-init
 
 # Skip setup prompts (for automation)
 uv run main.py --no-setup
@@ -146,7 +138,7 @@ uv run main.py --no-setup
     export LINKEDIN_EMAIL=your.email@example.com
     export LINKEDIN_PASSWORD=your_password
     ```
-  - Alternatively, you can run the server once manually and you'll be prompted for credentials, which will then be stored securely in your system's keychain (macOS Keychain, Windows Credential Locker, etc.)
+  - Alternatively, you can run the server once manually. You'll be prompted for credentials, which will then be stored securely in your system's keychain (macOS Keychain, Windows Credential Locker, etc.).
 
 ## ⚙️ Configuration System
 
@@ -210,7 +202,7 @@ Once specified, the ChromeDriver path is used for the current session but not st
 
 ## 🔄 Using with Claude Desktop
 
-1. **After adding the configuration** to Claude Desktop, restart the application
+1. **After adding the configuration** to Claude Desktop, restart Claude Desktop. The tools should be listed in the settings icon menu.
 2. **Start a conversation** with Claude
 3. **You'll see tools available** in the tools menu (settings icon)
 4. **You can now ask Claude** to retrieve LinkedIn profiles, companies, and job details
