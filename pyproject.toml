@@ -16,8 +16,8 @@ dependencies = [
     "pyperclip>=1.9.0",
 ]
 
-[tool.uv.sources]
-linkedin-scraper = { git = "https://github.com/joeyism/linkedin_scraper.git" }
-
 [tool.setuptools.package-data]
 linkedin_mcp_server = ["py.typed"]
+
+[tool.uv.sources]
+linkedin-scraper = { git = "https://github.com/joeyism/linkedin_scraper.git" }
