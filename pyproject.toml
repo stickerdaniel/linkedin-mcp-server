@@ -1,7 +1,7 @@
 [project]
 name = "linkedin-mcp-server"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP server for LinkedIn profile, company, and job scraping with Claude AI integration. Supports direct profile/company/job URL scraping with secure credential storage."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

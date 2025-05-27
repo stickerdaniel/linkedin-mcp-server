@@ -8,11 +8,18 @@ A Model Context Protocol (MCP) server that enables interaction with LinkedIn thr
 https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 
 
-## 📋 Features
+## 📋 Features & Tool Status
 
-- **Profile Scraping**: Get detailed information from LinkedIn profiles
-- **Company Analysis**: Extract company information, including employees if desired
-- **Job Search**: Search for jobs and get recommended positions
+### ✅ **Working Tools**
+- **Profile Scraping** (`get_person_profile`): Get detailed information from LinkedIn profiles including work history, education, skills, and connections
+- **Company Analysis** (`get_company_profile`): Extract company information with comprehensive details (employees optional)
+- **Job Details** (`get_job_details`): Retrieve specific job posting details using direct LinkedIn job URLs
+- **Session Management** (`close_session`): Properly close browser sessions and clean up resources
+
+### ⚠️ **Tools with Known Issues**
+- **Job Search** (`search_jobs`): Currently experiencing ChromeDriver compatibility issues with LinkedIn's search interface
+- **Recommended Jobs** (`get_recommended_jobs`): Has Selenium method compatibility issues due to outdated scraping methods
+- **Company Profiles**: Some companies may have restricted access or may return empty results (need further investigation)
 
 ## 🔧 Installation
 
@@ -186,12 +193,17 @@ Once specified, the ChromeDriver path is used for the current session but not st
 1. **After adding the configuration** to Claude Desktop, restart the application
 2. **Start a conversation** with Claude
 3. **You'll see tools available** in the tools menu (settings icon)
-4. **You can now ask Claude** to retrieve LinkedIn profiles, search for jobs, etc.
+4. **You can now ask Claude** to retrieve LinkedIn profiles, companies, and job details
 
-Examples of what you can ask Claude:
-- "Can you tell me about Daniels work experience? His LinkedIn profile is https://www.linkedin.com/in/stickerdaniel/"
-- "Search for machine learning engineer jobs on LinkedIn"
-- "Tell me about Google as a company based on their LinkedIn page"
+### ✅ **Recommended Usage Examples**
+- "Can you tell me about Daniel's work experience? His LinkedIn profile is https://www.linkedin.com/in/stickerdaniel/"
+- "Get details about this job posting: https://www.linkedin.com/jobs/view/1234567890"
+- "Tell me about Electric Mind as a company based on their LinkedIn page"
+- "Get the profile information for this LinkedIn user: [profile URL]"
+
+### ⚠️ **Usage Examples with Known Issues**
+- ~~"Search for machine learning engineer jobs on LinkedIn"~~ (currently not working due to browser automation issues)
+- ~~"Show me recommended jobs from LinkedIn"~~ (has compatibility issues)
 
 ## 🔐 Security and Privacy
 
@@ -201,6 +213,28 @@ Examples of what you can ask Claude:
 - All LinkedIn scraping happens through your account - be aware that profile visits are visible to other users
 
 ## ⚠️ Troubleshooting
+
+### Tool-Specific Issues
+
+**Job Search (`search_jobs`) Not Working:**
+- This tool currently has ChromeDriver compatibility issues
+- Use direct job URLs with `get_job_details` instead
+- LinkedIn's search interface has anti-automation measures
+
+**Recommended Jobs (`get_recommended_jobs`) Errors:**
+- Contains outdated Selenium methods (`find_elements_by_class_name`)
+- LinkedIn has updated their DOM structure
+- Use manual job discovery and direct URLs as workaround
+
+**Empty Job Descriptions:**
+- Job content may be dynamically loaded
+- Some job postings have protected content
+- Try accessing the job URL directly in a browser first
+
+**Company Profile Access Issues:**
+- Some companies restrict automated access
+- Corporate LinkedIn pages may have different structures
+- Try with well-known company URLs first
 
 ### ChromeDriver Issues
 
