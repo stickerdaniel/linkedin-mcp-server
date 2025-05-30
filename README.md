@@ -8,20 +8,20 @@ A Model Context Protocol (MCP) server that enables interaction with LinkedIn thr
 https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 
 
-## 📋 Features & Tool Status
+## Features & Tool Status
 
-### ✅ **Working Tools**
+### Working Tools
 - **Profile Scraping** (`get_person_profile`): Get detailed information from LinkedIn profiles including work history, education, skills, and connections
 - **Company Analysis** (`get_company_profile`): Extract company information with comprehensive details (employees optional)
 - **Job Details** (`get_job_details`): Retrieve specific job posting details using direct LinkedIn job URLs
 - **Session Management** (`close_session`): Properly close browser sessions and clean up resources
 
-### ⚠️ **Tools with Known Issues**
+### Tools with Known Issues
 - **Job Search** (`search_jobs`): Currently experiencing ChromeDriver compatibility issues with LinkedIn's search interface
 - **Recommended Jobs** (`get_recommended_jobs`): Has Selenium method compatibility issues due to outdated scraping methods
 - **Company Profiles**: Some companies may have restricted access or may return empty results (need further investigation)
 
-## 🔧 Installation
+## Installation
 
 ### Prerequisites
 
@@ -79,7 +79,7 @@ ChromeDriver is required for Selenium to interact with Chrome. You need to insta
      ```
    - **Option 3**: The server will attempt to auto-detect or prompt you for the path when run
 
-## 🚀 Running the Server
+## Running the Server
 
 ### Quick Start
 
@@ -140,7 +140,7 @@ uv run main.py --no-setup
     ```
   - Alternatively, you can run the server once manually. You'll be prompted for credentials, which will then be stored securely in your system's keychain (macOS Keychain, Windows Credential Locker, etc.).
 
-## ⚙️ Configuration System
+## Configuration System
 
 ### Configuration Hierarchy
 
@@ -200,31 +200,26 @@ The ChromeDriver path is found in this order:
 
 Once specified, the ChromeDriver path is used for the current session but not stored persistently.
 
-## 🔄 Using with Claude Desktop
+## Using with Claude Desktop
 
 1. **After adding the configuration** to Claude Desktop, restart Claude Desktop. The tools should be listed in the settings icon menu.
 2. **Start a conversation** with Claude
 3. **You'll see tools available** in the tools menu (settings icon)
 4. **You can now ask Claude** to retrieve LinkedIn profiles, companies, and job details
 
-### ✅ **Recommended Usage Examples**
+### Recommended Usage Examples
 - "Can you tell me about Daniel's work experience? His LinkedIn profile is https://www.linkedin.com/in/stickerdaniel/"
 - "Get details about this job posting: https://www.linkedin.com/jobs/view/1234567890"
-- "Tell me about Electric Mind as a company based on their LinkedIn page"
-- "Get the profile information for this LinkedIn user: [profile URL]"
+- "Tell me about the company Google based on their LinkedIn page."
 
-### ⚠️ **Usage Examples with Known Issues**
-- ~~"Search for machine learning engineer jobs on LinkedIn"~~ (currently not working due to browser automation issues)
-- ~~"Show me recommended jobs from LinkedIn"~~ (has compatibility issues)
-
-## 🔐 Security and Privacy
+## Security and Privacy
 
 - Your LinkedIn credentials are securely stored in your system's native keychain/credential manager with user-only permissions
 - Credentials are never exposed to Claude or any other AI and are only used for the LinkedIn login to scrape data
 - The server runs on your local machine, not in the cloud
 - All LinkedIn scraping happens through your account - be aware that profile visits are visible to other users
 
-## ⚠️ Troubleshooting
+## Troubleshooting
 
 ### Tool-Specific Issues
 
@@ -236,17 +231,6 @@ Once specified, the ChromeDriver path is used for the current session but not st
 **Recommended Jobs (`get_recommended_jobs`) Errors:**
 - Contains outdated Selenium methods (`find_elements_by_class_name`)
 - LinkedIn has updated their DOM structure
-- Use manual job discovery and direct URLs as workaround
-
-**Empty Job Descriptions:**
-- Job content may be dynamically loaded
-- Some job postings have protected content
-- Try accessing the job URL directly in a browser first
-
-**Company Profile Access Issues:**
-- Some companies restrict automated access
-- Corporate LinkedIn pages may have different structures
-- Try with well-known company URLs first
 
 ### ChromeDriver Issues
 
@@ -275,7 +259,7 @@ If Claude cannot connect to the server:
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License
 
 ## Acknowledgements
 
