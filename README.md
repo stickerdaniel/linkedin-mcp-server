@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 
 ### Working Tools
 - **Profile Scraping** (`get_person_profile`): Get detailed information from LinkedIn profiles including work history, education, skills, and connections
-- **Company Analysis** (`get_company_profile`): Extract company information with comprehensive details (employees optional)
+- **Company Analysis** (`get_company_profile`): Extract company information with comprehensive details
 - **Job Details** (`get_job_details`): Retrieve specific job posting details using direct LinkedIn job URLs
 - **Session Management** (`close_session`): Properly close browser sessions and clean up resources
 
