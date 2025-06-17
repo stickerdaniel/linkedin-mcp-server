@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/stickerdaniel-linkedin-mcp-server-badge.png)](https://mseep.ai/app/stickerdaniel-linkedin-mcp-server)
+
 # LinkedIn MCP Server
 
 [![smithery badge](https://smithery.ai/badge/@stickerdaniel/linkedin-mcp-server)](https://smithery.ai/server/@stickerdaniel/linkedin-mcp-server)
