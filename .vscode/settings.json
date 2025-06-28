@@ -13,4 +13,7 @@
             "source.organizeImports.ruff": "explicit"
         }
     },
+    "yaml.schemas": {
+        "https://www.schemastore.org/github-issue-config.json": "file:///Users/daniel/Documents/development/python/linkedin-mcp-server/.github/ISSUE_TEMPLATE/config.yml"
+    },
 }
