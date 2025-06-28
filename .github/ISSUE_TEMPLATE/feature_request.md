@@ -1,20 +1,23 @@
 ---
-name: Feature request
-about: Suggest an idea for this project
-title: ''
-labels: ''
+name: Feature Request
+about: Suggest an idea for the LinkedIn MCP server
+title: '[FEATURE] '
+labels: ['enhancement']
 assignees: ''
 
 ---
 
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+## What feature would you like?
+Describe what you want to happen and why it would be useful.
 
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
+## Use case
+How would you use this feature?
+```
+Example: "Claude, get me the skills from this LinkedIn profile: [URL]"
+```
 
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
+## Suggested implementation
+If you have a specific idea for how to implement this feature, please describe it here.
 
-**Additional context**
-Add any other context or screenshots about the feature request here.
+## Additional context
+Add any other details that would help.
