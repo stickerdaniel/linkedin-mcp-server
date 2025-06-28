@@ -1,7 +1,7 @@
 # .github/ISSUE_TEMPLATE/config.yml
 blank_issues_enabled: false
 contact_links:
-  - name: 🗣️ General Questions & Discussion
+  - name: 💬 General Questions & Discussion
     url: https://github.com/stickerdaniel/linkedin-mcp-server/discussions
     about: Ask questions about setup, usage, or get help from the community
   - name: 📚 Share Your Setup & Get Help with Configuration
