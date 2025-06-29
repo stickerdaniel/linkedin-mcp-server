@@ -2,7 +2,8 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Run pre-commit",
+            "label": "uv run pre-commit run --all-files",
+            "detail": "Run pre-commit hooks on all files",
             "type": "shell",
             "command": "uv",
             "args": ["run", "pre-commit", "run", "--all-files"],
@@ -18,10 +19,11 @@
             "problemMatcher": []
         },
         {
-            "label": "Run main.py (debug)",
+            "label": "uv run main.py --debug --no-headless --no-lazy-init",
+            "detail": "Run main.py in debug mode with visible window and login immediately",
             "type": "shell",
             "command": "uv",
-            "args": ["run", "main.py", "--no-headless", "--no-lazy-init", "--debug"],
+            "args": ["run", "main.py", "--debug", "--no-headless", "--no-lazy-init"],
             "group": {
                 "kind": "build",
                 "isDefault": false
@@ -33,7 +35,8 @@
             },
             "problemMatcher": []
         },        {
-            "label": "Run main.py",
+            "label": "uv run main.py --no-headless --no-lazy-init",
+            "detail": "Run main.py with visible window and login immediately",
             "type": "shell",
             "command": "uv",
             "args": ["run", "main.py", "--no-headless", "--no-lazy-init"],
@@ -49,7 +52,8 @@
             "problemMatcher": []
         },
         {
-            "label": "Follow Logs",
+            "label": "uv run tail -n 20 -F ~/Library/Logs/Claude/mcp*.log",
+            "detail": "Follow Claude Desktop logs",
             "type": "shell",
             "command": "tail",
             "args": ["-n", "20", "-F", "~/Library/Logs/Claude/mcp*.log"],
