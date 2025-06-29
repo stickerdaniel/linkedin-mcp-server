@@ -6,7 +6,7 @@ LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration.
 import sys
 import logging
 import inquirer  # type: ignore
-from typing import Literal, NoReturn
+from typing import Literal
 
 # Import the new centralized configuration
 from linkedin_mcp_server.config import get_config
@@ -70,7 +70,7 @@ def main() -> None:
     mcp.run(transport=transport)
 
 
-def exit_gracefully(exit_code: int = 0) -> NoReturn:
+def exit_gracefully(exit_code: int = 0) -> None:
     """Exit the application gracefully, cleaning up resources."""
     print("\n👋 Shutting down LinkedIn MCP server...")
     shutdown_handler()
