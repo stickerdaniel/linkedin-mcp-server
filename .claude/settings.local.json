@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(ty check:*)"
+    ],
+    "deny": []
+  }
+}

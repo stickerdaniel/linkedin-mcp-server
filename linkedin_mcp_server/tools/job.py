@@ -99,7 +99,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             )
 
             # Get recommended jobs and convert to dictionaries
-            if hasattr(job_search, "recommended_jobs"):
+            if hasattr(job_search, "recommended_jobs") and job_search.recommended_jobs:
                 return [job.to_dict() for job in job_search.recommended_jobs]
             else:
                 return []
