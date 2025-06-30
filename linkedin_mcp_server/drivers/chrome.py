@@ -6,7 +6,7 @@ This module handles the creation and management of Chrome WebDriver instances.
 """
 
 import sys
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 import os
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -18,16 +18,16 @@ from linkedin_mcp_server.config.secrets import get_credentials
 from linkedin_mcp_server.config.providers import clear_credentials_from_keyring
 
 # Global driver storage to reuse sessions
-active_drivers: Dict[str, webdriver.Chrome] = {}
+active_drivers: Dict[str, Union[webdriver.Chrome, webdriver.Remote]] = {}
 
 
-def get_or_create_driver() -> Optional[webdriver.Chrome]:
+def get_or_create_driver() -> Optional[Union[webdriver.Chrome, webdriver.Remote]]:
     """
     Get existing driver or create a new one using the configured settings.
 
     Returns:
-        Optional[webdriver.Chrome]: Chrome WebDriver instance or None if initialization fails
-                                   in non-interactive mode
+        Optional[Union[webdriver.Chrome, webdriver.Remote]]: WebDriver instance or None if initialization fails
+                                                            in non-interactive mode
 
     Raises:
         WebDriverException: If the driver cannot be created and not in non-interactive mode
@@ -47,11 +47,13 @@ def get_or_create_driver() -> Optional[webdriver.Chrome]:
     if config.chrome.headless:
         chrome_options.add_argument("--headless=new")
 
-    # Add additional options for stability
+    # Add essential options for stability (compatible with both Grid and direct)
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-background-timer-throttling")
     chrome_options.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36"
     )
@@ -62,13 +64,32 @@ def get_or_create_driver() -> Optional[webdriver.Chrome]:
 
     # Initialize Chrome driver
     try:
-        if config.chrome.chromedriver_path:
-            print(f"🌐 Using ChromeDriver at path: {config.chrome.chromedriver_path}")
-            service = Service(executable_path=config.chrome.chromedriver_path)
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-        else:
-            print("🌐 Using auto-detected ChromeDriver")
-            driver = webdriver.Chrome(options=chrome_options)
+        # Check for remote Selenium URL (Docker environment)
+        selenium_url = os.environ.get(
+            "SELENIUM_REMOTE_URL", "http://localhost:4444/wd/hub"
+        )
+
+        # First, try to connect to Selenium Grid (Docker or remote)
+        try:
+            print(f"🌐 Attempting to connect to Selenium Grid at {selenium_url}...")
+            driver = webdriver.Remote(
+                command_executor=selenium_url, options=chrome_options
+            )
+            print("✅ Connected to Selenium Grid successfully")
+        except Exception as grid_error:
+            print(f"⚠️ Selenium Grid not available at {selenium_url}: {grid_error}")
+            print("🌐 Falling back to local ChromeDriver...")
+
+            # Fallback to local ChromeDriver
+            if config.chrome.chromedriver_path:
+                print(
+                    f"🌐 Using ChromeDriver at path: {config.chrome.chromedriver_path}"
+                )
+                service = Service(executable_path=config.chrome.chromedriver_path)
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+            else:
+                print("🌐 Using auto-detected ChromeDriver")
+                driver = webdriver.Chrome(options=chrome_options)
 
         # Add a page load timeout for safety
         driver.set_page_load_timeout(60)
@@ -94,12 +115,12 @@ def get_or_create_driver() -> Optional[webdriver.Chrome]:
         raise WebDriverException(error_msg)
 
 
-def login_to_linkedin(driver: webdriver.Chrome) -> bool:
+def login_to_linkedin(driver: Union[webdriver.Chrome, webdriver.Remote]) -> bool:
     """
     Log in to LinkedIn using stored or provided credentials.
 
     Args:
-        driver: Chrome WebDriver instance
+        driver: WebDriver instance (Chrome or Remote)
 
     Returns:
         bool: True if login was successful, False otherwise
