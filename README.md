@@ -23,7 +23,7 @@ https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 
 Choose your installation method:
 
-**📦 [Docker Installation](#docker-installation-recommended)** - No ChromeDriver setup needed
+**📦 [Docker Installation](#docker-installation-recommended)** - No ChromeDriver setup needed  
 **🔧 [Local Installation](#local-installation-with-chromedriver)** - Install ChromeDriver manually
 
 ---
