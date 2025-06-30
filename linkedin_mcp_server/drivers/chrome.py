@@ -6,7 +6,7 @@ This module handles the creation and management of Chrome WebDriver instances.
 """
 
 import sys
-from typing import Dict, Optional, Union
+from typing import Dict, Optional
 import os
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -18,16 +18,16 @@ from linkedin_mcp_server.config.secrets import get_credentials
 from linkedin_mcp_server.config.providers import clear_credentials_from_keyring
 
 # Global driver storage to reuse sessions
-active_drivers: Dict[str, Union[webdriver.Chrome, webdriver.Remote]] = {}
+active_drivers: Dict[str, webdriver.Chrome] = {}
 
 
-def get_or_create_driver() -> Optional[Union[webdriver.Chrome, webdriver.Remote]]:
+def get_or_create_driver() -> Optional[webdriver.Chrome]:
     """
     Get existing driver or create a new one using the configured settings.
 
     Returns:
-        Optional[Union[webdriver.Chrome, webdriver.Remote]]: WebDriver instance or None if initialization fails
-                                                            in non-interactive mode
+        Optional[webdriver.Chrome]: Chrome WebDriver instance or None if initialization fails
+                                   in non-interactive mode
 
     Raises:
         WebDriverException: If the driver cannot be created and not in non-interactive mode
@@ -64,32 +64,22 @@ def get_or_create_driver() -> Optional[Union[webdriver.Chrome, webdriver.Remote]
 
     # Initialize Chrome driver
     try:
-        # Check for remote Selenium URL (Docker environment)
-        selenium_url = os.environ.get(
-            "SELENIUM_REMOTE_URL", "http://localhost:4444/wd/hub"
+        print("🌐 Initializing Chrome WebDriver...")
+
+        # Use ChromeDriver path from environment or config
+        chromedriver_path = (
+            os.environ.get("CHROMEDRIVER_PATH") or config.chrome.chromedriver_path
         )
 
-        # First, try to connect to Selenium Grid (Docker or remote)
-        try:
-            print(f"🌐 Attempting to connect to Selenium Grid at {selenium_url}...")
-            driver = webdriver.Remote(
-                command_executor=selenium_url, options=chrome_options
-            )
-            print("✅ Connected to Selenium Grid successfully")
-        except Exception as grid_error:
-            print(f"⚠️ Selenium Grid not available at {selenium_url}: {grid_error}")
-            print("🌐 Falling back to local ChromeDriver...")
+        if chromedriver_path:
+            print(f"🌐 Using ChromeDriver at path: {chromedriver_path}")
+            service = Service(executable_path=chromedriver_path)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+        else:
+            print("🌐 Using auto-detected ChromeDriver")
+            driver = webdriver.Chrome(options=chrome_options)
 
-            # Fallback to local ChromeDriver
-            if config.chrome.chromedriver_path:
-                print(
-                    f"🌐 Using ChromeDriver at path: {config.chrome.chromedriver_path}"
-                )
-                service = Service(executable_path=config.chrome.chromedriver_path)
-                driver = webdriver.Chrome(service=service, options=chrome_options)
-            else:
-                print("🌐 Using auto-detected ChromeDriver")
-                driver = webdriver.Chrome(options=chrome_options)
+        print("✅ Chrome WebDriver initialized successfully")
 
         # Add a page load timeout for safety
         driver.set_page_load_timeout(60)
@@ -115,12 +105,12 @@ def get_or_create_driver() -> Optional[Union[webdriver.Chrome, webdriver.Remote]
         raise WebDriverException(error_msg)
 
 
-def login_to_linkedin(driver: Union[webdriver.Chrome, webdriver.Remote]) -> bool:
+def login_to_linkedin(driver: webdriver.Chrome) -> bool:
     """
     Log in to LinkedIn using stored or provided credentials.
 
     Args:
-        driver: WebDriver instance (Chrome or Remote)
+        driver: Chrome WebDriver instance
 
     Returns:
         bool: True if login was successful, False otherwise
