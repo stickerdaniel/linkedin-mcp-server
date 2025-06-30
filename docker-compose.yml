@@ -1,0 +1,36 @@
+# Docker Compose configuration for LinkedIn MCP Server with Selenium Grid
+
+services:
+  selenium:
+    image: selenium/standalone-chromium:latest
+    container_name: linkedin-selenium
+    ports:
+      - "4444:4444"  # Selenium Grid
+      - "7900:7900"  # VNC (optional for debugging)
+    shm_size: 2g
+    environment:
+      - SE_NODE_MAX_SESSIONS=1
+      - SE_NODE_SESSION_TIMEOUT=300
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4444/wd/hub/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  linkedin-mcp:
+    build: .
+    container_name: linkedin-mcp-server
+    depends_on:
+      selenium:
+        condition: service_healthy
+    environment:
+      - SELENIUM_REMOTE_URL=http://selenium:4444/wd/hub
+      - LINKEDIN_EMAIL=${LINKEDIN_EMAIL}
+      - LINKEDIN_PASSWORD=${LINKEDIN_PASSWORD}
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: ["uv", "run", "python", "main.py", "--no-setup"]
+    stdin_open: true
+    tty: true
