@@ -23,30 +23,55 @@ https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 
 ## Installation
 
-### Prerequisites
+Choose your installation method:
 
-- Python 3.12 or higher
-- Chrome browser installed
-- ChromeDriver matching your Chrome version (we'll help you set this up)
+**📦 [Docker Installation](#docker-installation-recommended)** - No ChromeDriver setup needed
+**🔧 [Local Installation](#local-installation-with-chromedriver)** - Install ChromeDriver manually
+
+---
+
+### Docker Installation (Recommended)
+
+No ChromeDriver setup required - uses Selenium Grid in containers.
+
+```bash
+# 1. Clone and setup
+git clone https://github.com/stickerdaniel/linkedin-mcp-server
+cd linkedin-mcp-server
+cp .env.example .env
+
+# 2. Add your LinkedIn credentials to .env
+
+# 3. Start services
+docker-compose up --build
+```
+
+---
+
+### Local Installation (with ChromeDriver)
+
+**Prerequisites:**
+- [Chrome browser](https://www.google.com/chrome/) installed
 - A LinkedIn account
 
-### Quick Start (Recommended)
+**Setup:**
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/stickerdaniel/linkedin-mcp-server
 cd linkedin-mcp-server
 
-# 2. Install UV if you don't have it
+# 2.1 Install UV if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
+# 2.2 Install python if you don't have it
+uv python install
 
 # 3. Install the project and all dependencies
 uv sync
 ```
 
 #### For Development
-
-If you want to contribute or modify the code:
+If you plan to modify the code and contribute (feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues?q=sort%3Aupdated-desc+is%3Aissue+is%3Aopen) / [PR](https://github.com/stickerdaniel/linkedin-mcp-server/pulls?q=sort%3Aupdated-desc+is%3Apr+is%3Aopen)!):
 
 ```bash
 # Install with development dependencies
@@ -99,7 +124,7 @@ uv run main.py
 # Debug mode with visible browser and direct startup
 uv run main.py --no-headless --debug --no-lazy-init
 
-# Skip setup prompts (for automation)
+# Skip setup prompts (for your mcp client to start the server after you've configured it once)
 uv run main.py --no-setup
 ```
 
@@ -160,8 +185,6 @@ Configuration values are loaded with the following precedence (highest to lowest
    *Note: Environment variables always override credentials stored in the system keychain*
 
 3. **System keychain**: Securely stored credentials from previous sessions
-
-4. **Default values**: Built-in fallback values
 
 ### Command-line Options
 
