@@ -1,9 +1,11 @@
 FROM python:3.12-alpine
 
-# Install system dependencies
+# Install system dependencies including Chromium and ChromeDriver
 RUN apk add --no-cache \
     git \
-    curl
+    curl \
+    chromium \
+    chromium-chromedriver
 
 # Install uv from official image
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -23,4 +25,4 @@ RUN adduser -D -u 1000 mcpuser && chown -R mcpuser:mcpuser /app
 USER mcpuser
 
 # Default command
-CMD ["uv", "run", "python", "main.py", "--no-setup"]
+CMD ["uv", "run", "python", "main.py", "--no-setup", "--no-lazy-init"]

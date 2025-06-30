@@ -3,7 +3,8 @@
     "allow": [
       "WebFetch(domain:github.com)",
       "WebFetch(domain:docs.astral.sh)",
-      "Bash(ty check:*)"
+      "Bash(ty check:*)",
+      "Bash(./build.sh)"
     ],
     "deny": []
   }
