@@ -36,7 +36,7 @@ Get details about this job posting https://www.linkedin.com/jobs/view/123456789
 Choose your preferred installation method:
 
 [![Docker Hub](https://img.shields.io/badge/Docker_Hub-Universal_MCP_Server-2496ED?style=for-the-badge&logo=docker)](https://hub.docker.com/r/stickerdaniel/linkedin-mcp-server)
-[![Install DXT Extension](https://img.shields.io/badge/Claude_Desktop_Extension-purple?style=for-the-badge&logo=anthropic)](./linkedin-mcp-server-1.0.0.dxt)
+[![Install DXT Extension](https://img.shields.io/badge/Claude_Desktop_Extension-purple?style=for-the-badge&logo=anthropic)](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest/download/linkedin-mcp-server.dxt)
 [![Development](https://img.shields.io/badge/Development-Local_Setup-green?style=for-the-badge&logo=github)](#%EF%B8%8F-local-setup-develop--contribute)
 
 ---
