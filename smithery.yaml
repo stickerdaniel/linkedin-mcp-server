@@ -12,22 +12,6 @@ startCommand:
       LINKEDIN_PASSWORD:
         type: string
         description: Password for LinkedIn login
-      CHROMEDRIVER:
-        type: string
-        description: Path to the ChromeDriver binary. Optional if ChromeDriver is in PATH.
-  commandFunction:
-    # A JS function that produces the CLI command based on the given config to start the MCP on stdio.
-    |-
-    (config) => ({
-      command: 'python',
-      args: ['main.py', '--no-setup'],
-      env: {
-        LINKEDIN_EMAIL: config.LINKEDIN_EMAIL || '',
-        LINKEDIN_PASSWORD: config.LINKEDIN_PASSWORD || '',
-        CHROMEDRIVER: config.CHROMEDRIVER || ''
-      }
-    })
   exampleConfig:
     LINKEDIN_EMAIL: example.user@example.com
     LINKEDIN_PASSWORD: yourLinkedInPassword
-    CHROMEDRIVER: /usr/local/bin/chromedriver
