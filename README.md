@@ -2,9 +2,25 @@
 
 A Model Context Protocol (MCP) server that enables interaction with LinkedIn through Claude and other AI assistants. This server allows you to scrape LinkedIn profiles, companies, jobs, and perform job searches.
 
+## Installation Methods
+
+[![Docker](https://img.shields.io/badge/Docker_Hub-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup-recommended-universal)
+[![Install DXT Extension](https://img.shields.io/badge/Claude_Desktop_Extension-d97757?style=for-the-badge&logo=anthropic)](#-claude-desktop-dxt-extension)
+[![Development](https://img.shields.io/badge/Development-Local_Setup-ffd343?style=for-the-badge&logo=python&logoColor=ffd343)](#-local-setup-develop--contribute)
 
 https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 
+## Usage Examples
+
+```
+Get Daniel's profile https://www.linkedin.com/in/stickerdaniel/
+```
+```
+Analyze this company https://www.linkedin.com/company/docker/
+```
+```
+Get details about this job posting https://www.linkedin.com/jobs/view/123456789
+```
 
 ## Features & Tool Status
 
@@ -18,26 +34,6 @@ https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 - **Job Search** (`search_jobs`): Currently experiencing ChromeDriver compatibility issues with LinkedIn's search interface
 - **Recommended Jobs** (`get_recommended_jobs`): Has Selenium method compatibility issues due to outdated scraping methods
 - **Company Profiles**: Some companies may have restricted access or may return empty results (need further investigation)
-
-## 🎯 Usage Examples
-
-```
-Get Daniel's profile https://www.linkedin.com/in/stickerdaniel/
-```
-```
-Analyze this company https://www.linkedin.com/company/docker/
-```
-```
-Get details about this job posting https://www.linkedin.com/jobs/view/123456789
-```
-
-## Installation Methods
-
-Choose your preferred installation method:
-
-[![Docker Hub](https://img.shields.io/badge/Docker_Hub-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](https://hub.docker.com/r/stickerdaniel/linkedin-mcp-server)
-[![Install DXT Extension](https://img.shields.io/badge/Claude_Desktop_Extension-d97757?style=for-the-badge&logo=anthropic)](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest/download/linkedin-mcp-server.dxt)
-[![Development](https://img.shields.io/badge/Development-Local_Setup-ffd343?style=for-the-badge&logo=python&logoColor=ffd343)](#%EF%B8%8F-local-setup-develop--contribute)
 
 ---
 
@@ -83,7 +79,7 @@ docker run -i --rm \
 </details>
 
 <details>
-<summary><b>🚨 Troubleshooting</b></summary>
+<summary><b>❗ Troubleshooting</b></summary>
 
 **Container won't start:**
 ```bash
@@ -101,8 +97,6 @@ docker pull stickerdaniel/linkedin-mcp-server
 
 </details>
 
----
-
 ## 📦 Claude Desktop (DXT Extension)
 
 **Prerequisites:** [Claude Desktop](https://claude.ai/download) and [Docker](https://www.docker.com/get-started/) installed
@@ -115,9 +109,7 @@ docker pull stickerdaniel/linkedin-mcp-server
 
 The extension automatically handles Docker setup and credential management.
 
----
-
-## 🛠️ Local Setup (Develop & Contribute)
+## 🐍 Local Setup (Develop & Contribute)
 
 **For contributors** who want to modify and debug the code.
 
@@ -178,7 +170,7 @@ uv run main.py --no-headless --no-lazy-init
 </details>
 
 <details>
-<summary><b>🚨 Troubleshooting</b></summary>
+<summary><b>❗ Troubleshooting</b></summary>
 
 **Scraping issues:**
 - Use `--no-headless` to see browser actions
@@ -201,6 +193,8 @@ uv sync --reinstall
 
 Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) or [PR](https://github.com/stickerdaniel/linkedin-mcp-server/pulls)!
 
+---
+
 ## License
 
 MIT License
@@ -208,4 +202,4 @@ MIT License
 ## Acknowledgements
 Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@joeyism](https://github.com/joeyism) and [Model Context Protocol](https://modelcontextprotocol.io/).
 
-⚠️ Use responsibly and in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
