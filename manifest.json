@@ -24,8 +24,8 @@
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "-e", "LINKEDIN_EMAIL={{user_config.linkedin_email}}",
-        "-e", "LINKEDIN_PASSWORD={{user_config.linkedin_password}}",
+        "-e", "LINKEDIN_EMAIL=${user_config.linkedin_email}",
+        "-e", "LINKEDIN_PASSWORD=${user_config.linkedin_password}",
         "stickerdaniel/linkedin-mcp-server"
       ]
     }
@@ -100,6 +100,7 @@
     }
   },
   "compatibility": {
+    "claude_desktop": ">=0.10.0",
     "dxt_version": ">=0.1",
     "docker_version": ">=20.0.0",
     "platforms": ["darwin", "linux", "win32"]
