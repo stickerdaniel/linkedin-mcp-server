@@ -39,7 +39,7 @@
         "properties": {
           "profile_url": {
             "type": "string",
-            "description": "LinkedIn profile URL (e.g., https://www.linkedin.com/in/username/)"
+            "description": "LinkedIn profile URL (e.g., https://www.linkedin.com/in/stickerdaniel/)"
           }
         },
         "required": ["profile_url"]
@@ -89,7 +89,7 @@
       "description": "Your LinkedIn account email address",
       "type": "string",
       "required": true,
-      "sensitive": true
+      "sensitive": false
     },
     "linkedin_password": {
       "title": "LinkedIn Password",
@@ -97,20 +97,6 @@
       "type": "string",
       "required": true,
       "sensitive": true
-    },
-    "headless_mode": {
-      "title": "Headless Mode",
-      "description": "Run browser in headless mode (recommended for production)",
-      "type": "boolean",
-      "default": true,
-      "required": false
-    },
-    "debug_mode": {
-      "title": "Debug Mode",
-      "description": "Enable detailed logging for debugging",
-      "type": "boolean",
-      "default": false,
-      "required": false
     }
   },
   "compatibility": {
