@@ -31,21 +31,21 @@ Analyze this company https://www.linkedin.com/company/docker/
 Get details about this job posting https://www.linkedin.com/jobs/view/123456789
 ```
 
-The server automatically handles login, navigation, and data extraction.
-
 ## Installation Methods
 
 Choose your preferred installation method:
 
-[![Install with Claude Desktop](https://img.shields.io/badge/Claude_Desktop-One_Click_Install-blue?style=for-the-badge&logo=anthropic)](https://claude.ai/install-mcp?name=linkedin&config=eyJjb21tYW5kIjoiZG9ja2VyIiwiYXJncyI6WyJydW4iLCItaSIsIi0tcm0iLCItZSIsIkxJTktFRElOX0VNQUlMIiwiLWUiLCJMSU5LRURJTl9QQVNTV09SRCIsIm1jcC9saW5rZWRpbiJdfQ%3D%3D)
-[![Docker Hub](https://img.shields.io/badge/Docker_Hub-stickerdaniel/linkedin--mcp--server-2496ED?style=for-the-badge&logo=docker)](https://hub.docker.com/r/stickerdaniel/linkedin-mcp-server)
-[![Development](https://img.shields.io/badge/Contributors-Local_Setup-green?style=for-the-badge&logo=github)](#%EF%B8%8F-local-setup-develop--contribute)
+[![Docker Hub](https://img.shields.io/badge/Docker_Hub-Universal_MCP_Server-2496ED?style=for-the-badge&logo=docker)](https://hub.docker.com/r/stickerdaniel/linkedin-mcp-server)
+[![Install DXT Extension](https://img.shields.io/badge/Claude_Desktop_Extension-purple?style=for-the-badge&logo=anthropic)](./linkedin-mcp-server-1.0.0.dxt)
+[![Development](https://img.shields.io/badge/Development-Local_Setup-green?style=for-the-badge&logo=github)](#%EF%B8%8F-local-setup-develop--contribute)
 
 ---
 
-## 🐳 Docker Setup (Recommended)
+## 🐳 Docker Setup (Recommended - Universal)
 
-**Zero setup required** - no Chrome installation, no ChromeDriver management, no dependencies.
+**Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running.
+
+**Zero setup required** - just add the mcp server to your client config and replace email and password with your linkedin credentials.
 
 ### Installation
 
@@ -103,20 +103,31 @@ docker pull stickerdaniel/linkedin-mcp-server
 
 ---
 
+## 📦 Claude Desktop (DXT Extension)
+
+**Prerequisites:** [Claude Desktop](https://claude.ai/desktop) installed
+
+**One-click installation** for Claude Desktop users:
+1. Download the [DXT extension](./linkedin-mcp-server-1.0.0.dxt)
+2. Double-click to install into Claude Desktop
+3. Configure your LinkedIn credentials when prompted
+4. Start using LinkedIn tools immediately
+
+The extension automatically handles Docker setup and credential management.
+
+---
+
 ## 🛠️ Local Setup (Develop & Contribute)
 
 **For contributors** who want to modify and debug the code.
 
-**Prerequisites:**
-- Python 3.12 or higher
-- Chrome browser installed
-- ChromeDriver (see setup below)
+**Prerequisites:** [Chrome browser](https://www.google.com/chrome/) and [Git](https://git-scm.com/downloads) installed
 
 **ChromeDriver Setup:**
 1. **Check Chrome version**: Chrome → menu (⋮) → Help → About Google Chrome
 2. **Download matching ChromeDriver**: [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)
-3. **Make accessible**:
-   - Place in PATH (`/usr/local/bin` on macOS/Linux)
+3. **Make it accessible**:
+   - Place ChromeDriver in PATH (`/usr/local/bin` on macOS/Linux)
    - Or set: `export CHROMEDRIVER_PATH=/path/to/chromedriver`
    - if no CHROMEDRIVER_PATH is set, the server will try to find it automatically by checking common locations
 
@@ -194,6 +205,7 @@ Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-serve
 
 MIT License
 
-⚠️ **Important:** Use responsibly and in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+## Acknowledgements
+Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@joeyism](https://github.com/joeyism) and [Model Context Protocol](https://modelcontextprotocol.io/).
 
-**Acknowledgements:** Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) and [Model Context Protocol](https://modelcontextprotocol.io/).
+⚠️ Use responsibly and in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.

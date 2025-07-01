@@ -190,3 +190,6 @@ cython_debug/
 
 # Docker deployment tracking
 .docker/
+
+# DXT extension packages (too large for git)
+*.dxt
