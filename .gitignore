@@ -187,3 +187,6 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 .cursor
+
+# Docker deployment tracking
+.docker/

@@ -39,7 +39,7 @@ Choose your preferred installation method:
 
 [![Install with Claude Desktop](https://img.shields.io/badge/Claude_Desktop-One_Click_Install-blue?style=for-the-badge&logo=anthropic)](https://claude.ai/install-mcp?name=linkedin&config=eyJjb21tYW5kIjoiZG9ja2VyIiwiYXJncyI6WyJydW4iLCItaSIsIi0tcm0iLCItZSIsIkxJTktFRElOX0VNQUlMIiwiLWUiLCJMSU5LRURJTl9QQVNTV09SRCIsIm1jcC9saW5rZWRpbiJdfQ%3D%3D)
 [![Docker Hub](https://img.shields.io/badge/Docker_Hub-stickerdaniel/linkedin--mcp--server-2496ED?style=for-the-badge&logo=docker)](https://hub.docker.com/r/stickerdaniel/linkedin-mcp-server)
-[![Contributors](https://img.shields.io/badge/Contributors-Local_Setup-green?style=for-the-badge&logo=github)](https://github.com/stickerdaniel/linkedin-mcp-server#%EF%B8%8F-local-setup-contributors-only)
+[![Development](https://img.shields.io/badge/Contributors-Local_Setup-green?style=for-the-badge&logo=github)](#%EF%B8%8F-local-setup-develop--contribute)
 
 ---
 
