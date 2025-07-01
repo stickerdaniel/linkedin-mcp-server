@@ -1,7 +1,16 @@
 # Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
 
 startCommand:
-  type: stdio
+  command: docker
+  args:
+    - run
+    - -i
+    - --rm
+    - -e
+    - LINKEDIN_EMAIL=${LINKEDIN_EMAIL}
+    - -e
+    - LINKEDIN_PASSWORD=${LINKEDIN_PASSWORD}
+    - stickerdaniel/linkedin-mcp-server
   configSchema:
     # JSON Schema defining the configuration options for the MCP.
     type: object
