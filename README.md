@@ -13,27 +13,29 @@ https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 ## Usage Examples
 
 ```
-Get Daniel's profile https://www.linkedin.com/in/stickerdaniel/
+Research the background of this candidate https://www.linkedin.com/in/stickerdaniel/
 ```
 ```
-Analyze this company https://www.linkedin.com/company/docker/
+Get this company profile for partnership discussions https://www.linkedin.com/company/inframs/
 ```
 ```
-Get details about this job posting https://www.linkedin.com/jobs/view/123456789
+Suggest improvements for my CV to target this job posting https://www.linkedin.com/jobs/view/4252026496
 ```
 
 ## Features & Tool Status
 
-### Working Tools
-- **Profile Scraping** (`get_person_profile`): Get detailed information from LinkedIn profiles including work history, education, skills, and connections
-- **Company Analysis** (`get_company_profile`): Extract company information with comprehensive details
-- **Job Details** (`get_job_details`): Retrieve specific job posting details using direct LinkedIn job URLs
-- **Session Management** (`close_session`): Properly close browser sessions and clean up resources
+**Working Tools:**
+> [!TIP]
+> - **Profile Scraping** (`get_person_profile`): Get detailed information from LinkedIn profiles including work history, education, skills, and connections
+> - **Company Analysis** (`get_company_profile`): Extract company information with comprehensive details
+> - **Job Details** (`get_job_details`): Retrieve specific job posting details using direct LinkedIn job URLs
+> - **Session Management** (`close_session`): Properly close browser session and clean up resources
 
-### Tools with Known Issues
-- **Job Search** (`search_jobs`): Currently experiencing ChromeDriver compatibility issues with LinkedIn's search interface
-- **Recommended Jobs** (`get_recommended_jobs`): Has Selenium method compatibility issues due to outdated scraping methods
-- **Company Profiles**: Some companies may have restricted access or may return empty results (need further investigation)
+**Known Issues:**
+> [!WARNING]
+> - **Job Search** (`search_jobs`): Compatibility issues with LinkedIn's search interface
+> - **Recommended Jobs** (`get_recommended_jobs`): Selenium method compatibility issues
+> - **Company Profiles** (`get_company_profile`): Some companies can't be accessed / may return empty results (need further investigation)
 
 ---
 
@@ -81,20 +83,13 @@ docker run -i --rm \
 <details>
 <summary><b>❗ Troubleshooting</b></summary>
 
-**Container won't start:**
-```bash
-# Check Docker is running
-docker ps
-
-# Pull latest image
-docker pull stickerdaniel/linkedin-mcp-server
-```
+**Docker issues:**
+> Make sure [Docker](https://www.docker.com/get-started/) is installed
+- Check if Docker is running: `docker ps`
 
 **Login issues:**
-- Verify credentials are correct
-- Check for typos in email/password
-- Check if you need to confirm the login in the mobile app
-
+- Ensure your LinkedIn credentials are set and correct
+- LinkedIn may require a login confirmation in the LinkedIn mobile app
 </details>
 
 ## 📦 Claude Desktop (DXT Extension)
@@ -106,6 +101,18 @@ docker pull stickerdaniel/linkedin-mcp-server
 2. Double-click to install into Claude Desktop
 3. Configure your LinkedIn credentials when prompted
 4. Start using LinkedIn tools immediately
+
+<details>
+<summary><b>❗ Troubleshooting</b></summary>
+
+**Docker issues:**
+- Make sure [Docker](https://www.docker.com/get-started/) is installed
+- Check if Docker is running: `docker ps`
+
+**Login issues:**
+- Ensure your LinkedIn credentials are set and correct
+- LinkedIn may require a login confirmation in the LinkedIn mobile app
+</details>
 
 ## 🐍 Local Setup (Develop & Contribute)
 
@@ -172,20 +179,16 @@ uv run main.py --no-headless --no-lazy-init
 
 **Scraping issues:**
 - Use `--no-headless` to see browser actions
+- Add `--no-lazy-init` to attempt to login to LinkedIn immediately instead of waiting for the first tool call
 - Add `--debug` to see more detailed logging
 
 **ChromeDriver issues:**
 - Ensure Chrome and ChromeDriver versions match
-- Check ChromeDriver is in PATH or set `CHROMEDRIVER_PATH`
+- Check ChromeDriver is in PATH or set `CHROMEDRIVER_PATH` in your env
 
 **Python issues:**
-```bash
-# Check Python version
-python --version  # Should be 3.12+
-
-# Reinstall dependencies
-uv sync --reinstall
-```
+- Check Python version: `uv python --version` (should be 3.12+)
+- Reinstall dependencies: `uv sync --reinstall`
 
 </details>
 
