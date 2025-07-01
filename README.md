@@ -107,8 +107,6 @@ docker pull stickerdaniel/linkedin-mcp-server
 3. Configure your LinkedIn credentials when prompted
 4. Start using LinkedIn tools immediately
 
-The extension automatically handles Docker setup and credential management.
-
 ## 🐍 Local Setup (Develop & Contribute)
 
 **For contributors** who want to modify and debug the code.
