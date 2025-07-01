@@ -105,7 +105,7 @@ docker pull stickerdaniel/linkedin-mcp-server
 
 ## 📦 Claude Desktop (DXT Extension)
 
-**Prerequisites:** [Claude Desktop](https://claude.ai/download) installed
+**Prerequisites:** [Claude Desktop](https://claude.ai/download) and [Docker](https://www.docker.com/get-started/) installed
 
 **One-click installation** for Claude Desktop users:
 1. Download the [DXT extension](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest/download/linkedin-mcp-server.dxt)
