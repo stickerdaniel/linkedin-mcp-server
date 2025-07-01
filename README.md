@@ -108,7 +108,7 @@ docker pull stickerdaniel/linkedin-mcp-server
 **Prerequisites:** [Claude Desktop](https://claude.ai/desktop) installed
 
 **One-click installation** for Claude Desktop users:
-1. Download the [DXT extension](./linkedin-mcp-server-1.0.0.dxt)
+1. Download the [DXT extension](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest/download/linkedin-mcp-server.dxt)
 2. Double-click to install into Claude Desktop
 3. Configure your LinkedIn credentials when prompted
 4. Start using LinkedIn tools immediately
