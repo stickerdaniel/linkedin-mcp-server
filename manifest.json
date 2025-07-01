@@ -1,0 +1,121 @@
+{
+  "dxt_version": "0.1",
+  "name": "linkedin-mcp-server",
+  "display_name": "LinkedIn MCP Server",
+  "version": "1.0.0",
+  "description": "A Model Context Protocol server for LinkedIn profile and company data scraping",
+  "long_description": "# LinkedIn MCP Server\n\nA comprehensive MCP server that enables AI assistants to interact with LinkedIn profiles, companies, and job postings. Features include profile scraping, company analysis, and job details extraction with automatic login handling.\n\n## Features\n- **Profile Scraping**: Extract detailed LinkedIn profile information including work history, education, and skills\n- **Company Analysis**: Get comprehensive company data and insights\n- **Job Details**: Retrieve job posting information using LinkedIn URLs\n- **Session Management**: Automatic login and session handling\n\n## Security & Privacy\n- Credentials stored securely in system keychain\n- Headless browser operation for privacy\n- Automatic session cleanup\n- Respects LinkedIn's rate limiting\n\n⚠️ Use responsibly and in accordance with LinkedIn's Terms of Service.",
+  "author": {
+    "name": "Daniel Sticker",
+    "email": "daniel@sticker.name",
+    "url": "https://daniel.sticker.name/"
+  },
+  "homepage": "https://github.com/stickerdaniel/linkedin-mcp-server",
+  "documentation": "https://github.com/stickerdaniel/linkedin-mcp-server#readme",
+  "support": "https://github.com/stickerdaniel/linkedin-mcp-server/issues",
+  "license": "MIT",
+  "keywords": ["linkedin", "scraping", "mcp", "profiles", "companies", "jobs"],
+  "icon": "assets/icons/linkedin.svg",
+  "screenshots": ["assets/screenshots/screenshot.png"],
+  "server": {
+    "type": "binary",
+    "entry_point": "docker",
+    "mcp_config": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "LINKEDIN_EMAIL={{user_config.linkedin_email}}",
+        "-e", "LINKEDIN_PASSWORD={{user_config.linkedin_password}}",
+        "stickerdaniel/linkedin-mcp-server"
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "get_person_profile",
+      "description": "Get detailed information from a LinkedIn profile including work history, education, skills, and connections",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "profile_url": {
+            "type": "string",
+            "description": "LinkedIn profile URL (e.g., https://www.linkedin.com/in/username/)"
+          }
+        },
+        "required": ["profile_url"]
+      }
+    },
+    {
+      "name": "get_company_profile",
+      "description": "Extract comprehensive company information and details",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "company_url": {
+            "type": "string",
+            "description": "LinkedIn company URL (e.g., https://www.linkedin.com/company/company-name/)"
+          }
+        },
+        "required": ["company_url"]
+      }
+    },
+    {
+      "name": "get_job_details",
+      "description": "Retrieve specific job posting details using LinkedIn job URLs",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "job_url": {
+            "type": "string",
+            "description": "LinkedIn job URL (e.g., https://www.linkedin.com/jobs/view/123456789)"
+          }
+        },
+        "required": ["job_url"]
+      }
+    },
+    {
+      "name": "close_session",
+      "description": "Properly close browser session and clean up resources",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  ],
+  "user_config": {
+    "linkedin_email": {
+      "title": "LinkedIn Email",
+      "description": "Your LinkedIn account email address",
+      "type": "string",
+      "required": true,
+      "sensitive": true
+    },
+    "linkedin_password": {
+      "title": "LinkedIn Password",
+      "description": "Your LinkedIn account password",
+      "type": "string",
+      "required": true,
+      "sensitive": true
+    },
+    "headless_mode": {
+      "title": "Headless Mode",
+      "description": "Run browser in headless mode (recommended for production)",
+      "type": "boolean",
+      "default": true,
+      "required": false
+    },
+    "debug_mode": {
+      "title": "Debug Mode",
+      "description": "Enable detailed logging for debugging",
+      "type": "boolean",
+      "default": false,
+      "required": false
+    }
+  },
+  "compatibility": {
+    "dxt_version": ">=0.1",
+    "docker_version": ">=20.0.0",
+    "platforms": ["darwin", "linux", "win32"]
+  }
+}
