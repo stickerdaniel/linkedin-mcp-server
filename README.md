@@ -39,7 +39,7 @@ Get details about this job posting https://www.linkedin.com/jobs/view/123456789
 
 ## 🐳 Docker Setup (Recommended - Universal)
 
-**Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running.
+**Prerequisites:** Make sure you have <a href="https://www.docker.com/get-started/" target="_blank">Docker</a> installed and running.
 
 **Zero setup required** - just add the mcp server to your client config and replace email and password with your linkedin credentials.
 
@@ -99,10 +99,10 @@ docker pull stickerdaniel/linkedin-mcp-server
 
 ## 📦 Claude Desktop (DXT Extension)
 
-**Prerequisites:** [Claude Desktop](https://claude.ai/download) and [Docker](https://www.docker.com/get-started/) installed
+**Prerequisites:** <a href="https://claude.ai/download" target="_blank">Claude Desktop</a> and <a href="https://www.docker.com/get-started/" target="_blank">Docker</a> installed
 
 **One-click installation** for Claude Desktop users:
-1. Download the [DXT extension](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest/download/linkedin-mcp-server.dxt)
+1. Download the <a href="https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest/download/linkedin-mcp-server.dxt" target="_blank">DXT extension</a>
 2. Double-click to install into Claude Desktop
 3. Configure your LinkedIn credentials when prompted
 4. Start using LinkedIn tools immediately
@@ -113,11 +113,11 @@ The extension automatically handles Docker setup and credential management.
 
 **For contributors** who want to modify and debug the code.
 
-**Prerequisites:** [Chrome browser](https://www.google.com/chrome/) and [Git](https://git-scm.com/downloads) installed
+**Prerequisites:** <a href="https://www.google.com/chrome/" target="_blank">Chrome browser</a> and <a href="https://git-scm.com/downloads" target="_blank">Git</a> installed
 
 **ChromeDriver Setup:**
 1. **Check Chrome version**: Chrome → menu (⋮) → Help → About Google Chrome
-2. **Download matching ChromeDriver**: [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)
+2. **Download matching ChromeDriver**: <a href="https://googlechromelabs.github.io/chrome-for-testing/" target="_blank">Chrome for Testing</a>
 3. **Make it accessible**:
    - Place ChromeDriver in PATH (`/usr/local/bin` on macOS/Linux)
    - Or set: `export CHROMEDRIVER_PATH=/path/to/chromedriver`
@@ -191,7 +191,7 @@ uv sync --reinstall
 
 </details>
 
-Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) or [PR](https://github.com/stickerdaniel/linkedin-mcp-server/pulls)!
+Feel free to open an <a href="https://github.com/stickerdaniel/linkedin-mcp-server/issues" target="_blank">issue</a> or <a href="https://github.com/stickerdaniel/linkedin-mcp-server/pulls" target="_blank">PR</a>!
 
 ---
 
@@ -200,6 +200,6 @@ Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-serve
 MIT License
 
 ## Acknowledgements
-Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@joeyism](https://github.com/joeyism) and [Model Context Protocol](https://modelcontextprotocol.io/).
+Built with <a href="https://github.com/joeyism/linkedin_scraper" target="_blank">LinkedIn Scraper</a> by <a href="https://github.com/joeyism" target="_blank">@joeyism</a> and <a href="https://modelcontextprotocol.io/" target="_blank">Model Context Protocol</a>.
 
-⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+⚠️ Use in accordance with <a href="https://www.linkedin.com/legal/user-agreement" target="_blank">LinkedIn's Terms of Service</a>. Web scraping may violate LinkedIn's terms. This tool is for personal use only.
