@@ -84,7 +84,7 @@ docker run -i --rm \
 <summary><b>❗ Troubleshooting</b></summary>
 
 **Docker issues:**
-> Make sure [Docker](https://www.docker.com/get-started/) is installed
+- Make sure [Docker](https://www.docker.com/get-started/) is installed
 - Check if Docker is running: `docker ps`
 
 **Login issues:**
