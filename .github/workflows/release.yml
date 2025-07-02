@@ -1,0 +1,157 @@
+# .github/workflows/release.yml
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+    paths: ['pyproject.toml']  # Only trigger when pyproject.toml changes
+
+jobs:
+  check-version-bump:
+    runs-on: ubuntu-latest
+    outputs:
+      should-release: ${{ steps.check.outputs.should-release }}
+      new-version: ${{ steps.check.outputs.new-version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # Need to compare with previous commit
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v2
+
+      - name: Check if version was bumped
+        id: check
+        run: |
+          # Get current version
+          CURRENT_VERSION=$(uv version | cut -d' ' -f2)
+          echo "Current version: $CURRENT_VERSION"
+
+          # Get previous version from git (before this commit)
+          git checkout HEAD~1 -- pyproject.toml || true
+          PREVIOUS_VERSION=$(uv version | cut -d' ' -f2) 2>/dev/null || echo "0.0.0"
+          git checkout HEAD -- pyproject.toml
+          echo "Previous version: $PREVIOUS_VERSION"
+
+          # Check if version actually changed
+          if [[ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]]; then
+            echo "✅ Version bump detected: $PREVIOUS_VERSION → $CURRENT_VERSION"
+            echo "should-release=true" >> $GITHUB_OUTPUT
+            echo "new-version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "ℹ️ No version change detected"
+            echo "should-release=false" >> $GITHUB_OUTPUT
+          fi
+
+  release:
+    needs: check-version-bump
+    if: needs.check-version-bump.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v2
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v1
+
+      - name: Create release tag
+        env:
+          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          echo "✅ Created and pushed tag v$VERSION"
+
+      - name: Update manifest.json version
+        env:
+          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+        run: |
+          sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
+          echo "✅ Updated manifest.json to version $VERSION"
+
+      - name: Commit manifest update
+        env:
+          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+        run: |
+          git add manifest.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Auto-update manifest.json to v$VERSION [skip ci]"
+            git push origin main
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker images
+        env:
+          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            stickerdaniel/linkedin-mcp-server:${{ env.VERSION }}
+            stickerdaniel/linkedin-mcp-server:latest
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v1
+
+      - name: Build DXT extension
+        run: bunx @anthropic-ai/dxt pack
+
+      - name: Create GitHub Release
+        env:
+          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.VERSION }}
+          files: |
+            *.dxt
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          name: "Release v${{ env.VERSION }}"
+          body: |
+            ## LinkedIn MCP Server v${{ env.VERSION }}
+
+            **Docker**
+            ```bash
+            docker pull stickerdaniel/linkedin-mcp-server:${{ env.VERSION }}
+            ```
+
+            **Claude Desktop DXT Extension**
+            Download the `.dxt` file below and double-click to install.
+
+            ### What's Changed
+            See the auto-generated release notes below.
+
+      - name: Summary
+        env:
+          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+        run: |
+          echo "Successfully released v$VERSION!"
+          echo "Docker: stickerdaniel/linkedin-mcp-server:$VERSION"
+          echo "GitHub: https://github.com/${{ github.repository }}/releases/tag/v$VERSION"
