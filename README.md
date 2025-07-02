@@ -116,8 +116,6 @@ docker run -i --rm \
 
 ## 🐍 Local Setup (Develop & Contribute)
 
-**For contributors** who want to modify and debug the code.
-
 **Prerequisites:** [Chrome browser](https://www.google.com/chrome/) and [Git](https://git-scm.com/downloads) installed
 
 **ChromeDriver Setup:**
