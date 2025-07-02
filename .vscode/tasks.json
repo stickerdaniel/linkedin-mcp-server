@@ -86,26 +86,6 @@
                 "focus": false
             },
             "problemMatcher": []
-        },
-        {
-            "label": "bunx @anthropic-ai/dxt pack",
-            "detail": "Bundle the DXT extension using bunx",
-            "type": "shell",
-            "command": "bunx",
-            "args": [
-                "@anthropic-ai/dxt",
-                "pack"
-            ],
-            "group": {
-                "kind": "build",
-                "isDefault": false
-            },
-            "presentation": {
-                "reveal": "always",
-                "panel": "new",
-                "focus": true
-            },
-            "problemMatcher": []
         }
     ]
 }
