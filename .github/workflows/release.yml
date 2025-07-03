@@ -115,9 +115,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v1
-
       - name: Build DXT extension
         run: bunx @anthropic-ai/dxt pack
 
