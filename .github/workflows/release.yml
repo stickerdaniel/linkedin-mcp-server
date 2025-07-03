@@ -18,7 +18,9 @@ jobs:
           fetch-depth: 2  # Need to compare with previous commit
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v2
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
 
       - name: Check if version was bumped
         id: check
@@ -47,6 +49,8 @@ jobs:
     needs: check-version-bump
     if: needs.check-version-bump.outputs.should-release == 'true'
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-version-bump.outputs.new-version }}
     permissions:
       contents: write
       packages: write
@@ -58,38 +62,43 @@ jobs:
           fetch-depth: 0
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v2
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v1
 
       - name: Create release tag
-        env:
-          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
-          echo "✅ Created and pushed tag v$VERSION"
+          set -e
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          if git tag -l "v$VERSION" | grep -q "v$VERSION"; then
+            echo "⚠️ Tag v$VERSION already exists, skipping tag creation"
+          else
+            git tag "v$VERSION"
+            git push origin "v$VERSION"
+            echo "✅ Created and pushed tag v$VERSION"
+          fi
 
       - name: Update manifest.json version
-        env:
-          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
         run: |
+          set -e
           sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
           echo "✅ Updated manifest.json to version $VERSION"
 
       - name: Commit manifest update
-        env:
-          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
         run: |
+          set -e
           git add manifest.json
           if git diff --staged --quiet; then
-            echo "No changes to commit"
+            echo "ℹ️ No changes to commit"
           else
             git commit -m "chore(dxt): update manifest.json version to v$VERSION [skip ci]"
             git push origin main
+            echo "✅ Committed manifest.json update"
           fi
 
       - name: Set up Docker Buildx
@@ -102,9 +111,7 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push Docker images
-        env:
-          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
@@ -115,14 +122,16 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Optimize uv cache for CI
+        run: uv cache prune --ci
+
       - name: Build DXT extension
         run: bunx @anthropic-ai/dxt pack
 
       - name: Create GitHub Release
         env:
-          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}
           files: |
@@ -146,8 +155,6 @@ jobs:
             3. Configure with your LinkedIn credentials
 
       - name: Summary
-        env:
-          VERSION: ${{ needs.check-version-bump.outputs.new-version }}
         run: |
           echo "Successfully released v$VERSION!"
           echo "Docker: stickerdaniel/linkedin-mcp-server:$VERSION"
