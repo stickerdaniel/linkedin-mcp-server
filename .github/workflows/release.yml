@@ -88,7 +88,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Auto-update manifest.json to v$VERSION [skip ci]"
+            git commit -m "chore(dxt): update manifest.json version to v$VERSION [skip ci]"
             git push origin main
           fi
 
