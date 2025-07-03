@@ -133,20 +133,20 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
-          name: "Release v${{ env.VERSION }}"
+          name: "LinkedIn MCP Server v${{ env.VERSION }}"
           body: |
-            ## LinkedIn MCP Server v${{ env.VERSION }}
+            For an installation guide, please refer to the [README](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/README.md).
 
-            **Docker**
+            ## Update Docker Image
+            **Pull this release's image:**
             ```bash
             docker pull stickerdaniel/linkedin-mcp-server:${{ env.VERSION }}
             ```
 
-            **Claude Desktop DXT Extension**
-            Download the `.dxt` file below and double-click to install.
-
-            ### What's Changed
-            See the auto-generated release notes below.
+            ## Update Claude Desktop DXT Extension
+            1. Download the `.dxt` file below
+            2. Double-click to open in Claude Desktop
+            3. Configure with your LinkedIn credentials
 
       - name: Summary
         env:
