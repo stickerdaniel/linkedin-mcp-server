@@ -2,6 +2,28 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "uv run pytest tests/",
+            "detail": "Run pytest tests for LinkedIn MCP server",
+            "type": "shell",
+            "command": "uv",
+            "args": [
+                "run",
+                "pytest",
+                "tests/",
+                "-v"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": true
+            },
+            "problemMatcher": []
+        },
+        {
             "label": "uv run pre-commit run --all-files",
             "detail": "Run pre-commit hooks on all files",
             "type": "shell",
@@ -14,7 +36,7 @@
             ],
             "group": {
                 "kind": "test",
-                "isDefault": true
+                "isDefault": false
             },
             "presentation": {
                 "reveal": "never",
