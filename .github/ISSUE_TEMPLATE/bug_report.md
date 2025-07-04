@@ -7,93 +7,39 @@ assignees: ''
 
 ---
 
-## Bug Description
-**Describe the bug**
-A clear and concise description of what the bug is.
+## Installation Method
+- [ ] Docker (specify docker image version/tag): _._._
+- [ ] Claude Desktop DXT extension (specify docker image version/tag): _._._
+- [ ] Local Python setup
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+## When does the error occur?
+- [ ] At startup
+- [ ] During tool call (specify which tool):
+  - [ ] get_person_profile
+  - [ ] get_company_profile
+  - [ ] get_job_details
+  - [ ] search_jobs
+  - [ ] get_recommended_jobs
+  - [ ] close_session
 
-**Actual behavior**
-What actually happened instead.
+## MCP Client Configuration
 
-## MCP Configuration & Client Info
-**MCP Client Used**
-- [ ] Claude Desktop
-- [ ] Other MCP client (specify): ___________
-
-**Claude Desktop Configuration**
-Please share your MCP configuration from Claude Desktop settings (remove sensitive info):
+**Claude Desktop Config** (`/Users/[username]/Library/Application Support/Claude/claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
-    "linkedin-scraper": {
-      // Your configuration here
+    "linkedin": {
+      // Your configuration here (remove sensitive credentials)
     }
   }
 }
 ```
 
-**Transport Mode**
-- [ ] stdio
-- [ ] sse
-
-## Environment Details
-**Operating System**
-- [ ] macOS
-- [ ] Windows
-- [ ] Linux
-
-**Python Version**
-- Python version: ___________
-
-**Package Manager used**
-- [ ] UV (recommended)
-- [ ] pip
-- [ ] Other: ___________
-
-**ChromeDriver Info**
-- ChromeDriver location: ___________
-- Installation method:
-  - [ ] Auto-detected
-  - [ ] Manual path specified
-  - [ ] Environment variable
-
-## Tool & LinkedIn Context
-**Tool Used**
-- [ ] get_person_profile
-- [ ] get_company_profile
-- [ ] get_job_details
-- [ ] search_jobs
-- [ ] get_recommended_jobs
-- [ ] close_session
-
-**LinkedIn Context** (if applicable)
-- Account type: [ ] Free [ ] Premium [ ] Sales Navigator
-- Two-factor authentication enabled: [ ] Yes [ ] No
-- Corporate/VPN network: [ ] Yes [ ] No
-
-## Error Details
-**Error Messages**
+## MCP Client Logs
+**Claude Desktop Logs** (`/Users/[username]/Library/Logs/Claude/mcp-server-LinkedIn MCP Server.log`):
 ```
-Paste any error messages here
+Paste relevant log entries here
 ```
 
-**Console Output/Logs**
-```
-Paste relevant console output or logs here
-```
-
-## Steps to Reproduce
-1. Go to '...'
-2. Send message '....'
-3. Scroll down to '....'
-4. See error
-
-## Screenshots/Videos
-If applicable, add screenshots or videos to help explain your problem.
-
-## Additional Context
-- Issue also occurs in `--no-headless` mode: [ ] Yes [ ] No
-
-Add any other context about the problem here.
+## Error Description
+What went wrong and what did you expect to happen?
