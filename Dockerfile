@@ -24,5 +24,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN adduser -D -u 1000 mcpuser && chown -R mcpuser:mcpuser /app
 USER mcpuser
 
-# Default command
-CMD ["uv", "run", "python", "main.py", "--no-setup"]
+# Set entrypoint and default arguments
+ENTRYPOINT ["uv", "run", "python", "main.py", "--no-setup"]
+CMD []
