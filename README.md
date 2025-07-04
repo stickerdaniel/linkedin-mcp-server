@@ -31,7 +31,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 > - **Job Details** (`get_job_details`): Retrieve specific job posting details using direct LinkedIn job URLs
 > - **Session Management** (`close_session`): Properly close browser session and clean up resources
 
-**Known Issues:**
+**Known Issues: (should be fixed after this [PR](https://github.com/joeyism/linkedin_scraper/pull/252) is merged)**
 > [!WARNING]
 > - **Job Search** (`search_jobs`): Compatibility issues with LinkedIn's search interface
 > - **Recommended Jobs** (`get_recommended_jobs`): Selenium method compatibility issues
