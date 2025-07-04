@@ -2,23 +2,6 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "bunx @modelcontextprotocol/inspector",
-            "detail": "Run the Model Context Protocol Inspector",
-            "type": "shell",
-            "command": "bunx",
-            "args": ["@modelcontextprotocol/inspector"],
-            "group": {
-                "kind": "test",
-                "isDefault": true
-            },
-            "presentation": {
-                "reveal": "always",
-                "panel": "new",
-                "focus": true
-            },
-            "problemMatcher": []
-        },
-        {
             "label": "uv run pre-commit run --all-files",
             "detail": "Run pre-commit hooks on all files",
             "type": "shell",
@@ -31,7 +14,7 @@
             ],
             "group": {
                 "kind": "test",
-                "isDefault": false
+                "isDefault": true
             },
             "presentation": {
                 "reveal": "never",
@@ -75,37 +58,8 @@
                 "--no-lazy-init"
             ],
             "group": {
-                "kind": "build"
-            },
-            "presentation": {
-                "reveal": "always",
-                "panel": "new",
-                "focus": true
-            },
-            "problemMatcher": []
-        },
-        {
-            "label": "uv run main.py --transport streamable-http --no-setup",
-            "detail": "Start HTTP MCP server on localhost:8000/mcp",
-            "type": "shell",
-            "command": "uv",
-            "args": [
-                "run",
-                "main.py",
-                "--transport",
-                "streamable-http",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "8000",
-                "--path",
-                "/mcp",
-                "--no-setup"
-            ],
-            "isBackground": true,
-            "group": {
                 "kind": "build",
-                "isDefault": false
+                "isDefault": true
             },
             "presentation": {
                 "reveal": "always",
@@ -132,6 +86,6 @@
                 "focus": false
             },
             "problemMatcher": []
-        },
+        }
     ]
 }

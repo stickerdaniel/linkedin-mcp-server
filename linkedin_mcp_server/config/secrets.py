@@ -1,15 +1,12 @@
 # src/linkedin_mcp_server/config/secrets.py
-import logging
 from typing import Dict, Optional
-
+import logging
 import inquirer  # type: ignore
-
 from linkedin_mcp_server.config import get_config
-
 from .providers import (
     get_credentials_from_keyring,
-    get_keyring_name,
     save_credentials_to_keyring,
+    get_keyring_name,
 )
 
 logger = logging.getLogger(__name__)

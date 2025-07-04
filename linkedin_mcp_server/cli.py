@@ -5,12 +5,11 @@ CLI utilities for LinkedIn MCP server.
 This module handles the command-line interface and configuration management.
 """
 
-import json
-import logging
+from typing import Dict, Any, List
 import os
+import json
 import subprocess
-from typing import Any, Dict, List
-
+import logging
 import pyperclip  # type: ignore
 
 from linkedin_mcp_server.config import get_config

@@ -7,8 +7,8 @@ This module provides tools for scraping LinkedIn job postings and searches.
 
 from typing import Any, Dict, List
 
-from fastmcp import FastMCP
 from linkedin_scraper import Job, JobSearch
+from mcp.server.fastmcp import FastMCP
 
 from linkedin_mcp_server.drivers.chrome import get_or_create_driver
 

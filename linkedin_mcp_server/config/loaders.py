@@ -44,18 +44,6 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Headless mode
     if os.environ.get("HEADLESS") in ("0", "false", "False", "no", "No"):
         config.chrome.headless = False
-    elif os.environ.get("HEADLESS") in ("1", "true", "True", "yes", "Yes"):
-        config.chrome.headless = True
-
-    # Non-interactive mode
-    if os.environ.get("NON_INTERACTIVE") in ("1", "true", "True", "yes", "Yes"):
-        config.chrome.non_interactive = True
-
-    # Lazy initialization
-    if os.environ.get("LAZY_INIT") in ("1", "true", "True", "yes", "Yes"):
-        config.server.lazy_init = True
-    elif os.environ.get("LAZY_INIT") in ("0", "false", "False", "no", "No"):
-        config.server.lazy_init = False
 
     return config
 
@@ -92,30 +80,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     parser.add_argument(
         "--transport",
-        choices=["stdio", "streamable-http"],
+        choices=["stdio", "sse"],
         default=None,
-        help="Specify the transport mode (stdio or streamable-http)",
-    )
-
-    parser.add_argument(
-        "--host",
-        type=str,
-        default=None,
-        help="HTTP server host (default: 127.0.0.1)",
-    )
-
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="HTTP server port (default: 8000)",
-    )
-
-    parser.add_argument(
-        "--path",
-        type=str,
-        default=None,
-        help="HTTP server path (default: /mcp)",
+        help="Specify the transport mode (stdio or sse)",
     )
 
     parser.add_argument(
@@ -141,15 +108,6 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.transport:
         config.server.transport = args.transport
-
-    if args.host:
-        config.server.host = args.host
-
-    if args.port:
-        config.server.port = args.port
-
-    if args.path:
-        config.server.path = args.path
 
     if args.chromedriver:
         config.chrome.chromedriver_path = args.chromedriver

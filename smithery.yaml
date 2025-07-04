@@ -1,0 +1,29 @@
+# Smithery configuration file: https://smithery.ai/docs/build/project-config
+version: 1
+start:
+  command:
+    - docker
+    - run
+    - -i
+    - --rm
+    - -e
+    - LINKEDIN_EMAIL=${LINKEDIN_EMAIL}
+    - -e
+    - LINKEDIN_PASSWORD=${LINKEDIN_PASSWORD}
+    - stickerdaniel/linkedin-mcp-server
+configSchema:
+  # JSON Schema defining the configuration options for the MCP.
+  type: object
+  properties:
+    LINKEDIN_EMAIL:
+      type: string
+      description: Email for LinkedIn login
+    LINKEDIN_PASSWORD:
+      type: string
+      description: Password for LinkedIn login
+  required:
+    - LINKEDIN_EMAIL
+    - LINKEDIN_PASSWORD
+exampleConfig:
+  LINKEDIN_EMAIL: example.user@example.com
+  LINKEDIN_PASSWORD: yourLinkedInPassword
