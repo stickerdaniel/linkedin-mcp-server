@@ -5,11 +5,10 @@ description = "MCP server for LinkedIn profile, company, and job scraping with C
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "httpx>=0.28.1",
+    "fastmcp>=2.10.1",
     "inquirer>=3.4.0",
     "keyring>=25.6.0",
     "linkedin-scraper",
-    "mcp[cli]>=1.6.0",
     "pyperclip>=1.9.0",
 ]
 
@@ -21,8 +20,10 @@ linkedin-scraper = { git = "https://github.com/joeyism/linkedin_scraper.git" }
 
 [dependency-groups]
 dev = [
+    "aiohttp>=3.12.13",
     "pre-commit>=4.2.0",
     "pytest>=8.3.5",
+    "pytest-asyncio>=1.0.0",
     "pytest-cov>=6.1.1",
     "ruff>=0.11.11",
     "ty>=0.0.1a12",
