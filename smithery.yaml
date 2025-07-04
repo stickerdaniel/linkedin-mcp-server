@@ -1,0 +1,20 @@
+runtime: "container"
+build:
+  dockerfile: "Dockerfile.smithery"           # Smithery-specific Dockerfile
+  dockerBuildPath: "."                        # Docker build context
+startCommand:
+  type: "http"
+  configSchema:                               # JSON Schema for configuration
+    type: "object"
+    properties:
+      linkedin_email:
+        type: "string"
+        description: "LinkedIn email address for authentication"
+      linkedin_password:
+        type: "string"
+        description: "LinkedIn password for authentication"
+        sensitive: true
+    required: ["linkedin_email", "linkedin_password"]
+  exampleConfig:
+    linkedin_email: "user@example.com"
+    linkedin_password: "password123"
