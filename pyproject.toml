@@ -20,6 +20,7 @@ linkedin-scraper = { git = "https://github.com/joeyism/linkedin_scraper.git" }
 
 [dependency-groups]
 dev = [
+    "aiohttp>=3.12.13",
     "pre-commit>=4.2.0",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
