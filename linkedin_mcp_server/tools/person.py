@@ -5,8 +5,9 @@ Person profile tools for LinkedIn MCP server.
 This module provides tools for scraping LinkedIn person profiles.
 """
 
-from typing import Dict, Any, List
-from mcp.server.fastmcp import FastMCP
+from typing import Any, Dict, List
+
+from fastmcp import FastMCP
 from linkedin_scraper import Person
 
 from linkedin_mcp_server.drivers.chrome import get_or_create_driver
