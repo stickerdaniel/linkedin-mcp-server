@@ -1,7 +1,4 @@
 runtime: "container"
-build:
-  dockerfile: "Dockerfile.smithery"
-  dockerBuildPath: "."
 startCommand:
   type: "http"
   configSchema:
@@ -14,7 +11,7 @@ startCommand:
         type: "string"
         description: "LinkedIn password for authentication"
         sensitive: true
-    required: []  # Make them optional to allow tool discovery without credentials
-  exampleConfig:
-    linkedin_email: "user@example.com"
-    linkedin_password: "password123"
+    required: [linkedin_email, linkedin_password]
+build:
+  dockerfile: "Dockerfile.smithery"
+  dockerBuildPath: "."
