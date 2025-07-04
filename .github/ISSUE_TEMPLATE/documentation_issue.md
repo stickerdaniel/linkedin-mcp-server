@@ -22,9 +22,6 @@ assignees: ''
 ## Location
 **Where is the documentation issue?**
 - [ ] README.md
-- [ ] Installation section
-- [ ] Configuration section
-- [ ] Troubleshooting section
 - [ ] Code comments
 - [ ] Error messages
 - [ ] CLI help text
