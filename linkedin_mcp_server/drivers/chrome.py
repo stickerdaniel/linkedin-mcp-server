@@ -5,19 +5,17 @@ Chrome driver management for LinkedIn scraping.
 This module handles the creation and management of Chrome WebDriver instances.
 """
 
-import os
 import sys
 from typing import Dict, Optional
-
-import inquirer  # type: ignore
+import os
 from selenium import webdriver
-from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-
+from selenium.common.exceptions import WebDriverException
+import inquirer  # type: ignore
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.providers import clear_credentials_from_keyring
 from linkedin_mcp_server.config.secrets import get_credentials
+from linkedin_mcp_server.config.providers import clear_credentials_from_keyring
 
 # Global driver storage to reuse sessions
 active_drivers: Dict[str, webdriver.Chrome] = {}
