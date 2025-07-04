@@ -1,10 +1,10 @@
 runtime: "container"
 build:
-  dockerfile: "Dockerfile.smithery"           # Smithery-specific Dockerfile
-  dockerBuildPath: "."                        # Docker build context
+  dockerfile: "Dockerfile.smithery"
+  dockerBuildPath: "."
 startCommand:
   type: "http"
-  configSchema:                               # JSON Schema for configuration
+  configSchema:
     type: "object"
     properties:
       linkedin_email:
