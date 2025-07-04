@@ -26,14 +26,10 @@ class LinkedInConfig:
 class ServerConfig:
     """MCP server configuration."""
 
-    transport: Literal["stdio", "streamable-http"] = "stdio"
+    transport: Literal["stdio", "sse"] = "stdio"
     lazy_init: bool = True
     debug: bool = False
     setup: bool = True
-    # HTTP transport configuration
-    host: str = "127.0.0.1"
-    port: int = 8000
-    path: str = "/mcp"
 
 
 @dataclass
