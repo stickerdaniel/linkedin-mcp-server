@@ -22,6 +22,7 @@ linkedin-scraper = { git = "https://github.com/joeyism/linkedin_scraper.git" }
 dev = [
     "pre-commit>=4.2.0",
     "pytest>=8.3.5",
+    "pytest-asyncio>=1.0.0",
     "pytest-cov>=6.1.1",
     "ruff>=0.11.11",
     "ty>=0.0.1a12",
