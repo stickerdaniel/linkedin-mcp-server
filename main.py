@@ -3,14 +3,16 @@
 LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration.
 """
 
-import sys
 import logging
-import inquirer  # type: ignore
+import sys
 from typing import Literal
+
+import inquirer  # type: ignore
+
+from linkedin_mcp_server.cli import print_claude_config
 
 # Import the new centralized configuration
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.drivers.chrome import initialize_driver
 from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
 

@@ -5,7 +5,8 @@ Company profile tools for LinkedIn MCP server.
 This module provides tools for scraping LinkedIn company profiles.
 """
 
-from typing import Dict, Any, List
+from typing import Any, Dict, List
+
 from fastmcp import FastMCP
 from linkedin_scraper import Company
 
