@@ -14,7 +14,7 @@ startCommand:
         type: "string"
         description: "LinkedIn password for authentication"
         sensitive: true
-    required: ["linkedin_email", "linkedin_password"]
+    required: []  # Make them optional to allow tool discovery without credentials
   exampleConfig:
     linkedin_email: "user@example.com"
     linkedin_password: "password123"

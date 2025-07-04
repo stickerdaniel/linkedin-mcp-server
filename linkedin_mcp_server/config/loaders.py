@@ -44,6 +44,18 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Headless mode
     if os.environ.get("HEADLESS") in ("0", "false", "False", "no", "No"):
         config.chrome.headless = False
+    elif os.environ.get("HEADLESS") in ("1", "true", "True", "yes", "Yes"):
+        config.chrome.headless = True
+
+    # Non-interactive mode
+    if os.environ.get("NON_INTERACTIVE") in ("1", "true", "True", "yes", "Yes"):
+        config.chrome.non_interactive = True
+
+    # Lazy initialization
+    if os.environ.get("LAZY_INIT") in ("1", "true", "True", "yes", "Yes"):
+        config.server.lazy_init = True
+    elif os.environ.get("LAZY_INIT") in ("0", "false", "False", "no", "No"):
+        config.server.lazy_init = False
 
     return config
 
