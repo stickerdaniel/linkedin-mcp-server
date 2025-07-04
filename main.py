@@ -3,21 +3,19 @@
 LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration.
 """
 
-import logging
 import sys
-from typing import Literal
-
+import logging
 import inquirer  # type: ignore
-
-from linkedin_mcp_server.cli import print_claude_config
+from typing import Literal
 
 # Import the new centralized configuration
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.drivers.chrome import initialize_driver
 from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
 
 
-def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
+def choose_transport_interactive() -> Literal["stdio", "sse"]:
     """Prompt user for transport mode using inquirer."""
     questions = [
         inquirer.List(
@@ -25,7 +23,7 @@ def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
             message="Choose mcp transport mode",
             choices=[
                 ("stdio (Default CLI mode)", "stdio"),
-                ("streamable-http (HTTP server mode)", "streamable-http"),
+                ("sse (Server-Sent Events HTTP mode)", "sse"),
             ],
             default="stdio",
         )
@@ -69,18 +67,7 @@ def main() -> None:
 
     # Start server
     print(f"\n🚀 Running LinkedIn MCP server ({transport.upper()} mode)...")
-    if transport == "streamable-http":
-        print(
-            f"📡 HTTP server will be available at http://{config.server.host}:{config.server.port}{config.server.path}"
-        )
-        mcp.run(
-            transport=transport,
-            host=config.server.host,
-            port=config.server.port,
-            path=config.server.path,
-        )
-    else:
-        mcp.run(transport=transport)
+    mcp.run(transport=transport)
 
 
 def exit_gracefully(exit_code: int = 0) -> None:
