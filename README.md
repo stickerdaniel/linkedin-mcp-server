@@ -69,14 +69,36 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 ```
 
 <details>
-<summary><b>🐳 Manual Docker Usage</b></summary>
+<summary><b>🔧 Configuration</b></summary>
 
+**Transport Modes:**
+- **Default (stdio)**: Standard communication for local MCP servers
+- **Streamable HTTP**: For a web-based MCP server
+
+**CLI Options:**
+- `--debug` - Enable detailed logging
+- `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
+- `--transport {stdio,streamable-http}` - Set transport mode
+- `--host HOST` - HTTP server host (default: 127.0.0.1)
+- `--port PORT` - HTTP server port (default: 8000)
+- `--path PATH` - HTTP server path (default: /mcp)
+
+**HTTP Mode Example (for web-based MCP clients):**
 ```bash
 docker run -i --rm \
   -e LINKEDIN_EMAIL="your.email@example.com" \
   -e LINKEDIN_PASSWORD="your_password" \
-  stickerdaniel/linkedin-mcp-server
+  -p 8080:8080 \
+  stickerdaniel/linkedin-mcp-server \
+  --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
+**Test with mcp inspector:**
+1. Install and run mcp inspector ```bunx @modelcontextprotocol/inspector```
+2. Click pre-filled token url to open the inspector in your browser
+3. Select `Streamable HTTP` as `Transport Type`
+4. Set `URL` to `http://localhost:8080/mcp`
+5. Connect
+6. Test tools
 
 </details>
 
@@ -90,6 +112,7 @@ docker run -i --rm \
 **Login issues:**
 - Ensure your LinkedIn credentials are set and correct
 - LinkedIn may require a login confirmation in the LinkedIn mobile app
+- You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
 </details>
 
 ## 📦 Claude Desktop (DXT Extension)
@@ -112,6 +135,7 @@ docker run -i --rm \
 **Login issues:**
 - Ensure your LinkedIn credentials are set and correct
 - LinkedIn may require a login confirmation in the LinkedIn mobile app
+- You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
 </details>
 
 ## 🐍 Local Setup (Develop & Contribute)
@@ -155,7 +179,7 @@ uv run main.py --no-headless --no-lazy-init
 **CLI Options:**
 - `--no-headless` - Show browser window (debugging)
 - `--debug` - Enable detailed logging
-- `--no-setup` - Skip credential prompts (make sure to set `LINKEDIN_EMAIL` and `LINKEDIN_PASSWORD` in env)
+- `--no-setup` - Skip credential prompts (make sure to set `LINKEDIN_EMAIL` and `LINKEDIN_PASSWORD` in env or or run the server once manualy, then it will be stored in your OS keychain and you can run the server without credentials)
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 
 **Claude Desktop:**
@@ -175,8 +199,8 @@ uv run main.py --no-headless --no-lazy-init
 <details>
 <summary><b>❗ Troubleshooting</b></summary>
 
-**Scraping issues:**
-- Use `--no-headless` to see browser actions
+**Login/Scraping issues:**
+- Use `--no-headless` to see browser actions (captcha challenge, LinkedIn mobile app 2fa, ...)
 - Add `--no-lazy-init` to attempt to login to LinkedIn immediately instead of waiting for the first tool call
 - Add `--debug` to see more detailed logging
 
