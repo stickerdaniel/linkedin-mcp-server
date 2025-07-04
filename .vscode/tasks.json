@@ -69,6 +69,36 @@
             "problemMatcher": []
         },
         {
+            "label": "uv run main.py --transport streamable-http --no-setup",
+            "detail": "Start HTTP MCP server on localhost:8000/mcp",
+            "type": "shell",
+            "command": "uv",
+            "args": [
+                "run",
+                "main.py",
+                "--transport",
+                "streamable-http",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000",
+                "--path",
+                "/mcp",
+                "--no-setup"
+            ],
+            "isBackground": true,
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": true
+            },
+            "problemMatcher": []
+        },
+        {
             "label": "uv run tail -n 20 -F ~/Library/Logs/Claude/mcp*.log",
             "detail": "Follow Claude Desktop logs",
             "type": "shell",
