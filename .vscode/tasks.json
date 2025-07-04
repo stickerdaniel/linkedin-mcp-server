@@ -2,16 +2,11 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "uv run pytest tests/",
-            "detail": "Run pytest tests for LinkedIn MCP server",
+            "label": "bunx @modelcontextprotocol/inspector",
+            "detail": "Run the Model Context Protocol Inspector",
             "type": "shell",
-            "command": "uv",
-            "args": [
-                "run",
-                "pytest",
-                "tests/",
-                "-v"
-            ],
+            "command": "bunx",
+            "args": ["@modelcontextprotocol/inspector"],
             "group": {
                 "kind": "test",
                 "isDefault": true
@@ -80,8 +75,7 @@
                 "--no-lazy-init"
             ],
             "group": {
-                "kind": "build",
-                "isDefault": true
+                "kind": "build"
             },
             "presentation": {
                 "reveal": "always",
@@ -138,6 +132,6 @@
                 "focus": false
             },
             "problemMatcher": []
-        }
+        },
     ]
 }
