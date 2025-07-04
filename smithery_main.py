@@ -1,164 +1,130 @@
+#!/usr/bin/env python3
 # smithery_main.py
 """
 LinkedIn MCP Server - Smithery HTTP Transport Entry Point
 
-This entry point is specifically designed for Smithery deployment with:
-- HTTP transport (streamable-http)
-- Query parameter configuration parsing
-- PORT environment variable support
-- Uses existing lazy authentication system
+Handles Smithery's query parameter configuration approach.
+Smithery passes config as query params: /mcp?linkedin_email=user@example.com&linkedin_password=pass
 """
 
-import os
 import logging
-from urllib.parse import parse_qs
-from fastmcp.server.middleware import Middleware, MiddlewareContext
+import os
+import sys
 
-from linkedin_mcp_server.config import get_config, reset_config
-from linkedin_mcp_server.drivers.chrome import initialize_driver
-from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
+import uvicorn
+
+# Set up environment for lazy initialization
+os.environ.setdefault("LINKEDIN_EMAIL", "")
+os.environ.setdefault("LINKEDIN_PASSWORD", "")
+os.environ.setdefault("LAZY_INIT", "true")
+os.environ.setdefault("NON_INTERACTIVE", "true")
+os.environ.setdefault("HEADLESS", "true")
+os.environ.setdefault("TRANSPORT", "streamable-http")
+os.environ.setdefault("DEBUG", "false")
+os.environ.setdefault("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO if os.environ.get("DEBUG") == "true" else logging.ERROR,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+
+# Suppress noisy libraries
+for logger_name in ["selenium", "urllib3", "httpx", "httpcore"]:
+    logging.getLogger(logger_name).setLevel(logging.ERROR)
+
+logger = logging.getLogger("smithery_main")
+
+# Import after environment setup
+from starlette.middleware import Middleware  # noqa: E402
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import Response  # noqa: E402
+
+from linkedin_mcp_server.config import reset_config  # noqa: E402
+from linkedin_mcp_server.server import create_mcp_server  # noqa: E402
 
 
-class SmitheryConfigMiddleware(Middleware):
-    """
-    FastMCP middleware to handle Smithery query parameter configuration.
+class SmitheryConfigMiddleware(BaseHTTPMiddleware):
+    """Extract Smithery query parameters and update environment."""
 
-    Intercepts HTTP requests and extracts configuration from query parameters,
-    then temporarily sets environment variables for the duration of the request.
-    """
+    async def dispatch(self, request: Request, call_next) -> Response:
+        """Process query parameters before handling the request."""
+        # Extract query parameters
+        query_params = dict(request.query_params)
 
-    def __init__(self):
-        super().__init__()
-        self.param_mapping = {
-            "linkedin_email": "LINKEDIN_EMAIL",
-            "linkedin_password": "LINKEDIN_PASSWORD",
-        }
+        # Log incoming request for debugging
+        logger.info(f"Incoming request: {request.method} {request.url}")
+        logger.info(f"Query params: {query_params}")
 
-    async def on_call_tool(self, context: MiddlewareContext, call_next):
-        """
-        Called before each tool execution.
-        Extract configuration from HTTP request query parameters.
-        """
-        # Store original environment variables
-        original_env = {}
-        for env_var in self.param_mapping.values():
-            original_env[env_var] = os.environ.get(env_var)
-
-        # Extract query parameters from the request context
-        query_params = self._extract_query_params(context)
-
+        # Update environment if credentials are provided
         if query_params:
-            # Apply configuration from query parameters
-            self._apply_config(query_params)
+            # Check for linkedin credentials in query params
+            if "linkedin_email" in query_params:
+                os.environ["LINKEDIN_EMAIL"] = query_params["linkedin_email"]
+                logger.info("Updated LINKEDIN_EMAIL from query params")
 
-            # Reset configuration to pick up new environment variables
+            if "linkedin_password" in query_params:
+                os.environ["LINKEDIN_PASSWORD"] = query_params["linkedin_password"]
+                logger.info("Updated LINKEDIN_PASSWORD from query params")
+
+            # Reset config to pick up new values
             reset_config()
 
-        try:
-            # Execute the tool with the new configuration
-            result = await call_next(context)
-            return result
-        finally:
-            # Restore original environment variables
-            self._restore_env(original_env)
+        # Process the request
+        response = await call_next(request)
+        return response
 
-    def _extract_query_params(self, context: MiddlewareContext) -> dict:
-        """Extract query parameters from the request context."""
-        # Check if we can access FastMCP context for HTTP transport
-        if hasattr(context, "fastmcp_context") and context.fastmcp_context:
-            # Check if there's transport-specific information
-            if hasattr(context.fastmcp_context, "transport_info"):
-                transport_info = context.fastmcp_context.transport_info
-                if hasattr(transport_info, "query_params"):
-                    return dict(transport_info.query_params)
 
-        # Try to get from environment if set by HTTP server
-        query_string = os.environ.get("QUERY_STRING", "")
-        if query_string:
-            return {k: v[0] for k, v in parse_qs(query_string).items()}
+def create_app():
+    """Create the FastMCP ASGI application with Smithery middleware."""
+    # Create MCP server
+    mcp = create_mcp_server()
 
-        return {}
+    # Create middleware list
+    middleware = [Middleware(SmitheryConfigMiddleware)]
 
-    def _apply_config(self, query_params: dict):
-        """Apply configuration from query parameters to environment variables."""
-        for param, env_var in self.param_mapping.items():
-            if param in query_params and query_params[param]:
-                os.environ[env_var] = query_params[param]
-                print(f"🔧 Applied config: {param} -> {env_var}")
+    # Create HTTP app with middleware
+    app = mcp.http_app(path="/mcp", middleware=middleware, transport="streamable-http")
 
-    def _restore_env(self, original_env: dict):
-        """Restore original environment variables."""
-        for env_var, original_value in original_env.items():
-            if original_value is not None:
-                os.environ[env_var] = original_value
-            elif env_var in os.environ:
-                del os.environ[env_var]
+    return app
 
 
 def main() -> None:
-    """
-    Main entry point for Smithery deployment.
-
-    Starts HTTP server listening on PORT environment variable.
-    Handles query parameter configuration as required by Smithery Custom Deploy.
-    """
-    print("🔗 LinkedIn MCP Server (Smithery) 🔗")
-    print("=" * 40)
+    """Main entry point for Smithery deployment."""
+    print("🔗 LinkedIn MCP Server (Smithery Edition) 🔗")
+    print("=" * 50)
 
     # Get PORT from environment (Smithery requirement)
     port = int(os.environ.get("PORT", 8000))
 
-    # Force settings for Smithery compatibility
-    os.environ["DEBUG"] = "false"  # No debug logs in production
-    os.environ.setdefault("TRANSPORT", "streamable-http")
+    # Create the app
+    app = create_app()
 
-    # Ensure we don't try to use keyring in containers
-    os.environ.setdefault("LINKEDIN_EMAIL", "")
-    os.environ.setdefault("LINKEDIN_PASSWORD", "")
+    print(f"\n🚀 Starting server on port {port}...")
+    print(f"📡 Server endpoint: http://0.0.0.0:{port}/mcp")
+    print("🔧 Tools available for discovery")
+    print("⚙️  Config via query params: ?linkedin_email=...&linkedin_password=...")
+    print("\n✨ Server is starting...\n")
 
-    # Initialize configuration (will use lazy_init=True by default)
-    get_config()
-
-    # Configure minimal logging for containers
-    logging.basicConfig(
-        level=logging.ERROR,  # Only errors, no debug/info spam
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    # Run with uvicorn
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="error" if os.environ.get("DEBUG") != "true" else "info",
     )
-
-    logger = logging.getLogger("linkedin_mcp_server")
-    logger.error(f"Starting Smithery MCP server on port {port}")
-
-    # Initialize driver with lazy loading (no immediate credentials needed)
-    initialize_driver()
-
-    # Create MCP server (tools will be registered and available for discovery)
-    mcp = create_mcp_server()
-
-    # Add Smithery configuration middleware
-    mcp.add_middleware(SmitheryConfigMiddleware())
-
-    # Start HTTP server
-    print("\n🚀 Running LinkedIn MCP server (Smithery HTTP mode)...")
-    print(f"📡 HTTP server listening on http://0.0.0.0:{port}/mcp")
-    print("🔧 Tools available for discovery - no credentials required")
-    print("⚙️  Configure linkedin_email and linkedin_password to use tools")
-
-    try:
-        # Add a startup delay to ensure everything is ready
-        import time
-
-        time.sleep(1)
-
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=port, path="/mcp")
-    except KeyboardInterrupt:
-        print("\n👋 Shutting down LinkedIn MCP server...")
-        shutdown_handler()
-    except Exception as e:
-        print(f"❌ Error running MCP server: {e}")
-        print(f"Stack trace: {e.__class__.__name__}: {str(e)}")
-        shutdown_handler()
-        raise
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down...")
+        sys.exit(0)
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
