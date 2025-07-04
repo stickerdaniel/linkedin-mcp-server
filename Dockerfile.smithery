@@ -20,6 +20,16 @@ COPY . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen
 
+# Set ChromeDriver path for Alpine
+ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
+
+# Set environment variables for Smithery
+ENV LAZY_INIT=true \
+    NON_INTERACTIVE=true \
+    HEADLESS=true \
+    TRANSPORT=streamable-http \
+    DEBUG=false
+
 # Create a non-root user
 RUN adduser -D -u 1000 mcpuser && chown -R mcpuser:mcpuser /app
 USER mcpuser
