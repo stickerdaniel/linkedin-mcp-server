@@ -52,7 +52,7 @@ def main() -> None:
     logger = logging.getLogger("linkedin_mcp_server")
     logger.debug(f"Server configuration: {config}")
 
-    # Initialize the driver with configuration
+    # Initialize the driver with configuration (initialize driver checks for lazy init options)
     initialize_driver()
 
     # Decide transport
