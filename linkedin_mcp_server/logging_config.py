@@ -42,6 +42,41 @@ class MCPJSONFormatter(logging.Formatter):
         return json.dumps(log_data)
 
 
+class CompactFormatter(logging.Formatter):
+    """Compact formatter that shortens logger names and uses shorter timestamps."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        """Format log record with compact formatting.
+
+        Args:
+            record: The log record to format
+
+        Returns:
+            Compact-formatted log string
+        """
+        # Create a copy of the record to avoid modifying the original
+        record_copy = logging.LogRecord(
+            name=record.name,
+            level=record.levelno,
+            pathname=record.pathname,
+            lineno=record.lineno,
+            msg=record.msg,
+            args=record.args,
+            exc_info=record.exc_info,
+            func=record.funcName,
+        )
+        record_copy.stack_info = record.stack_info
+
+        # Shorten the logger name by removing the linkedin_mcp_server prefix
+        if record_copy.name.startswith("linkedin_mcp_server."):
+            record_copy.name = record_copy.name[len("linkedin_mcp_server.") :]
+
+        # Format the time as HH:MM:SS only
+        record_copy.asctime = self.formatTime(record_copy, datefmt="%H:%M:%S")
+
+        return f"{record_copy.asctime} - {record_copy.name} - {record.levelname} - {record.getMessage()}"
+
+
 def configure_logging(debug: bool = False, json_format: bool = False) -> None:
     """Configure logging for the LinkedIn MCP Server.
 
@@ -54,9 +89,7 @@ def configure_logging(debug: bool = False, json_format: bool = False) -> None:
     if json_format:
         formatter = MCPJSONFormatter()
     else:
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
+        formatter = CompactFormatter()
 
     # Configure root logger
     root_logger = logging.getLogger()
