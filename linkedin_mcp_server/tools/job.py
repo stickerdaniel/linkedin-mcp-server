@@ -11,8 +11,8 @@ from fastmcp import FastMCP
 from linkedin_scraper import Job, JobSearch
 
 from linkedin_mcp_server.error_handler import (
-    handle_linkedin_errors,
-    handle_linkedin_errors_list,
+    handle_tool_error,
+    handle_tool_error_list,
     safe_get_driver,
 )
 
@@ -26,7 +26,6 @@ def register_job_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
-    @handle_linkedin_errors
     async def get_job_details(job_url: str) -> Dict[str, Any]:
         """
         Scrape job details from a LinkedIn job posting.
@@ -44,16 +43,18 @@ def register_job_tools(mcp: FastMCP) -> None:
             Dict[str, Any]: Structured job data including title, company, location, posting date,
                           application count, and job description (may be empty if content is protected)
         """
-        driver = safe_get_driver()
+        try:
+            driver = safe_get_driver()
 
-        print(f"💼 Scraping job: {job_url}")
-        job = Job(job_url, driver=driver, close_on_complete=False)
+            print(f"💼 Scraping job: {job_url}")
+            job = Job(job_url, driver=driver, close_on_complete=False)
 
-        # Convert job object to a dictionary
-        return job.to_dict()
+            # Convert job object to a dictionary
+            return job.to_dict()
+        except Exception as e:
+            return handle_tool_error(e, "get_job_details")
 
     @mcp.tool()
-    @handle_linkedin_errors_list
     async def search_jobs(search_term: str) -> List[Dict[str, Any]]:
         """
         Search for jobs on LinkedIn (Note: This tool has compatibility issues).
@@ -64,17 +65,19 @@ def register_job_tools(mcp: FastMCP) -> None:
         Returns:
             List[Dict[str, Any]]: List of job search results
         """
-        driver = safe_get_driver()
+        try:
+            driver = safe_get_driver()
 
-        print(f"🔍 Searching jobs: {search_term}")
-        job_search = JobSearch(driver=driver, close_on_complete=False, scrape=False)
-        jobs = job_search.search(search_term)
+            print(f"🔍 Searching jobs: {search_term}")
+            job_search = JobSearch(driver=driver, close_on_complete=False, scrape=False)
+            jobs = job_search.search(search_term)
 
-        # Convert job objects to dictionaries
-        return [job.to_dict() for job in jobs]
+            # Convert job objects to dictionaries
+            return [job.to_dict() for job in jobs]
+        except Exception as e:
+            return handle_tool_error_list(e, "search_jobs")
 
     @mcp.tool()
-    @handle_linkedin_errors_list
     async def get_recommended_jobs() -> List[Dict[str, Any]]:
         """
         Get recommended jobs from LinkedIn (Note: This tool has compatibility issues).
@@ -82,16 +85,20 @@ def register_job_tools(mcp: FastMCP) -> None:
         Returns:
             List[Dict[str, Any]]: List of recommended jobs
         """
-        driver = safe_get_driver()
+        try:
+            driver = safe_get_driver()
 
-        print("📋 Getting recommended jobs")
-        job_search = JobSearch(
-            driver=driver,
-            close_on_complete=False,
-            scrape=False,
-        )
+            print("📋 Getting recommended jobs")
+            job_search = JobSearch(
+                driver=driver,
+                close_on_complete=False,
+                scrape=True,  # Enable scraping to get recommended jobs
+                scrape_recommended_jobs=True,
+            )
 
-        if job_search.recommended_jobs:
-            return [job.to_dict() for job in job_search.recommended_jobs]
-        else:
-            return []
+            if hasattr(job_search, "recommended_jobs") and job_search.recommended_jobs:
+                return [job.to_dict() for job in job_search.recommended_jobs]
+            else:
+                return []
+        except Exception as e:
+            return handle_tool_error_list(e, "get_recommended_jobs")
