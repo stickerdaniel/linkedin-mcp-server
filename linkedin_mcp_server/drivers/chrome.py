@@ -197,10 +197,11 @@ def handle_login_error(error: Exception) -> None:
             ]
         )
         if retry and retry.get("retry", False):
-            # Clear credentials from keyring and try again
+            # Clear credentials from keyring
             clear_credentials_from_keyring()
-            # Try again
-            initialize_driver()
+            print("✅ Credentials cleared from keyring.")
+            print("💡 Please restart the application to try with new credentials.")
+            print("   Example: uv run main.py --no-headless")
 
     elif isinstance(error, CaptchaRequiredError):
         print("⚠️ LinkedIn requires captcha verification.")
