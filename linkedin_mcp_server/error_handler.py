@@ -23,49 +23,34 @@ from linkedin_mcp_server.exceptions import (
 )
 
 
-def handle_linkedin_errors(func):
+def handle_tool_error(exception: Exception, context: str = "") -> Dict[str, Any]:
     """
-    Decorator to handle LinkedIn MCP errors consistently across all tools.
-
-    This decorator wraps tool functions and converts exceptions into
-    structured error responses that MCP clients can understand.
+    Handle errors from tool functions and return structured responses.
 
     Args:
-        func: The tool function to wrap
+        exception: The exception that occurred
+        context: Context about which tool failed
 
     Returns:
-        The decorated function that returns structured error responses
+        Structured error response dictionary
     """
-
-    async def wrapper(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            return convert_exception_to_response(e, func.__name__)
-
-    return wrapper
+    return convert_exception_to_response(exception, context)
 
 
-def handle_linkedin_errors_list(func):
+def handle_tool_error_list(
+    exception: Exception, context: str = ""
+) -> List[Dict[str, Any]]:
     """
-    Decorator to handle LinkedIn MCP errors for functions that return lists.
-
-    Similar to handle_linkedin_errors but returns errors in list format.
+    Handle errors from tool functions that return lists.
 
     Args:
-        func: The tool function to wrap
+        exception: The exception that occurred
+        context: Context about which tool failed
 
     Returns:
-        The decorated function that returns structured error responses in list format
+        List containing structured error response dictionary
     """
-
-    async def wrapper(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            return convert_exception_to_list_response(e, func.__name__)
-
-    return wrapper
+    return convert_exception_to_list_response(exception, context)
 
 
 def convert_exception_to_response(

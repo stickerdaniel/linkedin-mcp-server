@@ -16,6 +16,14 @@ from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.drivers.chrome import initialize_driver
 from linkedin_mcp_server.exceptions import LinkedInMCPError
 from linkedin_mcp_server.logging_config import configure_logging
+from linkedin_scraper.exceptions import (
+    CaptchaRequiredError,
+    InvalidCredentialsError,
+    LoginTimeoutError,
+    RateLimitError,
+    SecurityChallengeError,
+    TwoFactorAuthError,
+)
 from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
 
 
@@ -56,11 +64,26 @@ def main() -> None:
     # Initialize the driver with configuration (initialize driver checks for lazy init options)
     try:
         initialize_driver()
-    except LinkedInMCPError as e:
+    except (
+        LinkedInMCPError,
+        CaptchaRequiredError,
+        InvalidCredentialsError,
+        SecurityChallengeError,
+        TwoFactorAuthError,
+        RateLimitError,
+        LoginTimeoutError,
+    ) as e:
         logger.error(
             f"Failed to initialize driver: {str(e)}",
             extra={"error_type": type(e).__name__, "error_details": str(e)},
         )
+
+        # Always terminate if login fails and we're not using lazy initialization
+        if not config.server.lazy_init:
+            print(f"\n❌ {str(e)}")
+            sys.exit(1)
+
+        # In lazy init mode with non-interactive, still exit on error
         if config.chrome.non_interactive:
             sys.exit(1)
         else:
