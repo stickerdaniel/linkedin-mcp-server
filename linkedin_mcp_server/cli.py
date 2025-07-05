@@ -26,9 +26,7 @@ def print_claude_config() -> None:
     and copies it to the clipboard for easy pasting.
     """
     config = get_config()
-    current_dir = os.path.abspath(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    )
+    current_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
     # Find the full path to uv executable
     try:
