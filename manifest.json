@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "linkedin-mcp-server",
   "display_name": "LinkedIn MCP Server",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "A Model Context Protocol server for LinkedIn profile and company data scraping",
   "long_description": "# LinkedIn MCP Server\n\nA comprehensive MCP server that enables AI assistants to interact with LinkedIn profiles, companies, and job postings. Features include profile scraping, company analysis, and job details extraction with automatic login handling.\n\n## Features\n- **Profile Scraping**: Extract detailed LinkedIn profile information including work history, education, and skills\n- **Company Analysis**: Get comprehensive company data and insights\n- **Job Details**: Retrieve job posting information using LinkedIn URLs\n- **Session Management**: Automatic login and session handling\n\n## Security & Privacy\n- Credentials stored securely in system keychain\n- Headless browser operation for privacy\n- Automatic session cleanup\n- Respects LinkedIn's rate limiting\n\n⚠️ Use responsibly and in accordance with LinkedIn's Terms of Service.",
   "author": {
