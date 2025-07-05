@@ -5,6 +5,7 @@ MCP server setup for LinkedIn integration.
 This module creates the MCP server and registers all the LinkedIn tools.
 """
 
+import logging
 from typing import Any, Dict
 
 from fastmcp import FastMCP
@@ -13,6 +14,8 @@ from linkedin_mcp_server.drivers.chrome import active_drivers
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.person import register_person_tools
+
+logger = logging.getLogger(__name__)
 
 
 def create_mcp_server() -> FastMCP:
@@ -59,4 +62,11 @@ def shutdown_handler() -> None:
             driver.quit()
             del active_drivers[session_id]
         except Exception as e:
-            print(f"❌ Error closing driver during shutdown: {e}")
+            logger.error(
+                f"Error closing driver during shutdown: {e}",
+                extra={
+                    "session_id": session_id,
+                    "exception_type": type(e).__name__,
+                    "exception_message": str(e),
+                },
+            )

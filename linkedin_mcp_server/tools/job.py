@@ -5,6 +5,7 @@ Job tools for LinkedIn MCP server.
 This module provides tools for scraping LinkedIn job postings and searches.
 """
 
+import logging
 from typing import Any, Dict, List
 
 from fastmcp import FastMCP
@@ -15,6 +16,8 @@ from linkedin_mcp_server.error_handler import (
     handle_tool_error_list,
     safe_get_driver,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def register_job_tools(mcp: FastMCP) -> None:
@@ -46,7 +49,7 @@ def register_job_tools(mcp: FastMCP) -> None:
         try:
             driver = safe_get_driver()
 
-            print(f"💼 Scraping job: {job_url}")
+            logger.info(f"Scraping job: {job_url}")
             job = Job(job_url, driver=driver, close_on_complete=False)
 
             # Convert job object to a dictionary
@@ -68,7 +71,7 @@ def register_job_tools(mcp: FastMCP) -> None:
         try:
             driver = safe_get_driver()
 
-            print(f"🔍 Searching jobs: {search_term}")
+            logger.info(f"Searching jobs: {search_term}")
             job_search = JobSearch(driver=driver, close_on_complete=False, scrape=False)
             jobs = job_search.search(search_term)
 
@@ -88,7 +91,7 @@ def register_job_tools(mcp: FastMCP) -> None:
         try:
             driver = safe_get_driver()
 
-            print("📋 Getting recommended jobs")
+            logger.info("Getting recommended jobs")
             job_search = JobSearch(
                 driver=driver,
                 close_on_complete=False,

@@ -5,12 +5,15 @@ Person profile tools for LinkedIn MCP server.
 This module provides tools for scraping LinkedIn person profiles.
 """
 
+import logging
 from typing import Any, Dict, List
 
 from fastmcp import FastMCP
 from linkedin_scraper import Person
 
 from linkedin_mcp_server.error_handler import handle_tool_error, safe_get_driver
+
+logger = logging.getLogger(__name__)
 
 
 def register_person_tools(mcp: FastMCP) -> None:
@@ -35,7 +38,7 @@ def register_person_tools(mcp: FastMCP) -> None:
         try:
             driver = safe_get_driver()
 
-            print(f"🔍 Scraping profile: {linkedin_url}")
+            logger.info(f"Scraping profile: {linkedin_url}")
             person = Person(linkedin_url, driver=driver, close_on_complete=False)
 
             # Convert experiences to structured dictionaries

@@ -8,14 +8,6 @@ import sys
 from typing import Literal
 
 import inquirer  # type: ignore
-
-from linkedin_mcp_server.cli import print_claude_config
-
-# Import the new centralized configuration
-from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.drivers.chrome import initialize_driver
-from linkedin_mcp_server.exceptions import LinkedInMCPError
-from linkedin_mcp_server.logging_config import configure_logging
 from linkedin_scraper.exceptions import (
     CaptchaRequiredError,
     InvalidCredentialsError,
@@ -24,7 +16,17 @@ from linkedin_scraper.exceptions import (
     SecurityChallengeError,
     TwoFactorAuthError,
 )
+
+from linkedin_mcp_server.cli import print_claude_config
+
+# Import the new centralized configuration
+from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.drivers.chrome import initialize_driver
+from linkedin_mcp_server.exceptions import LinkedInMCPError
+from linkedin_mcp_server.logging_config import configure_logging
 from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
+
+logger = logging.getLogger(__name__)
 
 
 def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
@@ -58,7 +60,6 @@ def main() -> None:
         json_format=config.chrome.non_interactive,  # Use JSON format in non-interactive mode
     )
 
-    logger = logging.getLogger("linkedin_mcp_server")
     logger.debug(f"Server configuration: {config}")
 
     # Initialize the driver with configuration (initialize driver checks for lazy init options)
@@ -132,5 +133,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         exit_gracefully(0)
     except Exception as e:
+        logger.error(
+            f"Error running MCP server: {e}",
+            extra={"exception_type": type(e).__name__, "exception_message": str(e)},
+        )
         print(f"❌ Error running MCP server: {e}")
         exit_gracefully(1)
