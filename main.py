@@ -46,6 +46,62 @@ def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
     return answers["transport"]
 
 
+def get_cookie_and_exit() -> None:
+    """Get LinkedIn cookie and exit (for Docker setup)."""
+    print("🔗 LinkedIn MCP Server - Cookie Extraction 🔗")
+    print("=" * 50)
+
+    config = get_config()
+
+    # Configure logging
+    configure_logging(
+        debug=config.server.debug,
+        json_format=config.chrome.non_interactive,
+    )
+
+    try:
+        from linkedin_mcp_server.config.secrets import get_credentials
+        from linkedin_mcp_server.drivers.chrome import setup_driver_for_cookie_capture
+
+        # Get credentials
+        credentials = get_credentials()
+
+        print("🔑 Logging in to LinkedIn...")
+        cookie = setup_driver_for_cookie_capture(
+            credentials["email"], credentials["password"]
+        )
+
+        if cookie:
+            print("✅ Login successful!")
+            print(f"🍪 LinkedIn Cookie: {cookie}")
+
+            # Try to copy to clipboard
+            try:
+                import pyperclip
+
+                pyperclip.copy(cookie)
+                print("📋 Cookie copied to clipboard!")
+            except Exception as e:
+                logger.warning(f"Could not copy to clipboard: {e}")
+                print("⚠️  Copy the cookie above manually")
+
+            print("\n📝 Usage:")
+            print("1. Copy the cookie above")
+            print("2. Set LINKEDIN_COOKIE environment variable in your Docker setup")
+            print("3. Or paste into Claude Desktop configuration")
+
+        else:
+            print("❌ Failed to obtain cookie")
+            sys.exit(1)
+
+    except Exception as e:
+        logger.error(f"Error getting cookie: {e}")
+        print(f"❌ Error getting cookie: {e}")
+        sys.exit(1)
+
+    sys.exit(0)
+
+
 def main() -> None:
     """Initialize and run the LinkedIn MCP server."""
     print("🔗 LinkedIn MCP Server 🔗")
@@ -53,6 +109,10 @@ def main() -> None:
 
     # Get configuration using the new centralized system
     config = get_config()
+
+    # Handle --get-cookie flag
+    if config.server.get_cookie:
+        get_cookie_and_exit()
 
     # Configure logging
     configure_logging(

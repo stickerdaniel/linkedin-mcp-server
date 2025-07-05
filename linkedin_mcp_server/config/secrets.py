@@ -11,13 +11,59 @@ from .providers import (
     get_credentials_from_keyring,
     get_keyring_name,
     save_credentials_to_keyring,
+    get_cookie_from_keyring,
+    save_cookie_to_keyring,
 )
 
 logger = logging.getLogger(__name__)
 
 
+def has_authentication() -> bool:
+    """Check if authentication is available without triggering interactive setup."""
+    config = get_config()
+
+    # Check environment variable
+    if config.linkedin.cookie:
+        return True
+
+    # Check keyring if enabled
+    if config.linkedin.use_keyring:
+        cookie = get_cookie_from_keyring()
+        if cookie:
+            return True
+
+    return False
+
+
+def get_authentication() -> str:
+    """Get LinkedIn cookie from keyring, environment, or interactive setup."""
+    config = get_config()
+
+    # First, try environment variable
+    if config.linkedin.cookie:
+        logger.info("Using LinkedIn cookie from environment")
+        return config.linkedin.cookie
+
+    # Second, try keyring if enabled
+    if config.linkedin.use_keyring:
+        cookie = get_cookie_from_keyring()
+        if cookie:
+            logger.info(f"Using LinkedIn cookie from {get_keyring_name()}")
+            return cookie
+
+    # If in non-interactive mode and no cookie found, raise error
+    if config.chrome.non_interactive:
+        raise CredentialsNotFoundError(
+            "No LinkedIn cookie found. Please provide cookie via "
+            "environment variable (LINKEDIN_COOKIE) or run with --get-cookie to obtain one."
+        )
+
+    # Otherwise, prompt for cookie or setup
+    return prompt_for_authentication()
+
+
 def get_credentials() -> Dict[str, str]:
-    """Get LinkedIn credentials from config, keyring, or prompt."""
+    """Get LinkedIn credentials from config, keyring, or prompt (legacy for --get-cookie)."""
     config = get_config()
 
     # First, try configuration (includes environment variables)
@@ -41,6 +87,49 @@ def get_credentials() -> Dict[str, str]:
 
     # Otherwise, prompt for credentials
     return prompt_for_credentials()
+
+
+def prompt_for_authentication() -> str:
+    """Prompt user for LinkedIn cookie or setup via login."""
+    print("🔗 LinkedIn MCP Server Setup")
+
+    # Ask if user has a cookie
+    has_cookie = inquirer.confirm("Do you have a LinkedIn cookie?", default=False)
+
+    if has_cookie:
+        cookie = inquirer.text("LinkedIn Cookie", validate=lambda _, x: len(x) > 10)
+        if save_cookie_to_keyring(cookie):
+            logger.info(f"Cookie stored securely in {get_keyring_name()}")
+        else:
+            logger.warning("Could not store cookie in system keyring.")
+            logger.info("Your cookie will only be used for this session.")
+        return cookie
+    else:
+        # Login flow to get cookie
+        return setup_cookie_from_login()
+
+
+def setup_cookie_from_login() -> str:
+    """Login with credentials and capture cookie."""
+    from linkedin_mcp_server.drivers.chrome import setup_driver_for_cookie_capture
+
+    print("🔑 LinkedIn login required to obtain cookie")
+    credentials = prompt_for_credentials()
+
+    # Use special driver setup for cookie capture
+    cookie = setup_driver_for_cookie_capture(
+        credentials["email"], credentials["password"]
+    )
+
+    if cookie:
+        if save_cookie_to_keyring(cookie):
+            logger.info(f"Cookie stored securely in {get_keyring_name()}")
+        else:
+            logger.warning("Could not store cookie in system keyring.")
+            logger.info("Your cookie will only be used for this session.")
+        return cookie
+    else:
+        raise CredentialsNotFoundError("Failed to obtain LinkedIn cookie")
 
 
 def prompt_for_credentials() -> Dict[str, str]:
