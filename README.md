@@ -37,17 +37,6 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 > - **Recommended Jobs** (`get_recommended_jobs`): Selenium method compatibility issues
 > - **Company Profiles** (`get_company_profile`): Some companies can't be accessed / may return empty results (need further investigation)
 
-## 🛡️ Error Handling & Non-Interactive Mode
-
-**NEW**: Enhanced error handling for Docker and CI/CD environments!
-
-The server now provides detailed error information when login fails:
-- **Specific error types**: `credentials_not_found`, `invalid_credentials`, `captcha_required`, `two_factor_auth_required`, `rate_limit`
-- **Non-interactive mode**: Use `--no-setup` to skip all prompts (perfect for Docker)
-- **Structured responses**: Each error includes type, message, and resolution steps
-
-For detailed error handling documentation, see [ERROR_HANDLING.md](ERROR_HANDLING.md)
-
 ---
 
 ## 🐳 Docker Setup (Recommended - Universal)
