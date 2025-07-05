@@ -24,18 +24,17 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 
 ## Features & Tool Status
 
-**Working Tools:**
+**Current Status: All Tools Working**
 > [!TIP]
 > - **Profile Scraping** (`get_person_profile`): Get detailed information from LinkedIn profiles including work history, education, skills, and connections
 > - **Company Analysis** (`get_company_profile`): Extract company information with comprehensive details
 > - **Job Details** (`get_job_details`): Retrieve specific job posting details using direct LinkedIn job URLs
+> - **Job Search** (`search_jobs`): Search for jobs with filters like location, keywords, and experience level
+> - **Recommended Jobs** (`get_recommended_jobs`): Get personalized job recommendations based on your profile
 > - **Session Management** (`close_session`): Properly close browser session and clean up resources
 
-**Known Issues: (should be fixed after this [PR](https://github.com/joeyism/linkedin_scraper/pull/252) is merged)**
-> [!WARNING]
-> - **Job Search** (`search_jobs`): Compatibility issues with LinkedIn's search interface
-> - **Recommended Jobs** (`get_recommended_jobs`): Selenium method compatibility issues
-> - **Company Profiles** (`get_company_profile`): Some companies can't be accessed / may return empty results (need further investigation)
+> [!NOTE]
+> All tools are currently functional and actively maintained. If you encounter any issues, please report them in the [GitHub issues](https://github.com/stickerdaniel/linkedin-mcp-server/issues).
 
 ---
 
@@ -57,7 +56,8 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
         "run", "-i", "--rm",
         "-e", "LINKEDIN_EMAIL",
         "-e", "LINKEDIN_PASSWORD",
-        "stickerdaniel/linkedin-mcp-server"
+        "stickerdaniel/linkedin-mcp-server",
+        "--no-setup"
       ],
       "env": {
         "LINKEDIN_EMAIL": "your.email@example.com",
@@ -76,6 +76,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 - **Streamable HTTP**: For a web-based MCP server
 
 **CLI Options:**
+- `--no-setup` - Skip interactive prompts (required for Docker/non-interactive environments)
 - `--debug` - Enable detailed logging
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--transport {stdio,streamable-http}` - Set transport mode
@@ -90,7 +91,7 @@ docker run -i --rm \
   -e LINKEDIN_PASSWORD="your_password" \
   -p 8080:8080 \
   stickerdaniel/linkedin-mcp-server \
-  --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
+  --no-setup --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
 **Test with mcp inspector:**
 1. Install and run mcp inspector ```bunx @modelcontextprotocol/inspector```
