@@ -339,11 +339,13 @@ def handle_driver_error() -> None:
             config.chrome.chromedriver_path = path
             os.environ["CHROMEDRIVER"] = path
             print(f"✅ ChromeDriver path set to: {path}")
-            # Try again with the new path
-            initialize_driver()
+            print("💡 Please restart the application to use the new ChromeDriver path.")
+            print("   Example: uv run main.py")
+            sys.exit(0)
         else:
             print(f"⚠️ Warning: The specified path does not exist: {path}")
-            initialize_driver()
+            print("💡 Please check the path and restart the application.")
+            sys.exit(1)
 
     elif answers["chromedriver_action"] == "help":
         print("\n📋 ChromeDriver Installation Guide:")
