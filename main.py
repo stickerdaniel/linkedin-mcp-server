@@ -96,8 +96,8 @@ def main() -> None:
     if config.server.setup:
         transport = choose_transport_interactive()
 
-    # Print configuration for Claude if in setup mode
-    if config.server.setup:
+    # Print configuration for Claude if in setup mode and using stdio transport
+    if config.server.setup and transport == "stdio":
         print_claude_config()
 
     # Create and run the MCP server
