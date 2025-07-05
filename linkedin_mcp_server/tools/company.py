@@ -5,12 +5,15 @@ Company profile tools for LinkedIn MCP server.
 This module provides tools for scraping LinkedIn company profiles.
 """
 
+import logging
 from typing import Any, Dict, List
 
 from fastmcp import FastMCP
 from linkedin_scraper import Company
 
 from linkedin_mcp_server.error_handler import handle_tool_error, safe_get_driver
+
+logger = logging.getLogger(__name__)
 
 
 def register_company_tools(mcp: FastMCP) -> None:
@@ -38,9 +41,9 @@ def register_company_tools(mcp: FastMCP) -> None:
         try:
             driver = safe_get_driver()
 
-            print(f"🏢 Scraping company: {linkedin_url}")
+            logger.info(f"Scraping company: {linkedin_url}")
             if get_employees:
-                print("⚠️ Fetching employees may take a while...")
+                logger.info("Fetching employees may take a while...")
 
             company = Company(
                 linkedin_url,
