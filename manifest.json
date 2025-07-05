@@ -24,8 +24,7 @@
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "-e", "LINKEDIN_EMAIL=${user_config.linkedin_email}",
-        "-e", "LINKEDIN_PASSWORD=${user_config.linkedin_password}",
+        "-e", "LINKEDIN_COOKIE=${user_config.linkedin_cookie}",
         "stickerdaniel/linkedin-mcp-server"
       ]
     }
@@ -84,16 +83,9 @@
     }
   ],
   "user_config": {
-    "linkedin_email": {
-      "title": "LinkedIn Email",
-      "description": "Your LinkedIn account email address",
-      "type": "string",
-      "required": true,
-      "sensitive": false
-    },
-    "linkedin_password": {
-      "title": "LinkedIn Password",
-      "description": "Your LinkedIn account password",
+    "linkedin_cookie": {
+      "title": "LinkedIn Cookie",
+      "description": "LinkedIn session cookie. Run 'docker run -it --rm -e LINKEDIN_EMAIL=your@email.com -e LINKEDIN_PASSWORD=yourpass stickerdaniel/linkedin-mcp-server --get-cookie' to obtain",
       "type": "string",
       "required": true,
       "sensitive": true
