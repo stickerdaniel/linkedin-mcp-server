@@ -5,6 +5,7 @@ This module provides a DRY approach to error handling across all tools,
 eliminating code duplication and ensuring consistent error responses.
 """
 
+import logging
 from typing import Any, Dict, List
 
 from linkedin_scraper.exceptions import (
@@ -135,8 +136,16 @@ def convert_exception_to_response(
         return {"error": "linkedin_error", "message": str(exception)}
 
     else:
-        # Generic error handling
-        print(f"❌ Error in {context}: {exception}")
+        # Generic error handling with structured logging
+        logger = logging.getLogger(__name__)
+        logger.error(
+            f"Error in {context}: {exception}",
+            extra={
+                "context": context,
+                "exception_type": type(exception).__name__,
+                "exception_message": str(exception),
+            },
+        )
         return {
             "error": "unknown_error",
             "message": f"Failed to execute {context}: {str(exception)}",

@@ -10,14 +10,6 @@ import sys
 from typing import Dict, Optional
 
 import inquirer  # type: ignore
-from selenium import webdriver
-from selenium.common.exceptions import WebDriverException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-
-from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.providers import clear_credentials_from_keyring
-from linkedin_mcp_server.config.secrets import get_credentials
 from linkedin_scraper.exceptions import (
     CaptchaRequiredError,
     InvalidCredentialsError,
@@ -26,6 +18,14 @@ from linkedin_scraper.exceptions import (
     SecurityChallengeError,
     TwoFactorAuthError,
 )
+from selenium import webdriver
+from selenium.common.exceptions import WebDriverException
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+
+from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.providers import clear_credentials_from_keyring
+from linkedin_mcp_server.config.secrets import get_credentials
 from linkedin_mcp_server.exceptions import (
     CredentialsNotFoundError,
     DriverInitializationError,
@@ -131,9 +131,6 @@ def get_or_create_driver() -> Optional[webdriver.Chrome]:
             raise DriverInitializationError(error_msg)
         else:
             raise WebDriverException(error_msg)
-
-
-# Remove this function - linkedin-scraper now handles all error detection
 
 
 def login_to_linkedin(driver: webdriver.Chrome) -> bool:
