@@ -25,8 +25,15 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.providers import clear_credentials_from_keyring
-from linkedin_mcp_server.config.secrets import get_credentials
+from linkedin_mcp_server.config.providers import (
+    clear_credentials_from_keyring,
+    clear_cookie_from_keyring,
+)
+from linkedin_mcp_server.config.secrets import (
+    get_authentication,
+    get_credentials,
+    has_authentication,
+)
 from linkedin_mcp_server.exceptions import (
     CredentialsNotFoundError,
     DriverInitializationError,
@@ -145,9 +152,116 @@ def get_or_create_driver() -> Optional[webdriver.Chrome]:
             raise WebDriverException(error_msg)
 
 
+def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
+    """
+    Log in to LinkedIn using session cookie.
+
+    Args:
+        driver: Chrome WebDriver instance
+        cookie: LinkedIn session cookie
+
+    Returns:
+        bool: True if login was successful, False otherwise
+    """
+    try:
+        from linkedin_scraper import actions  # type: ignore
+
+        # Use linkedin-scraper cookie login
+        actions.login(driver, cookie=cookie)
+
+        # Verify login by checking current URL
+        current_url = driver.current_url
+        if (
+            "feed" in current_url
+            or "mynetwork" in current_url
+            or "linkedin.com/in/" in current_url
+        ):
+            return True
+        else:
+            return False
+    except Exception as e:
+        logger.warning(f"Cookie authentication failed: {e}")
+        return False
+
+
+def capture_session_cookie(driver: webdriver.Chrome) -> Optional[str]:
+    """
+    Capture LinkedIn session cookie from driver.
+
+    Args:
+        driver: Chrome WebDriver instance
+
+    Returns:
+        Optional[str]: Session cookie if found, None otherwise
+    """
+    try:
+        # Get li_at cookie which is the main LinkedIn session cookie
+        cookie = driver.get_cookie("li_at")
+        if cookie and cookie.get("value"):
+            return f"li_at={cookie['value']}"
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to capture session cookie: {e}")
+        return None
+
+
+def setup_driver_for_cookie_capture(email: str, password: str) -> Optional[str]:
+    """
+    Setup a temporary driver to login and capture cookie.
+
+    Args:
+        email: LinkedIn email
+        password: LinkedIn password
+
+    Returns:
+        Optional[str]: Captured cookie if successful, None otherwise
+    """
+    config = get_config()
+
+    # Set up Chrome options for cookie capture
+    chrome_options = Options()
+    if config.chrome.headless:
+        chrome_options.add_argument("--headless=new")
+
+    # Add essential options
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+
+    try:
+        # Create temporary driver
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.set_page_load_timeout(60)
+
+        # Login using linkedin-scraper
+        from linkedin_scraper import actions  # type: ignore
+
+        actions.login(
+            driver,
+            email,
+            password,
+            interactive=not config.chrome.non_interactive,
+        )
+
+        # Capture cookie
+        cookie = capture_session_cookie(driver)
+
+        # Clean up
+        driver.quit()
+
+        return cookie
+
+    except Exception as e:
+        logger.error(f"Failed to capture cookie: {e}")
+        if "driver" in locals():
+            driver.quit()
+        return None
+
+
 def login_to_linkedin(driver: webdriver.Chrome) -> bool:
     """
-    Log in to LinkedIn using stored or provided credentials.
+    Log in to LinkedIn using cookie-first authentication.
 
     Args:
         driver: Chrome WebDriver instance
@@ -160,7 +274,27 @@ def login_to_linkedin(driver: webdriver.Chrome) -> bool:
     """
     config = get_config()
 
-    # Get LinkedIn credentials from config
+    # Try cookie authentication first
+    try:
+        cookie = get_authentication()
+        if login_with_cookie(driver, cookie):
+            logger.info("Successfully logged in to LinkedIn using cookie")
+            return True
+        else:
+            # Cookie login failed - clear invalid cookie from keyring
+            logger.warning(
+                "Cookie authentication failed - cookie may be expired or invalid"
+            )
+            clear_cookie_from_keyring()
+    except CredentialsNotFoundError:
+        # No cookie available, fall back to credentials
+        pass
+    except Exception as e:
+        logger.warning(f"Cookie authentication failed: {e}")
+        # Clear invalid cookie from keyring
+        clear_cookie_from_keyring()
+
+    # Fallback to credential-based login
     try:
         credentials = get_credentials()
     except CredentialsNotFoundError as e:
@@ -172,10 +306,10 @@ def login_to_linkedin(driver: webdriver.Chrome) -> bool:
         credentials = prompt_for_credentials()
 
     if not credentials:
-        raise CredentialsNotFoundError("No credentials available")
+        raise CredentialsNotFoundError("No authentication method available")
 
     # Login to LinkedIn using enhanced linkedin-scraper
-    logger.info("Logging in to LinkedIn...")
+    logger.info("Logging in to LinkedIn with credentials...")
 
     from linkedin_scraper import actions  # type: ignore
 
@@ -189,6 +323,15 @@ def login_to_linkedin(driver: webdriver.Chrome) -> bool:
         )
 
         logger.info("Successfully logged in to LinkedIn")
+
+        # Capture cookie for future use
+        cookie = capture_session_cookie(driver)
+        if cookie:
+            from linkedin_mcp_server.config.providers import save_cookie_to_keyring
+
+            save_cookie_to_keyring(cookie)
+            logger.info("Session cookie captured and stored")
+
         return True
 
     except Exception:
@@ -210,6 +353,15 @@ def login_to_linkedin(driver: webdriver.Chrome) -> bool:
         elif "feed" in current_url or "mynetwork" in current_url:
             # Actually logged in successfully despite the exception
             logger.info("Successfully logged in to LinkedIn")
+
+            # Capture cookie for future use
+            cookie = capture_session_cookie(driver)
+            if cookie:
+                from linkedin_mcp_server.config.providers import save_cookie_to_keyring
+
+                save_cookie_to_keyring(cookie)
+                logger.info("Session cookie captured and stored")
+
             return True
 
         else:
@@ -275,13 +427,20 @@ def initialize_driver() -> None:
         logger.info(
             "Using lazy initialization - driver will be created on first tool call"
         )
-        if config.linkedin.email and config.linkedin.password:
-            logger.info("LinkedIn credentials found in configuration")
+        if has_authentication():
+            logger.info("LinkedIn authentication found in configuration")
         else:
-            logger.info(
-                "No LinkedIn credentials found - will look for stored credentials on first use"
-            )
+            logger.info("No LinkedIn authentication found - will set up on first use")
         return
+
+    # Pre-check authentication availability to trigger setup if needed
+    if not config.chrome.non_interactive and not has_authentication():
+        # In interactive mode without authentication, trigger setup first
+        logger.info("Setting up LinkedIn authentication...")
+        try:
+            get_authentication()  # This will trigger the interactive setup
+        except CredentialsNotFoundError:
+            pass  # Setup was cancelled or failed, continue to driver creation
 
     # Validate chromedriver can be found
     if config.chrome.chromedriver_path:
