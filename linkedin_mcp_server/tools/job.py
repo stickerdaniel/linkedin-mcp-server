@@ -1,6 +1,6 @@
 # src/linkedin_mcp_server/tools/job.py
 """
-Job-related tools for LinkedIn MCP server.
+Job tools for LinkedIn MCP server.
 
 This module provides tools for scraping LinkedIn job postings and searches.
 """
@@ -10,7 +10,11 @@ from typing import Any, Dict, List
 from fastmcp import FastMCP
 from linkedin_scraper import Job, JobSearch
 
-from linkedin_mcp_server.drivers.chrome import get_or_create_driver
+from linkedin_mcp_server.error_handler import (
+    handle_linkedin_errors,
+    handle_linkedin_errors_list,
+    safe_get_driver,
+)
 
 
 def register_job_tools(mcp: FastMCP) -> None:
@@ -22,87 +26,72 @@ def register_job_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
+    @handle_linkedin_errors
     async def get_job_details(job_url: str) -> Dict[str, Any]:
         """
         Scrape job details from a LinkedIn job posting.
 
         IMPORTANT: Only use direct LinkedIn job URLs in the format:
-        https://www.linkedin.com/jobs/view/[JOB_ID]
+        https://www.linkedin.com/jobs/view/XXXXXXXX/ where XXXXXXXX is the job ID.
 
-        DO NOT use collection URLs like:
-        - /collections/recommended/?currentJobId=
-        - /jobs/search/?keywords=
-
-        If you have a collection URL, extract the job ID and convert it to the direct format.
-        Example: If you see currentJobId=1234567890, use https://www.linkedin.com/jobs/view/1234567890
+        This tool extracts comprehensive job information including title, company,
+        location, posting date, application count, and full job description.
 
         Args:
-            job_url (str): The direct LinkedIn job URL (must be /jobs/view/[ID] format)
+            job_url (str): The LinkedIn job posting URL to scrape
 
         Returns:
             Dict[str, Any]: Structured job data including title, company, location, posting date,
                           application count, and job description (may be empty if content is protected)
         """
-        driver = get_or_create_driver()
+        driver = safe_get_driver()
 
-        try:
-            print(f"💼 Scraping job: {job_url}")
-            job = Job(job_url, driver=driver, close_on_complete=False)
+        print(f"💼 Scraping job: {job_url}")
+        job = Job(job_url, driver=driver, close_on_complete=False)
 
-            # Convert job object to a dictionary
-            return job.to_dict()
-        except Exception as e:
-            print(f"❌ Error scraping job: {e}")
-            return {"error": f"Failed to scrape job posting: {str(e)}"}
+        # Convert job object to a dictionary
+        return job.to_dict()
 
     @mcp.tool()
+    @handle_linkedin_errors_list
     async def search_jobs(search_term: str) -> List[Dict[str, Any]]:
         """
-        Search for jobs on LinkedIn with the given search term.
+        Search for jobs on LinkedIn (Note: This tool has compatibility issues).
 
         Args:
-            search_term (str): The job search query
+            search_term (str): The search term to use for job search
 
         Returns:
             List[Dict[str, Any]]: List of job search results
         """
-        driver = get_or_create_driver()
+        driver = safe_get_driver()
 
-        try:
-            print(f"🔍 Searching jobs: {search_term}")
-            job_search = JobSearch(driver=driver, close_on_complete=False, scrape=False)
-            jobs = job_search.search(search_term)
+        print(f"🔍 Searching jobs: {search_term}")
+        job_search = JobSearch(driver=driver, close_on_complete=False, scrape=False)
+        jobs = job_search.search(search_term)
 
-            # Convert job objects to dictionaries
-            return [job.to_dict() for job in jobs]
-        except Exception as e:
-            print(f"❌ Error searching jobs: {e}")
-            return [{"error": f"Failed to search jobs: {str(e)}"}]
+        # Convert job objects to dictionaries
+        return [job.to_dict() for job in jobs]
 
     @mcp.tool()
+    @handle_linkedin_errors_list
     async def get_recommended_jobs() -> List[Dict[str, Any]]:
         """
-        Get recommended jobs from your LinkedIn homepage.
+        Get recommended jobs from LinkedIn (Note: This tool has compatibility issues).
 
         Returns:
             List[Dict[str, Any]]: List of recommended jobs
         """
-        driver = get_or_create_driver()
+        driver = safe_get_driver()
 
-        try:
-            print("📋 Getting recommended jobs")
-            job_search = JobSearch(
-                driver=driver,
-                close_on_complete=False,
-                scrape=True,
-                scrape_recommended_jobs=True,
-            )
+        print("📋 Getting recommended jobs")
+        job_search = JobSearch(
+            driver=driver,
+            close_on_complete=False,
+            scrape=False,
+        )
 
-            # Get recommended jobs and convert to dictionaries
-            if hasattr(job_search, "recommended_jobs") and job_search.recommended_jobs:
-                return [job.to_dict() for job in job_search.recommended_jobs]
-            else:
-                return []
-        except Exception as e:
-            print(f"❌ Error getting recommended jobs: {e}")
-            return [{"error": f"Failed to get recommended jobs: {str(e)}"}]
+        if job_search.recommended_jobs:
+            return [job.to_dict() for job in job_search.recommended_jobs]
+        else:
+            return []

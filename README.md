@@ -37,6 +37,17 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 > - **Recommended Jobs** (`get_recommended_jobs`): Selenium method compatibility issues
 > - **Company Profiles** (`get_company_profile`): Some companies can't be accessed / may return empty results (need further investigation)
 
+## 🛡️ Error Handling & Non-Interactive Mode
+
+**NEW**: Enhanced error handling for Docker and CI/CD environments!
+
+The server now provides detailed error information when login fails:
+- **Specific error types**: `credentials_not_found`, `invalid_credentials`, `captcha_required`, `two_factor_auth_required`, `rate_limit`
+- **Non-interactive mode**: Use `--no-setup` to skip all prompts (perfect for Docker)
+- **Structured responses**: Each error includes type, message, and resolution steps
+
+For detailed error handling documentation, see [ERROR_HANDLING.md](ERROR_HANDLING.md)
+
 ---
 
 ## 🐳 Docker Setup (Recommended - Universal)
@@ -57,7 +68,8 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
         "run", "-i", "--rm",
         "-e", "LINKEDIN_EMAIL",
         "-e", "LINKEDIN_PASSWORD",
-        "stickerdaniel/linkedin-mcp-server"
+        "stickerdaniel/linkedin-mcp-server",
+        "--no-setup"
       ],
       "env": {
         "LINKEDIN_EMAIL": "your.email@example.com",
@@ -76,6 +88,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 - **Streamable HTTP**: For a web-based MCP server
 
 **CLI Options:**
+- `--no-setup` - Skip interactive prompts (required for Docker/non-interactive environments)
 - `--debug` - Enable detailed logging
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--transport {stdio,streamable-http}` - Set transport mode
@@ -90,7 +103,7 @@ docker run -i --rm \
   -e LINKEDIN_PASSWORD="your_password" \
   -p 8080:8080 \
   stickerdaniel/linkedin-mcp-server \
-  --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
+  --no-setup --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
 **Test with mcp inspector:**
 1. Install and run mcp inspector ```bunx @modelcontextprotocol/inspector```

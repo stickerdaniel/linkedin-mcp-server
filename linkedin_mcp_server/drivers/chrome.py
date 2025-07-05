@@ -18,6 +18,18 @@ from selenium.webdriver.chrome.service import Service
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.config.providers import clear_credentials_from_keyring
 from linkedin_mcp_server.config.secrets import get_credentials
+from linkedin_scraper.exceptions import (
+    CaptchaRequiredError,
+    InvalidCredentialsError,
+    LoginTimeoutError,
+    RateLimitError,
+    SecurityChallengeError,
+    TwoFactorAuthError,
+)
+from linkedin_mcp_server.exceptions import (
+    CredentialsNotFoundError,
+    DriverInitializationError,
+)
 
 # Global driver storage to reuse sessions
 active_drivers: Dict[str, webdriver.Chrome] = {}
@@ -87,24 +99,41 @@ def get_or_create_driver() -> Optional[webdriver.Chrome]:
         driver.set_page_load_timeout(60)
 
         # Try to log in
-        if login_to_linkedin(driver):
-            print("Successfully logged in to LinkedIn")
-        elif config.chrome.non_interactive:
-            # In non-interactive mode, if login fails, return None
+        try:
+            if login_to_linkedin(driver):
+                print("Successfully logged in to LinkedIn")
+                active_drivers[session_id] = driver
+                return driver
+        except (
+            CaptchaRequiredError,
+            InvalidCredentialsError,
+            SecurityChallengeError,
+            TwoFactorAuthError,
+            RateLimitError,
+            LoginTimeoutError,
+            CredentialsNotFoundError,
+        ) as e:
+            # Clean up driver on login failure
             driver.quit()
-            return None
 
-        active_drivers[session_id] = driver
-        return driver
+            if config.chrome.non_interactive:
+                # In non-interactive mode, propagate the error
+                raise e
+            else:
+                # In interactive mode, handle the error
+                handle_login_error(e)
+                return None
     except Exception as e:
         error_msg = f"🛑 Error creating web driver: {e}"
         print(error_msg)
 
         if config.chrome.non_interactive:
-            print("🛑 Failed to initialize driver in non-interactive mode")
-            return None
+            raise DriverInitializationError(error_msg)
+        else:
+            raise WebDriverException(error_msg)
 
-        raise WebDriverException(error_msg)
+
+# Remove this function - linkedin-scraper now handles all error detection
 
 
 def login_to_linkedin(driver: webdriver.Chrome) -> bool:
@@ -116,59 +145,105 @@ def login_to_linkedin(driver: webdriver.Chrome) -> bool:
 
     Returns:
         bool: True if login was successful, False otherwise
+
+    Raises:
+        Various login-related errors from linkedin-scraper
     """
     config = get_config()
 
     # Get LinkedIn credentials from config
-    credentials = get_credentials()
+    try:
+        credentials = get_credentials()
+    except CredentialsNotFoundError as e:
+        if config.chrome.non_interactive:
+            raise e
+        # Only prompt if not in non-interactive mode
+        from linkedin_mcp_server.config.secrets import prompt_for_credentials
+
+        credentials = prompt_for_credentials()
 
     if not credentials:
-        print("❌ No credentials available")
-        return False
+        raise CredentialsNotFoundError("No credentials available")
 
-    try:
-        # Login to LinkedIn
-        print("🔑 Logging in to LinkedIn...")
+    # Login to LinkedIn using enhanced linkedin-scraper
+    print("🔑 Logging in to LinkedIn...")
 
-        from linkedin_scraper import actions  # type: ignore
+    from linkedin_scraper import actions  # type: ignore
 
-        actions.login(driver, credentials["email"], credentials["password"])
+    # linkedin-scraper now handles all error detection and raises appropriate exceptions
+    actions.login(
+        driver,
+        credentials["email"],
+        credentials["password"],
+        interactive=not config.chrome.non_interactive,
+    )
 
-        print("✅ Successfully logged in to LinkedIn")
-        return True
-    except Exception as e:
-        error_msg = f"Failed to login: {str(e)}"
-        print(f"❌ {error_msg}")
+    print("✅ Successfully logged in to LinkedIn")
+    return True
 
-        if not config.chrome.non_interactive:
+
+def handle_login_error(error: Exception) -> None:
+    """Handle login errors in interactive mode."""
+    config = get_config()
+
+    print(f"\n❌ Login failed: {str(error)}")
+
+    if isinstance(error, InvalidCredentialsError):
+        print("⚠️ Please check your email and password.")
+        retry = inquirer.prompt(
+            [
+                inquirer.Confirm(
+                    "retry",
+                    message="Would you like to try with different credentials?",
+                    default=True,
+                ),
+            ]
+        )
+        if retry and retry.get("retry", False):
+            # Clear credentials from keyring and try again
+            clear_credentials_from_keyring()
+            # Try again
+            initialize_driver()
+
+    elif isinstance(error, CaptchaRequiredError):
+        print("⚠️ LinkedIn requires captcha verification.")
+        captcha_url = getattr(error, "captcha_url", str(error))
+        print(f"🔗 Please complete the captcha at: {captcha_url}")
+        if config.chrome.headless:
             print(
-                "⚠️ You might need to confirm the login in your LinkedIn mobile app. "
-                "Please try again and confirm the login."
+                "🔍 Try running with visible browser window to complete captcha: "
+                "uv run main.py --no-headless"
             )
 
-            if config.chrome.headless:
-                print(
-                    "🔍 Try running with visible browser window to see what's happening: "
-                    "uv run main.py --no-headless"
-                )
-
-            retry = inquirer.prompt(
-                [
-                    inquirer.Confirm(
-                        "retry",
-                        message="Would you like to try with different credentials?",
-                        default=True,
-                    ),
-                ]
+    elif isinstance(error, SecurityChallengeError):
+        print("⚠️ LinkedIn requires a security challenge.")
+        challenge_url = getattr(error, "challenge_url", str(error))
+        print(f"🔗 Please complete the security challenge at: {challenge_url}")
+        if config.chrome.headless:
+            print(
+                "🔍 Try running with visible browser window to complete challenge: "
+                "uv run main.py --no-headless"
             )
 
-            if retry and retry.get("retry", False):
-                # Clear credentials from keyring and try again
-                clear_credentials_from_keyring()
-                # Try again with new credentials
-                return login_to_linkedin(driver)
+    elif isinstance(error, TwoFactorAuthError):
+        print("⚠️ Two-factor authentication is required.")
+        print(
+            "📱 Please confirm the login in your LinkedIn mobile app or enter the 2FA code."
+        )
+        if config.chrome.headless:
+            print(
+                "🔍 Try running with visible browser window to complete 2FA: "
+                "uv run main.py --no-headless"
+            )
 
-        return False
+    elif isinstance(error, RateLimitError):
+        print("⚠️ Too many login attempts. Please wait before trying again.")
+
+    elif isinstance(error, LoginTimeoutError):
+        print("⚠️ Login timed out. Please check your network connection.")
+
+    else:
+        print("⚠️ An unexpected error occurred during login.")
 
 
 def initialize_driver() -> None:
@@ -204,8 +279,30 @@ def initialize_driver() -> None:
         if driver:
             print("✅ Web driver initialized successfully")
         else:
+            if config.chrome.non_interactive:
+                raise DriverInitializationError(
+                    "Failed to initialize web driver in non-interactive mode"
+                )
             print("❌ Failed to initialize web driver.")
+    except (
+        CaptchaRequiredError,
+        InvalidCredentialsError,
+        SecurityChallengeError,
+        TwoFactorAuthError,
+        RateLimitError,
+        LoginTimeoutError,
+        CredentialsNotFoundError,
+    ) as e:
+        # In non-interactive mode, let the error propagate
+        if config.chrome.non_interactive:
+            raise e
+        # In interactive mode, handle gracefully
+        print(f"❌ Error: {str(e)}")
     except WebDriverException as e:
+        if config.chrome.non_interactive:
+            raise DriverInitializationError(
+                f"Failed to initialize web driver: {str(e)}"
+            )
         print(f"❌ Failed to initialize web driver: {str(e)}")
         handle_driver_error()
 
@@ -215,6 +312,11 @@ def handle_driver_error() -> None:
     Handle ChromeDriver initialization errors by providing helpful options.
     """
     config = get_config()
+
+    # Skip interactive handling in non-interactive mode
+    if config.chrome.non_interactive:
+        print("❌ ChromeDriver is required for this application to work properly.")
+        sys.exit(1)
 
     questions = [
         inquirer.List(

@@ -1,10 +1,11 @@
 # src/linkedin_mcp_server/config/secrets.py
 import logging
-from typing import Dict, Optional
+from typing import Dict
 
 import inquirer  # type: ignore
 
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 
 from .providers import (
     get_credentials_from_keyring,
@@ -15,7 +16,7 @@ from .providers import (
 logger = logging.getLogger(__name__)
 
 
-def get_credentials() -> Optional[Dict[str, str]]:
+def get_credentials() -> Dict[str, str]:
     """Get LinkedIn credentials from config, keyring, or prompt."""
     config = get_config()
 
@@ -31,10 +32,12 @@ def get_credentials() -> Optional[Dict[str, str]]:
             print(f"Using LinkedIn credentials from {get_keyring_name()}")
             return {"email": credentials["email"], "password": credentials["password"]}
 
-    # If in non-interactive mode and no credentials found, return None
+    # If in non-interactive mode and no credentials found, raise error
     if config.chrome.non_interactive:
-        print("No credentials found in non-interactive mode")
-        return None
+        raise CredentialsNotFoundError(
+            "No LinkedIn credentials found. Please provide credentials via "
+            "environment variables (LINKEDIN_EMAIL, LINKEDIN_PASSWORD) or keyring."
+        )
 
     # Otherwise, prompt for credentials
     return prompt_for_credentials()

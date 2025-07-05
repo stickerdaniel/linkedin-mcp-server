@@ -135,6 +135,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.no_setup:
         config.server.setup = False
+        config.chrome.non_interactive = (
+            True  # Automatically set when --no-setup is used
+        )
 
     if args.no_lazy_init:
         config.server.lazy_init = False
