@@ -34,7 +34,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 > - **Session Management** (`close_session`): Properly close browser session and clean up resources
 
 > [!NOTE]
-> All tools are currently functional and actively maintained. If you encounter any issues, please report them in the [GitHub issues](https://github.com/stickerdaniel/linkedin-mcp-server/issues).
+> July 2025: All tools are currently functional and actively maintained. If you encounter any issues, please report them in the [GitHub issues](https://github.com/stickerdaniel/linkedin-mcp-server/issues).
 
 ---
 
