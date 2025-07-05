@@ -37,9 +37,9 @@ def handle_linkedin_errors(func):
         The decorated function that returns structured error responses
     """
 
-    def wrapper(*args, **kwargs):
+    async def wrapper(*args, **kwargs):
         try:
-            return func(*args, **kwargs)
+            return await func(*args, **kwargs)
         except Exception as e:
             return convert_exception_to_response(e, func.__name__)
 
@@ -59,9 +59,9 @@ def handle_linkedin_errors_list(func):
         The decorated function that returns structured error responses in list format
     """
 
-    def wrapper(*args, **kwargs):
+    async def wrapper(*args, **kwargs):
         try:
-            return func(*args, **kwargs)
+            return await func(*args, **kwargs)
         except Exception as e:
             return convert_exception_to_list_response(e, func.__name__)
 
