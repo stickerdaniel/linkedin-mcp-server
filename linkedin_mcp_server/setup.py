@@ -78,7 +78,7 @@ def prompt_for_credentials() -> Dict[str, str]:
         inquirer.Text("email", message="LinkedIn Email"),
         inquirer.Password("password", message="LinkedIn Password"),
     ]
-    credentials: dict[str, str] = inquirer.prompt(questions)
+    credentials: Dict[str, str] = inquirer.prompt(questions)
 
     if not credentials:
         raise KeyboardInterrupt("Credential input was cancelled")
@@ -172,7 +172,7 @@ def capture_cookie_from_credentials(email: str, password: str) -> str:
         )
 
         # Capture cookie
-        cookie_obj: dict[str, str] = driver.get_cookie("li_at")
+        cookie_obj: Dict[str, str] = driver.get_cookie("li_at")
         if cookie_obj and cookie_obj.get("value"):
             cookie: str = cookie_obj["value"]
             logger.info("Successfully captured session cookie")
@@ -327,7 +327,7 @@ def run_cookie_extraction_setup() -> str:
     print("🔗 LinkedIn MCP Server - Cookie Extraction")
 
     # Get credentials
-    credentials: dict[str, str] = get_credentials_for_setup()
+    credentials: Dict[str, str] = get_credentials_for_setup()
 
     # Capture cookie
     cookie: str = capture_cookie_from_credentials(
