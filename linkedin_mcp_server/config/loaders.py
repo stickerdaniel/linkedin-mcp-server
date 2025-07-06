@@ -175,8 +175,6 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if hasattr(args, "get_cookie") and args.get_cookie:
         config.server.get_cookie = True
-        config.chrome.non_interactive = True
-
     if args.cookie:
         config.linkedin.cookie = args.cookie
 

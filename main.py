@@ -76,22 +76,20 @@ def get_cookie_and_exit() -> None:
 
         logger.info("Cookie extraction successful")
         print("✅ Login successful!")
-        print(f"🍪 LinkedIn Cookie: {cookie}")
+        print("🍪 LinkedIn Cookie extracted:")
+        print(cookie)
 
         # Try to copy to clipboard
         try:
             import pyperclip
 
             pyperclip.copy(cookie)
-            print("📋 Cookie copied to clipboard!")
+            print(
+                "📋 Cookie copied to clipboard! Now you can set the LINKEDIN_COOKIE environment variable in your configuration"
+            )
         except Exception as e:
             logger.warning(f"Could not copy to clipboard: {e}")
             print("⚠️  Copy the cookie above manually")
-
-        print("\n📝 Usage:")
-        print("1. Copy the cookie above")
-        print("2. Set LINKEDIN_COOKIE environment variable in your Docker setup")
-        print("3. Or paste into Claude Desktop configuration")
 
     except Exception as e:
         logger.error(f"Error getting cookie: {e}")
@@ -102,11 +100,10 @@ def get_cookie_and_exit() -> None:
             print("❌ LinkedIn security challenge detected")
             print("💡 Try one of these solutions:")
             print(
-                "   1. Use an existing LinkedIn cookie instead (see instructions below)"
+                "   1. Use an existing LinkedIn cookie from your browser instead (see instructions below)"
             )
-            print("   2. Login to LinkedIn in your browser first, then retry")
             print(
-                "   3. Use --no-headless to see and complete the security challenge manually"
+                "   2. Use --no-headless flag (manual installation required, does not work with Docker) and solve the security challenge manually"
             )
             print("\n🍪 To get your LinkedIn cookie manually:")
             print("   1. Login to LinkedIn in your browser")
