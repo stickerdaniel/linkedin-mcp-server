@@ -26,10 +26,10 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 
 **Current Status: All Tools Working**
 > [!TIP]
-> - **Profile Scraping** (`get_person_profile`): Get detailed information from LinkedIn profiles including work history, education, skills, and connections
-> - **Company Analysis** (`get_company_profile`): Extract company information with comprehensive details
-> - **Job Details** (`get_job_details`): Retrieve specific job posting details using direct LinkedIn job URLs
-> - **Job Search** (`search_jobs`): Search for jobs with filters like location, keywords, and experience level
+> - **Profile Scraping** (`get_person_profile`): Get detailed information from a LinkedIn profile including work history, education, skills, and connections
+> - **Company Analysis** (`get_company_profile`): Extract comprehensive company information from a LinkedIn company profile name
+> - **Job Details** (`get_job_details`): Retrieve specific job posting details using LinkedIn job IDs
+> - **Job Search** (`search_jobs`): Search for jobs with filters like keywords and location
 > - **Recommended Jobs** (`get_recommended_jobs`): Get personalized job recommendations based on your profile
 > - **Session Management** (`close_session`): Properly close browser session and clean up resources
 
@@ -92,10 +92,7 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 </details>
 
 > [!NOTE]
-> The cookie will expire during the next 30 days. Just get the new cookie and update your config.
-
-> [!TIP]
-> There are also many cookie manager extensions that you can use to easily get the cookie.
+> The cookie will expire during the next 30 days. Just get the new cookie and update your config. There are also many cookie manager extensions that you can use to easily get the cookie.
 
 ### Docker Setup Help
 <details>
@@ -187,10 +184,7 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 </details>
 
 > [!NOTE]
-> The cookie will expire during the next 30 days. Just get the new cookie and update your config.
-
-> [!TIP]
-> There are also many cookie manager extensions that you can use to easily get the cookie.
+> The cookie will expire during the next 30 days. Just get the new cookie and update your config. There are also many cookie manager extensions that you can use to easily get the cookie.
 
 ### DXT Extension Setup Help
 <details>
