@@ -68,9 +68,9 @@ def convert_exception_to_response(
     """
     if isinstance(exception, CredentialsNotFoundError):
         return {
-            "error": "credentials_not_found",
+            "error": "authentication_not_found",
             "message": str(exception),
-            "resolution": "Provide LinkedIn credentials via environment variables",
+            "resolution": "Provide LinkedIn cookie via LINKEDIN_COOKIE environment variable or run setup",
         }
 
     elif isinstance(exception, InvalidCredentialsError):
@@ -161,17 +161,18 @@ def safe_get_driver():
     Safely get or create a driver with proper error handling.
 
     Returns:
-        Driver instance or None if initialization fails
+        Driver instance
 
     Raises:
-        LinkedInMCPError: If driver initialization fails in non-interactive mode
+        LinkedInMCPError: If driver initialization fails
     """
+    from linkedin_mcp_server.authentication import ensure_authentication
     from linkedin_mcp_server.drivers.chrome import get_or_create_driver
 
-    driver = get_or_create_driver()
-    if not driver:
-        from linkedin_mcp_server.exceptions import DriverInitializationError
+    # Get authentication first
+    authentication = ensure_authentication()
 
-        raise DriverInitializationError("Failed to initialize Chrome driver")
+    # Create driver with authentication
+    driver = get_or_create_driver(authentication)
 
     return driver

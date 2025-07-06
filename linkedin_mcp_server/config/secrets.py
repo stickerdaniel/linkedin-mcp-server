@@ -111,13 +111,13 @@ def prompt_for_authentication() -> str:
 
 def setup_cookie_from_login() -> str:
     """Login with credentials and capture cookie."""
-    from linkedin_mcp_server.drivers.chrome import setup_driver_for_cookie_capture
+    from linkedin_mcp_server.setup import capture_cookie_from_credentials
 
     print("🔑 LinkedIn login required to obtain cookie")
     credentials = prompt_for_credentials()
 
-    # Use special driver setup for cookie capture
-    cookie = setup_driver_for_cookie_capture(
+    # Use existing cookie capture functionality
+    cookie = capture_cookie_from_credentials(
         credentials["email"], credentials["password"]
     )
 

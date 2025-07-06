@@ -1,10 +1,11 @@
 # src/linkedin_mcp_server/config/loaders.py
-import os
 import argparse
 import logging
+import os
 from typing import Optional
-from .schema import AppConfig
+
 from .providers import get_chromedriver_paths
+from .schema import AppConfig
 
 logger = logging.getLogger(__name__)
 
