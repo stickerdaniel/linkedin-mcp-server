@@ -68,7 +68,15 @@ def get_cookie_and_exit() -> None:
         json_format=config.chrome.non_interactive and not config.server.debug,
     )
 
-    logger.info("LinkedIn MCP Server - Cookie Extraction mode started")
+    # Get version for logging
+    try:
+        import importlib.metadata
+
+        version = importlib.metadata.version("linkedin-mcp-server")
+    except Exception:
+        version = "unknown"
+
+    logger.info(f"LinkedIn MCP Server v{version} - Cookie Extraction mode started")
 
     try:
         # Run cookie extraction setup
@@ -190,8 +198,16 @@ def initialize_driver_with_auth(authentication: str) -> None:
 
 def main() -> None:
     """Main application entry point with clear phase separation."""
-    logger.info("🔗 LinkedIn MCP Server 🔗")
-    print("🔗 LinkedIn MCP Server 🔗")
+    # Get version from package metadata
+    try:
+        import importlib.metadata
+
+        version = importlib.metadata.version("linkedin-mcp-server")
+    except Exception:
+        version = "unknown"
+
+    logger.info(f"🔗 LinkedIn MCP Server v{version} 🔗")
+    print(f"🔗 LinkedIn MCP Server v{version} 🔗")
     print("=" * 40)
 
     # Get configuration
