@@ -9,6 +9,7 @@ Clean architecture with clear phase separation:
 """
 
 import logging
+import os
 import sys
 from typing import Literal
 
@@ -28,6 +29,7 @@ from linkedin_mcp_server.authentication import (
 )
 from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.drivers.chrome import close_all_drivers, get_or_create_driver
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError, LinkedInMCPError
 from linkedin_mcp_server.logging_config import configure_logging
@@ -35,6 +37,11 @@ from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
 from linkedin_mcp_server.setup import run_cookie_extraction_setup, run_interactive_setup
 
 logger = logging.getLogger(__name__)
+
+
+def should_suppress_stdout(config: AppConfig) -> bool:
+    """Check if stdout should be suppressed to avoid interfering with MCP stdio protocol."""
+    return not config.server.setup and config.server.transport == "stdio"
 
 
 def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
@@ -212,6 +219,10 @@ def main() -> None:
 
     # Get configuration
     config = get_config()
+
+    # Suppress stdout if running in MCP stdio mode to avoid interfering with JSON-RPC protocol
+    if should_suppress_stdout(config):
+        sys.stdout = open(os.devnull, "w")
 
     # Handle --get-cookie flag immediately
     if config.server.get_cookie:
