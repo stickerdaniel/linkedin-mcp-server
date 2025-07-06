@@ -65,16 +65,16 @@
     },
     {
       "name": "get_job_details",
-      "description": "Retrieve specific job posting details using LinkedIn job URLs",
+      "description": "Retrieve specific job posting details using LinkedIn job IDs",
       "parameters": {
         "type": "object",
         "properties": {
-          "job_url": {
+          "job_id": {
             "type": "string",
-            "description": "LinkedIn job URL (e.g., https://www.linkedin.com/jobs/view/123456789)"
+            "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")"
           }
         },
-        "required": ["job_url"]
+        "required": ["job_id"]
       }
     },
     {
