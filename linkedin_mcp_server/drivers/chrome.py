@@ -1,16 +1,15 @@
-# src/linkedin_mcp_server/drivers/chrome.py
+# linkedin_mcp_server/drivers/chrome.py
 """
 Chrome driver management for LinkedIn scraping.
 
 This module handles the creation and management of Chrome WebDriver instances.
+Simplified to focus only on driver management without authentication setup.
 """
 
 import logging
 import os
-import sys
 from typing import Dict, Optional
 
-import inquirer  # type: ignore
 from linkedin_scraper.exceptions import (
     CaptchaRequiredError,
     InvalidCredentialsError,
@@ -25,12 +24,10 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.providers import clear_credentials_from_keyring
-from linkedin_mcp_server.config.secrets import get_credentials
-from linkedin_mcp_server.exceptions import (
-    CredentialsNotFoundError,
-    DriverInitializationError,
-)
+from linkedin_mcp_server.exceptions import DriverInitializationError
+
+# Constants
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
 # Global driver storage to reuse sessions
 active_drivers: Dict[str, webdriver.Chrome] = {}
@@ -38,23 +35,17 @@ active_drivers: Dict[str, webdriver.Chrome] = {}
 logger = logging.getLogger(__name__)
 
 
-def get_or_create_driver() -> Optional[webdriver.Chrome]:
+def create_chrome_driver() -> webdriver.Chrome:
     """
-    Get existing driver or create a new one using the configured settings.
+    Create a new Chrome WebDriver instance with proper configuration.
 
     Returns:
-        Optional[webdriver.Chrome]: Chrome WebDriver instance or None if initialization fails
-                                   in non-interactive mode
+        webdriver.Chrome: Configured Chrome WebDriver instance
 
     Raises:
-        WebDriverException: If the driver cannot be created and not in non-interactive mode
+        WebDriverException: If driver creation fails
     """
     config = get_config()
-    session_id = "default"  # We use a single session for simplicity
-
-    # Return existing driver if available
-    if session_id in active_drivers:
-        return active_drivers[session_id]
 
     # Set up Chrome options
     chrome_options = Options()
@@ -64,244 +55,179 @@ def get_or_create_driver() -> Optional[webdriver.Chrome]:
     if config.chrome.headless:
         chrome_options.add_argument("--headless=new")
 
-    # Add essential options for stability (compatible with both Grid and direct)
+    # Add essential options for stability
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-background-timer-throttling")
-    chrome_options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36"
-    )
+
+    # Set user agent (configurable with sensible default)
+    user_agent = getattr(config.chrome, "user_agent", DEFAULT_USER_AGENT)
+    chrome_options.add_argument(f"--user-agent={user_agent}")
 
     # Add any custom browser arguments from config
     for arg in config.chrome.browser_args:
         chrome_options.add_argument(arg)
 
     # Initialize Chrome driver
-    try:
-        logger.info("Initializing Chrome WebDriver...")
+    logger.info("Initializing Chrome WebDriver...")
 
-        # Use ChromeDriver path from environment or config
-        chromedriver_path = (
-            os.environ.get("CHROMEDRIVER_PATH") or config.chrome.chromedriver_path
-        )
+    # Use ChromeDriver path from environment or config
+    chromedriver_path = (
+        os.environ.get("CHROMEDRIVER_PATH") or config.chrome.chromedriver_path
+    )
 
-        if chromedriver_path:
-            logger.info(f"Using ChromeDriver at path: {chromedriver_path}")
-            service = Service(executable_path=chromedriver_path)
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-        else:
-            logger.info("Using auto-detected ChromeDriver")
-            driver = webdriver.Chrome(options=chrome_options)
+    if chromedriver_path:
+        logger.info(f"Using ChromeDriver at path: {chromedriver_path}")
+        service = Service(executable_path=chromedriver_path)
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+    else:
+        logger.info("Using auto-detected ChromeDriver")
+        driver = webdriver.Chrome(options=chrome_options)
 
-        logger.info("Chrome WebDriver initialized successfully")
+    logger.info("Chrome WebDriver initialized successfully")
 
-        # Add a page load timeout for safety
-        driver.set_page_load_timeout(60)
+    # Add a page load timeout for safety
+    driver.set_page_load_timeout(60)
 
-        # Try to log in with retry loop
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                if login_to_linkedin(driver):
-                    logger.info("Successfully logged in to LinkedIn")
-                    active_drivers[session_id] = driver
-                    return driver
-            except (
-                CaptchaRequiredError,
-                InvalidCredentialsError,
-                SecurityChallengeError,
-                TwoFactorAuthError,
-                RateLimitError,
-                LoginTimeoutError,
-                CredentialsNotFoundError,
-            ) as e:
-                if config.chrome.non_interactive:
-                    # In non-interactive mode, propagate the error
-                    driver.quit()
-                    raise e
-                else:
-                    # In interactive mode, handle the error and potentially retry
-                    should_retry = handle_login_error(e)
-                    if should_retry and attempt < max_retries - 1:
-                        logger.info(f"Retry attempt {attempt + 2}/{max_retries}")
-                        continue
-                    else:
-                        # Clean up driver on final failure
-                        driver.quit()
-                        return None
-    except Exception as e:
-        error_msg = f"Error creating web driver: {e}"
-        logger.error(
-            error_msg,
-            extra={"exception_type": type(e).__name__, "exception_message": str(e)},
-        )
+    # Set shorter implicit wait for faster cookie validation
+    driver.implicitly_wait(10)
 
-        if config.chrome.non_interactive:
-            raise DriverInitializationError(error_msg)
-        else:
-            raise WebDriverException(error_msg)
+    return driver
 
 
-def login_to_linkedin(driver: webdriver.Chrome) -> bool:
+def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
     """
-    Log in to LinkedIn using stored or provided credentials.
+    Log in to LinkedIn using session cookie.
 
     Args:
         driver: Chrome WebDriver instance
+        cookie: LinkedIn session cookie
 
     Returns:
         bool: True if login was successful, False otherwise
+    """
+    try:
+        from linkedin_scraper import actions  # type: ignore
+
+        logger.info("Attempting cookie authentication...")
+
+        # Set shorter timeout for faster failure detection
+        driver.set_page_load_timeout(15)
+
+        actions.login(driver, cookie=cookie)
+
+        # Quick check - if we're on login page, cookie is invalid
+        current_url = driver.current_url
+        if "login" in current_url or "uas/login" in current_url:
+            logger.warning("Cookie authentication failed - redirected to login page")
+            return False
+        elif (
+            "feed" in current_url
+            or "mynetwork" in current_url
+            or "linkedin.com/in/" in current_url
+        ):
+            logger.info("Cookie authentication successful")
+            return True
+        else:
+            logger.warning("Cookie authentication failed - unexpected page")
+            return False
+
+    except Exception as e:
+        logger.warning(f"Cookie authentication failed: {e}")
+        return False
+    finally:
+        # Restore normal timeout
+        driver.set_page_load_timeout(60)
+
+
+def login_to_linkedin(driver: webdriver.Chrome, authentication: str) -> None:
+    """
+    Log in to LinkedIn using provided authentication.
+
+    Args:
+        driver: Chrome WebDriver instance
+        authentication: LinkedIn session cookie
 
     Raises:
-        Various login-related errors from linkedin-scraper
+        Various login-related errors from linkedin-scraper or this module
     """
-    config = get_config()
+    # Try cookie authentication
+    if login_with_cookie(driver, authentication):
+        logger.info("Successfully logged in to LinkedIn using cookie")
+        return
 
-    # Get LinkedIn credentials from config
+    # If we get here, cookie authentication failed
+    logger.error("Cookie authentication failed")
+
+    # Clear invalid cookie from keyring
+    from linkedin_mcp_server.authentication import clear_authentication
+
+    clear_authentication()
+    logger.info("Cleared invalid cookie from authentication storage")
+
+    # Check current page to determine the issue
     try:
-        credentials = get_credentials()
-    except CredentialsNotFoundError as e:
-        if config.chrome.non_interactive:
-            raise e
-        # Only prompt if not in non-interactive mode
-        from linkedin_mcp_server.config.secrets import prompt_for_credentials
-
-        credentials = prompt_for_credentials()
-
-    if not credentials:
-        raise CredentialsNotFoundError("No credentials available")
-
-    # Login to LinkedIn using enhanced linkedin-scraper
-    logger.info("Logging in to LinkedIn...")
-
-    from linkedin_scraper import actions  # type: ignore
-
-    # Use linkedin-scraper login but with simplified error handling
-    try:
-        actions.login(
-            driver,
-            credentials["email"],
-            credentials["password"],
-            interactive=not config.chrome.non_interactive,
-        )
-
-        logger.info("Successfully logged in to LinkedIn")
-        return True
-
-    except Exception:
-        # Check current page to determine the real issue
-        current_url = driver.current_url
+        current_url: str = driver.current_url
 
         if "checkpoint/challenge" in current_url:
-            # We're on a challenge page - this is the real issue, not credentials
             if "security check" in driver.page_source.lower():
                 raise SecurityChallengeError(
                     challenge_url=current_url,
                     message="LinkedIn requires a security challenge. Please complete it manually and restart the application.",
                 )
             else:
-                raise CaptchaRequiredError(
-                    captcha_url=current_url,
-                )
-
-        elif "feed" in current_url or "mynetwork" in current_url:
-            # Actually logged in successfully despite the exception
-            logger.info("Successfully logged in to LinkedIn")
-            return True
-
+                raise CaptchaRequiredError(captcha_url=current_url)
         else:
-            # Check for actual credential issues
-            page_source = driver.page_source.lower()
-            if any(
-                pattern in page_source
-                for pattern in ["wrong email", "wrong password", "incorrect", "invalid"]
-            ):
-                raise InvalidCredentialsError("Invalid LinkedIn email or password.")
-            elif "too many" in page_source:
-                raise RateLimitError(
-                    "Too many login attempts. Please wait and try again later."
-                )
-            else:
-                raise LoginTimeoutError(
-                    "Login failed. Please check your credentials and network connection."
-                )
+            raise InvalidCredentialsError(
+                "Cookie authentication failed - cookie may be expired or invalid"
+            )
+
+    except Exception as e:
+        # If we can't determine the specific error, raise a generic one
+        raise LoginTimeoutError(f"Login failed: {str(e)}")
 
 
-def handle_login_error(error: Exception) -> bool:
-    """Handle login errors in interactive mode.
+def get_or_create_driver(authentication: str) -> webdriver.Chrome:
+    """
+    Get existing driver or create a new one and login.
+
+    Args:
+        authentication: LinkedIn session cookie for login
 
     Returns:
-        bool: True if user wants to retry, False if they want to exit
+        webdriver.Chrome: Chrome WebDriver instance, logged in and ready
+
+    Raises:
+        DriverInitializationError: If driver creation fails
+        Various login-related errors: If login fails
     """
-    config = get_config()
+    session_id = "default"  # We use a single session for simplicity
 
-    logger.error(f"\n❌ {str(error)}")
+    # Return existing driver if available
+    if session_id in active_drivers:
+        logger.info("Using existing Chrome WebDriver session")
+        return active_drivers[session_id]
 
-    if config.chrome.headless:
-        logger.info(
-            "🔍 Try running with visible browser window: uv run main.py --no-headless"
-        )
-
-    # Only allow retry for credential errors
-    if isinstance(error, InvalidCredentialsError):
-        retry = inquirer.prompt(
-            [
-                inquirer.Confirm(
-                    "retry",
-                    message="Would you like to try with different credentials?",
-                    default=True,
-                ),
-            ]
-        )
-        if retry and retry.get("retry", False):
-            clear_credentials_from_keyring()
-            logger.info("✅ Credentials cleared from keyring.")
-            logger.info("🔄 Retrying with new credentials...")
-            return True
-
-    return False
-
-
-def initialize_driver() -> None:
-    """
-    Initialize the driver based on global configuration.
-    """
-    config = get_config()
-
-    if config.server.lazy_init:
-        logger.info(
-            "Using lazy initialization - driver will be created on first tool call"
-        )
-        if config.linkedin.email and config.linkedin.password:
-            logger.info("LinkedIn credentials found in configuration")
-        else:
-            logger.info(
-                "No LinkedIn credentials found - will look for stored credentials on first use"
-            )
-        return
-
-    # Validate chromedriver can be found
-    if config.chrome.chromedriver_path:
-        logger.info(f"✅ ChromeDriver found at: {config.chrome.chromedriver_path}")
-        os.environ["CHROMEDRIVER"] = config.chrome.chromedriver_path
-    else:
-        logger.info("⚠️ ChromeDriver not found in common locations.")
-        logger.info("⚡ Continuing with automatic detection...")
-        logger.info(
-            "💡 Tip: install ChromeDriver and set the CHROMEDRIVER environment variable"
-        )
-
-    # Create driver and log in
     try:
-        driver = get_or_create_driver()
-        if driver:
-            logger.info("✅ Web driver initialized successfully")
-        else:
-            # Driver creation failed - always raise an error
-            raise DriverInitializationError("Failed to initialize web driver")
+        # Create new driver
+        driver = create_chrome_driver()
+
+        # Login to LinkedIn
+        login_to_linkedin(driver, authentication)
+
+        # Store successful driver
+        active_drivers[session_id] = driver
+        logger.info("Chrome WebDriver session created and authenticated successfully")
+
+        return driver
+
+    except WebDriverException as e:
+        error_msg = f"Error creating web driver: {e}"
+        logger.error(error_msg)
+        raise DriverInitializationError(error_msg)
     except (
         CaptchaRequiredError,
         InvalidCredentialsError,
@@ -309,83 +235,56 @@ def initialize_driver() -> None:
         TwoFactorAuthError,
         RateLimitError,
         LoginTimeoutError,
-        CredentialsNotFoundError,
     ) as e:
-        # Always re-raise login-related errors so main.py can handle them
+        # Login-related errors - clean up driver if it was created
+        if session_id in active_drivers:
+            active_drivers[session_id].quit()
+            del active_drivers[session_id]
         raise e
-    except WebDriverException as e:
-        if config.chrome.non_interactive:
-            raise DriverInitializationError(
-                f"Failed to initialize web driver: {str(e)}"
-            )
-        logger.error(f"❌ Failed to initialize web driver: {str(e)}")
-        handle_driver_error()
 
 
-def handle_driver_error() -> None:
+def close_all_drivers() -> None:
+    """Close all active drivers and clean up resources."""
+    global active_drivers
+
+    for session_id, driver in active_drivers.items():
+        try:
+            logger.info(f"Closing Chrome WebDriver session: {session_id}")
+            driver.quit()
+        except Exception as e:
+            logger.warning(f"Error closing driver {session_id}: {e}")
+
+    active_drivers.clear()
+    logger.info("All Chrome WebDriver sessions closed")
+
+
+def get_active_driver() -> Optional[webdriver.Chrome]:
     """
-    Handle ChromeDriver initialization errors by providing helpful options.
+    Get the currently active driver without creating a new one.
+
+    Returns:
+        Optional[webdriver.Chrome]: Active driver if available, None otherwise
     """
-    config = get_config()
+    session_id = "default"
+    return active_drivers.get(session_id)
 
-    # Skip interactive handling in non-interactive mode
-    if config.chrome.non_interactive:
-        logger.error(
-            "❌ ChromeDriver is required for this application to work properly."
-        )
-        sys.exit(1)
 
-    questions = [
-        inquirer.List(
-            "chromedriver_action",
-            message="What would you like to do?",
-            choices=[
-                ("Specify ChromeDriver path manually", "specify"),
-                ("Get help installing ChromeDriver", "help"),
-                ("Exit", "exit"),
-            ],
-        ),
-    ]
-    answers = inquirer.prompt(questions)
+def capture_session_cookie(driver: webdriver.Chrome) -> Optional[str]:
+    """
+    Capture LinkedIn session cookie from driver.
 
-    if answers["chromedriver_action"] == "specify":
-        path = inquirer.prompt(
-            [inquirer.Text("custom_path", message="Enter ChromeDriver path")]
-        )["custom_path"]
+    Args:
+        driver: Chrome WebDriver instance
 
-        if os.path.exists(path):
-            # Update config with the new path
-            config.chrome.chromedriver_path = path
-            os.environ["CHROMEDRIVER"] = path
-            logger.info(f"✅ ChromeDriver path set to: {path}")
-            logger.info(
-                "💡 Please restart the application to use the new ChromeDriver path."
-            )
-            logger.info("   Example: uv run main.py")
-            sys.exit(0)
-        else:
-            logger.warning(f"⚠️ Warning: The specified path does not exist: {path}")
-            logger.info("💡 Please check the path and restart the application.")
-            sys.exit(1)
-
-    elif answers["chromedriver_action"] == "help":
-        logger.info("\n📋 ChromeDriver Installation Guide:")
-        logger.info(
-            "1. Find your Chrome version: Chrome menu > Help > About Google Chrome"
-        )
-        logger.info(
-            "2. Download matching ChromeDriver: https://chromedriver.chromium.org/downloads"
-        )
-        logger.info("3. Place ChromeDriver in a location on your PATH")
-        logger.info("   - macOS/Linux: /usr/local/bin/ is recommended")
-        logger.info(
-            "   - Windows: Add to a directory in your PATH or specify the full path\n"
-        )
-
-        if inquirer.prompt(
-            [inquirer.Confirm("try_again", message="Try again?", default=True)]
-        )["try_again"]:
-            initialize_driver()
-
-    logger.error("❌ ChromeDriver is required for this application to work properly.")
-    sys.exit(1)
+    Returns:
+        Optional[str]: Session cookie if found, None otherwise
+    """
+    try:
+        # Get li_at cookie which is the main LinkedIn session cookie
+        cookie = driver.get_cookie("li_at")
+        if cookie and cookie.get("value"):
+            return f"li_at={cookie['value']}"
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to capture session cookie: {e}")
+        return None

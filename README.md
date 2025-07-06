@@ -36,17 +36,16 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 > [!NOTE]
 > July 2025: All tools are currently functional and actively maintained. If you encounter any issues, please report them in the [GitHub issues](https://github.com/stickerdaniel/linkedin-mcp-server/issues).
 
----
+<br/>
+<br/>
 
 ## 🐳 Docker Setup (Recommended - Universal)
 
 **Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running.
 
-**Zero setup required** - just add the mcp server to your client config and replace email and password with your linkedin credentials.
-
 ### Installation
 
-**Claude Desktop:**
+**Client Configuration:**
 ```json
 {
   "mcpServers": {
@@ -54,20 +53,52 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "-e", "LINKEDIN_EMAIL",
-        "-e", "LINKEDIN_PASSWORD",
+        "-e", "LINKEDIN_COOKIE",
         "stickerdaniel/linkedin-mcp-server",
         "--no-setup"
       ],
       "env": {
-        "LINKEDIN_EMAIL": "your.email@example.com",
-        "LINKEDIN_PASSWORD": "your_password"
+        "LINKEDIN_COOKIE": "XXXXXX...",
       }
     }
   }
 }
 ```
 
+### Getting the LinkedIn Cookie
+<details>
+<summary><b>🐳 Docker get-cookie method</b></summary>
+
+**Run the server with the `--get-cookie` flag:**
+```bash
+docker run -i --rm \
+  -e LINKEDIN_EMAIL="your.email@example.com" \
+  -e LINKEDIN_PASSWORD="your_password" \
+  stickerdaniel/linkedin-mcp-server \
+  --get-cookie
+```
+Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client configuration. If this fails with a captcha challenge, use the method below.
+</details>
+<details>
+<summary><b>🌐 Chrome DevTools Guide</b></summary>
+
+1. Open LinkedIn and login
+2. Open Chrome DevTools (F12 or right-click → Inspect)
+3. Go to **Application** > **Storage** > **Cookies** > **https://www.linkedin.com**
+4. Find the cookie named `li_at`
+5. Copy the **Value** field (this is your LinkedIn session cookie)
+6. Use this value as your `LINKEDIN_COOKIE` in the configuration
+
+</details>
+<br/>
+
+> [!NOTE]
+> The cookie will expire during the next 30 days. Just get the new cookie and update your config.
+
+> [!TIP]
+> There are also many cookie manager extensions that you can use to easily get the cookie.
+
+### Docker Setup Help
 <details>
 <summary><b>🔧 Configuration</b></summary>
 
@@ -83,6 +114,8 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
+- `--get-cookie` - Attempt to login with email and password and extract the LinkedIn cookie
+- `--cookie {cookie}` - Pass a specific LinkedIn cookie for login
 
 **HTTP Mode Example (for web-based MCP clients):**
 ```bash
@@ -116,6 +149,9 @@ docker run -i --rm \
 - You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
 </details>
 
+<br/>
+<br/>
+
 ## 📦 Claude Desktop (DXT Extension)
 
 **Prerequisites:** [Claude Desktop](https://claude.ai/download) and [Docker](https://www.docker.com/get-started/) installed
@@ -126,6 +162,40 @@ docker run -i --rm \
 3. Configure your LinkedIn credentials when prompted
 4. Start using LinkedIn tools immediately
 
+### Getting the LinkedIn Cookie
+<details>
+<summary><b>🐳 Docker get-cookie method</b></summary>
+
+**Run the server with the `--get-cookie` flag:**
+```bash
+docker run -i --rm \
+  -e LINKEDIN_EMAIL="your.email@example.com" \
+  -e LINKEDIN_PASSWORD="your_password" \
+  stickerdaniel/linkedin-mcp-server \
+  --get-cookie
+```
+Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client configuration. If this fails with a captcha challenge, use the method below.
+</details>
+<details>
+<summary><b>🌐 Chrome DevTools Guide</b></summary>
+
+1. Open LinkedIn and login
+2. Open Chrome DevTools (F12 or right-click → Inspect)
+3. Go to **Application** > **Storage** > **Cookies** > **https://www.linkedin.com**
+4. Find the cookie named `li_at`
+5. Copy the **Value** field (this is your LinkedIn session cookie)
+6. Use this value as your `LINKEDIN_COOKIE` in the configuration
+
+</details>
+<br/>
+
+> [!NOTE]
+> The cookie will expire during the next 30 days. Just get the new cookie and update your config.
+
+> [!TIP]
+> There are also many cookie manager extensions that you can use to easily get the cookie.
+
+### DXT Extension Setup Help
 <details>
 <summary><b>❗ Troubleshooting</b></summary>
 
@@ -138,6 +208,9 @@ docker run -i --rm \
 - LinkedIn may require a login confirmation in the LinkedIn mobile app
 - You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
 </details>
+
+<br/>
+<br/>
 
 ## 🐍 Local Setup (Develop & Contribute)
 
@@ -170,21 +243,26 @@ uv sync --group dev
 uv run pre-commit install
 
 # 5. Start the server once manually
-# (you will be prompted to enter your LinkedIn credentials, and they are securely stored in your OS keychain)
+# You will be prompted to enter your LinkedIn credentials, and they will be securely stored in your OS keychain
+# Once logged in, your cookie will be stored in your OS keychain and used for subsequent runs until it expires
 uv run main.py --no-headless --no-lazy-init
 ```
 
+### Local Setup Help
 <details>
 <summary><b>🔧 Configuration</b></summary>
 
 **CLI Options:**
 - `--no-headless` - Show browser window (debugging)
 - `--debug` - Enable detailed logging
-- `--no-setup` - Skip credential prompts (make sure to set `LINKEDIN_EMAIL` and `LINKEDIN_PASSWORD` in env or or run the server once manualy, then it will be stored in your OS keychain and you can run the server without credentials)
+- `--no-setup` - Skip credential prompts (make sure to set `LINKEDIN_COOKIE` or `LINKEDIN_EMAIL` and `LINKEDIN_PASSWORD` in env or that you run the server once manually, so the authentication is stored in your OS keychain and you can run the server without credentials)
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
+- `--get-cookie` - Login with email and password and extract the LinkedIn cookie
+- `--cookie {cookie}` - Pass a specific LinkedIn cookie for login
+- `--help` - Show help
 
 **Claude Desktop:**
-```json
+```**json**
 {
   "mcpServers": {
     "linkedin": {
@@ -217,7 +295,9 @@ uv run main.py --no-headless --no-lazy-init
 
 Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) or [PR](https://github.com/stickerdaniel/linkedin-mcp-server/pulls)!
 
----
+
+<br/>
+<br/>
 
 ## License
 
