@@ -7,6 +7,7 @@ This module handles interactive setup flows and authentication configuration.
 
 import logging
 import os
+import tempfile
 from contextlib import contextmanager
 from typing import Dict, Iterator
 
@@ -118,6 +119,11 @@ def temporary_chrome_driver() -> Iterator[webdriver.Chrome]:
     # chrome_options.add_argument("--disable-dev-shm-usage")
     # chrome_options.add_argument("--disable-gpu")
     # chrome_options.add_argument("--window-size=3456,2234")
+
+    # Create a unique user data directory to avoid conflicts
+    user_data_dir = tempfile.mkdtemp(prefix="linkedin_mcp_setup_")
+    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+    logger.debug(f"Using Chrome user data directory for setup: {user_data_dir}")
 
     driver = None
     try:
