@@ -52,7 +52,7 @@
         "properties": {
           "company_url": {
             "type": "string",
-            "description": "LinkedIn company URL (e.g., https://www.linkedin.com/company/company-name/)"
+            "description": "LinkedIn company URL (e.g., https://www.linkedin.com/company/docker/)"
           }
         },
         "required": ["company_url"]
