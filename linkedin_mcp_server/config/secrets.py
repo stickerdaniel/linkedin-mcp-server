@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_credentials() -> Dict[str, str]:
-    """Get LinkedIn credentials from config, keyring, or prompt."""
+    """Get LinkedIn credentials from config, keyring, or prompt (legacy for --get-cookie)."""
     config = get_config()
 
     # First, try configuration (includes environment variables)

@@ -1,14 +1,15 @@
 # src/linkedin_mcp_server/config/__init__.py
-from typing import Optional
 import logging
-from .schema import AppConfig, ChromeConfig, LinkedInConfig, ServerConfig
+from typing import Optional
+
 from .loaders import load_config
 from .providers import (
-    get_credentials_from_keyring,
-    save_credentials_to_keyring,
     clear_credentials_from_keyring,
+    get_credentials_from_keyring,
     get_keyring_name,
+    save_credentials_to_keyring,
 )
+from .schema import AppConfig, ChromeConfig, LinkedInConfig, ServerConfig
 
 logger = logging.getLogger(__name__)
 
