@@ -29,24 +29,24 @@ def register_job_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
-    async def get_job_details(job_url: str) -> Dict[str, Any]:
+    async def get_job_details(job_id: str) -> Dict[str, Any]:
         """
         Scrape job details from a LinkedIn job posting.
-
-        IMPORTANT: Only use direct LinkedIn job URLs in the format:
-        https://www.linkedin.com/jobs/view/XXXXXXXX/ where XXXXXXXX is the job ID.
 
         This tool extracts comprehensive job information including title, company,
         location, posting date, application count, and full job description.
 
         Args:
-            job_url (str): The LinkedIn job posting URL to scrape
+            job_id (str): LinkedIn job ID (e.g., "4252026496", "3856789012")
 
         Returns:
             Dict[str, Any]: Structured job data including title, company, location, posting date,
                           application count, and job description (may be empty if content is protected)
         """
         try:
+            # Construct clean LinkedIn URL from job ID
+            job_url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+
             driver = safe_get_driver()
 
             logger.info(f"Scraping job: {job_url}")
