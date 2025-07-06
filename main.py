@@ -80,16 +80,20 @@ def get_cookie_and_exit() -> None:
         print(cookie)
 
         # Try to copy to clipboard
+        clipboard_success = False
         try:
             import pyperclip
 
             pyperclip.copy(cookie)
-            print(
-                "📋 Cookie copied to clipboard! Now you can set the LINKEDIN_COOKIE environment variable in your configuration"
-            )
+            clipboard_success = True
+            print("📋 Cookie copied to clipboard!")
         except Exception as e:
-            logger.warning(f"Could not copy to clipboard: {e}")
-            print("⚠️  Copy the cookie above manually")
+            logger.debug(f"pyperclip clipboard failed: {e}")
+
+        if not clipboard_success:
+            print(
+                "💡 Set this cookie as an environment variable in your config or pass it with --cookie flag"
+            )
 
     except Exception as e:
         logger.error(f"Error getting cookie: {e}")
@@ -108,7 +112,7 @@ def get_cookie_and_exit() -> None:
             print("\n🍪 To get your LinkedIn cookie manually:")
             print("   1. Login to LinkedIn in your browser")
             print("   2. Open Developer Tools (F12)")
-            print("   3. Go to Application/Storage > Cookies > linkedin.com")
+            print("   3. Go to Application/Storage > Cookies > www.linkedin.com")
             print("   4. Copy the 'li_at' cookie value")
             print("   5. Set LINKEDIN_COOKIE environment variable or use --cookie flag")
         elif "invalid credentials" in error_msg:
@@ -144,8 +148,9 @@ def ensure_authentication_ready() -> str:
     # If in non-interactive mode and no auth, fail immediately
     if config.chrome.non_interactive:
         raise CredentialsNotFoundError(
-            "No LinkedIn authentication found. Please provide cookie via "
-            "environment variable (LINKEDIN_COOKIE) or run with --get-cookie to obtain one."
+            "No LinkedIn cookie found for non-interactive mode. You can:\n"
+            "  1. Set LINKEDIN_COOKIE environment variable with a valid LinkedIn session cookie\n"
+            "  2. Run with --get-cookie to extract a cookie using email/password"
         )
 
     # Run interactive setup
@@ -211,9 +216,12 @@ def main() -> None:
         logger.info("Authentication ready")
     except CredentialsNotFoundError as e:
         logger.error(f"Authentication setup failed: {e}")
-        print(
-            "\n❌ Authentication required - please provide LinkedIn cookie or credentials"
-        )
+        if config.chrome.non_interactive:
+            print("\n❌ LinkedIn cookie required for Docker/non-interactive mode")
+        else:
+            print(
+                "\n❌ Authentication required - please provide LinkedIn authentication"
+            )
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n\n👋 Setup cancelled by user")
