@@ -8,6 +8,8 @@ Simplified to focus only on driver management without authentication setup.
 
 import logging
 import os
+import shutil
+import tempfile
 from typing import Dict, Optional
 
 from linkedin_scraper.exceptions import (
@@ -32,12 +34,18 @@ DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKi
 # Global driver storage to reuse sessions
 active_drivers: Dict[str, webdriver.Chrome] = {}
 
+# Store user data directories for cleanup
+user_data_dirs: Dict[str, str] = {}
+
 logger = logging.getLogger(__name__)
 
 
-def create_chrome_driver() -> webdriver.Chrome:
+def create_chrome_driver(session_id: str = "default") -> webdriver.Chrome:
     """
     Create a new Chrome WebDriver instance with proper configuration.
+
+    Args:
+        session_id: Unique identifier for the session (used for cleanup)
 
     Returns:
         webdriver.Chrome: Configured Chrome WebDriver instance
@@ -62,6 +70,14 @@ def create_chrome_driver() -> webdriver.Chrome:
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-background-timer-throttling")
+
+    # Create a unique user data directory to avoid conflicts
+    user_data_dir = tempfile.mkdtemp(prefix="linkedin_mcp_chrome_")
+    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+    logger.debug(f"Using Chrome user data directory: {user_data_dir}")
+
+    # Store the user data directory for cleanup
+    user_data_dirs[session_id] = user_data_dir
 
     # Set user agent (configurable with sensible default)
     user_agent = getattr(config.chrome, "user_agent", DEFAULT_USER_AGENT)
@@ -213,7 +229,7 @@ def get_or_create_driver(authentication: str) -> webdriver.Chrome:
 
     try:
         # Create new driver
-        driver = create_chrome_driver()
+        driver = create_chrome_driver(session_id)
 
         # Login to LinkedIn
         login_to_linkedin(driver, authentication)
@@ -245,7 +261,7 @@ def get_or_create_driver(authentication: str) -> webdriver.Chrome:
 
 def close_all_drivers() -> None:
     """Close all active drivers and clean up resources."""
-    global active_drivers
+    global active_drivers, user_data_dirs
 
     for session_id, driver in active_drivers.items():
         try:
@@ -254,8 +270,21 @@ def close_all_drivers() -> None:
         except Exception as e:
             logger.warning(f"Error closing driver {session_id}: {e}")
 
+        # Clean up user data directory
+        if session_id in user_data_dirs:
+            try:
+                user_data_dir = user_data_dirs[session_id]
+                if os.path.exists(user_data_dir):
+                    shutil.rmtree(user_data_dir)
+                    logger.debug(f"Cleaned up user data directory: {user_data_dir}")
+            except Exception as e:
+                logger.warning(
+                    f"Error cleaning up user data directory for session {session_id}: {e}"
+                )
+
     active_drivers.clear()
-    logger.info("All Chrome WebDriver sessions closed")
+    user_data_dirs.clear()
+    logger.info("All Chrome WebDriver sessions closed and cleaned up")
 
 
 def get_active_driver() -> Optional[webdriver.Chrome]:
