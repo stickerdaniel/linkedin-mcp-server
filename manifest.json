@@ -78,6 +78,29 @@
       }
     },
     {
+      "name": "search_jobs",
+      "description": "Search for jobs with filters like keywords and location",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "search_term": {
+            "type": "string",
+            "description": "Search term for job search (e.g., \"software engineer\", \"product manager\")"
+          }
+        },
+        "required": ["search_term"]
+      }
+    },
+    {
+      "name": "get_recommended_jobs",
+      "description": "Get personalized job recommendations based on your profile",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources",
       "parameters": {
