@@ -25,17 +25,20 @@ def register_person_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
-    async def get_person_profile(linkedin_url: str) -> Dict[str, Any]:
+    async def get_person_profile(linkedin_username: str) -> Dict[str, Any]:
         """
         Scrape a person's LinkedIn profile.
 
         Args:
-            linkedin_url (str): The LinkedIn URL of the person's profile
+            linkedin_username (str): LinkedIn username (e.g., "john-doe-123456", "sarah-smith", "stickerdaniel")
 
         Returns:
             Dict[str, Any]: Structured data from the person's profile
         """
         try:
+            # Construct clean LinkedIn URL from username
+            linkedin_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+
             driver = safe_get_driver()
 
             logger.info(f"Scraping profile: {linkedin_url}")
