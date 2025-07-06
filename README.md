@@ -259,6 +259,7 @@ uv run main.py --no-headless --no-lazy-init
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--get-cookie` - Login with email and password and extract the LinkedIn cookie
 - `--cookie {cookie}` - Pass a specific LinkedIn cookie for login
+- `--help` - Show help
 
 **Claude Desktop:**
 ```**json**
