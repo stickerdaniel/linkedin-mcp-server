@@ -9,15 +9,15 @@ import logging
 
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.config.providers import (
+    clear_cookie_from_keyring,
     get_cookie_from_keyring,
     save_cookie_to_keyring,
-    clear_cookie_from_keyring,
 )
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 
 # Constants for cookie validation
-MIN_COOKIE_LENGTH = 20
-MIN_RAW_COOKIE_LENGTH = 10
+MIN_RAW_COOKIE_LENGTH = 110
+MIN_COOKIE_LENGTH = MIN_RAW_COOKIE_LENGTH + len("li_at=")
 
 logger = logging.getLogger(__name__)
 
