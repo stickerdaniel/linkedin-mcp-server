@@ -702,7 +702,7 @@ dev = [
 [[package]]
 name = "linkedin-scraper"
 version = "2.11.5"
-source = { git = "https://github.com/stickerdaniel/linkedin_scraper.git#1d6ff82f8b0950b060529b12102a674cfabad1bb" }
+source = { git = "https://github.com/stickerdaniel/linkedin_scraper.git#30f448df90af834bafb7d9e4caebfd0032605163" }
 dependencies = [
     { name = "lxml" },
     { name = "python-dotenv" },

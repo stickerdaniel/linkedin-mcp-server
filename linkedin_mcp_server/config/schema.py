@@ -19,6 +19,7 @@ class LinkedInConfig:
 
     email: Optional[str] = None
     password: Optional[str] = None
+    cookie: Optional[str] = None
     use_keyring: bool = True
 
 
@@ -30,6 +31,7 @@ class ServerConfig:
     lazy_init: bool = True
     debug: bool = False
     setup: bool = True
+    get_cookie: bool = False
     # HTTP transport configuration
     host: str = "127.0.0.1"
     port: int = 8000
