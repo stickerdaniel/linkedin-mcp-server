@@ -85,7 +85,7 @@
   "user_config": {
     "linkedin_cookie": {
       "title": "LinkedIn Cookie",
-      "description": "LinkedIn session cookie. Run 'docker run -it --rm -e LINKEDIN_EMAIL=your@email.com -e LINKEDIN_PASSWORD=yourpass stickerdaniel/linkedin-mcp-server --get-cookie' to obtain",
+      "description": "LinkedIn li_at session cookie. Follow the instructions in the README to get it.",
       "type": "string",
       "required": true,
       "sensitive": true
