@@ -1,10 +1,11 @@
 # src/linkedin_mcp_server/config/loaders.py
-import os
 import argparse
 import logging
+import os
 from typing import Optional
-from .schema import AppConfig
+
 from .providers import get_chromedriver_paths
+from .schema import AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,9 @@ def load_from_env(config: AppConfig) -> AppConfig:
 
     if password := os.environ.get("LINKEDIN_PASSWORD"):
         config.linkedin.password = password
+
+    if cookie := os.environ.get("LINKEDIN_COOKIE"):
+        config.linkedin.cookie = cookie
 
     # ChromeDriver configuration
     if chromedriver := os.environ.get("CHROMEDRIVER"):
@@ -124,6 +128,18 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Specify the path to the ChromeDriver executable",
     )
 
+    parser.add_argument(
+        "--get-cookie",
+        action="store_true",
+        help="Login with credentials and display cookie for Docker setup",
+    )
+
+    parser.add_argument(
+        "--cookie",
+        type=str,
+        help="Specify LinkedIn cookie directly",
+    )
+
     args = parser.parse_args()
 
     # Update configuration with parsed arguments
@@ -156,6 +172,11 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.chromedriver:
         config.chrome.chromedriver_path = args.chromedriver
+
+    if hasattr(args, "get_cookie") and args.get_cookie:
+        config.server.get_cookie = True
+    if args.cookie:
+        config.linkedin.cookie = args.cookie
 
     return config
 

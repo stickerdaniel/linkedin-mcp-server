@@ -84,7 +84,8 @@ def configure_logging(debug: bool = False, json_format: bool = False) -> None:
         debug: Whether to enable debug logging
         json_format: Whether to use JSON formatting for logs
     """
-    log_level = logging.DEBUG if debug else logging.INFO
+    # Set end-user appropriate logging level: WARNING for production, DEBUG for debug mode
+    log_level = logging.DEBUG if debug else logging.WARNING
 
     if json_format:
         formatter = MCPJSONFormatter()
@@ -104,6 +105,7 @@ def configure_logging(debug: bool = False, json_format: bool = False) -> None:
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 
-    # Set specific loggers
-    logging.getLogger("selenium").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    # Set specific loggers to reduce noise
+    logging.getLogger("selenium").setLevel(logging.ERROR)
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)

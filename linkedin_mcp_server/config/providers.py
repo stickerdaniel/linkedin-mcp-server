@@ -10,6 +10,7 @@ from keyring.errors import KeyringError
 SERVICE_NAME = "linkedin_mcp_server"
 EMAIL_KEY = "linkedin_email"
 PASSWORD_KEY = "linkedin_password"
+COOKIE_KEY = "linkedin_cookie"
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,27 @@ def clear_credentials_from_keyring() -> bool:
         return True
     except KeyringError as e:
         logger.error(f"Error clearing credentials: {e}")
+        return False
+
+
+def get_cookie_from_keyring() -> Optional[str]:
+    """Retrieve LinkedIn cookie from system keyring."""
+    return get_secret_from_keyring(COOKIE_KEY)
+
+
+def save_cookie_to_keyring(cookie: str) -> bool:
+    """Save LinkedIn cookie to system keyring."""
+    return set_secret_in_keyring(COOKIE_KEY, cookie)
+
+
+def clear_cookie_from_keyring() -> bool:
+    """Clear stored cookie from the keyring."""
+    try:
+        keyring.delete_password(SERVICE_NAME, COOKIE_KEY)
+        logger.info(f"Cookie removed from {get_keyring_name()}")
+        return True
+    except KeyringError as e:
+        logger.error(f"Error clearing cookie: {e}")
         return False
 
 
