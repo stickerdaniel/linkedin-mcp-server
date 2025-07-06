@@ -8,11 +8,11 @@ from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 
 from .providers import (
+    get_cookie_from_keyring,
     get_credentials_from_keyring,
     get_keyring_name,
-    save_credentials_to_keyring,
-    get_cookie_from_keyring,
     save_cookie_to_keyring,
+    save_credentials_to_keyring,
 )
 
 logger = logging.getLogger(__name__)
