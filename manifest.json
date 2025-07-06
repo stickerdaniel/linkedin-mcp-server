@@ -25,7 +25,7 @@
       "args": [
         "run", "-i", "--rm",
         "-e", "LINKEDIN_COOKIE=${user_config.linkedin_cookie}",
-        "stickerdaniel/linkedin-mcp-server"
+        "stickerdaniel/linkedin-mcp-server:latest"
       ]
     }
   },
