@@ -6,14 +6,11 @@ This module handles interactive setup flows and authentication configuration.
 """
 
 import logging
-import os
-import tempfile
 from contextlib import contextmanager
 from typing import Dict, Iterator
 
 import inquirer
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 
 from linkedin_mcp_server.authentication import store_authentication
 from linkedin_mcp_server.config import get_config
@@ -105,44 +102,13 @@ def temporary_chrome_driver() -> Iterator[webdriver.Chrome]:
     Raises:
         Exception: If driver creation fails
     """
-    config: AppConfig = get_config()
-
-    logger.info("Creating temporary browser for cookie capture...")
-
-    # Set up Chrome options for cookie capture
-    chrome_options = Options()
-    if config.chrome.headless:
-        chrome_options.add_argument("--headless=new")
-
-    # Add essential options
-    # chrome_options.add_argument("--no-sandbox")
-    # chrome_options.add_argument("--disable-dev-shm-usage")
-    # chrome_options.add_argument("--disable-gpu")
-    # chrome_options.add_argument("--window-size=3456,2234")
-
-    # Create a unique user data directory to avoid conflicts
-    user_data_dir = tempfile.mkdtemp(prefix="linkedin_mcp_setup_")
-    chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-    logger.debug(f"Using Chrome user data directory for setup: {user_data_dir}")
+    from linkedin_mcp_server.drivers.chrome import create_temporary_chrome_driver
 
     driver = None
     try:
-        # Create temporary driver
-        chromedriver_path = (
-            os.environ.get("CHROMEDRIVER_PATH") or config.chrome.chromedriver_path
-        )
-
-        if chromedriver_path:
-            from selenium.webdriver.chrome.service import Service
-
-            service = Service(executable_path=chromedriver_path)
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-        else:
-            driver = webdriver.Chrome(options=chrome_options)
-
-        driver.set_page_load_timeout(60)
+        # Create temporary driver using shared function
+        driver = create_temporary_chrome_driver()
         yield driver
-
     finally:
         if driver:
             driver.quit()
@@ -174,7 +140,7 @@ def capture_cookie_from_credentials(email: str, password: str) -> str:
             email,
             password,
             timeout=60,  # longer timeout for login (captcha, mobile verification, etc.)
-            interactive=interactive,  # Respect configuration setting
+            interactive=interactive,  # type: ignore  # Respect configuration setting
         )
 
         # Capture cookie
