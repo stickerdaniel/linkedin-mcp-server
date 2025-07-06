@@ -26,19 +26,22 @@ def register_company_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     async def get_company_profile(
-        linkedin_url: str, get_employees: bool = False
+        company_name: str, get_employees: bool = False
     ) -> Dict[str, Any]:
         """
         Scrape a company's LinkedIn profile.
 
         Args:
-            linkedin_url (str): The LinkedIn URL of the company's profile
+            company_name (str): LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
             get_employees (bool): Whether to scrape the company's employees (slower)
 
         Returns:
             Dict[str, Any]: Structured data from the company's profile
         """
         try:
+            # Construct clean LinkedIn URL from company name
+            linkedin_url = f"https://www.linkedin.com/company/{company_name}/"
+
             driver = safe_get_driver()
 
             logger.info(f"Scraping company: {linkedin_url}")

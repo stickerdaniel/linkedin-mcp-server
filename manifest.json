@@ -50,12 +50,17 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "company_url": {
+          "company_name": {
             "type": "string",
-            "description": "LinkedIn company URL (e.g., https://www.linkedin.com/company/docker/)"
+            "description": "LinkedIn company name (e.g., \"docker\", \"anthropic\", \"microsoft\")"
+          },
+          "get_employees": {
+            "type": "boolean",
+            "description": "Whether to scrape the company's employees (slower)",
+            "default": false
           }
         },
-        "required": ["company_url"]
+        "required": ["company_name"]
       }
     },
     {
