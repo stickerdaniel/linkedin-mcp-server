@@ -90,7 +90,6 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 6. Use this value as your `LINKEDIN_COOKIE` in the configuration
 
 </details>
-<br/>
 
 > [!NOTE]
 > The cookie will expire during the next 30 days. Just get the new cookie and update your config.
@@ -187,7 +186,6 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 6. Use this value as your `LINKEDIN_COOKIE` in the configuration
 
 </details>
-<br/>
 
 > [!NOTE]
 > The cookie will expire during the next 30 days. Just get the new cookie and update your config.
