@@ -36,12 +36,12 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "profile_url": {
+          "linkedin_username": {
             "type": "string",
-            "description": "LinkedIn profile URL (e.g., https://www.linkedin.com/in/stickerdaniel/)"
+            "description": "LinkedIn username (e.g., \"stickerdaniel\", \"john-doe-123456\")"
           }
         },
-        "required": ["profile_url"]
+        "required": ["linkedin_username"]
       }
     },
     {
