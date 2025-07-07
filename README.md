@@ -303,6 +303,8 @@ Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-serve
 ## Acknowledgements
 Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@joeyism](https://github.com/joeyism) and [FastMCP](https://gofastmcp.com/).
 
+⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+
 ## Star History
 
 <a href="https://www.star-history.com/#stickerdaniel/linkedin-mcp-server&Date">
@@ -318,7 +320,4 @@ Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@
 
 MIT License
 
-<br/>
-<br/>
-
-⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+<br>
