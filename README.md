@@ -250,7 +250,16 @@ uv run main.py --no-headless --no-lazy-init
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--get-cookie` - Login with email and password and extract the LinkedIn cookie
 - `--cookie {cookie}` - Pass a specific LinkedIn cookie for login
+- `--transport {stdio,streamable-http}` - Set transport mode
+- `--host HOST` - HTTP server host (default: 127.0.0.1)
+- `--port PORT` - HTTP server port (default: 8000)
+- `--path PATH` - HTTP server path (default: /mcp)
 - `--help` - Show help
+
+**HTTP Mode Example (for web-based MCP clients):**
+```bash
+uv run main.py --no-setup --transport streamable-http --host 127.0.0.1 --port 8000 --path /mcp
+```
 
 **Claude Desktop:**
 ```**json**
