@@ -5,6 +5,8 @@ from typing import Optional
 from .loaders import load_config
 from .providers import (
     clear_credentials_from_keyring,
+    clear_all_keychain_data,
+    check_keychain_data_exists,
     get_credentials_from_keyring,
     get_keyring_name,
     save_credentials_to_keyring,
@@ -45,5 +47,7 @@ __all__ = [
     "get_credentials_from_keyring",
     "save_credentials_to_keyring",
     "clear_credentials_from_keyring",
+    "clear_all_keychain_data",
+    "check_keychain_data_exists",
     "get_keyring_name",
 ]

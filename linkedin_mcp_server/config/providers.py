@@ -96,6 +96,68 @@ def clear_cookie_from_keyring() -> bool:
         return False
 
 
+def check_keychain_data_exists() -> Dict[str, bool]:
+    """Check what LinkedIn data exists in the keyring."""
+    credentials = get_credentials_from_keyring()
+    cookie = get_cookie_from_keyring()
+
+    return {
+        "has_email": credentials["email"] is not None,
+        "has_password": credentials["password"] is not None,
+        "has_cookie": cookie is not None,
+        "has_credentials": credentials["email"] is not None
+        or credentials["password"] is not None,
+        "has_any": credentials["email"] is not None
+        or credentials["password"] is not None
+        or cookie is not None,
+    }
+
+
+def clear_existing_keychain_data() -> Dict[str, bool]:
+    """Clear only existing LinkedIn data from the keyring."""
+    existing = check_keychain_data_exists()
+    results = {"credentials_cleared": False, "cookie_cleared": False}
+
+    # Only try to clear credentials if they exist
+    if existing["has_credentials"]:
+        try:
+            if existing["has_email"]:
+                keyring.delete_password(SERVICE_NAME, EMAIL_KEY)
+            if existing["has_password"]:
+                keyring.delete_password(SERVICE_NAME, PASSWORD_KEY)
+            results["credentials_cleared"] = True
+            logger.info(f"Credentials removed from {get_keyring_name()}")
+        except KeyringError as e:
+            logger.error(f"Error clearing credentials: {e}")
+    else:
+        results["credentials_cleared"] = True  # Nothing to clear = success
+
+    # Only try to clear cookie if it exists
+    if existing["has_cookie"]:
+        try:
+            keyring.delete_password(SERVICE_NAME, COOKIE_KEY)
+            results["cookie_cleared"] = True
+            logger.info(f"Cookie removed from {get_keyring_name()}")
+        except KeyringError as e:
+            logger.error(f"Error clearing cookie: {e}")
+    else:
+        results["cookie_cleared"] = True  # Nothing to clear = success
+
+    return results
+
+
+def clear_all_keychain_data() -> bool:
+    """Clear all stored LinkedIn data from the keyring (credentials + cookie)."""
+    results = clear_existing_keychain_data()
+
+    if results["credentials_cleared"] and results["cookie_cleared"]:
+        logger.info(f"All LinkedIn data cleared from {get_keyring_name()}")
+        return True
+    else:
+        logger.error("Failed to clear some LinkedIn data from keyring")
+        return False
+
+
 def get_chromedriver_paths() -> List[str]:
     """Get possible ChromeDriver paths based on the platform."""
     paths = [
