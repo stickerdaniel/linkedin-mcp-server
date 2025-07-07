@@ -33,6 +33,7 @@ class ServerConfig:
     debug: bool = False
     setup: bool = True
     get_cookie: bool = False
+    clear_keychain: bool = False
     # HTTP transport configuration
     host: str = "127.0.0.1"
     port: int = 8000
