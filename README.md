@@ -316,6 +316,6 @@ Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@
 
 ## License
 
-MIT License
+This project is licensed under the MIT License
 
 <br>
