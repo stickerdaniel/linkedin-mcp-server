@@ -28,7 +28,12 @@ from linkedin_mcp_server.authentication import (
     has_authentication,
 )
 from linkedin_mcp_server.cli import print_claude_config
-from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config import (
+    get_config,
+    clear_all_keychain_data,
+    check_keychain_data_exists,
+    get_keyring_name,
+)
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.drivers.chrome import close_all_drivers, get_or_create_driver
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError, LinkedInMCPError
@@ -63,6 +68,90 @@ def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
         raise KeyboardInterrupt("Transport selection cancelled by user")
 
     return answers["transport"]
+
+
+def clear_keychain_and_exit() -> None:
+    """Clear LinkedIn keychain data and exit."""
+    config = get_config()
+
+    # Configure logging - prioritize debug mode over non_interactive
+    configure_logging(
+        debug=config.server.debug,
+        json_format=config.chrome.non_interactive and not config.server.debug,
+    )
+
+    # Get version for logging
+    try:
+        import importlib.metadata
+
+        version = importlib.metadata.version("linkedin-mcp-server")
+    except Exception:
+        version = "unknown"
+
+    logger.info(f"LinkedIn MCP Server v{version} - Keychain Clear mode started")
+
+    # Check what exists in keychain
+    existing = check_keychain_data_exists()
+
+    # If nothing exists, inform user and exit
+    if not existing["has_any"]:
+        print("ℹ️  No LinkedIn data found in keychain")
+        print("Nothing to clear.")
+        sys.exit(0)
+
+    # Show confirmation prompt for existing items only
+    keyring_name = get_keyring_name()
+    print(f"🔑 Clear LinkedIn data from {keyring_name}?")
+    print("This will remove:")
+
+    items_to_remove = []
+    if existing["has_credentials"]:
+        credential_parts = []
+        if existing["has_email"]:
+            credential_parts.append("email")
+        if existing["has_password"]:
+            credential_parts.append("password")
+        items_to_remove.append(f"  • LinkedIn {' and '.join(credential_parts)}")
+
+    if existing["has_cookie"]:
+        items_to_remove.append("  • LinkedIn session cookie")
+
+    for item in items_to_remove:
+        print(item)
+    print()
+
+    # Get user confirmation
+    try:
+        confirmation = (
+            input("Are you sure you want to clear this keychain data? (y/N): ")
+            .strip()
+            .lower()
+        )
+        if confirmation not in ("y", "yes"):
+            print("❌ Operation cancelled")
+            sys.exit(0)
+    except KeyboardInterrupt:
+        print("\n❌ Operation cancelled")
+        sys.exit(0)
+
+    try:
+        # Clear all keychain data
+        success = clear_all_keychain_data()
+
+        if success:
+            logger.info("Keychain data cleared successfully")
+            print("✅ LinkedIn keychain data cleared successfully!")
+        else:
+            logger.error("Failed to clear keychain data")
+            print("❌ Failed to clear some keychain data - check logs for details")
+            sys.exit(1)
+
+    except Exception as e:
+        logger.error(f"Error clearing keychain: {e}")
+        print(f"❌ Error clearing keychain: {e}")
+        sys.exit(1)
+
+    sys.exit(0)
 
 
 def get_cookie_and_exit() -> None:
@@ -223,6 +312,10 @@ def main() -> None:
     # Suppress stdout if running in MCP stdio mode to avoid interfering with JSON-RPC protocol
     if should_suppress_stdout(config):
         sys.stdout = open(os.devnull, "w")
+
+    # Handle --clear-keychain flag immediately
+    if config.server.clear_keychain:
+        clear_keychain_and_exit()
 
     # Handle --get-cookie flag immediately
     if config.server.get_cookie:

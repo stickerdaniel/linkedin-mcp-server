@@ -144,6 +144,12 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
+        "--clear-keychain",
+        action="store_true",
+        help="Clear all stored LinkedIn credentials and cookies from system keychain",
+    )
+
+    parser.add_argument(
         "--cookie",
         type=str,
         help="Specify LinkedIn cookie directly",
@@ -185,6 +191,8 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if hasattr(args, "get_cookie") and args.get_cookie:
         config.server.get_cookie = True
+    if hasattr(args, "clear_keychain") and args.clear_keychain:
+        config.server.clear_keychain = True
     if args.cookie:
         config.linkedin.cookie = args.cookie
 
