@@ -307,3 +307,7 @@ MIT License
 Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@joeyism](https://github.com/joeyism) and [Model Context Protocol](https://modelcontextprotocol.io/).
 
 ⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=stickerdaniel/linkedin-mcp-server&type=Date)](https://www.star-history.com/#stickerdaniel/linkedin-mcp-server&Date)
