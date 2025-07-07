@@ -81,12 +81,7 @@ def clear_keychain_and_exit() -> None:
     )
 
     # Get version for logging
-    try:
-        import importlib.metadata
-
-        version = importlib.metadata.version("linkedin-mcp-server")
-    except Exception:
-        version = "unknown"
+    version = get_version()
 
     logger.info(f"LinkedIn MCP Server v{version} - Keychain Clear mode started")
 
@@ -165,12 +160,7 @@ def get_cookie_and_exit() -> None:
     )
 
     # Get version for logging
-    try:
-        import importlib.metadata
-
-        version = importlib.metadata.version("linkedin-mcp-server")
-    except Exception:
-        version = "unknown"
+    version = get_version()
 
     logger.info(f"LinkedIn MCP Server v{version} - Cookie Extraction mode started")
 
@@ -292,15 +282,24 @@ def initialize_driver_with_auth(authentication: str) -> None:
         raise e
 
 
+def get_version() -> str:
+    """Get version from pyproject.toml."""
+    try:
+        import tomllib
+        import os
+
+        pyproject_path = os.path.join(os.path.dirname(__file__), "pyproject.toml")
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+            return data["project"]["version"]
+    except Exception:
+        return "unknown"
+
+
 def main() -> None:
     """Main application entry point with clear phase separation."""
-    # Get version from package metadata
-    try:
-        import importlib.metadata
-
-        version = importlib.metadata.version("linkedin-mcp-server")
-    except Exception:
-        version = "unknown"
+    # Get version
+    version = get_version()
 
     logger.info(f"🔗 LinkedIn MCP Server v{version} 🔗")
     print(f"🔗 LinkedIn MCP Server v{version} 🔗")
