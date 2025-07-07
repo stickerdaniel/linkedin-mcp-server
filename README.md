@@ -249,6 +249,7 @@ uv run main.py --no-headless --no-lazy-init
 - `--no-setup` - Skip credential prompts (make sure to set `LINKEDIN_COOKIE` or `LINKEDIN_EMAIL` and `LINKEDIN_PASSWORD` in env or that you run the server once manually, so the authentication is stored in your OS keychain and you can run the server without credentials)
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--get-cookie` - Login with email and password and extract the LinkedIn cookie
+- `--clear-keychain` - Clear all stored LinkedIn credentials and cookies from system keychain
 - `--cookie {cookie}` - Pass a specific LinkedIn cookie for login
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
