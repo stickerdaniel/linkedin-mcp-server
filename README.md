@@ -140,8 +140,9 @@ docker run -i --rm \
 - Check if Docker is running: `docker ps`
 
 **Login issues:**
-- Ensure your LinkedIn credentials are set and correct
-- LinkedIn may require a login confirmation in the LinkedIn mobile app
+- Ensure your LinkedIn cookie is set and correct
+- Make sure you have only one active LinkedIn session per cookie at a time. Trying to open multiple sessions with the same cookie will result in a cookie invalid error.
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for --get-cookie
 - You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
 </details>
 
@@ -195,8 +196,9 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 - Check if Docker is running: `docker ps`
 
 **Login issues:**
-- Ensure your LinkedIn credentials are set and correct
-- LinkedIn may require a login confirmation in the LinkedIn mobile app
+- Ensure your LinkedIn cookie is set and correct
+- Make sure you have only one active LinkedIn session per cookie at a time. Trying to open multiple sessions with the same cookie will result in a cookie invalid error.
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for --get-cookie
 - You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
 </details>
 
@@ -283,6 +285,7 @@ uv run main.py --no-setup --transport streamable-http --host 127.0.0.1 --port 80
 - Use `--no-headless` to see browser actions (captcha challenge, LinkedIn mobile app 2fa, ...)
 - Add `--no-lazy-init` to attempt to login to LinkedIn immediately instead of waiting for the first tool call
 - Add `--debug` to see more detailed logging
+- Make sure you have only one active LinkedIn session per cookie at a time. Trying to open multiple sessions with the same cookie will result in a cookie invalid error. E.g. if you have a logged in browser session with a docker container, you can't use the same cookie to login with the local setup while the docker container is running / session is not closed.
 
 **ChromeDriver issues:**
 - Ensure Chrome and ChromeDriver versions match
