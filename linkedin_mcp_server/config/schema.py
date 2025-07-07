@@ -28,6 +28,7 @@ class ServerConfig:
     """MCP server configuration."""
 
     transport: Literal["stdio", "streamable-http"] = "stdio"
+    transport_explicitly_set: bool = False  # Track if transport was explicitly set
     lazy_init: bool = True
     debug: bool = False
     setup: bool = True

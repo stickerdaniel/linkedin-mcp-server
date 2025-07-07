@@ -61,6 +61,15 @@ def load_from_env(config: AppConfig) -> AppConfig:
     elif os.environ.get("LAZY_INIT") in ("0", "false", "False", "no", "No"):
         config.server.lazy_init = False
 
+    # Transport mode
+    if transport_env := os.environ.get("TRANSPORT"):
+        if transport_env == "stdio":
+            config.server.transport = "stdio"
+            config.server.transport_explicitly_set = True
+        elif transport_env == "streamable-http":
+            config.server.transport = "streamable-http"
+            config.server.transport_explicitly_set = True
+
     return config
 
 
@@ -160,6 +169,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.transport:
         config.server.transport = args.transport
+        config.server.transport_explicitly_set = True
 
     if args.host:
         config.server.host = args.host

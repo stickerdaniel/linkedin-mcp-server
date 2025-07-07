@@ -302,11 +302,18 @@ def main() -> None:
 
     # Phase 3: Server Runtime
     try:
-        # Decide transport
+        # Decide transport using the new config system
         transport = config.server.transport
-        if config.server.setup:
+
+        # Only show transport prompt if:
+        # a) we don't have --no-setup flag (config.server.setup is True) AND
+        # b) transport wasn't explicitly set via CLI/env
+        if config.server.setup and not config.server.transport_explicitly_set:
             print("\n🚀 Server ready! Choose transport mode:")
             transport = choose_transport_interactive()
+        elif not config.server.setup and not config.server.transport_explicitly_set:
+            # If we have --no-setup and no transport explicitly set, use default (stdio)
+            transport = config.server.transport
 
         # Print configuration for Claude if in setup mode and using stdio transport
         if config.server.setup and transport == "stdio":

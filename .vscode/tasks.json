@@ -85,22 +85,17 @@
             "problemMatcher": []
         },
         {
-            "label": "uv run main.py --transport streamable-http --no-setup",
+            "label": "uv run main.py --no-headless --no-lazy-init --transport streamable-http",
             "detail": "Start HTTP MCP server on localhost:8000/mcp",
             "type": "shell",
             "command": "uv",
             "args": [
                 "run",
                 "main.py",
+                "--no-headless",
+                "--no-lazy-init",
                 "--transport",
-                "streamable-http",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "8000",
-                "--path",
-                "/mcp",
-                "--no-setup"
+                "streamable-http"
             ],
             "isBackground": true,
             "group": {
