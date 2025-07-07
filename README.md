@@ -299,14 +299,9 @@ Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-serve
 <br/>
 <br/>
 
-## License
-
-MIT License
 
 ## Acknowledgements
-Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@joeyism](https://github.com/joeyism) and [Model Context Protocol](https://modelcontextprotocol.io/).
-
-⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@joeyism](https://github.com/joeyism) and [FastMCP](https://gofastmcp.com/).
 
 ## Star History
 
@@ -317,3 +312,13 @@ Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@
    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=stickerdaniel/linkedin-mcp-server&type=Date" />
  </picture>
 </a>
+
+
+## License
+
+MIT License
+
+<br/>
+<br/>
+
+⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
