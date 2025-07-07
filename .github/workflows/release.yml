@@ -152,7 +152,7 @@ jobs:
             ## Update Claude Desktop DXT Extension
             1. Download the `.dxt` file below
             2. Double-click to open in Claude Desktop
-            3. Configure with your LinkedIn credentials
+            3. Set your LinkedIn cookie
 
       - name: Summary
         run: |

@@ -1,6 +1,6 @@
 # LinkedIn MCP Server
 
-Through this LinkedIn MCP server, AI assistants like Claude can connect to your LinkedIn. Give access to profiles and companies, get your recommended jobs, or search for keywords. All from a Docker container on your local machine.
+Through this LinkedIn MCP server, AI assistants like Claude can connect to your LinkedIn. Give access to profiles and companies, get your recommended jobs, or search for keywords. All from a Docker container on your machine.
 
 ## Installation Methods
 
