@@ -1,6 +1,6 @@
 # LinkedIn MCP Server
 
-A Model Context Protocol (MCP) server that enables interaction with LinkedIn through Claude and other AI assistants. This server allows you to scrape LinkedIn profiles, companies, jobs, and perform job searches.
+Through this LinkedIn MCP server, AI assistants like ChatGPT and Claude can connect to your LinkedIn. Give access to profiles and companies, get your recommended jobs, or search for keywords. All from a Docker container on your local machine.
 
 ## Installation Methods
 
@@ -92,7 +92,7 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 </details>
 
 > [!NOTE]
-> The cookie will expire during the next 30 days. Just get the new cookie and update your config. There are also many cookie manager extensions that you can use to easily get the cookie.
+> The cookie will expire during the next 30 days. Just get the new cookie and update your client config. There are also many cookie manager extensions that you can use to quickly copy the cookie.
 
 ### Docker Setup Help
 <details>
@@ -184,7 +184,7 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 </details>
 
 > [!NOTE]
-> The cookie will expire during the next 30 days. Just get the new cookie and update your config. There are also many cookie manager extensions that you can use to easily get the cookie.
+> The cookie will expire during the next 30 days. Just get the new cookie and update your client config. There are also many cookie manager extensions that you can use to quickly copy the cookie.
 
 ### DXT Extension Setup Help
 <details>
