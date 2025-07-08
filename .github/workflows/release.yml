@@ -83,10 +83,11 @@ jobs:
             echo "✅ Created and pushed tag v$VERSION"
           fi
 
-      - name: Update manifest.json version
+      - name: Update manifest.json version and Docker image
         run: |
           set -e
           sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
+          sed -i 's/stickerdaniel\/linkedin-mcp-server:[^"]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' manifest.json
           echo "✅ Updated manifest.json to version $VERSION"
 
       - name: Commit manifest update
@@ -143,16 +144,23 @@ jobs:
           body: |
             For an installation guide, refer to the [README](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/README.md).
 
-            ## Update Docker Image
-            **Pull this release's image:**
+            ## 🐳 Update Docker Installation
+            **For users with Docker-based MCP client configurations:**
+            ```bash
+            docker pull stickerdaniel/linkedin-mcp-server:latest
+            ```
+            The `latest` tag will always point to the most recent release.
+            To pull this specific version, run:
             ```bash
             docker pull stickerdaniel/linkedin-mcp-server:${{ env.VERSION }}
             ```
 
-            ## Update Claude Desktop DXT Extension
+            ## 📦 Update DXT Extension Installation
+            **For Claude Desktop users:**
             1. Download the `.dxt` file below
-            2. Double-click to open in Claude Desktop
-            3. Set your LinkedIn cookie
+            2. Double-click to install in Claude Desktop
+
+            This DXT extension uses the pinned version `${{ env.VERSION }}`, the Docker image will be pulled automatically.
 
       - name: Summary
         run: |
