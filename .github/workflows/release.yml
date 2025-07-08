@@ -69,6 +69,27 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v1
 
+      - name: Update manifest.json version and Docker image
+        run: |
+          set -e
+          sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
+          sed -i 's/stickerdaniel\/linkedin-mcp-server:[^"]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' manifest.json
+          echo "✅ Updated manifest.json to version $VERSION"
+
+      - name: Commit manifest update
+        run: |
+          set -e
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add manifest.json
+          if git diff --staged --quiet; then
+            echo "ℹ️ No changes to commit"
+          else
+            git commit -m "chore(dxt): update manifest.json version to v$VERSION [skip ci]"
+            git push origin main
+            echo "✅ Committed manifest.json update"
+          fi
+
       - name: Create release tag
         run: |
           set -e
@@ -81,25 +102,6 @@ jobs:
             git tag "v$VERSION"
             git push origin "v$VERSION"
             echo "✅ Created and pushed tag v$VERSION"
-          fi
-
-      - name: Update manifest.json version and Docker image
-        run: |
-          set -e
-          sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
-          sed -i 's/stickerdaniel\/linkedin-mcp-server:[^"]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' manifest.json
-          echo "✅ Updated manifest.json to version $VERSION"
-
-      - name: Commit manifest update
-        run: |
-          set -e
-          git add manifest.json
-          if git diff --staged --quiet; then
-            echo "ℹ️ No changes to commit"
-          else
-            git commit -m "chore(dxt): update manifest.json version to v$VERSION [skip ci]"
-            git push origin main
-            echo "✅ Committed manifest.json update"
           fi
 
       - name: Set up Docker Buildx
