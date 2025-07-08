@@ -293,19 +293,22 @@ def get_version() -> str:
 def main() -> None:
     """Main application entry point with clear phase separation."""
 
-    # Get configuration
+    # Get configuration (this sets config.is_interactive)
     config = get_config()
 
     # Suppress stdout if running in MCP stdio mode to avoid interfering with JSON-RPC protocol
     if should_suppress_stdout(config):
         sys.stdout = open(os.devnull, "w")
 
-    # Get version
+    # Get version for logging/display
     version = get_version()
 
-    logger.info(f"🔗 LinkedIn MCP Server v{version} 🔗")
+    # Print banner
     print(f"🔗 LinkedIn MCP Server v{version} 🔗")
     print("=" * 40)
+
+    # Always log version (this goes to stderr/logging, not stdout)
+    logger.info(f"🔗 LinkedIn MCP Server v{version} 🔗")
 
     # Handle --clear-keychain flag immediately
     if config.server.clear_keychain:
