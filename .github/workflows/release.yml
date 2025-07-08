@@ -127,7 +127,9 @@ jobs:
         run: uv cache prune --ci
 
       - name: Build DXT extension
-        run: bunx @anthropic-ai/dxt pack
+        run: |
+          bunx @anthropic-ai/dxt pack
+          mv linkedin-mcp-server.dxt linkedin-mcp-server-v$VERSION.dxt
 
       - name: Create GitHub Release
         env:
