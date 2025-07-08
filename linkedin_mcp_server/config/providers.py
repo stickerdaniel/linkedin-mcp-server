@@ -1,8 +1,23 @@
 # src/linkedin_mcp_server/config/providers.py
-from typing import Dict, Optional, List
+"""
+Configuration providers for LinkedIn MCP Server.
+
+This module provides secure credential storage and retrieval using the system keyring,
+as well as utility functions for Chrome driver path detection. It abstracts the
+complexity of different keyring backends across macOS, Windows, and Linux.
+
+Key Functions:
+- System keyring integration for LinkedIn credentials and cookies
+- Chrome driver path detection across different operating systems
+- Secure credential management with proper error handling
+- Cross-platform compatibility with appropriate keyring backends
+"""
+
+import logging
 import os
 import platform
-import logging
+from typing import Dict, List, Optional
+
 import keyring
 from keyring.errors import KeyringError
 
