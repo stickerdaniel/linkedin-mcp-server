@@ -11,7 +11,9 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
 
 ## Usage Examples
-
+```
+What are my recommended jobs I can apply to?
+```
 ```
 Research the background of this candidate https://www.linkedin.com/in/stickerdaniel/
 ```
