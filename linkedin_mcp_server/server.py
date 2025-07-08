@@ -1,8 +1,10 @@
 # src/linkedin_mcp_server/server.py
 """
-MCP server setup for LinkedIn integration.
+FastMCP server implementation for LinkedIn integration with tool registration.
 
-This module creates the MCP server and registers all the LinkedIn tools.
+Creates and configures the MCP server with comprehensive LinkedIn tool suite including
+person profiles, company data, job information, and session management capabilities.
+Provides clean shutdown handling and resource cleanup.
 """
 
 import logging
