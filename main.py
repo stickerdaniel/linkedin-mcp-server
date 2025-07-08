@@ -289,6 +289,12 @@ def main() -> None:
     # Get configuration (this sets config.is_interactive)
     config = get_config()
 
+    # Configure logging FIRST (before any logger usage)
+    configure_logging(
+        log_level=config.server.log_level,
+        json_format=not config.is_interactive and config.server.log_level != "DEBUG",
+    )
+
     # Get version for logging/display
     version = get_version()
 
@@ -307,12 +313,6 @@ def main() -> None:
     # Handle --get-cookie flag immediately
     if config.server.get_cookie:
         get_cookie_and_exit()
-
-    # Configure logging
-    configure_logging(
-        log_level=config.server.log_level,
-        json_format=not config.is_interactive and config.server.log_level != "DEBUG",
-    )
 
     logger.debug(f"Server configuration: {config}")
 
