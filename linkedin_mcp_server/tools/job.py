@@ -1,8 +1,9 @@
 # src/linkedin_mcp_server/tools/job.py
 """
-Job tools for LinkedIn MCP server.
+LinkedIn job scraping tools with search and detail extraction capabilities.
 
-This module provides tools for scraping LinkedIn job postings and searches.
+Provides MCP tools for job posting details, job searches, and recommendations
+with comprehensive filtering and structured data extraction.
 """
 
 import logging

@@ -1,8 +1,9 @@
 # src/linkedin_mcp_server/cli.py
 """
-CLI utilities for LinkedIn MCP server.
+CLI utilities for LinkedIn MCP server configuration generation.
 
-This module handles the command-line interface and configuration management.
+Automatically generates Claude Desktop configuration with proper tool registration,
+environment variables, and clipboard integration for seamless setup workflow.
 """
 
 import json

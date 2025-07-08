@@ -52,13 +52,12 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
     "linkedin": {
       "command": "docker",
       "args": [
-        "run", "-i", "--rm",
+        "run", "--rm",
         "-e", "LINKEDIN_COOKIE",
-        "stickerdaniel/linkedin-mcp-server",
-        "--no-setup"
+        "stickerdaniel/linkedin-mcp-server"
       ],
       "env": {
-        "LINKEDIN_COOKIE": "XXXXXX...",
+        "LINKEDIN_COOKIE": "XXXXXX..."
       }
     }
   }
@@ -71,9 +70,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 
 **Run the server with the `--get-cookie` flag:**
 ```bash
-docker run -i --rm \
-  -e LINKEDIN_EMAIL="your.email@example.com" \
-  -e LINKEDIN_PASSWORD="your_password" \
+docker run -it --rm \
   stickerdaniel/linkedin-mcp-server \
   --get-cookie
 ```
@@ -103,8 +100,8 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 - **Streamable HTTP**: For a web-based MCP server
 
 **CLI Options:**
-- `--no-setup` - Skip interactive prompts (required for Docker/non-interactive environments)
-- `--debug` - Enable detailed logging
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
+- `--debug` - Enable debug logging (equivalent to --log-level DEBUG)
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
@@ -115,12 +112,12 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 
 **HTTP Mode Example (for web-based MCP clients):**
 ```bash
-docker run -i --rm \
+docker run -it --rm \
   -e LINKEDIN_EMAIL="your.email@example.com" \
   -e LINKEDIN_PASSWORD="your_password" \
   -p 8080:8080 \
   stickerdaniel/linkedin-mcp-server \
-  --no-setup --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
+  --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
 **Test with mcp inspector:**
 1. Install and run mcp inspector ```bunx @modelcontextprotocol/inspector```
@@ -164,9 +161,7 @@ docker run -i --rm \
 
 **Run the server with the `--get-cookie` flag:**
 ```bash
-docker run -i --rm \
-  -e LINKEDIN_EMAIL="your.email@example.com" \
-  -e LINKEDIN_PASSWORD="your_password" \
+docker run -it --rm \
   stickerdaniel/linkedin-mcp-server \
   --get-cookie
 ```
@@ -247,8 +242,8 @@ uv run main.py --no-headless --no-lazy-init
 
 **CLI Options:**
 - `--no-headless` - Show browser window (debugging)
-- `--debug` - Enable detailed logging
-- `--no-setup` - Skip credential prompts (make sure to set `LINKEDIN_COOKIE` or `LINKEDIN_EMAIL` and `LINKEDIN_PASSWORD` in env or that you run the server once manually, so the authentication is stored in your OS keychain and you can run the server without credentials)
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
+- `--debug` - Enable debug logging (equivalent to --log-level DEBUG)
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--get-cookie` - Login with email and password and extract the LinkedIn cookie
 - `--clear-keychain` - Clear all stored LinkedIn credentials and cookies from system keychain
@@ -261,7 +256,7 @@ uv run main.py --no-headless --no-lazy-init
 
 **HTTP Mode Example (for web-based MCP clients):**
 ```bash
-uv run main.py --no-setup --transport streamable-http --host 127.0.0.1 --port 8000 --path /mcp
+uv run main.py --transport streamable-http --host 127.0.0.1 --port 8000 --path /mcp
 ```
 
 **Claude Desktop:**
@@ -270,7 +265,7 @@ uv run main.py --no-setup --transport streamable-http --host 127.0.0.1 --port 80
   "mcpServers": {
     "linkedin": {
       "command": "uv",
-      "args": ["--directory", "/path/to/linkedin-mcp-server", "run", "main.py", "--no-setup"]
+      "args": ["--directory", "/path/to/linkedin-mcp-server", "run", "main.py"]
     }
   }
 }
@@ -284,7 +279,7 @@ uv run main.py --no-setup --transport streamable-http --host 127.0.0.1 --port 80
 **Login/Scraping issues:**
 - Use `--no-headless` to see browser actions (captcha challenge, LinkedIn mobile app 2fa, ...)
 - Add `--no-lazy-init` to attempt to login to LinkedIn immediately instead of waiting for the first tool call
-- Add `--debug` to see more detailed logging
+- Add `--log-level DEBUG` to see more detailed logging
 - Make sure you have only one active LinkedIn session per cookie at a time. Trying to open multiple sessions with the same cookie will result in a cookie invalid error. E.g. if you have a logged in browser session with a docker container, you can't use the same cookie to login with the local setup while the docker container is running / session is not closed.
 
 **ChromeDriver issues:**

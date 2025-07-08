@@ -1,8 +1,10 @@
+# src/linkedin_mcp_server/error_handler.py
 """
-Centralized error handling for LinkedIn MCP Server tools.
+Centralized error handling for LinkedIn MCP Server with structured responses.
 
-This module provides a DRY approach to error handling across all tools,
-eliminating code duplication and ensuring consistent error responses.
+Provides DRY approach to error handling across all tools with consistent MCP response
+format, specific LinkedIn error categorization, and proper logging integration.
+Eliminates code duplication while ensuring user-friendly error messages.
 """
 
 import logging

@@ -1,8 +1,10 @@
+# linkedin_mcp_server/logging_config.py
 """
-Logging configuration for LinkedIn MCP Server.
+Logging configuration for LinkedIn MCP Server with format options.
 
-This module provides structured JSON logging for better integration
-with MCP clients and monitoring systems.
+Provides JSON and compact logging formats for different deployment scenarios.
+JSON format for production MCP integration, compact format for development.
+Includes proper logger hierarchy and external library noise reduction.
 """
 
 import json
@@ -77,15 +79,15 @@ class CompactFormatter(logging.Formatter):
         return f"{record_copy.asctime} - {record_copy.name} - {record.levelname} - {record.getMessage()}"
 
 
-def configure_logging(debug: bool = False, json_format: bool = False) -> None:
+def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> None:
     """Configure logging for the LinkedIn MCP Server.
 
     Args:
-        debug: Whether to enable debug logging
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
         json_format: Whether to use JSON formatting for logs
     """
-    # Set end-user appropriate logging level: WARNING for production, DEBUG for debug mode
-    log_level = logging.DEBUG if debug else logging.WARNING
+    # Convert string to logging level
+    numeric_level = getattr(logging, log_level.upper(), logging.WARNING)
 
     if json_format:
         formatter = MCPJSONFormatter()
@@ -94,7 +96,7 @@ def configure_logging(debug: bool = False, json_format: bool = False) -> None:
 
     # Configure root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
+    root_logger.setLevel(numeric_level)
 
     # Remove existing handlers
     for handler in root_logger.handlers[:]:

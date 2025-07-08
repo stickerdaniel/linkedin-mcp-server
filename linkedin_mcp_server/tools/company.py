@@ -1,8 +1,9 @@
 # src/linkedin_mcp_server/tools/company.py
 """
-Company profile tools for LinkedIn MCP server.
+LinkedIn company profile scraping tools with employee data extraction.
 
-This module provides tools for scraping LinkedIn company profiles.
+Provides MCP tools for extracting company information, employee lists, and company
+insights from LinkedIn with configurable depth and comprehensive error handling.
 """
 
 import logging

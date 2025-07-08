@@ -1,11 +1,12 @@
 # main.py
 """
-LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration.
+LinkedIn MCP Server - Main application entry point.
 
-Clean architecture with clear phase separation:
-1. Authentication Setup Phase
-2. Driver Management Phase
-3. Server Runtime Phase
+Implements a three-phase startup:
+1. Authentication Setup Phase - Credential validation and session establishment
+2. Driver Management Phase - Chrome WebDriver initialization with LinkedIn login
+3. Server Runtime Phase - MCP server startup with transport selection
+
 """
 
 import logging
@@ -23,15 +24,11 @@ from linkedin_scraper.exceptions import (
     TwoFactorAuthError,
 )
 
-from linkedin_mcp_server.authentication import (
-    ensure_authentication,
-    has_authentication,
-)
 from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.config import (
-    get_config,
-    clear_all_keychain_data,
     check_keychain_data_exists,
+    clear_all_keychain_data,
+    get_config,
     get_keyring_name,
 )
 from linkedin_mcp_server.config.schema import AppConfig
@@ -46,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 def should_suppress_stdout(config: AppConfig) -> bool:
     """Check if stdout should be suppressed to avoid interfering with MCP stdio protocol."""
-    return not config.server.setup and config.server.transport == "stdio"
+    return not config.is_interactive and config.server.transport == "stdio"
 
 
 def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
@@ -74,10 +71,10 @@ def clear_keychain_and_exit() -> None:
     """Clear LinkedIn keychain data and exit."""
     config = get_config()
 
-    # Configure logging - prioritize debug mode over non_interactive
+    # Configure logging
     configure_logging(
-        debug=config.server.debug,
-        json_format=config.chrome.non_interactive and not config.server.debug,
+        log_level=config.server.log_level,
+        json_format=not config.is_interactive and config.server.log_level != "DEBUG",
     )
 
     # Get version for logging
@@ -153,10 +150,10 @@ def get_cookie_and_exit() -> None:
     """Get LinkedIn cookie and exit (for Docker setup)."""
     config = get_config()
 
-    # Configure logging - prioritize debug mode over non_interactive
+    # Configure logging
     configure_logging(
-        debug=config.server.debug,
-        json_format=config.chrome.non_interactive and not config.server.debug,
+        log_level=config.server.log_level,
+        json_format=not config.is_interactive and config.server.log_level != "DEBUG",
     )
 
     # Get version for logging
@@ -231,23 +228,20 @@ def ensure_authentication_ready() -> str:
     """
     config = get_config()
 
-    # Check if authentication already exists
-    if has_authentication():
-        try:
-            return ensure_authentication()
-        except CredentialsNotFoundError:
-            # Authentication exists but might be invalid, continue to setup
-            pass
+    # Check if we already have a cookie in config (from keyring, env, or args)
+    if config.linkedin.cookie:
+        logger.info("Using LinkedIn cookie from configuration")
+        return config.linkedin.cookie
 
-    # If in non-interactive mode and no auth, fail immediately
-    if config.chrome.non_interactive:
+    # If in non-interactive mode and no cookie, fail immediately
+    if not config.is_interactive:
         raise CredentialsNotFoundError(
             "No LinkedIn cookie found for non-interactive mode. You can:\n"
-            "  1. Set LINKEDIN_COOKIE environment variable with a valid LinkedIn session cookie\n"
-            "  2. Run with --get-cookie to extract a cookie using email/password"
+            "  1. Run with --get-cookie to extract a cookie using email/password\n"
+            "  2. Set LINKEDIN_COOKIE environment variable with a valid LinkedIn session cookie"
         )
 
-    # Run interactive setup
+    # Run interactive setup to get credentials and obtain cookie
     logger.info("Setting up LinkedIn authentication...")
     return run_interactive_setup()
 
@@ -285,8 +279,8 @@ def initialize_driver_with_auth(authentication: str) -> None:
 def get_version() -> str:
     """Get version from pyproject.toml."""
     try:
-        import tomllib
         import os
+        import tomllib
 
         pyproject_path = os.path.join(os.path.dirname(__file__), "pyproject.toml")
         with open(pyproject_path, "rb") as f:
@@ -298,12 +292,6 @@ def get_version() -> str:
 
 def main() -> None:
     """Main application entry point with clear phase separation."""
-    # Get version
-    version = get_version()
-
-    logger.info(f"🔗 LinkedIn MCP Server v{version} 🔗")
-    print(f"🔗 LinkedIn MCP Server v{version} 🔗")
-    print("=" * 40)
 
     # Get configuration
     config = get_config()
@@ -311,6 +299,13 @@ def main() -> None:
     # Suppress stdout if running in MCP stdio mode to avoid interfering with JSON-RPC protocol
     if should_suppress_stdout(config):
         sys.stdout = open(os.devnull, "w")
+
+    # Get version
+    version = get_version()
+
+    logger.info(f"🔗 LinkedIn MCP Server v{version} 🔗")
+    print(f"🔗 LinkedIn MCP Server v{version} 🔗")
+    print("=" * 40)
 
     # Handle --clear-keychain flag immediately
     if config.server.clear_keychain:
@@ -320,10 +315,10 @@ def main() -> None:
     if config.server.get_cookie:
         get_cookie_and_exit()
 
-    # Configure logging - prioritize debug mode over non_interactive
+    # Configure logging
     configure_logging(
-        debug=config.server.debug,
-        json_format=config.chrome.non_interactive and not config.server.debug,
+        log_level=config.server.log_level,
+        json_format=not config.is_interactive and config.server.log_level != "DEBUG",
     )
 
     logger.debug(f"Server configuration: {config}")
@@ -335,7 +330,7 @@ def main() -> None:
         logger.info("Authentication ready")
     except CredentialsNotFoundError as e:
         logger.error(f"Authentication setup failed: {e}")
-        if config.chrome.non_interactive:
+        if not config.is_interactive:
             print("\n❌ LinkedIn cookie required for Docker/non-interactive mode")
         else:
             print(
@@ -358,7 +353,7 @@ def main() -> None:
 
         # Cookie was already cleared in driver layer
         # In interactive mode, try setup again
-        if not config.chrome.non_interactive and config.server.setup:
+        if config.is_interactive:
             print(f"\n❌ {str(e)}")
             print("🔄 Starting interactive setup for new authentication...")
             try:
@@ -398,17 +393,17 @@ def main() -> None:
         transport = config.server.transport
 
         # Only show transport prompt if:
-        # a) we don't have --no-setup flag (config.server.setup is True) AND
+        # a) running in interactive environment AND
         # b) transport wasn't explicitly set via CLI/env
-        if config.server.setup and not config.server.transport_explicitly_set:
+        if config.is_interactive and not config.server.transport_explicitly_set:
             print("\n🚀 Server ready! Choose transport mode:")
             transport = choose_transport_interactive()
-        elif not config.server.setup and not config.server.transport_explicitly_set:
-            # If we have --no-setup and no transport explicitly set, use default (stdio)
+        elif not config.is_interactive and not config.server.transport_explicitly_set:
+            # If non-interactive and no transport explicitly set, use default (stdio)
             transport = config.server.transport
 
-        # Print configuration for Claude if in setup mode and using stdio transport
-        if config.server.setup and transport == "stdio":
+        # Print configuration for Claude if in interactive mode and using stdio transport
+        if config.is_interactive and transport == "stdio":
             print_claude_config()
 
         # Create and run the MCP server

@@ -1,8 +1,9 @@
 # src/linkedin_mcp_server/tools/person.py
 """
-Person profile tools for LinkedIn MCP server.
+LinkedIn person profile scraping tools with structured data extraction.
 
-This module provides tools for scraping LinkedIn person profiles.
+Provides MCP tools for extracting comprehensive LinkedIn profile information including
+experience, education, skills, and contact details with proper error handling.
 """
 
 import logging

@@ -1,8 +1,10 @@
+# src/linkedin_mcp_server/exceptions.py
 """
-Custom exceptions for LinkedIn MCP Server.
+Custom exceptions for LinkedIn MCP Server with specific error categorization.
 
-This module defines specific exception types for different error scenarios
-to provide better error handling and reporting to MCP clients.
+Defines hierarchical exception types for different error scenarios including
+authentication failures, driver initialization issues, and MCP client reporting.
+Provides structured error handling for better debugging and user experience.
 """
 
 

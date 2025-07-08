@@ -23,7 +23,7 @@
     "mcp_config": {
       "command": "docker",
       "args": [
-        "run", "-i", "--rm",
+        "run", "--rm",
         "-e", "LINKEDIN_COOKIE=${user_config.linkedin_cookie}",
         "stickerdaniel/linkedin-mcp-server:latest"
       ]

@@ -1,8 +1,10 @@
 # linkedin_mcp_server/setup.py
 """
-Interactive setup module for LinkedIn MCP Server.
+Interactive setup flows for LinkedIn MCP Server authentication configuration.
 
-This module handles interactive setup flows and authentication configuration.
+Handles credential collection, cookie extraction, validation, and secure storage
+with multiple authentication methods including cookie input and credential-based login.
+Provides temporary driver management and comprehensive retry logic.
 """
 
 import logging
@@ -14,6 +16,7 @@ from selenium import webdriver
 
 from linkedin_mcp_server.authentication import store_authentication
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.messages import ErrorMessages, InfoMessages
 from linkedin_mcp_server.config.providers import (
     get_credentials_from_keyring,
     save_credentials_to_keyring,
@@ -41,19 +44,15 @@ def get_credentials_for_setup() -> Dict[str, str]:
         logger.info("Using LinkedIn credentials from configuration")
         return {"email": config.linkedin.email, "password": config.linkedin.password}
 
-    # Second, try keyring if enabled
-    if config.linkedin.use_keyring:
-        credentials = get_credentials_from_keyring()
-        if credentials["email"] and credentials["password"]:
-            logger.info("Using LinkedIn credentials from keyring")
-            return {"email": credentials["email"], "password": credentials["password"]}
+    # Second, try keyring
+    credentials = get_credentials_from_keyring()
+    if credentials["email"] and credentials["password"]:
+        logger.info("Using LinkedIn credentials from keyring")
+        return {"email": credentials["email"], "password": credentials["password"]}
 
     # If in non-interactive mode and no credentials found, raise error
-    if config.chrome.non_interactive:
-        raise CredentialsNotFoundError(
-            "No LinkedIn credentials found. Please provide credentials via "
-            "environment variables (LINKEDIN_EMAIL, LINKEDIN_PASSWORD) for setup."
-        )
+    if not config.is_interactive:
+        raise CredentialsNotFoundError(ErrorMessages.no_credentials_found())
 
     # Otherwise, prompt for credentials
     return prompt_for_credentials()
@@ -69,8 +68,6 @@ def prompt_for_credentials() -> Dict[str, str]:
     Raises:
         KeyboardInterrupt: If user cancels input
     """
-    config: AppConfig = get_config()
-
     print("🔑 LinkedIn credentials required for setup")
     questions = [
         inquirer.Text("email", message="LinkedIn Email"),
@@ -81,12 +78,11 @@ def prompt_for_credentials() -> Dict[str, str]:
     if not credentials:
         raise KeyboardInterrupt("Credential input was cancelled")
 
-    # Store credentials securely in keyring if enabled
-    if config.linkedin.use_keyring:
-        if save_credentials_to_keyring(credentials["email"], credentials["password"]):
-            logger.info("Credentials stored securely in keyring")
-        else:
-            logger.warning("Could not store credentials in system keyring")
+    # Store credentials securely in keyring
+    if save_credentials_to_keyring(credentials["email"], credentials["password"]):
+        logger.info(InfoMessages.credentials_stored_securely())
+    else:
+        logger.warning(InfoMessages.keyring_storage_failed())
 
     return credentials
 
@@ -133,7 +129,7 @@ def capture_cookie_from_credentials(email: str, password: str) -> str:
         from linkedin_scraper import actions
 
         config: AppConfig = get_config()
-        interactive: bool = not config.chrome.non_interactive
+        interactive: bool = config.is_interactive
         logger.info(f"Logging in to LinkedIn... Interactive: {interactive}")
         actions.login(
             driver,

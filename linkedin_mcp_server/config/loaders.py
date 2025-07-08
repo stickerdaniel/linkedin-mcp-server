@@ -1,13 +1,56 @@
 # src/linkedin_mcp_server/config/loaders.py
+"""
+Configuration loading and argument parsing for LinkedIn MCP Server.
+
+This module implements the layered configuration system that loads settings from
+multiple sources in priority order: CLI arguments → environment variables → keyring
+→ defaults. It provides the main configuration loading logic and argument parsing
+for the MCP server.
+
+Key Functions:
+- Command-line argument parsing with comprehensive options
+- Environment variable parsing with type conversion
+- Integration with keyring providers for secure credential loading
+- Chrome driver path auto-detection and validation
+- Layered configuration with proper priority handling
+"""
+
 import argparse
 import logging
 import os
-from typing import Optional
+import sys
+from typing import Any, Dict, Optional
 
-from .providers import get_chromedriver_paths
+from .providers import (
+    get_chromedriver_paths,
+    get_cookie_from_keyring,
+    get_credentials_from_keyring,
+)
 from .schema import AppConfig
 
 logger = logging.getLogger(__name__)
+
+# Boolean value mappings for environment variable parsing
+TRUTHY_VALUES = ("1", "true", "True", "yes", "Yes")
+FALSY_VALUES = ("0", "false", "False", "no", "No")
+
+
+class EnvironmentKeys:
+    """Environment variable names used by the application."""
+
+    # LinkedIn configuration
+    LINKEDIN_EMAIL = "LINKEDIN_EMAIL"
+    LINKEDIN_PASSWORD = "LINKEDIN_PASSWORD"
+    LINKEDIN_COOKIE = "LINKEDIN_COOKIE"
+
+    # Chrome configuration
+    CHROMEDRIVER = "CHROMEDRIVER"
+    HEADLESS = "HEADLESS"
+
+    # Server configuration
+    LOG_LEVEL = "LOG_LEVEL"
+    LAZY_INIT = "LAZY_INIT"
+    TRANSPORT = "TRANSPORT"
 
 
 def find_chromedriver() -> Optional[str]:
@@ -25,50 +68,83 @@ def find_chromedriver() -> Optional[str]:
     return None
 
 
+def is_interactive_environment() -> bool:
+    """
+    Detect if running in an interactive environment (TTY).
+
+    Returns:
+        bool: True if both stdin and stdout are TTY devices
+    """
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, OSError):
+        # Handle cases where stdin/stdout might not have isatty() or fail
+        # This can happen in some containers, test environments, or non-standard setups
+        return False
+
+
+def load_from_keyring(config: AppConfig) -> AppConfig:
+    """Load configuration from system keyring."""
+    # Load LinkedIn cookie first (higher priority)
+    if cookie := get_cookie_from_keyring():
+        config.linkedin.cookie = cookie
+        logger.debug("LinkedIn cookie loaded from keyring")
+
+    # Load LinkedIn credentials if cookie not available
+    if not config.linkedin.cookie:
+        credentials = get_credentials_from_keyring()
+        if credentials["email"]:
+            config.linkedin.email = credentials["email"]
+            logger.debug("LinkedIn email loaded from keyring")
+        if credentials["password"]:
+            config.linkedin.password = credentials["password"]
+            logger.debug("LinkedIn password loaded from keyring")
+
+    return config
+
+
 def load_from_env(config: AppConfig) -> AppConfig:
     """Load configuration from environment variables."""
+
     # LinkedIn credentials
-    if email := os.environ.get("LINKEDIN_EMAIL"):
+    if email := os.environ.get(EnvironmentKeys.LINKEDIN_EMAIL):
         config.linkedin.email = email
 
-    if password := os.environ.get("LINKEDIN_PASSWORD"):
+    if password := os.environ.get(EnvironmentKeys.LINKEDIN_PASSWORD):
         config.linkedin.password = password
 
-    if cookie := os.environ.get("LINKEDIN_COOKIE"):
+    if cookie := os.environ.get(EnvironmentKeys.LINKEDIN_COOKIE):
         config.linkedin.cookie = cookie
 
     # ChromeDriver configuration
-    if chromedriver := os.environ.get("CHROMEDRIVER"):
+    if chromedriver := os.environ.get(EnvironmentKeys.CHROMEDRIVER):
         config.chrome.chromedriver_path = chromedriver
 
-    # Debug mode
-    if os.environ.get("DEBUG") in ("1", "true", "True", "yes", "Yes"):
-        config.server.debug = True
+    # Log level
+    if log_level_env := os.environ.get(EnvironmentKeys.LOG_LEVEL):
+        log_level_upper = log_level_env.upper()
+        if log_level_upper in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            config.server.log_level = log_level_upper
 
     # Headless mode
-    if os.environ.get("HEADLESS") in ("0", "false", "False", "no", "No"):
+    if os.environ.get(EnvironmentKeys.HEADLESS) in FALSY_VALUES:
         config.chrome.headless = False
-    elif os.environ.get("HEADLESS") in ("1", "true", "True", "yes", "Yes"):
+    elif os.environ.get(EnvironmentKeys.HEADLESS) in TRUTHY_VALUES:
         config.chrome.headless = True
 
-    # Non-interactive mode
-    if os.environ.get("NON_INTERACTIVE") in ("1", "true", "True", "yes", "Yes"):
-        config.chrome.non_interactive = True
-
     # Lazy initialization
-    if os.environ.get("LAZY_INIT") in ("1", "true", "True", "yes", "Yes"):
+    if os.environ.get(EnvironmentKeys.LAZY_INIT) in TRUTHY_VALUES:
         config.server.lazy_init = True
-    elif os.environ.get("LAZY_INIT") in ("0", "false", "False", "no", "No"):
+    elif os.environ.get(EnvironmentKeys.LAZY_INIT) in FALSY_VALUES:
         config.server.lazy_init = False
 
     # Transport mode
-    if transport_env := os.environ.get("TRANSPORT"):
+    if transport_env := os.environ.get(EnvironmentKeys.TRANSPORT):
+        config.server.transport_explicitly_set = True
         if transport_env == "stdio":
             config.server.transport = "stdio"
-            config.server.transport_explicitly_set = True
         elif transport_env == "streamable-http":
             config.server.transport = "streamable-http"
-            config.server.transport_explicitly_set = True
 
     return config
 
@@ -86,15 +162,16 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode with additional logging",
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Set logging level (default: WARNING)",
     )
 
+    # Keep --debug for backward compatibility (maps to DEBUG level)
     parser.add_argument(
-        "--no-setup",
+        "--debug",
         action="store_true",
-        help="Skip printing configuration information and interactive setup",
+        help="Enable debug logging (equivalent to --log-level DEBUG)",
     )
 
     parser.add_argument(
@@ -161,14 +238,12 @@ def load_from_args(config: AppConfig) -> AppConfig:
     if args.no_headless:
         config.chrome.headless = False
 
-    if args.debug:
-        config.server.debug = True
-
-    if args.no_setup:
-        config.server.setup = False
-        config.chrome.non_interactive = (
-            True  # Automatically set when --no-setup is used
-        )
+    # Handle log level arguments
+    if args.log_level:
+        config.server.log_level = args.log_level
+    elif args.debug:
+        # Backward compatibility: --debug maps to DEBUG level
+        config.server.log_level = "DEBUG"
 
     if args.no_lazy_init:
         config.server.lazy_init = False
@@ -189,9 +264,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
     if args.chromedriver:
         config.chrome.chromedriver_path = args.chromedriver
 
-    if hasattr(args, "get_cookie") and args.get_cookie:
+    if args.get_cookie:
         config.server.get_cookie = True
-    if hasattr(args, "clear_keychain") and args.clear_keychain:
+    if args.clear_keychain:
         config.server.clear_keychain = True
     if args.cookie:
         config.linkedin.cookie = args.cookie
@@ -199,20 +274,54 @@ def load_from_args(config: AppConfig) -> AppConfig:
     return config
 
 
+def detect_environment() -> Dict[str, Any]:
+    """
+    Detect environment settings without side effects.
+
+    Returns:
+        Dict containing detected environment settings
+    """
+    return {
+        "chromedriver_path": find_chromedriver(),
+        "is_interactive": is_interactive_environment(),
+    }
+
+
 def load_config() -> AppConfig:
     """
-    Load configuration from all sources with defined precedence:
+    Load configuration with clear precedence order.
+
+    Configuration is loaded in the following priority order:
     1. Command line arguments (highest priority)
     2. Environment variables
-    3. Default values and auto-detection (lowest priority)
+    3. System keyring
+    4. Auto-detection (ChromeDriver, interactive mode)
+    5. Defaults (lowest priority)
+
+    Returns:
+        AppConfig: Fully configured application settings
+
+    Raises:
+        ConfigurationError: If configuration validation fails
     """
     # Start with default configuration
     config = AppConfig()
 
-    # Auto-detect ChromeDriver path
-    if chromedriver_path := find_chromedriver():
-        config.chrome.chromedriver_path = chromedriver_path
-        logger.debug(f"Auto-detected ChromeDriver at: {chromedriver_path}")
+    # Apply environment detection
+    env_settings = detect_environment()
+
+    # Set detected values if not already configured
+    if env_settings["chromedriver_path"] and not config.chrome.chromedriver_path:
+        config.chrome.chromedriver_path = env_settings["chromedriver_path"]
+        logger.debug(
+            f"Auto-detected ChromeDriver found at: {env_settings['chromedriver_path']}"
+        )
+
+    config.is_interactive = env_settings["is_interactive"]
+    logger.debug(f"Auto-detected interactive mode: {config.is_interactive}")
+
+    # Load from keyring (lowest override priority)
+    config = load_from_keyring(config)
 
     # Override with environment variables
     config = load_from_env(config)
