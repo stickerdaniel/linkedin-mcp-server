@@ -25,5 +25,5 @@ RUN adduser -D -u 1000 mcpuser && chown -R mcpuser:mcpuser /app
 USER mcpuser
 
 # Set entrypoint and default arguments
-ENTRYPOINT ["uv", "run", "python", "main.py", "--no-setup"]
+ENTRYPOINT ["uv", "run", "main.py"]
 CMD []

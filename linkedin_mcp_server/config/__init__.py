@@ -1,4 +1,20 @@
 # src/linkedin_mcp_server/config/__init__.py
+"""
+Configuration system initialization and management for LinkedIn MCP Server.
+
+This module provides the main configuration interface and implements the singleton
+pattern for configuration management. It orchestrates the loading of configuration
+from multiple sources and provides a unified API for accessing configuration
+throughout the application.
+
+Key Features:
+- Singleton pattern for global configuration access
+- Integration with all configuration providers and loaders
+- Unified API for configuration access across the application
+- Proper initialization and lifecycle management
+- Support for configuration reloading and updates
+"""
+
 import logging
 from typing import Optional
 

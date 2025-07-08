@@ -1,9 +1,10 @@
 # linkedin_mcp_server/drivers/chrome.py
 """
-Chrome driver management for LinkedIn scraping.
+Chrome WebDriver management for LinkedIn scraping with session persistence.
 
-This module handles the creation and management of Chrome WebDriver instances.
-Simplified to focus only on driver management without authentication setup.
+Handles Chrome WebDriver creation, configuration, authentication, and lifecycle management.
+Implements singleton pattern for driver reuse across tools with automatic cleanup.
+Provides cookie-based authentication and comprehensive error handling.
 """
 
 import logging
