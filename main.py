@@ -420,7 +420,7 @@ def main() -> None:
             mcp.run(transport=transport)
 
     except KeyboardInterrupt:
-        print("⏹️  Server stopped by user")
+        print("\n⏹️  Server stopped by user")
         exit_gracefully(0)
     except Exception as e:
         logger.error(f"Server runtime error: {e}")
@@ -430,7 +430,7 @@ def main() -> None:
 
 def exit_gracefully(exit_code: int = 0) -> None:
     """Exit the application gracefully, cleaning up resources."""
-    print("\n👋 Shutting down LinkedIn MCP server...")
+    print("👋 Shutting down LinkedIn MCP server...")
 
     # Clean up drivers
     close_all_drivers()
