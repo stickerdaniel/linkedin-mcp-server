@@ -10,7 +10,6 @@ Implements a three-phase startup:
 """
 
 import logging
-import os
 import sys
 from typing import Literal
 
@@ -31,7 +30,6 @@ from linkedin_mcp_server.config import (
     get_config,
     get_keyring_name,
 )
-from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.drivers.chrome import close_all_drivers, get_or_create_driver
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError, LinkedInMCPError
 from linkedin_mcp_server.logging_config import configure_logging
@@ -39,11 +37,6 @@ from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
 from linkedin_mcp_server.setup import run_cookie_extraction_setup, run_interactive_setup
 
 logger = logging.getLogger(__name__)
-
-
-def should_suppress_stdout(config: AppConfig) -> bool:
-    """Check if stdout should be suppressed to avoid interfering with MCP stdio protocol."""
-    return not config.is_interactive and config.server.transport == "stdio"
 
 
 def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
@@ -296,16 +289,13 @@ def main() -> None:
     # Get configuration (this sets config.is_interactive)
     config = get_config()
 
-    # Suppress stdout if running in MCP stdio mode to avoid interfering with JSON-RPC protocol
-    if should_suppress_stdout(config):
-        sys.stdout = open(os.devnull, "w")
-
     # Get version for logging/display
     version = get_version()
 
-    # Print banner
-    print(f"🔗 LinkedIn MCP Server v{version} 🔗")
-    print("=" * 40)
+    # Only print banner in interactive mode (to avoid interfering with MCP protocol)
+    if config.is_interactive:
+        print(f"🔗 LinkedIn MCP Server v{version} 🔗")
+        print("=" * 40)
 
     # Always log version (this goes to stderr/logging, not stdout)
     logger.info(f"🔗 LinkedIn MCP Server v{version} 🔗")
