@@ -425,7 +425,7 @@ def main() -> None:
             mcp.run(transport=transport)
 
     except KeyboardInterrupt:
-        print("\n\n👋 Server stopped by user")
+        print("\n\n⏹️ Server stopped by user")
         exit_gracefully(0)
     except Exception as e:
         logger.error(f"Server runtime error: {e}")
