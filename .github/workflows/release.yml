@@ -163,6 +163,7 @@ jobs:
             **For Claude Desktop users:**
             1. Download the `.dxt` file below
             2. Double-click to install in Claude Desktop
+            3. Restart Claude Desktop
 
             This DXT extension uses the pinned version `${{ env.VERSION }}`, the Docker image will be pulled automatically.
 
