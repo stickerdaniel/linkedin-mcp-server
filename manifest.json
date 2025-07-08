@@ -25,8 +25,8 @@
       "args": [
         "run", "--rm", "-i",
         "-e", "LINKEDIN_COOKIE=${user_config.linkedin_cookie}",
-        "-e", "LOG_LEVEL=INFO",
-        "stickerdaniel/linkedin-mcp-server:latest"
+        "-e", "LOG_LEVEL=DEBUG",
+        "stickerdaniel/linkedin-mcp-server:1.2.4"
       ]
     }
   },
