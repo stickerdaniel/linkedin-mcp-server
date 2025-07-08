@@ -167,13 +167,6 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Set logging level (default: WARNING)",
     )
 
-    # Keep --debug for backward compatibility (maps to DEBUG level)
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug logging (equivalent to --log-level DEBUG)",
-    )
-
     parser.add_argument(
         "--no-lazy-init",
         action="store_true",
@@ -238,12 +231,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
     if args.no_headless:
         config.chrome.headless = False
 
-    # Handle log level arguments
+    # Handle log level argument
     if args.log_level:
         config.server.log_level = args.log_level
-    elif args.debug:
-        # Backward compatibility: --debug maps to DEBUG level
-        config.server.log_level = "DEBUG"
 
     if args.no_lazy_init:
         config.server.lazy_init = False
