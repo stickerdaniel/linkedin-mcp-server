@@ -323,12 +323,14 @@ def main() -> None:
         logger.info("Authentication ready")
     except CredentialsNotFoundError as e:
         logger.error(f"Authentication setup failed: {e}")
-        if not config.is_interactive:
-            print("\n❌ LinkedIn cookie required for Docker/non-interactive mode")
-        else:
+        if config.is_interactive:
             print(
-                "\n❌ Authentication required - please provide LinkedIn authentication"
+                "\n❌ Authentication required - please provide LinkedIn's li_at cookie"
             )
+        else:
+            # TODO: make claude desktop handle this without terminating
+            print("\n❌ Cookie required for Docker/non-interactive mode")
+
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n\n👋 Setup cancelled by user")

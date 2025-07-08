@@ -54,12 +54,10 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
       "args": [
         "run", "--rm", "-i",
         "-e", "LINKEDIN_COOKIE",
-        "-e", "LOG_LEVEL",
         "stickerdaniel/linkedin-mcp-server:latest"
       ],
       "env": {
-        "LINKEDIN_COOKIE": "XXXXXX...",
-        "LOG_LEVEL": "INFO"
+        "LINKEDIN_COOKIE": "XXXXXX..."
       }
     }
   }
@@ -114,8 +112,7 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 **HTTP Mode Example (for web-based MCP clients):**
 ```bash
 docker run -it --rm \
-  -e LINKEDIN_EMAIL="your.email@example.com" \
-  -e LINKEDIN_PASSWORD="your_password" \
+  -e LINKEDIN_COOKIE="your_linkedin_cookie" \
   -p 8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
