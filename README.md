@@ -52,12 +52,14 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
     "linkedin": {
       "command": "docker",
       "args": [
-        "run", "--rm",
+        "run", "--rm", "-i",
         "-e", "LINKEDIN_COOKIE",
-        "stickerdaniel/linkedin-mcp-server"
+        "-e", "LOG_LEVEL",
+        "stickerdaniel/linkedin-mcp-server:latest"
       ],
       "env": {
-        "LINKEDIN_COOKIE": "XXXXXX..."
+        "LINKEDIN_COOKIE": "XXXXXX...",
+        "LOG_LEVEL": "INFO"
       }
     }
   }
@@ -71,7 +73,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 **Run the server with the `--get-cookie` flag:**
 ```bash
 docker run -it --rm \
-  stickerdaniel/linkedin-mcp-server \
+  stickerdaniel/linkedin-mcp-server:latest \
   --get-cookie
 ```
 Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client configuration. If this fails with a captcha challenge, use the method below.
@@ -115,7 +117,7 @@ docker run -it --rm \
   -e LINKEDIN_EMAIL="your.email@example.com" \
   -e LINKEDIN_PASSWORD="your_password" \
   -p 8080:8080 \
-  stickerdaniel/linkedin-mcp-server \
+  stickerdaniel/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
 **Test with mcp inspector:**
@@ -161,7 +163,7 @@ docker run -it --rm \
 **Run the server with the `--get-cookie` flag:**
 ```bash
 docker run -it --rm \
-  stickerdaniel/linkedin-mcp-server \
+  stickerdaniel/linkedin-mcp-server:latest \
   --get-cookie
 ```
 Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client configuration. If this fails with a captcha challenge, use the method below.
