@@ -101,7 +101,6 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 
 **CLI Options:**
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--debug` - Enable debug logging (equivalent to --log-level DEBUG)
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
@@ -243,7 +242,6 @@ uv run main.py --no-headless --no-lazy-init
 **CLI Options:**
 - `--no-headless` - Show browser window (debugging)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--debug` - Enable debug logging (equivalent to --log-level DEBUG)
 - `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--get-cookie` - Login with email and password and extract the LinkedIn cookie
 - `--clear-keychain` - Clear all stored LinkedIn credentials and cookies from system keychain
