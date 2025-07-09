@@ -133,6 +133,11 @@ jobs:
           bunx @anthropic-ai/dxt pack
           mv linkedin-mcp-server.dxt linkedin-mcp-server-v$VERSION.dxt
 
+      - name: Generate release notes
+        run: |
+          envsubst < RELEASE_NOTES_TEMPLATE.md > RELEASE_NOTES.md
+          echo "✅ Generated release notes from template"
+
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -145,27 +150,7 @@ jobs:
           draft: false
           prerelease: false
           name: "LinkedIn MCP Server v${{ env.VERSION }}"
-          body: |
-            For an installation guide, refer to the [README](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/README.md).
-
-            ## 🐳 Update Docker Installation
-            **For users with Docker-based MCP client configurations:**
-            ```bash
-            docker pull stickerdaniel/linkedin-mcp-server:latest
-            ```
-            The `latest` tag will always point to the most recent release.
-            To pull this specific version, run:
-            ```bash
-            docker pull stickerdaniel/linkedin-mcp-server:${{ env.VERSION }}
-            ```
-
-            ## 📦 Update DXT Extension Installation
-            **For Claude Desktop users:**
-            1. Download the `.dxt` file below
-            2. Double-click to install in Claude Desktop
-            3. Restart Claude Desktop
-
-            This DXT extension uses the pinned version `${{ env.VERSION }}`, the Docker image will be pulled automatically.
+          body_path: RELEASE_NOTES.md
 
       - name: Summary
         run: |
