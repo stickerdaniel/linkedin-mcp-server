@@ -30,7 +30,7 @@ def register_company_tools(mcp: FastMCP) -> None:
         company_name: str, get_employees: bool = False
     ) -> Dict[str, Any]:
         """
-        Scrape a company's LinkedIn profile.
+        Get a specific company's LinkedIn profile.
 
         Args:
             company_name (str): LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
