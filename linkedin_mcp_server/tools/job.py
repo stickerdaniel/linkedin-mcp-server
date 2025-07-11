@@ -32,10 +32,7 @@ def register_job_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     async def get_job_details(job_id: str) -> Dict[str, Any]:
         """
-        Scrape job details from a LinkedIn job posting.
-
-        This tool extracts comprehensive job information including title, company,
-        location, posting date, application count, and full job description.
+        Get job details for a specific job posting on LinkedIn
 
         Args:
             job_id (str): LinkedIn job ID (e.g., "4252026496", "3856789012")
@@ -61,10 +58,10 @@ def register_job_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     async def search_jobs(search_term: str) -> List[Dict[str, Any]]:
         """
-        Search for jobs on LinkedIn (Note: This tool has compatibility issues).
+        Search for jobs on LinkedIn using a search term.
 
         Args:
-            search_term (str): The search term to use for job search
+            search_term (str): Search term to use for the job search.
 
         Returns:
             List[Dict[str, Any]]: List of job search results
@@ -84,7 +81,7 @@ def register_job_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     async def get_recommended_jobs() -> List[Dict[str, Any]]:
         """
-        Get recommended jobs from LinkedIn (Note: This tool has compatibility issues).
+        Get your personalized recommended jobs from LinkedIn
 
         Returns:
             List[Dict[str, Any]]: List of recommended jobs

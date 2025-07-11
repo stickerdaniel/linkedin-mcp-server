@@ -28,10 +28,10 @@ def register_person_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     async def get_person_profile(linkedin_username: str) -> Dict[str, Any]:
         """
-        Scrape a person's LinkedIn profile.
+        Get a specific person's LinkedIn profile.
 
         Args:
-            linkedin_username (str): LinkedIn username (e.g., "john-doe-123456", "sarah-smith", "stickerdaniel")
+            linkedin_username (str): LinkedIn username (e.g., "stickerdaniel", "anistji")
 
         Returns:
             Dict[str, Any]: Structured data from the person's profile
