@@ -149,7 +149,7 @@ docker run -it --rm \
 **Prerequisites:** [Claude Desktop](https://claude.ai/download) and [Docker](https://www.docker.com/get-started/) installed
 
 **One-click installation** for Claude Desktop users:
-1. Download the [DXT extension](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest/download/linkedin-mcp-server.dxt)
+1. Download the [DXT extension](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
 2. Double-click to install into Claude Desktop
 3. Set your LinkedIn cookie in the extension settings
 
