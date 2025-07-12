@@ -7,14 +7,11 @@ assignees: ''
 
 ---
 
-## What feature would you like?
-Describe what you want to happen and why it would be useful.
+## Feature description
+Describe what you want to happen.
 
 ## Use case
-How would you use this feature?
-```
-Example: "Claude, get me the skills from this LinkedIn profile: [URL]"
-```
+Why this feature is useful.
 
 ## Suggested implementation
 If you have a specific idea for how to implement this feature, please describe it here.
