@@ -108,6 +108,7 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--get-cookie` - Attempt to login with email and password and extract the LinkedIn cookie
 - `--cookie {cookie}` - Pass a specific LinkedIn cookie for login
+- `--user-agent {user_agent}` - Specify custom user agent string to prevent anti-scraping detection
 
 **HTTP Mode Example (for web-based MCP clients):**
 ```bash
@@ -117,6 +118,7 @@ docker run -it --rm \
   stickerdaniel/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
+
 **Test with mcp inspector:**
 1. Install and run mcp inspector ```bunx @modelcontextprotocol/inspector```
 2. Click pre-filled token url to open the inspector in your browser
@@ -245,6 +247,7 @@ uv run main.py --no-headless --no-lazy-init
 - `--get-cookie` - Login with email and password and extract the LinkedIn cookie
 - `--clear-keychain` - Clear all stored LinkedIn credentials and cookies from system keychain
 - `--cookie {cookie}` - Pass a specific LinkedIn cookie for login
+- `--user-agent {user_agent}` - Specify custom user agent string to prevent anti-scraping detection
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
