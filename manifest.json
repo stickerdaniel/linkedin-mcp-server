@@ -33,82 +33,27 @@
   "tools": [
     {
       "name": "get_person_profile",
-      "description": "Get detailed information from a LinkedIn profile including work history, education, skills, and connections",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "linkedin_username": {
-            "type": "string",
-            "description": "LinkedIn username (e.g., \"stickerdaniel\", \"john-doe-123456\")"
-          }
-        },
-        "required": ["linkedin_username"]
-      }
+      "description": "Get detailed information from a LinkedIn profile including work history, education, skills, and connections"
     },
     {
       "name": "get_company_profile",
-      "description": "Extract comprehensive company information and details",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "company_name": {
-            "type": "string",
-            "description": "LinkedIn company name (e.g., \"docker\", \"anthropic\", \"microsoft\")"
-          },
-          "get_employees": {
-            "type": "boolean",
-            "description": "Whether to scrape the company's employees (slower)",
-            "default": false
-          }
-        },
-        "required": ["company_name"]
-      }
+      "description": "Extract comprehensive company information and details"
     },
     {
       "name": "get_job_details",
-      "description": "Retrieve specific job posting details using LinkedIn job IDs",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "job_id": {
-            "type": "string",
-            "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")"
-          }
-        },
-        "required": ["job_id"]
-      }
+      "description": "Retrieve specific job posting details using LinkedIn job IDs"
     },
     {
       "name": "search_jobs",
-      "description": "Search for jobs with filters like keywords and location",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "search_term": {
-            "type": "string",
-            "description": "Search term for job search (e.g., \"software engineer\", \"product manager\")"
-          }
-        },
-        "required": ["search_term"]
-      }
+      "description": "Search for jobs with filters like keywords and location"
     },
     {
       "name": "get_recommended_jobs",
-      "description": "Get personalized job recommendations based on your profile",
-      "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      }
+      "description": "Get personalized job recommendations based on your profile"
     },
     {
       "name": "close_session",
-      "description": "Properly close browser session and clean up resources",
-      "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": []
-      }
+      "description": "Properly close browser session and clean up resources"
     }
   ],
   "user_config": {
