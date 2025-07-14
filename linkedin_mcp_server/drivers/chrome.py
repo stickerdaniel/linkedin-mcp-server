@@ -9,6 +9,7 @@ Provides cookie-based authentication and comprehensive error handling.
 
 import logging
 import os
+import platform
 from typing import Dict, Optional
 
 from linkedin_scraper.exceptions import (
@@ -27,8 +28,19 @@ from selenium.webdriver.chrome.service import Service
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.exceptions import DriverInitializationError
 
+
 # Constants
-DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+def get_default_user_agent() -> str:
+    """Get platform-specific default user agent to reduce fingerprinting."""
+    system = platform.system()
+
+    if system == "Windows":
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    elif system == "Darwin":  # macOS
+        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    else:  # Linux and others
+        return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+
 
 # Global driver storage to reuse sessions
 active_drivers: Dict[str, webdriver.Chrome] = {}
@@ -72,8 +84,8 @@ def create_chrome_options(config) -> Options:
     chrome_options.add_argument("--aggressive-cache-discard")
     chrome_options.add_argument("--disable-ipc-flooding-protection")
 
-    # Set user agent (configurable with sensible default)
-    user_agent = getattr(config.chrome, "user_agent", DEFAULT_USER_AGENT)
+    # Set user agent (configurable with platform-specific default)
+    user_agent = config.chrome.user_agent or get_default_user_agent()
     chrome_options.add_argument(f"--user-agent={user_agent}")
 
     # Add any custom browser arguments from config
