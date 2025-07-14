@@ -46,6 +46,7 @@ class EnvironmentKeys:
     # Chrome configuration
     CHROMEDRIVER = "CHROMEDRIVER"
     HEADLESS = "HEADLESS"
+    USER_AGENT = "USER_AGENT"
 
     # Server configuration
     LOG_LEVEL = "LOG_LEVEL"
@@ -119,6 +120,9 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # ChromeDriver configuration
     if chromedriver := os.environ.get(EnvironmentKeys.CHROMEDRIVER):
         config.chrome.chromedriver_path = chromedriver
+
+    if user_agent := os.environ.get(EnvironmentKeys.USER_AGENT):
+        config.chrome.user_agent = user_agent
 
     # Log level
     if log_level_env := os.environ.get(EnvironmentKeys.LOG_LEVEL):
@@ -225,6 +229,12 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Specify LinkedIn cookie directly",
     )
 
+    parser.add_argument(
+        "--user-agent",
+        type=str,
+        help="Specify custom user agent string to prevent anti-scraping detection",
+    )
+
     args = parser.parse_args()
 
     # Update configuration with parsed arguments
@@ -260,6 +270,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
         config.server.clear_keychain = True
     if args.cookie:
         config.linkedin.cookie = args.cookie
+
+    if args.user_agent:
+        config.chrome.user_agent = args.user_agent
 
     return config
 
