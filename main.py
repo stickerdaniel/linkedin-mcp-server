@@ -9,6 +9,7 @@ Implements a three-phase startup:
 
 """
 
+import io
 import logging
 import sys
 from typing import Literal
@@ -35,6 +36,8 @@ from linkedin_mcp_server.exceptions import CredentialsNotFoundError, LinkedInMCP
 from linkedin_mcp_server.logging_config import configure_logging
 from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
 from linkedin_mcp_server.setup import run_cookie_extraction_setup, run_interactive_setup
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 logger = logging.getLogger(__name__)
 
