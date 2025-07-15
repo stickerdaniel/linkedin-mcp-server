@@ -11,7 +11,9 @@ Implements a three-phase startup:
 
 import logging
 import sys
+import io
 from typing import Literal
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 import inquirer  # type: ignore
 from linkedin_scraper.exceptions import (
