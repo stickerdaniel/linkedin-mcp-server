@@ -321,6 +321,6 @@ Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0.
+This project is licensed under the Apache 2.0 license.
 
 <br>
