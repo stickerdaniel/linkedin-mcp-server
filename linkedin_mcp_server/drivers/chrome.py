@@ -206,43 +206,101 @@ def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
     Returns:
         bool: True if login was successful, False otherwise
     """
+    import time
+
+    start_time = time.time()
+
     try:
         from linkedin_scraper import actions  # type: ignore
         from selenium.common.exceptions import TimeoutException
         from selenium.webdriver.support.ui import WebDriverWait
 
         logger.info("Attempting cookie authentication...")
+        logger.debug(f"Cookie value (first 20 chars): {cookie[:20]}...")
+        logger.debug(f"Cookie length: {len(cookie)}")
+
+        # Log initial state
+        try:
+            initial_url = driver.current_url
+            logger.debug(f"Initial URL before login: {initial_url}")
+        except Exception as e:
+            logger.debug(f"Could not get initial URL: {e}")
 
         # Set longer timeout to handle slow LinkedIn loading
         driver.set_page_load_timeout(45)
+        logger.debug("Set page load timeout to 45 seconds")
 
+        # Attempt login with detailed logging
+        login_start_time = time.time()
         try:
+            logger.debug("Calling actions.login() with cookie...")
             actions.login(driver, cookie=cookie)
-        except TimeoutException:
+            login_duration = time.time() - login_start_time
+            logger.debug(f"actions.login() completed in {login_duration:.2f} seconds")
+        except TimeoutException as e:
+            login_duration = time.time() - login_start_time
             logger.info(
-                "Page load timeout during login - checking if authentication succeeded anyway"
+                f"Page load timeout during login after {login_duration:.2f}s - checking if authentication succeeded anyway"
             )
+            logger.debug(f"TimeoutException details: {e}")
+        except Exception as e:
+            login_duration = time.time() - login_start_time
+            logger.error(
+                f"Unexpected error during actions.login() after {login_duration:.2f}s: {e}"
+            )
+            raise
+
+        # Log URL immediately after login attempt
+        try:
+            post_login_url = driver.current_url
+            logger.debug(f"URL immediately after login attempt: {post_login_url}")
+        except Exception as e:
+            logger.debug(f"Could not get URL after login attempt: {e}")
 
         # Wait for page to stabilize after login attempt
         # Give LinkedIn time to redirect and load properly
-        import time
-
+        logger.debug("Waiting 3 seconds for page stabilization...")
         time.sleep(3)
+
+        # Log URL after stabilization wait
+        try:
+            stabilized_url = driver.current_url
+            logger.debug(f"URL after 3-second stabilization wait: {stabilized_url}")
+        except Exception as e:
+            logger.debug(f"Could not get URL after stabilization: {e}")
 
         # Try multiple times to check authentication status
         max_retries = 3
+        logger.debug(f"Starting authentication verification with {max_retries} retries")
+
         for attempt in range(max_retries):
+            attempt_start_time = time.time()
+            logger.debug(
+                f"=== Authentication check attempt {attempt + 1}/{max_retries} ==="
+            )
+
             try:
                 current_url = driver.current_url
-                logger.debug(
-                    f"Authentication check attempt {attempt + 1}: Current URL = {current_url}"
-                )
+                logger.debug(f"Current URL: {current_url}")
+
+                # Log page title for additional context
+                try:
+                    page_title = driver.title
+                    logger.debug(f"Page title: {page_title}")
+                except Exception as e:
+                    logger.debug(f"Could not get page title: {e}")
 
                 # Check if we're on login page (authentication failed)
                 if "login" in current_url or "uas/login" in current_url:
                     logger.warning(
-                        "Cookie authentication failed - redirected to login page"
+                        f"Cookie authentication failed - redirected to login page: {current_url}"
                     )
+                    logger.debug("Checking page source for login indicators...")
+                    try:
+                        page_source_snippet = driver.page_source[:500]
+                        logger.debug(f"Page source snippet: {page_source_snippet}")
+                    except Exception as e:
+                        logger.debug(f"Could not get page source: {e}")
                     return False
 
                 # Check if we're on authenticated pages (authentication succeeded)
@@ -252,7 +310,12 @@ def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
                     or "linkedin.com/in/" in current_url
                     or "/feed/" in current_url
                 ):
-                    logger.info("Cookie authentication successful")
+                    attempt_duration = time.time() - attempt_start_time
+                    total_duration = time.time() - start_time
+                    logger.info(
+                        f"Cookie authentication successful! (attempt {attempt + 1}, {attempt_duration:.2f}s, total {total_duration:.2f}s)"
+                    )
+                    logger.debug(f"Successfully authenticated to: {current_url}")
                     return True
 
                 # If we're on an unexpected page, wait a bit more and retry
@@ -260,6 +323,18 @@ def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
                     logger.debug(
                         f"Unexpected page during authentication check: {current_url}"
                     )
+
+                    # Log more details about the unexpected page
+                    try:
+                        page_source_snippet = driver.page_source[:1000]
+                        logger.debug(
+                            f"Unexpected page source snippet: {page_source_snippet}"
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            f"Could not get page source for unexpected page: {e}"
+                        )
+
                     if attempt < max_retries - 1:
                         logger.info(
                             f"Waiting for page to stabilize (attempt {attempt + 1}/{max_retries})..."
@@ -267,8 +342,12 @@ def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
                         time.sleep(2)
                         continue
                     else:
+                        logger.debug(
+                            "Final attempt - using WebDriverWait for definitive check..."
+                        )
                         # Try to wait for any LinkedIn authenticated page elements
                         try:
+                            wait_start_time = time.time()
                             WebDriverWait(driver, 10).until(
                                 lambda d: any(
                                     indicator in d.current_url
@@ -281,46 +360,87 @@ def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
                                 )
                                 or "login" in d.current_url
                             )
+                            wait_duration = time.time() - wait_start_time
+                            logger.debug(
+                                f"WebDriverWait completed in {wait_duration:.2f} seconds"
+                            )
+
                             final_url = driver.current_url
+                            logger.debug(f"Final URL after WebDriverWait: {final_url}")
+
                             if "login" in final_url or "uas/login" in final_url:
                                 logger.warning(
-                                    "Cookie authentication failed - final check shows login page"
+                                    f"Cookie authentication failed - final check shows login page: {final_url}"
                                 )
                                 return False
                             else:
+                                total_duration = time.time() - start_time
                                 logger.info(
-                                    "Cookie authentication successful - final check passed"
+                                    f"Cookie authentication successful - final check passed! (total {total_duration:.2f}s)"
                                 )
+                                logger.debug(f"Final successful URL: {final_url}")
                                 return True
                         except TimeoutException:
+                            wait_duration = time.time() - wait_start_time
                             logger.warning(
-                                "Cookie authentication failed - could not verify successful login"
+                                f"Cookie authentication failed - WebDriverWait timed out after {wait_duration:.2f}s"
                             )
+                            logger.debug(
+                                "Could not verify successful login within timeout period"
+                            )
+
+                            # Log final state for debugging
+                            try:
+                                timeout_url = driver.current_url
+                                timeout_title = driver.title
+                                logger.debug(
+                                    f"Final state - URL: {timeout_url}, Title: {timeout_title}"
+                                )
+                            except Exception as e:
+                                logger.debug(f"Could not get final state info: {e}")
+
                             return False
 
             except Exception as e:
+                attempt_duration = time.time() - attempt_start_time
                 logger.debug(
-                    f"Error during authentication check attempt {attempt + 1}: {e}"
+                    f"Error during authentication check attempt {attempt + 1} after {attempt_duration:.2f}s: {e}"
                 )
+                logger.debug(f"Exception type: {type(e).__name__}")
+
                 if attempt < max_retries - 1:
+                    logger.debug(
+                        f"Retrying after error (attempt {attempt + 1}/{max_retries})"
+                    )
                     time.sleep(2)
                     continue
                 else:
+                    logger.error(f"Final attempt failed with error: {e}")
                     raise e
 
         # If we exit the retry loop without returning, authentication failed
-        logger.warning("Cookie authentication failed - exhausted all retry attempts")
+        total_duration = time.time() - start_time
+        logger.warning(
+            f"Cookie authentication failed - exhausted all retry attempts after {total_duration:.2f}s"
+        )
         return False
 
     except TimeoutException as e:
-        logger.warning(f"Cookie authentication failed due to timeout: {e}")
+        total_duration = time.time() - start_time
+        logger.warning(
+            f"Cookie authentication failed due to timeout after {total_duration:.2f}s: {e}"
+        )
         return False
     except Exception as e:
-        logger.warning(f"Cookie authentication failed: {e}")
+        total_duration = time.time() - start_time
+        logger.warning(f"Cookie authentication failed after {total_duration:.2f}s: {e}")
+        logger.debug(f"Exception type: {type(e).__name__}")
         return False
     finally:
         # Restore normal timeout
         driver.set_page_load_timeout(60)
+        total_duration = time.time() - start_time
+        logger.debug(f"login_with_cookie() completed in {total_duration:.2f} seconds")
 
 
 def login_to_linkedin(driver: webdriver.Chrome, authentication: str) -> None:
