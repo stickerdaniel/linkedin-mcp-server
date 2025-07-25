@@ -211,8 +211,8 @@ def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
 
         logger.info("Attempting cookie authentication...")
 
-        # Set shorter timeout for faster failure detection
-        driver.set_page_load_timeout(15)
+        # Set timeout for cookie authentication - longer to handle LinkedIn's slow redirects
+        driver.set_page_load_timeout(30)
 
         actions.login(driver, cookie=cookie)
 
