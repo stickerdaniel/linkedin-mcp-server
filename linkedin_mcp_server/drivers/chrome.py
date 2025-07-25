@@ -208,30 +208,113 @@ def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
     """
     try:
         from linkedin_scraper import actions  # type: ignore
+        from selenium.common.exceptions import TimeoutException
+        from selenium.webdriver.support.ui import WebDriverWait
 
         logger.info("Attempting cookie authentication...")
 
-        # Set shorter timeout for faster failure detection
-        driver.set_page_load_timeout(15)
+        # Set longer timeout to handle slow LinkedIn loading
+        driver.set_page_load_timeout(45)
 
-        actions.login(driver, cookie=cookie)
+        try:
+            actions.login(driver, cookie=cookie)
+        except TimeoutException:
+            logger.info(
+                "Page load timeout during login - checking if authentication succeeded anyway"
+            )
 
-        # Quick check - if we're on login page, cookie is invalid
-        current_url = driver.current_url
-        if "login" in current_url or "uas/login" in current_url:
-            logger.warning("Cookie authentication failed - redirected to login page")
-            return False
-        elif (
-            "feed" in current_url
-            or "mynetwork" in current_url
-            or "linkedin.com/in/" in current_url
-        ):
-            logger.info("Cookie authentication successful")
-            return True
-        else:
-            logger.warning("Cookie authentication failed - unexpected page")
-            return False
+        # Wait for page to stabilize after login attempt
+        # Give LinkedIn time to redirect and load properly
+        import time
 
+        time.sleep(3)
+
+        # Try multiple times to check authentication status
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                current_url = driver.current_url
+                logger.debug(
+                    f"Authentication check attempt {attempt + 1}: Current URL = {current_url}"
+                )
+
+                # Check if we're on login page (authentication failed)
+                if "login" in current_url or "uas/login" in current_url:
+                    logger.warning(
+                        "Cookie authentication failed - redirected to login page"
+                    )
+                    return False
+
+                # Check if we're on authenticated pages (authentication succeeded)
+                elif (
+                    "feed" in current_url
+                    or "mynetwork" in current_url
+                    or "linkedin.com/in/" in current_url
+                    or "/feed/" in current_url
+                ):
+                    logger.info("Cookie authentication successful")
+                    return True
+
+                # If we're on an unexpected page, wait a bit more and retry
+                else:
+                    logger.debug(
+                        f"Unexpected page during authentication check: {current_url}"
+                    )
+                    if attempt < max_retries - 1:
+                        logger.info(
+                            f"Waiting for page to stabilize (attempt {attempt + 1}/{max_retries})..."
+                        )
+                        time.sleep(2)
+                        continue
+                    else:
+                        # Try to wait for any LinkedIn authenticated page elements
+                        try:
+                            WebDriverWait(driver, 10).until(
+                                lambda d: any(
+                                    indicator in d.current_url
+                                    for indicator in [
+                                        "feed",
+                                        "mynetwork",
+                                        "linkedin.com/in/",
+                                        "/feed/",
+                                    ]
+                                )
+                                or "login" in d.current_url
+                            )
+                            final_url = driver.current_url
+                            if "login" in final_url or "uas/login" in final_url:
+                                logger.warning(
+                                    "Cookie authentication failed - final check shows login page"
+                                )
+                                return False
+                            else:
+                                logger.info(
+                                    "Cookie authentication successful - final check passed"
+                                )
+                                return True
+                        except TimeoutException:
+                            logger.warning(
+                                "Cookie authentication failed - could not verify successful login"
+                            )
+                            return False
+
+            except Exception as e:
+                logger.debug(
+                    f"Error during authentication check attempt {attempt + 1}: {e}"
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                else:
+                    raise e
+
+        # If we exit the retry loop without returning, authentication failed
+        logger.warning("Cookie authentication failed - exhausted all retry attempts")
+        return False
+
+    except TimeoutException as e:
+        logger.warning(f"Cookie authentication failed due to timeout: {e}")
+        return False
     except Exception as e:
         logger.warning(f"Cookie authentication failed: {e}")
         return False
