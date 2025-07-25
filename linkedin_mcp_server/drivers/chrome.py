@@ -232,23 +232,49 @@ def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
 
         # Attempt login with detailed logging
         login_start_time = time.time()
+        login_exception = None
         try:
             logger.debug("Calling actions.login() with cookie...")
             actions.login(driver, cookie=cookie)
             login_duration = time.time() - login_start_time
-            logger.debug(f"actions.login() completed in {login_duration:.2f} seconds")
+            logger.debug(
+                f"actions.login() completed successfully in {login_duration:.2f} seconds"
+            )
         except TimeoutException as e:
             login_duration = time.time() - login_start_time
+            login_exception = e
             logger.info(
-                f"Page load timeout during login after {login_duration:.2f}s - checking if authentication succeeded anyway"
+                f"Page load timeout during login after {login_duration:.2f}s - will check if authentication succeeded anyway"
             )
             logger.debug(f"TimeoutException details: {e}")
         except Exception as e:
             login_duration = time.time() - login_start_time
-            logger.error(
-                f"Unexpected error during actions.login() after {login_duration:.2f}s: {e}"
+            login_exception = e
+            logger.warning(
+                f"actions.login() threw exception after {login_duration:.2f}s: {e}"
             )
-            raise
+            logger.debug(f"Exception type: {type(e).__name__}")
+
+            # Special handling for InvalidCredentialsError from linkedin-scraper
+            # This library sometimes incorrectly reports authentication failure even when login succeeds
+            if "InvalidCredentialsError" in str(
+                type(e)
+            ) or "Cookie login failed" in str(e):
+                logger.info(
+                    "Detected InvalidCredentialsError from linkedin-scraper library"
+                )
+                logger.info(
+                    "This is a known issue - will verify authentication status manually"
+                )
+                logger.info(
+                    "The browser may have logged in successfully despite the exception"
+                )
+            else:
+                logger.info(
+                    "Will check authentication status despite the exception - the browser may have logged in successfully"
+                )
+
+            # Don't raise the exception immediately - check if login actually worked first
 
         # Log URL immediately after login attempt
         try:
@@ -420,9 +446,21 @@ def login_with_cookie(driver: webdriver.Chrome, cookie: str) -> bool:
 
         # If we exit the retry loop without returning, authentication failed
         total_duration = time.time() - start_time
-        logger.warning(
-            f"Cookie authentication failed - exhausted all retry attempts after {total_duration:.2f}s"
-        )
+
+        # If we had a login exception but got here, it means the authentication checks failed
+        # but we should provide more context about the original exception
+        if login_exception:
+            logger.warning(
+                f"Cookie authentication failed - exhausted all retry attempts after {total_duration:.2f}s"
+            )
+            logger.warning(f"Original actions.login() exception was: {login_exception}")
+            logger.info(
+                "Despite the browser appearing to log in successfully, authentication verification failed"
+            )
+        else:
+            logger.warning(
+                f"Cookie authentication failed - exhausted all retry attempts after {total_duration:.2f}s"
+            )
         return False
 
     except TimeoutException as e:
