@@ -46,7 +46,8 @@ def print_claude_config() -> None:
         "--directory",
         current_dir,
         "run",
-        "main.py",
+        "-m",
+        "linkedin_mcp_server",
         "--no-setup",
     ]
 
