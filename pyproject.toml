@@ -12,6 +12,20 @@ dependencies = [
     "pyperclip>=1.9.0",
 ]
 
+[project.scripts]
+linkedin-mcp-server = "main:main"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["linkedin_mcp_server*"]
+exclude = ["assets*", "docs*", "tests*"]
+
 [tool.setuptools.package-data]
 linkedin_mcp_server = ["py.typed"]
 
