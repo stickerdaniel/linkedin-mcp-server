@@ -1,6 +1,6 @@
-# main.py
+# linkedin_mcp_server/cli_main.py
 """
-LinkedIn MCP Server - Main application entry point.
+LinkedIn MCP Server - Main CLI application entry point.
 
 Implements a three-phase startup:
 1. Authentication Setup Phase - Credential validation and session establishment

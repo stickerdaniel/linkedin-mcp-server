@@ -64,7 +64,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
         "stickerdaniel/linkedin-mcp-server:latest"
       ],
       "env": {
-        "LINKEDIN_COOKIE": "XXXXXX..."
+        "LINKEDIN_COOKIE": "li_at=YOUR_COOKIE_VALUE"
       }
     }
   }
@@ -120,7 +120,7 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 **HTTP Mode Example (for web-based MCP clients):**
 ```bash
 docker run -it --rm \
-  -e LINKEDIN_COOKIE="your_linkedin_cookie" \
+  -e LINKEDIN_COOKIE="li_at=YOUR_COOKIE_VALUE" \
   -p 8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
@@ -216,7 +216,7 @@ If you have [uv](https://docs.astral.sh/uv/) installed, you can run the LinkedIn
 uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --help
 
 # Run with your LinkedIn cookie
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --cookie "your_linkedin_cookie"
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --cookie "li_at=YOUR_COOKIE_VALUE"
 ```
 
 **Client Configuration for uvx:**
@@ -231,7 +231,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
         "linkedin-mcp-server"
       ],
       "env": {
-        "LINKEDIN_COOKIE": "your_linkedin_cookie_here"
+        "LINKEDIN_COOKIE": "li_at=YOUR_COOKIE_VALUE"
       }
     }
   }
@@ -293,7 +293,7 @@ uv run pre-commit install
 # 5. Start the server once manually
 # You will be prompted to enter your LinkedIn credentials, and they will be securely stored in your OS keychain
 # Once logged in, your cookie will be stored in your OS keychain and used for subsequent runs until it expires
-uv run main.py --no-headless --no-lazy-init
+uv run -m linkedin_mcp_server --no-headless --no-lazy-init
 ```
 
 ### Local Setup Help
@@ -316,7 +316,7 @@ uv run main.py --no-headless --no-lazy-init
 
 **HTTP Mode Example (for web-based MCP clients):**
 ```bash
-uv run main.py --transport streamable-http --host 127.0.0.1 --port 8000 --path /mcp
+uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --port 8000 --path /mcp
 ```
 
 **Claude Desktop:**
@@ -325,7 +325,7 @@ uv run main.py --transport streamable-http --host 127.0.0.1 --port 8000 --path /
   "mcpServers": {
     "linkedin": {
       "command": "uv",
-      "args": ["--directory", "/path/to/linkedin-mcp-server", "run", "main.py"]
+      "args": ["--directory", "/path/to/linkedin-mcp-server", "run", "-m", "linkedin_mcp_server"]
     }
   }
 }
