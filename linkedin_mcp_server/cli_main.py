@@ -278,7 +278,9 @@ def get_version() -> str:
         import os
         import tomllib
 
-        pyproject_path = os.path.join(os.path.dirname(__file__), "pyproject.toml")
+        pyproject_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "pyproject.toml"
+        )
         with open(pyproject_path, "rb") as f:
             data = tomllib.load(f)
             return data["project"]["version"]
