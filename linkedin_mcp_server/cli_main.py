@@ -1,6 +1,6 @@
-# main.py
+# linkedin_mcp_server/cli_main.py
 """
-LinkedIn MCP Server - Main application entry point.
+LinkedIn MCP Server - Main CLI application entry point.
 
 Implements a three-phase startup:
 1. Authentication Setup Phase - Credential validation and session establishment
@@ -278,7 +278,9 @@ def get_version() -> str:
         import os
         import tomllib
 
-        pyproject_path = os.path.join(os.path.dirname(__file__), "pyproject.toml")
+        pyproject_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "pyproject.toml"
+        )
         with open(pyproject_path, "rb") as f:
             data = tomllib.load(f)
             return data["project"]["version"]

@@ -13,14 +13,11 @@ dependencies = [
 ]
 
 [project.scripts]
-linkedin-mcp-server = "main:main"
+linkedin-mcp-server = "linkedin_mcp_server.cli_main:main"
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-py-modules = ["main"]
 
 [tool.setuptools.packages.find]
 include = ["linkedin_mcp_server*"]
