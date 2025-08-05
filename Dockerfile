@@ -25,5 +25,5 @@ RUN adduser -D -u 1000 mcpuser && chown -R mcpuser:mcpuser /app
 USER mcpuser
 
 # Set entrypoint and default arguments
-ENTRYPOINT ["uv", "run", "main.py"]
+ENTRYPOINT ["uv", "run", "-m", "linkedin_mcp_server"]
 CMD []
