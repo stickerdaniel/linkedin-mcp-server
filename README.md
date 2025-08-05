@@ -12,6 +12,7 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 
 [![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup-recommended---universal)
 [![Install DXT Extension](https://img.shields.io/badge/Claude_Desktop_Extension-d97757?style=for-the-badge&logo=anthropic)](#-claude-desktop-dxt-extension)
+[![uvx](https://img.shields.io/badge/uvx-Quick_Install-00E5FF?style=for-the-badge&logo=python&logoColor=white)](#-quick-installation-with-uvx)
 [![Development](https://img.shields.io/badge/Development-Local_Setup-ffd343?style=for-the-badge&logo=python&logoColor=ffd343)](#-local-setup-develop--contribute)
 
 https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680
@@ -201,6 +202,59 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 - Make sure you have only one active LinkedIn session per cookie at a time. Trying to open multiple sessions with the same cookie will result in a cookie invalid error.
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for --get-cookie
 - You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
+</details>
+
+<br/>
+<br/>
+
+## 🚀 Quick Installation with uvx
+
+If you have [uv](https://docs.astral.sh/uv/) installed, you can run the LinkedIn MCP Server directly without cloning:
+
+```bash
+# Run directly from GitHub (latest version)
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --help
+
+# Run with your LinkedIn cookie
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --cookie "your_linkedin_cookie"
+```
+
+**Client Configuration for uvx:**
+```json
+{
+  "mcpServers": {
+    "linkedin": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/stickerdaniel/linkedin-mcp-server",
+        "linkedin-mcp-server"
+      ],
+      "env": {
+        "LINKEDIN_COOKIE": "your_linkedin_cookie_here"
+      }
+    }
+  }
+}
+```
+
+<details>
+<summary><strong>⚠️ Troubleshooting uvx</strong></summary>
+
+**Installation issues:**
+- Ensure you have uv installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+**Cookie Setup:**
+1. Open Chrome DevTools on LinkedIn.com (F12)
+2. Go to Application → Cookies → linkedin.com
+3. Find the cookie named `li_at`
+4. Copy the entire value (starts with `AQE...`)
+5. Format as: `li_at=YOUR_COOKIE_VALUE`
+6. Use this value as your `LINKEDIN_COOKIE` in the configuration
+
+**Authentication:**
+- Cookie can be passed via `--cookie` flag or `LINKEDIN_COOKIE` environment variable
+- Make sure you have only one active LinkedIn session per cookie
 </details>
 
 <br/>
