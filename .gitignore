@@ -5,7 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
-
+test-config.json
 # Distribution / packaging
 .Python
 build/
@@ -197,3 +197,4 @@ cython_debug/
 # claude code settings
 .claude
 CLAUDE.md
+compose/local/ngrok/ngrok.yml
