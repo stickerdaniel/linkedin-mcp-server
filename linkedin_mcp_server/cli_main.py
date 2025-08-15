@@ -31,10 +31,16 @@ from linkedin_mcp_server.config import (
     get_config,
     get_keyring_name,
 )
-from linkedin_mcp_server.drivers.chrome import close_all_drivers, get_or_create_driver
+
+# Chrome driver imports are now handled by the scraper factory
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError, LinkedInMCPError
 from linkedin_mcp_server.logging_config import configure_logging
 from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
+from linkedin_mcp_server.scraper_factory import (
+    cleanup_scraper_backend,
+    get_backend_capabilities,
+    initialize_scraper_backend,
+)
 from linkedin_mcp_server.setup import run_cookie_extraction_setup, run_interactive_setup
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -242,33 +248,38 @@ def ensure_authentication_ready() -> str:
     return run_interactive_setup()
 
 
-def initialize_driver_with_auth(authentication: str) -> None:
+def initialize_backend_with_auth(authentication: str) -> None:
     """
-    Phase 2: Initialize driver using existing authentication.
+    Phase 2: Initialize scraper backend using existing authentication.
 
     Args:
-        authentication: LinkedIn session cookie
+        authentication: LinkedIn session cookie (not used directly, backends get auth via ensure_authentication())
 
     Raises:
-        Various exceptions if driver creation or login fails
+        Various exceptions if backend initialization fails
     """
     config = get_config()
 
     if config.server.lazy_init:
+        backend_info = get_backend_capabilities()
         logger.info(
-            "Using lazy initialization - driver will be created on first tool call"
+            f"Using lazy initialization - {backend_info['backend']} will be created on first tool call"
         )
         return
 
-    logger.info("Initializing Chrome WebDriver and logging in...")
+    backend_info = get_backend_capabilities()
+    logger.info(f"Initializing {backend_info['backend']} backend...")
 
     try:
-        # Create driver and login with provided authentication
-        get_or_create_driver(authentication)
-        logger.info("✅ Web driver initialized and authenticated successfully")
+        # Initialize the appropriate backend (authentication is handled internally)
+        success = initialize_scraper_backend()
+        if success:
+            logger.info("✅ Scraper backend initialized and authenticated successfully")
+        else:
+            raise Exception("Backend initialization returned False")
 
     except Exception as e:
-        logger.error(f"Failed to initialize driver: {e}")
+        logger.error(f"Failed to initialize scraper backend: {e}")
         raise e
 
 
@@ -345,13 +356,13 @@ def main() -> None:
         print("\n❌ Setup failed - please try again")
         sys.exit(1)
 
-    # Phase 2: Initialize Driver (if not lazy)
+    # Phase 2: Initialize Backend (if not lazy)
     try:
-        initialize_driver_with_auth(authentication)
+        initialize_backend_with_auth(authentication)
     except InvalidCredentialsError as e:
-        logger.error(f"Driver initialization failed with invalid credentials: {e}")
+        logger.error(f"Backend initialization failed with invalid credentials: {e}")
 
-        # Cookie was already cleared in driver layer
+        # Cookie was already cleared in authentication layer
         # In interactive mode, try setup again
         if config.is_interactive:
             print(f"\n❌ {str(e)}")
@@ -359,7 +370,7 @@ def main() -> None:
             try:
                 new_authentication = run_interactive_setup()
                 # Try again with new authentication
-                initialize_driver_with_auth(new_authentication)
+                initialize_backend_with_auth(new_authentication)
                 logger.info("✅ Successfully authenticated with new credentials")
             except Exception as setup_error:
                 logger.error(f"Setup failed: {setup_error}")
@@ -377,13 +388,13 @@ def main() -> None:
         RateLimitError,
         LoginTimeoutError,
     ) as e:
-        logger.error(f"Driver initialization failed: {e}")
+        logger.error(f"Backend initialization failed: {e}")
         print(f"\n❌ {str(e)}")
         if not config.server.lazy_init:
             sys.exit(1)
     except Exception as e:
-        logger.error(f"Unexpected error during driver initialization: {e}")
-        print(f"\n❌ Driver initialization failed: {e}")
+        logger.error(f"Unexpected error during backend initialization: {e}")
+        print(f"\n❌ Backend initialization failed: {e}")
         if not config.server.lazy_init:
             sys.exit(1)
 
@@ -437,8 +448,8 @@ def exit_gracefully(exit_code: int = 0) -> None:
     """Exit the application gracefully, cleaning up resources."""
     print("👋 Shutting down LinkedIn MCP server...")
 
-    # Clean up drivers
-    close_all_drivers()
+    # Clean up scraper backend
+    cleanup_scraper_backend()
 
     # Clean up server
     shutdown_handler()
