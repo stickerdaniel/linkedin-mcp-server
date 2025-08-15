@@ -9,7 +9,9 @@ dependencies = [
     "inquirer>=3.4.0",
     "keyring>=25.6.0",
     "linkedin-scraper",
+    "fast-linkedin-scraper",
     "pyperclip>=1.9.0",
+    "playwright>=1.54.0",
 ]
 
 [project.scripts]
@@ -28,6 +30,7 @@ linkedin_mcp_server = ["py.typed"]
 
 [tool.uv.sources]
 linkedin-scraper = { git = "https://github.com/stickerdaniel/linkedin_scraper.git" }
+fast-linkedin-scraper = { git = "https://github.com/stickerdaniel/fast-linkedin-scraper.git" }
 
 [dependency-groups]
 dev = [

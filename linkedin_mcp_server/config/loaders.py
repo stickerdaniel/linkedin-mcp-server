@@ -42,6 +42,7 @@ class EnvironmentKeys:
     LINKEDIN_EMAIL = "LINKEDIN_EMAIL"
     LINKEDIN_PASSWORD = "LINKEDIN_PASSWORD"
     LINKEDIN_COOKIE = "LINKEDIN_COOKIE"
+    LINKEDIN_SCRAPER_TYPE = "LINKEDIN_SCRAPER_TYPE"
 
     # Chrome configuration
     CHROMEDRIVER = "CHROMEDRIVER"
@@ -107,7 +108,7 @@ def load_from_keyring(config: AppConfig) -> AppConfig:
 def load_from_env(config: AppConfig) -> AppConfig:
     """Load configuration from environment variables."""
 
-    # LinkedIn credentials
+    # LinkedIn credentials (always applicable)
     if email := os.environ.get(EnvironmentKeys.LINKEDIN_EMAIL):
         config.linkedin.email = email
 
@@ -117,38 +118,69 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if cookie := os.environ.get(EnvironmentKeys.LINKEDIN_COOKIE):
         config.linkedin.cookie = cookie
 
-    # ChromeDriver configuration
-    if chromedriver := os.environ.get(EnvironmentKeys.CHROMEDRIVER):
-        config.chrome.chromedriver_path = chromedriver
+    # Scraper type (affects Chrome config processing)
+    if scraper_type := os.environ.get(EnvironmentKeys.LINKEDIN_SCRAPER_TYPE):
+        if scraper_type in ["linkedin-scraper", "fast-linkedin-scraper"]:
+            config.linkedin.scraper_type = scraper_type  # type: ignore
 
-    if user_agent := os.environ.get(EnvironmentKeys.USER_AGENT):
-        config.chrome.user_agent = user_agent
-
-    # Log level
+    # Log level (always applicable)
     if log_level_env := os.environ.get(EnvironmentKeys.LOG_LEVEL):
         log_level_upper = log_level_env.upper()
         if log_level_upper in ("DEBUG", "INFO", "WARNING", "ERROR"):
             config.server.log_level = log_level_upper
 
-    # Headless mode
-    if os.environ.get(EnvironmentKeys.HEADLESS) in FALSY_VALUES:
-        config.chrome.headless = False
-    elif os.environ.get(EnvironmentKeys.HEADLESS) in TRUTHY_VALUES:
-        config.chrome.headless = True
-
-    # Lazy initialization
+    # Lazy initialization (always applicable)
     if os.environ.get(EnvironmentKeys.LAZY_INIT) in TRUTHY_VALUES:
         config.server.lazy_init = True
     elif os.environ.get(EnvironmentKeys.LAZY_INIT) in FALSY_VALUES:
         config.server.lazy_init = False
 
-    # Transport mode
+        # Warn if LAZY_INIT=0/false is used with fast-linkedin-scraper (it's not meaningful)
+        if config.linkedin.scraper_type == "fast-linkedin-scraper":
+            logger.warning(
+                "LAZY_INIT=0/false has no effect with fast-linkedin-scraper. "
+                "This backend creates sessions on-demand and doesn't maintain persistent connections."
+            )
+
+    # Transport mode (always applicable)
     if transport_env := os.environ.get(EnvironmentKeys.TRANSPORT):
         config.server.transport_explicitly_set = True
         if transport_env == "stdio":
             config.server.transport = "stdio"
         elif transport_env == "streamable-http":
             config.server.transport = "streamable-http"
+
+    # Chrome-specific configuration (only for linkedin-scraper)
+    chrome_env_relevant = config.linkedin.scraper_type == "linkedin-scraper"
+
+    if chrome_env_relevant:
+        # ChromeDriver configuration
+        if chromedriver := os.environ.get(EnvironmentKeys.CHROMEDRIVER):
+            config.chrome.chromedriver_path = chromedriver
+
+        if user_agent := os.environ.get(EnvironmentKeys.USER_AGENT):
+            config.chrome.user_agent = user_agent
+
+        # Headless mode
+        if os.environ.get(EnvironmentKeys.HEADLESS) in FALSY_VALUES:
+            config.chrome.headless = False
+        elif os.environ.get(EnvironmentKeys.HEADLESS) in TRUTHY_VALUES:
+            config.chrome.headless = True
+    else:
+        # Warn if Chrome environment variables are set but not relevant
+        chrome_env_vars = []
+        if os.environ.get(EnvironmentKeys.CHROMEDRIVER):
+            chrome_env_vars.append("CHROMEDRIVER")
+        if os.environ.get(EnvironmentKeys.USER_AGENT):
+            chrome_env_vars.append("USER_AGENT")
+        if os.environ.get(EnvironmentKeys.HEADLESS):
+            chrome_env_vars.append("HEADLESS")
+
+        if chrome_env_vars:
+            logger.warning(
+                f"Chrome-specific environment variables ignored for {config.linkedin.scraper_type}: "
+                f"{', '.join(chrome_env_vars)}. These only apply to linkedin-scraper."
+            )
 
     return config
 
@@ -159,10 +191,11 @@ def load_from_args(config: AppConfig) -> AppConfig:
         description="LinkedIn MCP Server - A Model Context Protocol server for LinkedIn integration"
     )
 
+    # Always available arguments (common to all scrapers)
     parser.add_argument(
-        "--no-headless",
-        action="store_true",
-        help="Run Chrome with a visible browser window (useful for debugging)",
+        "--scraper-type",
+        choices=["linkedin-scraper", "fast-linkedin-scraper"],
+        help="Choose scraper library (default: linkedin-scraper)",
     )
 
     parser.add_argument(
@@ -174,7 +207,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
     parser.add_argument(
         "--no-lazy-init",
         action="store_true",
-        help="Initialize Chrome driver and login immediately",
+        help="Initialize scraper backend immediately (applies to both scrapers)",
     )
 
     parser.add_argument(
@@ -206,12 +239,6 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
-        "--chromedriver",
-        type=str,
-        help="Specify the path to the ChromeDriver executable",
-    )
-
-    parser.add_argument(
         "--get-cookie",
         action="store_true",
         help="Login with credentials and display cookie for Docker setup",
@@ -229,24 +256,51 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Specify LinkedIn cookie directly",
     )
 
-    parser.add_argument(
+    # Chrome-specific arguments (only for linkedin-scraper)
+    chrome_group = parser.add_argument_group(
+        "Chrome WebDriver Options (linkedin-scraper only)"
+    )
+
+    chrome_group.add_argument(
+        "--no-headless",
+        action="store_true",
+        help="Run Chrome with a visible browser window (only applies to linkedin-scraper)",
+    )
+
+    chrome_group.add_argument(
+        "--chromedriver",
+        type=str,
+        help="Specify the path to the ChromeDriver executable (only applies to linkedin-scraper)",
+    )
+
+    chrome_group.add_argument(
         "--user-agent",
         type=str,
-        help="Specify custom user agent string to prevent anti-scraping detection",
+        help="Specify custom user agent string (only applies to linkedin-scraper)",
     )
 
     args = parser.parse_args()
 
-    # Update configuration with parsed arguments
-    if args.no_headless:
-        config.chrome.headless = False
+    # Apply scraper type first (affects other argument processing)
+    if getattr(args, "scraper_type", None):
+        config.linkedin.scraper_type = args.scraper_type
 
-    # Handle log level argument
+    # Determine if Chrome-specific arguments should be processed
+    chrome_args_relevant = config.linkedin.scraper_type == "linkedin-scraper"
+
+    # Always apply common arguments
     if args.log_level:
         config.server.log_level = args.log_level
 
     if args.no_lazy_init:
         config.server.lazy_init = False
+
+        # Warn if --no-lazy-init is used with fast-linkedin-scraper (it's not meaningful)
+        if config.linkedin.scraper_type == "fast-linkedin-scraper":
+            logger.warning(
+                "--no-lazy-init has no effect with fast-linkedin-scraper. "
+                "This backend creates sessions on-demand and doesn't maintain persistent connections."
+            )
 
     if args.transport:
         config.server.transport = args.transport
@@ -261,9 +315,6 @@ def load_from_args(config: AppConfig) -> AppConfig:
     if args.path:
         config.server.path = args.path
 
-    if args.chromedriver:
-        config.chrome.chromedriver_path = args.chromedriver
-
     if args.get_cookie:
         config.server.get_cookie = True
     if args.clear_keychain:
@@ -271,8 +322,36 @@ def load_from_args(config: AppConfig) -> AppConfig:
     if args.cookie:
         config.linkedin.cookie = args.cookie
 
-    if args.user_agent:
-        config.chrome.user_agent = args.user_agent
+    # Only apply Chrome-specific arguments if using linkedin-scraper
+    if chrome_args_relevant:
+        if args.no_headless:
+            config.chrome.headless = False
+            logger.debug("Applied --no-headless for linkedin-scraper")
+
+        if args.chromedriver:
+            config.chrome.chromedriver_path = args.chromedriver
+            logger.debug(
+                f"Applied --chromedriver for linkedin-scraper: {args.chromedriver}"
+            )
+
+        if args.user_agent:
+            config.chrome.user_agent = args.user_agent
+            logger.debug("Applied --user-agent for linkedin-scraper")
+    else:
+        # Warn if Chrome-specific arguments are provided but not relevant
+        chrome_args_provided = []
+        if args.no_headless:
+            chrome_args_provided.append("--no-headless")
+        if args.chromedriver:
+            chrome_args_provided.append("--chromedriver")
+        if args.user_agent:
+            chrome_args_provided.append("--user-agent")
+
+        if chrome_args_provided:
+            logger.warning(
+                f"Chrome-specific arguments ignored for {config.linkedin.scraper_type}: "
+                f"{', '.join(chrome_args_provided)}. These only apply to linkedin-scraper."
+            )
 
     return config
 

@@ -285,6 +285,10 @@ def run_cookie_extraction_setup() -> str:
     """
     Run setup specifically for cookie extraction (--get-cookie mode).
 
+    Note: Cookie extraction always uses Chrome WebDriver regardless of scraper type,
+    as it requires credential-based login which is only supported by linkedin-scraper.
+    The extracted cookie can then be used with fast-linkedin-scraper.
+
     Returns:
         str: Captured LinkedIn session cookie for display
 
@@ -293,11 +297,12 @@ def run_cookie_extraction_setup() -> str:
     """
     logger.info("🔗 LinkedIn MCP Server - Cookie Extraction mode started")
     print("🔗 LinkedIn MCP Server - Cookie Extraction")
+    print("ℹ️  Cookie extraction uses Chrome WebDriver for credential-based login")
 
     # Get credentials
     credentials: Dict[str, str] = get_credentials_for_setup()
 
-    # Capture cookie
+    # Capture cookie using Chrome WebDriver (regardless of configured scraper type)
     cookie: str = capture_cookie_from_credentials(
         credentials["email"], credentials["password"]
     )

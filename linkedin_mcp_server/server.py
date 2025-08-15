@@ -32,13 +32,19 @@ def create_mcp_server() -> FastMCP:
     @mcp.tool()
     async def close_session() -> Dict[str, Any]:
         """Close the current browser session and clean up resources."""
-        from linkedin_mcp_server.drivers.chrome import close_all_drivers
+        from linkedin_mcp_server.drivers import close_all_sessions, is_driver_needed
 
         try:
-            close_all_drivers()
+            close_all_sessions()
+
+            if is_driver_needed():
+                message = "Successfully closed Chrome WebDriver session and cleaned up resources"
+            else:
+                message = "No persistent browser session to close (using fast-linkedin-scraper)"
+
             return {
                 "status": "success",
-                "message": "Successfully closed the browser session and cleaned up resources",
+                "message": message,
             }
         except Exception as e:
             return {
@@ -51,6 +57,6 @@ def create_mcp_server() -> FastMCP:
 
 def shutdown_handler() -> None:
     """Clean up resources on shutdown."""
-    from linkedin_mcp_server.drivers.chrome import close_all_drivers
+    from linkedin_mcp_server.drivers import close_all_sessions
 
-    close_all_drivers()
+    close_all_sessions()

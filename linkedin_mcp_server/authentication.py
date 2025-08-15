@@ -87,7 +87,7 @@ def clear_authentication() -> bool:
 
 def ensure_authentication() -> str:
     """
-    Ensure authentication is available with clear error messages.
+    Ensure authentication is available with backend-aware error messages.
 
     Returns:
         str: Valid LinkedIn session cookie
@@ -100,6 +100,16 @@ def ensure_authentication() -> str:
     except CredentialsNotFoundError:
         config = get_config()
 
-        raise CredentialsNotFoundError(
-            ErrorMessages.no_cookie_found(config.is_interactive)
-        )
+        # Provide backend-specific guidance
+        if config.linkedin.scraper_type == "fast-linkedin-scraper":
+            error_msg = (
+                f"No LinkedIn cookie found for {config.linkedin.scraper_type}. "
+                "This scraper requires a valid LinkedIn session cookie. You can:\n"
+                "  1. Set LINKEDIN_COOKIE environment variable with a valid LinkedIn session cookie\n"
+                "  2. Use --cookie flag to provide the cookie directly\n"
+                "  3. Run with linkedin-scraper first using --get-cookie to extract a cookie"
+            )
+        else:
+            error_msg = ErrorMessages.no_cookie_found(config.is_interactive)
+
+        raise CredentialsNotFoundError(error_msg)

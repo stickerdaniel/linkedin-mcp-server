@@ -10,14 +10,35 @@ Eliminates code duplication while ensuring user-friendly error messages.
 import logging
 from typing import Any, Dict, List
 
-from linkedin_scraper.exceptions import (
-    CaptchaRequiredError,
-    InvalidCredentialsError,
-    LoginTimeoutError,
-    RateLimitError,
-    SecurityChallengeError,
-    TwoFactorAuthError,
-)
+try:
+    from linkedin_scraper.exceptions import (
+        CaptchaRequiredError,
+        InvalidCredentialsError,
+        LoginTimeoutError,
+        RateLimitError,
+        SecurityChallengeError,
+        TwoFactorAuthError,
+    )
+except ImportError:
+    # Fallback if linkedin_scraper is not available
+    class CaptchaRequiredError(Exception):
+        pass
+
+    class InvalidCredentialsError(Exception):
+        pass
+
+    class LoginTimeoutError(Exception):
+        pass
+
+    class RateLimitError(Exception):
+        pass
+
+    class SecurityChallengeError(Exception):
+        pass
+
+    class TwoFactorAuthError(Exception):
+        pass
+
 
 from linkedin_mcp_server.exceptions import (
     CredentialsNotFoundError,
@@ -125,6 +146,37 @@ def convert_exception_to_response(
     else:
         # Generic error handling with structured logging
         logger = logging.getLogger(__name__)
+
+        # Check for common fast-linkedin-scraper errors by error message
+        error_message = str(exception).lower()
+
+        if "cookie" in error_message and (
+            "invalid" in error_message or "expired" in error_message
+        ):
+            return {
+                "error": "invalid_cookie",
+                "message": str(exception),
+                "resolution": "LinkedIn cookie has expired or is invalid. Please obtain a fresh cookie.",
+            }
+        elif "authentication" in error_message or "login" in error_message:
+            return {
+                "error": "authentication_failed",
+                "message": str(exception),
+                "resolution": "Authentication failed. Check your LinkedIn credentials or cookie.",
+            }
+        elif "rate" in error_message or "limit" in error_message:
+            return {
+                "error": "rate_limited",
+                "message": str(exception),
+                "resolution": "Rate limited by LinkedIn. Wait before making more requests.",
+            }
+        elif "captcha" in error_message:
+            return {
+                "error": "captcha_required",
+                "message": str(exception),
+                "resolution": "Captcha required. Use --no-headless mode to solve manually.",
+            }
+
         logger.error(
             f"Error in {context}: {exception}",
             extra={
@@ -161,6 +213,7 @@ def convert_exception_to_list_response(
 def safe_get_driver():
     """
     Safely get or create a driver with proper error handling.
+    Only used for legacy linkedin-scraper. Fast-linkedin-scraper handles its own browser management.
 
     Returns:
         Driver instance
@@ -168,13 +221,24 @@ def safe_get_driver():
     Raises:
         LinkedInMCPError: If driver initialization fails
     """
-    from linkedin_mcp_server.authentication import ensure_authentication
-    from linkedin_mcp_server.drivers.chrome import get_or_create_driver
+    from linkedin_mcp_server.config import get_config
 
-    # Get authentication first
-    authentication = ensure_authentication()
+    config = get_config()
 
-    # Create driver with authentication
-    driver = get_or_create_driver(authentication)
+    # Only create Chrome driver for legacy scraper
+    if config.linkedin.scraper_type == "linkedin-scraper":
+        from linkedin_mcp_server.authentication import ensure_authentication
+        from linkedin_mcp_server.drivers.chrome import get_or_create_driver
 
-    return driver
+        # Get authentication first
+        authentication = ensure_authentication()
+
+        # Create driver with authentication
+        driver = get_or_create_driver(authentication)
+
+        return driver
+    else:
+        # For fast-linkedin-scraper, we don't use Chrome driver
+        raise LinkedInMCPError(
+            "safe_get_driver() should not be called when using fast-linkedin-scraper"
+        )

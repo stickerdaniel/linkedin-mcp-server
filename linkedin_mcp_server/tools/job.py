@@ -10,13 +10,12 @@ import logging
 from typing import Any, Dict, List
 
 from fastmcp import FastMCP
-from linkedin_scraper import Job, JobSearch
 
 from linkedin_mcp_server.error_handler import (
     handle_tool_error,
     handle_tool_error_list,
-    safe_get_driver,
 )
+from linkedin_mcp_server.scraper_adapter import get_scraper_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +41,8 @@ def register_job_tools(mcp: FastMCP) -> None:
                           application count, and job description (may be empty if content is protected)
         """
         try:
-            # Construct clean LinkedIn URL from job ID
-            job_url = f"https://www.linkedin.com/jobs/view/{job_id}/"
-
-            driver = safe_get_driver()
-
-            logger.info(f"Scraping job: {job_url}")
-            job = Job(job_url, driver=driver, close_on_complete=False)
-
-            # Convert job object to a dictionary
-            return job.to_dict()
+            scraper = get_scraper_adapter()
+            return scraper.get_job_details(job_id)
         except Exception as e:
             return handle_tool_error(e, "get_job_details")
 
@@ -67,14 +58,8 @@ def register_job_tools(mcp: FastMCP) -> None:
             List[Dict[str, Any]]: List of job search results
         """
         try:
-            driver = safe_get_driver()
-
-            logger.info(f"Searching jobs: {search_term}")
-            job_search = JobSearch(driver=driver, close_on_complete=False, scrape=False)
-            jobs = job_search.search(search_term)
-
-            # Convert job objects to dictionaries
-            return [job.to_dict() for job in jobs]
+            scraper = get_scraper_adapter()
+            return scraper.search_jobs(search_term)
         except Exception as e:
             return handle_tool_error_list(e, "search_jobs")
 
@@ -87,19 +72,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             List[Dict[str, Any]]: List of recommended jobs
         """
         try:
-            driver = safe_get_driver()
-
-            logger.info("Getting recommended jobs")
-            job_search = JobSearch(
-                driver=driver,
-                close_on_complete=False,
-                scrape=True,  # Enable scraping to get recommended jobs
-                scrape_recommended_jobs=True,
-            )
-
-            if hasattr(job_search, "recommended_jobs") and job_search.recommended_jobs:
-                return [job.to_dict() for job in job_search.recommended_jobs]
-            else:
-                return []
+            scraper = get_scraper_adapter()
+            return scraper.get_recommended_jobs()
         except Exception as e:
             return handle_tool_error_list(e, "get_recommended_jobs")
