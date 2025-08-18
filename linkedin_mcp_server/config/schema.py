@@ -41,6 +41,9 @@ class LinkedInConfig:
     email: Optional[str] = None
     password: Optional[str] = None
     cookie: Optional[str] = None
+    scraper_type: Literal["linkedin-scraper", "fast-linkedin-scraper"] = (
+        "linkedin-scraper"
+    )
 
 
 @dataclass
@@ -73,6 +76,7 @@ class AppConfig:
         self._validate_transport_config()
         self._validate_port_range()
         self._validate_path_format()
+        self._validate_scraper_config()
 
     def _validate_transport_config(self) -> None:
         """Validate transport configuration is consistent."""
@@ -100,3 +104,32 @@ class AppConfig:
                 raise ConfigurationError(
                     f"HTTP path '{self.server.path}' must be at least 2 characters"
                 )
+
+    def _validate_scraper_config(self) -> None:
+        """Validate scraper-specific configuration."""
+        # Validate that fast-linkedin-scraper has appropriate authentication
+        if self.linkedin.scraper_type == "fast-linkedin-scraper":
+            if not self.linkedin.cookie and not self.is_interactive:
+                raise ConfigurationError(
+                    "fast-linkedin-scraper requires a LinkedIn cookie in non-interactive mode. "
+                    "Provide it via LINKEDIN_COOKIE environment variable or --cookie flag."
+                )
+
+        # Validate that Chrome config is only meaningful for linkedin-scraper
+        if self.linkedin.scraper_type == "fast-linkedin-scraper":
+            chrome_config_warnings = []
+            if not self.chrome.headless:  # Default is True, so False means it was set
+                chrome_config_warnings.append("headless=False")
+            if self.chrome.chromedriver_path:
+                chrome_config_warnings.append(
+                    f"chromedriver_path={self.chrome.chromedriver_path}"
+                )
+            if self.chrome.user_agent:
+                chrome_config_warnings.append(f"user_agent={self.chrome.user_agent}")
+            if self.chrome.browser_args:
+                chrome_config_warnings.append(
+                    f"browser_args={self.chrome.browser_args}"
+                )
+
+            # Note: We don't raise an error here, just log a warning
+            # The actual warning is handled in the loaders module
