@@ -24,6 +24,7 @@ from selenium import webdriver
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.exceptions import DriverInitializationError
@@ -99,23 +100,34 @@ def create_chrome_service(config):
     """
     Create Chrome service with ChromeDriver path resolution.
 
+    Supports backwards compatibility by checking for manually specified paths first,
+    then falls back to automatic ChromeDriver management with webdriver-manager.
+
     Args:
         config: AppConfig instance with Chrome configuration
 
     Returns:
-        Service or None: Chrome service if path is configured, None for auto-detection
+        Service: Chrome service with automatically managed or manually specified ChromeDriver
     """
-    # Use ChromeDriver path from environment or config
+    # Use ChromeDriver path from environment or config (backwards compatibility)
     chromedriver_path = (
         os.environ.get("CHROMEDRIVER_PATH") or config.chrome.chromedriver_path
     )
 
     if chromedriver_path:
-        logger.info(f"Using ChromeDriver at path: {chromedriver_path}")
+        logger.info(f"Using manually specified ChromeDriver at path: {chromedriver_path}")
         return Service(executable_path=chromedriver_path)
     else:
-        logger.info("Using auto-detected ChromeDriver")
-        return None
+        # Use webdriver-manager for automatic ChromeDriver management
+        try:
+            logger.info("Using ChromeDriverManager for automatic version management...")
+            auto_driver_path = ChromeDriverManager().install()
+            logger.info(f"ChromeDriverManager installed ChromeDriver at: {auto_driver_path}")
+            return Service(executable_path=auto_driver_path)
+        except Exception as e:
+            logger.warning(f"ChromeDriverManager failed: {e}. Falling back to system PATH.")
+            logger.info("Using auto-detected ChromeDriver from system PATH")
+            return None
 
 
 def create_temporary_chrome_driver() -> webdriver.Chrome:
