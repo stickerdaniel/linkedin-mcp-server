@@ -98,38 +98,40 @@ def create_chrome_options(config) -> Options:
 
 def create_chrome_service(config):
     """
-    Create Chrome service with ChromeDriver path resolution.
+    Create Chrome service with automatic ChromeDriver version management.
 
-    Supports backwards compatibility by checking for manually specified paths first,
-    then falls back to automatic ChromeDriver management with webdriver-manager.
+    ALWAYS uses ChromeDriverManager to ensure compatibility with the installed Chrome version.
+    This prevents ChromeDriver version mismatches by automatically downloading the correct version.
 
     Args:
-        config: AppConfig instance with Chrome configuration
+        config: AppConfig instance with Chrome configuration (legacy paths ignored)
 
     Returns:
-        Service: Chrome service with automatically managed or manually specified ChromeDriver
+        Service: Chrome service with automatically managed ChromeDriver
 
     Raises:
-        Exception: If both manual path and ChromeDriverManager fail
+        Exception: If ChromeDriverManager fails
     """
-    # Use ChromeDriver path from environment or config (backwards compatibility)
-    chromedriver_path = (
-        os.environ.get("CHROMEDRIVER_PATH") or config.chrome.chromedriver_path
-    )
+    # ALWAYS use ChromeDriverManager for automatic version management
+    # This ensures we get the correct ChromeDriver version that matches Chrome
+    try:
+        logger.info("Using ChromeDriverManager for automatic version management...")
+        auto_driver_path = ChromeDriverManager().install()
+        logger.info(f"ChromeDriverManager installed ChromeDriver at: {auto_driver_path}")
 
-    if chromedriver_path:
-        logger.info(f"Using manually specified ChromeDriver at path: {chromedriver_path}")
-        return Service(executable_path=chromedriver_path)
-    else:
-        # Use webdriver-manager for automatic ChromeDriver management
+        # Verify the downloaded driver version
+        import subprocess
         try:
-            logger.info("Using ChromeDriverManager for automatic version management...")
-            auto_driver_path = ChromeDriverManager().install()
-            logger.info(f"ChromeDriverManager installed ChromeDriver at: {auto_driver_path}")
-            return Service(executable_path=auto_driver_path)
-        except Exception as e:
-            logger.error(f"ChromeDriverManager failed: {e}")
-            raise Exception(f"Failed to initialize ChromeDriver: ChromeDriverManager error: {e}. Please ensure Chrome is installed and accessible.")
+            result = subprocess.run([auto_driver_path, '--version'],
+                                  capture_output=True, text=True, timeout=5)
+            logger.info(f"ChromeDriver version: {result.stdout.strip()}")
+        except Exception:
+            pass  # Version check is informational only
+
+        return Service(executable_path=auto_driver_path)
+    except Exception as e:
+        logger.error(f"ChromeDriverManager failed: {e}")
+        raise Exception(f"Failed to initialize ChromeDriver: ChromeDriverManager error: {e}. Please ensure Chrome is installed and accessible.")
 
 
 def create_temporary_chrome_driver() -> webdriver.Chrome:
