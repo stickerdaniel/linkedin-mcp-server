@@ -1,0 +1,56 @@
+{
+  "name": "Nick Hargreaves",
+  "job_title": "Investment Management Business Development",
+  "company": "Industry's best talent",
+  "location": "United Kingdom",
+  "about": "I help investment management businesses partner with the financial services industry's best talent.",
+  "open_to_work": false,
+  "contact_info": {
+    "email": "nick.hargreaves@berkeleycroft.com",
+    "phone": "020 3865 4629",
+    "birthday": "July 12",
+    "connected_date": "Apr 6, 2023",
+    "linkedin_url": "https://linkedin.com/in/hargreavesnick",
+    "websites": [
+      {
+        "url": "https://berkeleycroft.com",
+        "type": "Hedge Fund Recruitment"
+      },
+      {
+        "url": "https://berkeleycroft.com",
+        "type": "Asset Management Recruitment"
+      },
+      {
+        "url": "https://berkeleycroft.com",
+        "type": "Marketing Recruitment"
+      }
+    ]
+  },
+  "experiences": [
+    {
+      "position_title": "Director",
+      "company": "Berkeley Croft",
+      "from_date": "2019",
+      "to_date": "Present",
+      "duration": "5 years",
+      "location": "London, UK",
+      "description": "Leading business development initiatives..."
+    }
+  ],
+  "educations": [
+    {
+      "institution": "University Name",
+      "degree": "Bachelor's Degree",
+      "from_date": "2010",
+      "to_date": "2014",
+      "description": "Business Administration"
+    }
+  ],
+  "interests": [
+    "Financial Services",
+    "Investment Management",
+    "Recruitment"
+  ],
+  "accomplishments": [],
+  "contacts": []
+}

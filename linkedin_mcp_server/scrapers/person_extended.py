@@ -64,17 +64,27 @@ class PersonExtended(Person):
                 EC.presence_of_element_located((By.TAG_NAME, "main"))
             )
 
+            # Log current page for debugging
+            logger.info(f"Current URL: {driver.current_url}")
+
             # Find and click the Contact Info link
             # The link is usually next to the location, with text "Contact info"
             contact_info_link = None
 
             # Try multiple selectors to find the Contact Info link
+            # Updated selectors based on current LinkedIn UI
             selectors = [
                 "//a[contains(@href, 'overlay/contact-info')]",
                 "//button[contains(@aria-label, 'Contact info')]",
                 "//a[contains(text(), 'Contact info')]",
                 "//span[contains(text(), 'Contact info')]/parent::a",
-                "//span[contains(text(), 'Contact info')]/parent::button"
+                "//span[contains(text(), 'Contact info')]/parent::button",
+                # New selectors for current LinkedIn UI
+                "//a[@id='top-card-text-details-contact-info']",
+                "//span[@aria-label='View contact info']/parent::a",
+                "//div[contains(@class, 'pv-text-details__left-panel')]//a[contains(@href, 'contact-info')]",
+                # Try finding by partial href
+                "//a[contains(@href, 'contact-info')]"
             ]
 
             for selector in selectors:
@@ -92,8 +102,15 @@ class PersonExtended(Person):
             # Click the Contact Info link
             driver.execute_script("arguments[0].scrollIntoView(true);", contact_info_link)
             time.sleep(1)
-            contact_info_link.click()
-            logger.info("Clicked Contact Info link")
+
+            # Try regular click first, then JavaScript click if that fails
+            try:
+                contact_info_link.click()
+                logger.info("Clicked Contact Info link (regular click)")
+            except Exception as e:
+                logger.info(f"Regular click failed ({e}), trying JavaScript click...")
+                driver.execute_script("arguments[0].click();", contact_info_link)
+                logger.info("Clicked Contact Info link (JavaScript click)")
 
             # Wait for modal to appear
             time.sleep(2)
@@ -114,17 +131,23 @@ class PersonExtended(Person):
         try:
             # Wait for modal content to load
             modal = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "[role='dialog']"))
+                EC.presence_of_element_located((By.CSS_SELECTOR, "[role='dialog'], .artdeco-modal"))
             )
+            logger.info("Modal found, extracting data...")
+
+            # Try to get all text from modal for debugging
+            modal_text = modal.text
+            logger.debug(f"Modal text preview: {modal_text[:200] if modal_text else 'No text found'}...")
 
             # Extract LinkedIn Profile URL
             try:
-                profile_section = modal.find_element(By.XPATH, ".//section[contains(., 'Profile')]")
-                profile_link = profile_section.find_element(By.TAG_NAME, "a")
-                self.contact_info["linkedin_url"] = profile_link.get_attribute("href")
-                logger.info(f"Found LinkedIn URL: {self.contact_info['linkedin_url']}")
-            except NoSuchElementException:
-                pass
+                # Try multiple approaches
+                profile_links = modal.find_elements(By.XPATH, ".//a[contains(@href, 'linkedin.com/in/')]")
+                if profile_links:
+                    self.contact_info["linkedin_url"] = profile_links[0].get_attribute("href")
+                    logger.info(f"Found LinkedIn URL: {self.contact_info['linkedin_url']}")
+            except Exception as e:
+                logger.debug(f"LinkedIn URL extraction failed: {e}")
 
             # Extract Websites
             try:
@@ -143,27 +166,49 @@ class PersonExtended(Person):
 
             # Extract Phone
             try:
-                phone_section = modal.find_element(By.XPATH, ".//section[contains(., 'Phone')]")
-                # Look for the phone number text (it's usually in a span or div after the Phone label)
-                phone_elements = phone_section.find_elements(By.XPATH, ".//span[not(contains(text(), 'Phone'))]")
-                for elem in phone_elements:
-                    text = elem.text.strip()
-                    if text and not text == "Phone":
-                        self.contact_info["phone"] = text
-                        logger.info(f"Found phone: {self.contact_info['phone']}")
-                        break
-            except NoSuchElementException:
-                pass
+                # Try different approaches for phone
+                phone_selectors = [
+                    ".//section[contains(., 'Phone')]//span[not(contains(text(), 'Phone'))]",
+                    ".//div[contains(text(), 'Phone')]/following-sibling::*",
+                    ".//span[contains(@class, 'contact-info__phone')]",
+                    ".//a[contains(@href, 'tel:')]"
+                ]
+                for selector in phone_selectors:
+                    try:
+                        phone_elem = modal.find_element(By.XPATH, selector)
+                        text = phone_elem.text.strip() if selector != ".//a[contains(@href, 'tel:')]" else phone_elem.get_attribute("href").replace("tel:", "")
+                        if text and text != "Phone":
+                            self.contact_info["phone"] = text
+                            logger.info(f"Found phone: {self.contact_info['phone']}")
+                            break
+                    except NoSuchElementException:
+                        continue
+            except Exception as e:
+                logger.debug(f"Phone extraction failed: {e}")
 
             # Extract Email
             try:
-                email_section = modal.find_element(By.XPATH, ".//section[contains(., 'Email')]")
-                email_link = email_section.find_element(By.CSS_SELECTOR, "a[href^='mailto:']")
-                email = email_link.get_attribute("href").replace("mailto:", "")
-                self.contact_info["email"] = email
-                logger.info(f"Found email: {self.contact_info['email']}")
-            except NoSuchElementException:
-                pass
+                # Try different approaches for email
+                email_selectors = [
+                    ".//a[contains(@href, 'mailto:')]",
+                    ".//section[contains(., 'Email')]//a",
+                    ".//div[contains(text(), 'Email')]/following-sibling::*//a"
+                ]
+                for selector in email_selectors:
+                    try:
+                        email_elem = modal.find_element(By.XPATH, selector)
+                        if email_elem.get_attribute("href") and "mailto:" in email_elem.get_attribute("href"):
+                            email = email_elem.get_attribute("href").replace("mailto:", "")
+                        else:
+                            email = email_elem.text.strip()
+                        if email and "@" in email:
+                            self.contact_info["email"] = email
+                            logger.info(f"Found email: {self.contact_info['email']}")
+                            break
+                    except NoSuchElementException:
+                        continue
+            except Exception as e:
+                logger.debug(f"Email extraction failed: {e}")
 
             # Extract Birthday
             try:
