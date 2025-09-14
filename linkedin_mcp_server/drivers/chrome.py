@@ -108,6 +108,9 @@ def create_chrome_service(config):
 
     Returns:
         Service: Chrome service with automatically managed or manually specified ChromeDriver
+
+    Raises:
+        Exception: If both manual path and ChromeDriverManager fail
     """
     # Use ChromeDriver path from environment or config (backwards compatibility)
     chromedriver_path = (
@@ -125,9 +128,8 @@ def create_chrome_service(config):
             logger.info(f"ChromeDriverManager installed ChromeDriver at: {auto_driver_path}")
             return Service(executable_path=auto_driver_path)
         except Exception as e:
-            logger.warning(f"ChromeDriverManager failed: {e}. Falling back to system PATH.")
-            logger.info("Using auto-detected ChromeDriver from system PATH")
-            return None
+            logger.error(f"ChromeDriverManager failed: {e}")
+            raise Exception(f"Failed to initialize ChromeDriver: ChromeDriverManager error: {e}. Please ensure Chrome is installed and accessible.")
 
 
 def create_temporary_chrome_driver() -> webdriver.Chrome:
@@ -153,11 +155,8 @@ def create_temporary_chrome_driver() -> webdriver.Chrome:
     # Create Chrome service using shared function
     service = create_chrome_service(config)
 
-    # Initialize Chrome driver
-    if service:
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-    else:
-        driver = webdriver.Chrome(options=chrome_options)
+    # Initialize Chrome driver (service is always valid now)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
 
     logger.info("Temporary Chrome WebDriver created successfully")
 
@@ -190,11 +189,8 @@ def create_chrome_driver() -> webdriver.Chrome:
     # Create Chrome service using shared function
     service = create_chrome_service(config)
 
-    # Initialize Chrome driver
-    if service:
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-    else:
-        driver = webdriver.Chrome(options=chrome_options)
+    # Initialize Chrome driver (service is always valid now)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
 
     logger.info("Chrome WebDriver initialized successfully")
 
