@@ -100,3 +100,4 @@ def register_company_tools(mcp: FastMCP) -> None:
             return result
         except Exception as e:
             return handle_tool_error(e, "get_company_profile")
+

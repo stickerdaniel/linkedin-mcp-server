@@ -457,3 +457,4 @@ Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@
 This project is licensed under the Apache 2.0 license.
 
 <br>
+

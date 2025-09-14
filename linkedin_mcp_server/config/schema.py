@@ -100,3 +100,4 @@ class AppConfig:
                 raise ConfigurationError(
                     f"HTTP path '{self.server.path}' must be at least 2 characters"
                 )
+

@@ -59,3 +59,4 @@ def register_person_tools(mcp: FastMCP) -> None:
 
         except Exception as e:
             return handle_tool_error(e, "get_person_profile")
+

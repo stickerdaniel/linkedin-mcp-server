@@ -17,3 +17,4 @@ Architecture:
 - Singleton driver pattern for session persistence
 - Structured data return format for consistent MCP responses
 """
+

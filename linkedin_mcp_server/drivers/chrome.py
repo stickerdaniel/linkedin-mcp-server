@@ -466,3 +466,4 @@ def capture_session_cookie(driver: webdriver.Chrome) -> Optional[str]:
     except Exception as e:
         logger.warning(f"Failed to capture session cookie: {e}")
         return None
+

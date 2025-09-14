@@ -103,3 +103,4 @@ def ensure_authentication() -> str:
         raise CredentialsNotFoundError(
             ErrorMessages.no_cookie_found(config.is_interactive)
         )
+

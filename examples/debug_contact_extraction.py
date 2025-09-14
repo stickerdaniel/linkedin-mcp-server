@@ -41,7 +41,9 @@ def debug_contact_extraction():
     # Create Chrome options (non-headless)
     chrome_options = create_chrome_options(config)
     # Remove headless mode for debugging
-    chrome_options.arguments = [arg for arg in chrome_options.arguments if '--headless' not in arg]
+    # Remove headless arguments for visible debugging
+    filtered_args = [arg for arg in chrome_options.arguments if '--headless' not in arg]
+    chrome_options._arguments = filtered_args  # Direct access to private attribute
 
     print("✅ Creating visible Chrome browser for debugging...")
 
@@ -151,7 +153,7 @@ def debug_contact_extraction():
                 modal = driver.find_element(By.CSS_SELECTOR, selector)
                 print(f"✅ Found modal with selector: {selector}")
                 break
-            except:
+            except Exception:
                 continue
 
         if not modal:

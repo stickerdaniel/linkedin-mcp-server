@@ -54,3 +54,4 @@ def shutdown_handler() -> None:
     from linkedin_mcp_server.drivers.chrome import close_all_drivers
 
     close_all_drivers()
+

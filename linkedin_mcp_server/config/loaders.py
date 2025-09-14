@@ -333,3 +333,4 @@ def load_config() -> AppConfig:
     config = load_from_args(config)
 
     return config
+

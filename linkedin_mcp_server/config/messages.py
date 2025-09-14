@@ -99,3 +99,4 @@ class InfoMessages:
             str: Formatted message
         """
         return f"Using LinkedIn cookie from {source}"
+

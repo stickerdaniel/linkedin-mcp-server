@@ -18,3 +18,4 @@ docker pull stickerdaniel/linkedin-mcp-server:${VERSION}
 3. Restart Claude Desktop
 
 This DXT extension uses the pinned version `${VERSION}`, the Docker image will be pulled automatically.
+
