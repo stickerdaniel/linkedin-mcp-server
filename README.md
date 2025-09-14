@@ -33,7 +33,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 
 ## Features & Tool Status
 > [!TIP]
-> - **Profile Scraping** (`get_person_profile`): Get detailed information from a LinkedIn profile including work history, education, skills, and connections
+> - **Enhanced Profile Scraping** (`get_person_profile`): Get detailed information from a LinkedIn profile including work history, education, skills, connections, and **📧 contact information** (email, phone, websites, birthday)
 > - **Company Analysis** (`get_company_profile`): Extract comprehensive company information from a LinkedIn company profile name
 > - **Job Details** (`get_job_details`): Retrieve specific job posting details using LinkedIn job IDs
 > - **Job Search** (`search_jobs`): Search for jobs with filters like keywords and location

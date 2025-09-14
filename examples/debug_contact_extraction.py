@@ -17,8 +17,14 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(leve
 def debug_contact_extraction():
     """Debug the contact info extraction with visible browser."""
 
-    # Set LinkedIn cookie
-    cookie = 'AQEFAQ8BAAAAABfNzSkAAAGYNhQPzAAAAZlswEwXTgAAsnVybjpsaTplbnRlcnByaXNlQXV0aFRva2VuOmVKeGpaQUFDZnJ1b1Z5Q2FiOFdIcjJDK3phNGNSaEFqUnRpREQ4eUkvS0ZUeHNBSUFMek5DRm85XnVybjpsaTplbnRlcnByaXNlUHJvZmlsZToodXJuOmxpOmVudGVycHJpc2VBY2NvdW50OjI1NTc0NDc0NiwyNDU5NTI3NTcpXnVybjpsaTptZW1iZXI6NjkwNzAwNTBniP2Dx66MRpPU6o_z_BUNPVXF0ciOKwt_1LsFioyPL_Tq5c4zsNz78z8lxwnn99DQ-SGtdk9Y2MVzGCRWIskcuTMgPWi_krPgaZ_BtLopmbss3QXjoEqB-o5wGH-lCmi_Y_tmFV0QX6OWT7w47VnBakvw0exEGlAt8jjv3z6N5qj62pRL4u_OXsZd2NpRueSKW-x_'
+    # Get LinkedIn cookie from environment variable
+    cookie = os.getenv('LINKEDIN_COOKIE')
+
+    if not cookie:
+        print("❌ LINKEDIN_COOKIE environment variable not set")
+        print("Please set your LinkedIn cookie with:")
+        print("export LINKEDIN_COOKIE='your_cookie_here'")
+        return
 
     print("🔧 Debug: Contact Info Extraction")
     print("=" * 50)
