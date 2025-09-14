@@ -7,7 +7,7 @@ experience, education, skills, and detailed contact information with proper erro
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from fastmcp import FastMCP
 
@@ -26,7 +26,9 @@ def register_person_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
-    async def get_person_profile(linkedin_username: str, extract_contact_info: bool = True) -> Dict[str, Any]:
+    async def get_person_profile(
+        linkedin_username: str, extract_contact_info: bool = True
+    ) -> Dict[str, Any]:
         """
         Get a specific person's LinkedIn profile with optional detailed contact information.
 
@@ -46,7 +48,9 @@ def register_person_tools(mcp: FastMCP) -> None:
             logger.info(f"Scraping profile: {linkedin_url}")
 
             # Use PersonExtended for enhanced contact info extraction
-            person = PersonExtended(linkedin_url, driver=driver, close_on_complete=False)
+            person = PersonExtended(
+                linkedin_url, driver=driver, close_on_complete=False
+            )
 
             # Use the to_dict method which includes all data including contact info
             profile_data = person.to_dict()
@@ -59,4 +63,3 @@ def register_person_tools(mcp: FastMCP) -> None:
 
         except Exception as e:
             return handle_tool_error(e, "get_person_profile")
-

@@ -46,4 +46,3 @@ def prompt_for_credentials() -> Dict[str, str]:
         logger.warning("Could not store credentials in system keyring")
 
     return credentials
-

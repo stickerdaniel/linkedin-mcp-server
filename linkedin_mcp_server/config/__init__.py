@@ -67,4 +67,3 @@ __all__ = [
     "check_keychain_data_exists",
     "get_keyring_name",
 ]
-

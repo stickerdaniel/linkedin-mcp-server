@@ -7,7 +7,7 @@ feature added to the LinkedIn MCP server's get_person_profile tool.
 """
 
 import json
-from typing import Dict, Any
+
 
 def demonstrate_contact_extraction():
     """
@@ -28,7 +28,6 @@ def demonstrate_contact_extraction():
         "location": "United Kingdom",
         "about": "I help investment management businesses partner with the financial services industry's best talent.",
         "open_to_work": False,
-
         # ⭐ NEW: Detailed contact information extracted from Contact Info modal
         "contact_info": {
             "email": "nick.hargreaves@berkeleycroft.com",
@@ -37,21 +36,14 @@ def demonstrate_contact_extraction():
             "connected_date": "Apr 6, 2023",
             "linkedin_url": "https://linkedin.com/in/hargreavesnick",
             "websites": [
+                {"url": "https://berkeleycroft.com", "type": "Hedge Fund Recruitment"},
                 {
                     "url": "https://berkeleycroft.com",
-                    "type": "Hedge Fund Recruitment"
+                    "type": "Asset Management Recruitment",
                 },
-                {
-                    "url": "https://berkeleycroft.com",
-                    "type": "Asset Management Recruitment"
-                },
-                {
-                    "url": "https://berkeleycroft.com",
-                    "type": "Marketing Recruitment"
-                }
-            ]
+                {"url": "https://berkeleycroft.com", "type": "Marketing Recruitment"},
+            ],
         },
-
         # Standard profile data (unchanged)
         "experiences": [
             {
@@ -61,7 +53,7 @@ def demonstrate_contact_extraction():
                 "to_date": "Present",
                 "duration": "5 years",
                 "location": "London, UK",
-                "description": "Leading business development initiatives..."
+                "description": "Leading business development initiatives...",
             }
         ],
         "educations": [
@@ -70,12 +62,12 @@ def demonstrate_contact_extraction():
                 "degree": "Bachelor's Degree",
                 "from_date": "2010",
                 "to_date": "2014",
-                "description": "Business Administration"
+                "description": "Business Administration",
             }
         ],
         "interests": ["Financial Services", "Investment Management", "Recruitment"],
         "accomplishments": [],
-        "contacts": []  # List of connections (separate from contact_info)
+        "contacts": [],  # List of connections (separate from contact_info)
     }
 
     print("📊 EXAMPLE OUTPUT FROM get_person_profile('nick-hargreaves')")
@@ -91,14 +83,14 @@ def demonstrate_contact_extraction():
     print()
 
     print("📧 Contact Information (NEW FEATURE!):")
-    contact = example_profile_data['contact_info']
+    contact = example_profile_data["contact_info"]
     print(f"  • Email: {contact['email']}")
     print(f"  • Phone: {contact['phone']}")
     print(f"  • Birthday: {contact['birthday']}")
     print(f"  • Connected: {contact['connected_date']}")
     print(f"  • LinkedIn: {contact['linkedin_url']}")
     print(f"  • Websites: {len(contact['websites'])} found")
-    for site in contact['websites']:
+    for site in contact["websites"]:
         print(f"    - {site['type']}: {site['url']}")
     print()
 
@@ -154,9 +146,10 @@ def demonstrate_contact_extraction():
     print()
 
     # Save example output to JSON for reference
-    with open('example_contact_extraction_output.json', 'w') as f:
+    with open("example_contact_extraction_output.json", "w") as f:
         json.dump(example_profile_data, f, indent=2)
     print("📄 Example output saved to: example_contact_extraction_output.json")
+
 
 if __name__ == "__main__":
     demonstrate_contact_extraction()

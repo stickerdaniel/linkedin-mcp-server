@@ -24,4 +24,3 @@ class DriverInitializationError(LinkedInMCPError):
     """Failed to initialize Chrome WebDriver."""
 
     pass
-

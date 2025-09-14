@@ -193,4 +193,3 @@ def get_chromedriver_paths() -> List[str]:
         )
 
     return paths
-

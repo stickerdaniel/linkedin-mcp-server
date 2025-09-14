@@ -7,18 +7,20 @@ to see exactly what's happening when trying to extract contact information.
 """
 
 import os
-import sys
 import logging
 import time
 
 # Set up detailed logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+
 
 def debug_contact_extraction():
     """Debug the contact info extraction with visible browser."""
 
     # Get LinkedIn cookie from environment variable
-    cookie = os.getenv('LINKEDIN_COOKIE')
+    cookie = os.getenv("LINKEDIN_COOKIE")
 
     if not cookie:
         print("❌ LINKEDIN_COOKIE environment variable not set")
@@ -29,7 +31,10 @@ def debug_contact_extraction():
     print("🔧 Debug: Contact Info Extraction")
     print("=" * 50)
 
-    from linkedin_mcp_server.drivers.chrome import create_chrome_driver, create_chrome_options, login_with_cookie
+    from linkedin_mcp_server.drivers.chrome import (
+        create_chrome_options,
+        login_with_cookie,
+    )
     from linkedin_mcp_server.config import get_config
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -42,15 +47,17 @@ def debug_contact_extraction():
     chrome_options = create_chrome_options(config)
     # Remove headless mode for debugging
     # Remove headless arguments for visible debugging
-    filtered_args = [arg for arg in chrome_options.arguments if '--headless' not in arg]
+    filtered_args = [arg for arg in chrome_options.arguments if "--headless" not in arg]
     chrome_options._arguments = filtered_args  # Direct access to private attribute
 
     print("✅ Creating visible Chrome browser for debugging...")
 
     from linkedin_mcp_server.drivers.chrome import create_chrome_service
+
     service = create_chrome_service(config)
 
     from selenium import webdriver
+
     driver = webdriver.Chrome(service=service, options=chrome_options)
 
     try:
@@ -83,7 +90,7 @@ def debug_contact_extraction():
             "//a[contains(@href, 'contact-info')]",
             "//a[contains(text(), 'Contact info')]",
             "//span[contains(text(), 'Contact info')]/parent::a",
-            "//button[contains(@aria-label, 'Contact info')]"
+            "//button[contains(@aria-label, 'Contact info')]",
         ]
 
         contact_link = None
@@ -92,12 +99,16 @@ def debug_contact_extraction():
                 elements = driver.find_elements(By.XPATH, selector)
                 if elements:
                     contact_link = elements[0]
-                    print(f"✅ Found Contact Info link with selector {i+1}: {selector}")
+                    print(
+                        f"✅ Found Contact Info link with selector {i + 1}: {selector}"
+                    )
                     print(f"   Element text: '{contact_link.text.strip()}'")
-                    print(f"   Element href: '{contact_link.get_attribute('href') or 'N/A'}'")
+                    print(
+                        f"   Element href: '{contact_link.get_attribute('href') or 'N/A'}'"
+                    )
                     break
             except Exception as e:
-                print(f"   Selector {i+1} failed: {e}")
+                print(f"   Selector {i + 1} failed: {e}")
 
         if not contact_link:
             print("❌ No Contact Info link found")
@@ -112,7 +123,10 @@ def debug_contact_extraction():
                     print(f"   Link {i}: '{text}' -> {href[:100]}")
 
             # Also check for any element containing "contact"
-            contact_elements = driver.find_elements(By.XPATH, "//*[contains(translate(text(), 'CONTACT', 'contact'), 'contact')]")[:10]
+            contact_elements = driver.find_elements(
+                By.XPATH,
+                "//*[contains(translate(text(), 'CONTACT', 'contact'), 'contact')]",
+            )[:10]
             if contact_elements:
                 print("\\n🔍 Found elements containing 'contact':")
                 for elem in contact_elements:
@@ -144,7 +158,7 @@ def debug_contact_extraction():
             "[role='dialog']",
             ".artdeco-modal",
             "[data-test-modal]",
-            ".contact-info"
+            ".contact-info",
         ]
 
         modal = None
@@ -166,7 +180,9 @@ def debug_contact_extraction():
             print(f"📄 Modal content preview: {modal_text}")
 
             # Try to find email
-            email_elements = modal.find_elements(By.XPATH, ".//a[contains(@href, 'mailto:')]")
+            email_elements = modal.find_elements(
+                By.XPATH, ".//a[contains(@href, 'mailto:')]"
+            )
             if email_elements:
                 email = email_elements[0].get_attribute("href").replace("mailto:", "")
                 print(f"📧 Found email: {email}")
@@ -174,7 +190,9 @@ def debug_contact_extraction():
                 print("❌ No email found in modal")
 
             # Try to find phone
-            phone_elements = modal.find_elements(By.XPATH, ".//a[contains(@href, 'tel:')]")
+            phone_elements = modal.find_elements(
+                By.XPATH, ".//a[contains(@href, 'tel:')]"
+            )
             if phone_elements:
                 phone = phone_elements[0].get_attribute("href").replace("tel:", "")
                 print(f"📱 Found phone: {phone}")
@@ -185,6 +203,7 @@ def debug_contact_extraction():
 
     finally:
         driver.quit()
+
 
 if __name__ == "__main__":
     debug_contact_extraction()

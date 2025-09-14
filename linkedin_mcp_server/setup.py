@@ -303,4 +303,3 @@ def run_cookie_extraction_setup() -> str:
     )
 
     return cookie
-

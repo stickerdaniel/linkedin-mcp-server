@@ -103,4 +103,3 @@ def register_job_tools(mcp: FastMCP) -> None:
                 return []
         except Exception as e:
             return handle_tool_error_list(e, "get_recommended_jobs")
-

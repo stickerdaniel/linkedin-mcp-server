@@ -178,4 +178,3 @@ def safe_get_driver():
     driver = get_or_create_driver(authentication)
 
     return driver
-

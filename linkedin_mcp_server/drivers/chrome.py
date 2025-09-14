@@ -8,7 +8,6 @@ Provides cookie-based authentication and comprehensive error handling.
 """
 
 import logging
-import os
 import platform
 from typing import Dict, Optional
 
@@ -117,13 +116,20 @@ def create_chrome_service(config):
     try:
         logger.info("Using ChromeDriverManager for automatic version management...")
         auto_driver_path = ChromeDriverManager().install()
-        logger.info(f"ChromeDriverManager installed ChromeDriver at: {auto_driver_path}")
+        logger.info(
+            f"ChromeDriverManager installed ChromeDriver at: {auto_driver_path}"
+        )
 
         # Verify the downloaded driver version
         import subprocess
+
         try:
-            result = subprocess.run([auto_driver_path, '--version'],
-                                  capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                [auto_driver_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
             logger.info(f"ChromeDriver version: {result.stdout.strip()}")
         except Exception:
             pass  # Version check is informational only
@@ -131,7 +137,9 @@ def create_chrome_service(config):
         return Service(executable_path=auto_driver_path)
     except Exception as e:
         logger.error(f"ChromeDriverManager failed: {e}")
-        raise Exception(f"Failed to initialize ChromeDriver: ChromeDriverManager error: {e}. Please ensure Chrome is installed and accessible.")
+        raise Exception(
+            f"Failed to initialize ChromeDriver: ChromeDriverManager error: {e}. Please ensure Chrome is installed and accessible."
+        )
 
 
 def create_temporary_chrome_driver() -> webdriver.Chrome:
@@ -466,4 +474,3 @@ def capture_session_cookie(driver: webdriver.Chrome) -> Optional[str]:
     except Exception as e:
         logger.warning(f"Failed to capture session cookie: {e}")
         return None
-

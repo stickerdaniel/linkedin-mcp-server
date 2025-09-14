@@ -5,4 +5,3 @@ from linkedin_mcp_server.cli_main import main
 
 if __name__ == "__main__":
     main()
-

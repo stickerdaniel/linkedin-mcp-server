@@ -48,4 +48,3 @@ Suggested replacement text or improvements
 
 ## Additional Context
 Add any other context, screenshots, or examples that would help improve the documentation.
-
