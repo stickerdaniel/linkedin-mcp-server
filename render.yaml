@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: linkedin-mcp-server
+    runtime: docker
+    plan: starter
+    region: oregon
+    branch: main
+    repo: https://github.com/TerrysPOV/linkedin-mcp-server
+    dockerfilePath: ./Dockerfile
+    dockerContext: ./
+    envVars:
+      - key: LINKEDIN_COOKIE
+        value: AQEFAQ8BAAAAABdzf44AAAGYvk1N5QAAAZmReW8sTQAAsnVybjpsaTplbnRlcnByaXNlQXV0aFRva2VuOmVKeGpaQUFDZnJ1b1Z5Q2FiOFdIcjJDK3phNGNSaEFqUnRpREQ4eUkvS0ZUeHNBSUFMek5DRm85XnVybjpsaTplbnRlcnByaXNlUHJvZmlsZToodXJuOmxpOmVudGVycHJpc2VBY2NvdW50OjI1NTc0NDc0NiwyNDU5NTI3NTcpXnVybjpsaTptZW1iZXI6NjkwNzAwNTBhnAibI5nreYDypWR6Ja25Y8aKRpysmwR3FYV6MNnFQyxoniaj-uFhcvOOkUzzG0q12EjEfigwpu06m9G_0cimed7e0h-WXxy_UoYdnFgGDX8iP-AFiK2iEfCY1_Ksyfsuaj8B-lRUFukYrCzZISdL3G_iSAjxrHkXvyXNxZYOCI7Wdl2M9nNVZaxtuWaSG6ImXGqb
+      - key: PORT
+        value: 8000
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: LOG_LEVEL
+        value: INFO
+    buildCommand: echo "Build handled by Dockerfile"
+    startCommand: uv run -m linkedin_mcp_server --transport streamable-http --host 0.0.0.0 --port 8000 --path /mcp --log-level INFO
+    healthCheckPath: /mcp
+    autoDeploy: true

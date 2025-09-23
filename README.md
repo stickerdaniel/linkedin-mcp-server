@@ -10,6 +10,7 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 
 ## Installation Methods
 
+[![Render](https://img.shields.io/badge/Render-Cloud_Deploy-46e3b7?style=for-the-badge&logo=render&logoColor=46e3b7)](#-render-deployment-cloud-hosting)
 [![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup-recommended---universal)
 [![Install DXT Extension](https://img.shields.io/badge/Claude_Desktop_DXT-d97757?style=for-the-badge&logo=anthropic)](#-claude-desktop-dxt-extension)
 [![uvx](https://img.shields.io/badge/uvx-Quick_Install-de5fe9?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDEiIGhlaWdodD0iNDEiIHZpZXdCb3g9IjAgMCA0MSA0MSIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTS01LjI4NjE5ZS0wNiAwLjE2ODYyOUwwLjA4NDMwOTggMjAuMTY4NUwwLjE1MTc2MiAzNi4xNjgzQzAuMTYxMDc1IDM4LjM3NzQgMS45NTk0NyA0MC4xNjA3IDQuMTY4NTkgNDAuMTUxNEwyMC4xNjg0IDQwLjA4NEwzMC4xNjg0IDQwLjA0MThMMzEuMTg1MiA0MC4wMzc1QzMzLjM4NzcgNDAuMDI4MiAzNS4xNjgzIDM4LjIwMjYgMzUuMTY4MyAzNlYzNkwzNy4wMDAzIDM2TDM3LjAwMDMgMzkuOTk5Mkw0MC4xNjgzIDM5Ljk5OTZMMzkuOTk5NiAtOS45NDY1M2UtMDdMMjEuNTk5OCAwLjA3NzU2ODlMMjEuNjc3NCAxNi4wMTg1TDIxLjY3NzQgMjUuOTk5OEwyMC4wNzc0IDI1Ljk5OThMMTguMzk5OCAyNS45OTk4TDE4LjQ3NzQgMTYuMDMyTDE4LjM5OTggMC4wOTEwNTkzTC01LjI4NjE5ZS0wNiAwLjE2ODYyOVoiIGZpbGw9IiNERTVGRTkiLz4KPC9zdmc+Cg==)](#-uvx-setup-quick-install---universal)
@@ -42,6 +43,117 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 
 > [!NOTE]
 > July 2025: All tools are currently functional and actively maintained. If you encounter any issues, please report them in the [GitHub issues](https://github.com/stickerdaniel/linkedin-mcp-server/issues).
+
+<br/>
+<br/>
+
+## ☁️ Render Deployment (Cloud Hosting)
+
+**Prerequisites:** [Render account](https://render.com) and [GitHub repository](https://github.com)
+
+Deploy the LinkedIn MCP server to the cloud with Render for 24/7 availability and easy access from any MCP client.
+
+### Quick Deploy
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/TerrysPOV/linkedin-mcp-server)
+
+### Manual Setup
+
+1. **Fork this repository** to your GitHub account
+2. **Connect to Render:**
+   - Go to [Render Dashboard](https://dashboard.render.com)
+   - Click "New +" → "Web Service"
+   - Connect your GitHub repository
+3. **Configure deployment:**
+   - Runtime: Docker
+   - Branch: main
+   - Root Directory: (leave empty)
+4. **Set environment variables:**
+   ```
+   LINKEDIN_COOKIE=your_li_at_cookie_value
+   PORT=8000
+   PYTHONUNBUFFERED=1
+   LOG_LEVEL=INFO
+   ```
+5. **Deploy:** Click "Create Web Service"
+
+### Getting the LinkedIn Cookie
+<details>
+<summary><b>🌐 Chrome DevTools Guide</b></summary>
+
+1. Open LinkedIn and login
+2. Open Chrome DevTools (F12 or right-click → Inspect)
+3. Go to **Application** > **Storage** > **Cookies** > **https://www.linkedin.com**
+4. Find the cookie named `li_at`
+5. Copy the **Value** field (this is your LinkedIn session cookie)
+6. Use this value as your `LINKEDIN_COOKIE` in Render environment variables
+
+</details>
+
+### Using the Deployed Service
+
+**MCP Client Configuration:**
+```json
+{
+  "mcpServers": {
+    "linkedin": {
+      "command": "curl",
+      "args": [
+        "-X", "POST",
+        "https://your-service-name.onrender.com/mcp",
+        "-H", "Content-Type: application/json",
+        "-d", "@-"
+      ]
+    }
+  }
+}
+```
+
+**Direct HTTP Access:**
+```bash
+# Test the deployed service
+curl https://your-service-name.onrender.com/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"method": "tools/list", "params": {}}'
+```
+
+### Render Deployment Help
+<details>
+<summary><b>🔧 Configuration Options</b></summary>
+
+**Environment Variables:**
+- `LINKEDIN_COOKIE`: Your LinkedIn session cookie (required)
+- `PORT`: Server port (default: 8000)
+- `LOG_LEVEL`: Logging level (DEBUG, INFO, WARNING, ERROR)
+- `PYTHONUNBUFFERED`: Python output buffering (set to 1)
+
+**Service Settings:**
+- **Plan**: Free tier supported (with limitations)
+- **Region**: Choose closest to your location
+- **Auto-Deploy**: Enable for automatic updates from GitHub
+- **Health Check Path**: `/mcp`
+
+</details>
+
+<details>
+<summary><b>❗ Troubleshooting</b></summary>
+
+**Deployment issues:**
+- Ensure all environment variables are set correctly
+- Check build logs for dependency installation errors
+- Verify LinkedIn cookie is valid and not expired
+
+**Runtime issues:**
+- LinkedIn cookies expire after ~30 days - update when needed
+- Service may sleep on free tier - first request after inactivity may be slow
+- Check application logs in Render dashboard for errors
+
+**Performance:**
+- Free tier has limitations (750 hours/month, sleeps after inactivity)
+- Consider upgrading to paid tier for production use
+- Monitor resource usage in Render dashboard
+
+</details>
 
 <br/>
 <br/>
