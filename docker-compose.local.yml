@@ -1,0 +1,45 @@
+name: 'linkedin-mcp-server'
+
+services:
+  linkedin-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: linkedin-mcp-server
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - /tmp/chrome-profile-$(date +%s%N):/tmp/chrome-profile-$(date +%s%N)
+      - .:/app:z
+
+    # streamable-http or stdio
+    command:
+      python linkedin-mcp-server --no-headless --user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+    restart: unless-stopped
+    networks:
+      - linkedin-mcp-server-network
+
+  ngrok:
+    build:
+      context: ./compose/local/ngrok
+      dockerfile: ./Dockerfile
+    restart: unless-stopped
+    command: >
+      http
+      127.0.0.1:8000
+    # command: ["ngrok", "start", "--all"]
+    environment:
+      - NGROK_CONFIG_FILE=/home/ngrok/.ngrok2/ngrok.yml
+    ports:
+      - 4041:4040
+    depends_on:
+      - linkedin-mcp-server
+    networks:
+      - linkedin-mcp-server-network
+
+networks:
+  linkedin-mcp-server-network:
+    driver: bridge
