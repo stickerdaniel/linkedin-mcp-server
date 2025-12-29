@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 from fastmcp import FastMCP
 from linkedin_scraper import Company
+from mcp.types import ToolAnnotations
 
 from linkedin_mcp_server.error_handler import handle_tool_error, safe_get_driver
 
@@ -25,7 +26,14 @@ def register_company_tools(mcp: FastMCP) -> None:
         mcp (FastMCP): The MCP server instance
     """
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get Company Profile",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
     async def get_company_profile(
         company_name: str, get_employees: bool = False
     ) -> Dict[str, Any]:
