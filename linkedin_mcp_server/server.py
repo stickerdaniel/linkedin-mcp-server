@@ -11,6 +11,7 @@ import logging
 from typing import Any, Dict
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.job import register_job_tools
@@ -29,7 +30,14 @@ def create_mcp_server() -> FastMCP:
     register_job_tools(mcp)
 
     # Register session management tool
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Close Session",
+            readOnlyHint=False,
+            destructiveHint=False,
+            openWorldHint=False,
+        )
+    )
     async def close_session() -> Dict[str, Any]:
         """Close the current browser session and clean up resources."""
         from linkedin_mcp_server.drivers.chrome import close_all_drivers
