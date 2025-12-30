@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 from fastmcp import FastMCP
 from linkedin_scraper import Job, JobSearch
+from mcp.types import ToolAnnotations
 
 from linkedin_mcp_server.error_handler import (
     handle_tool_error,
@@ -29,7 +30,14 @@ def register_job_tools(mcp: FastMCP) -> None:
         mcp (FastMCP): The MCP server instance
     """
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get Job Details",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
     async def get_job_details(job_id: str) -> Dict[str, Any]:
         """
         Get job details for a specific job posting on LinkedIn
@@ -55,7 +63,14 @@ def register_job_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return handle_tool_error(e, "get_job_details")
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Search Jobs",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
     async def search_jobs(search_term: str) -> List[Dict[str, Any]]:
         """
         Search for jobs on LinkedIn using a search term.
@@ -78,7 +93,14 @@ def register_job_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return handle_tool_error_list(e, "search_jobs")
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get Recommended Jobs",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
     async def get_recommended_jobs() -> List[Dict[str, Any]]:
         """
         Get your personalized recommended jobs from LinkedIn

@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 from fastmcp import FastMCP
 from linkedin_scraper import Person
+from mcp.types import ToolAnnotations
 
 from linkedin_mcp_server.error_handler import handle_tool_error, safe_get_driver
 
@@ -25,7 +26,14 @@ def register_person_tools(mcp: FastMCP) -> None:
         mcp (FastMCP): The MCP server instance
     """
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get Person Profile",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
     async def get_person_profile(linkedin_username: str) -> Dict[str, Any]:
         """
         Get a specific person's LinkedIn profile.
