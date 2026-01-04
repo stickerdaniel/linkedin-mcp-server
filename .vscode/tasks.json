@@ -41,7 +41,7 @@
             "problemMatcher": []
         },
         {
-            "label": "uv run -m linkedin_mcp_server --debug --no-headless --no-lazy-init",
+            "label": "uv run -m linkedin_mcp_server --log-level DEBUG --no-headless --no-lazy-init",
             "detail": "Run server in debug mode with visible window and login immediately",
             "type": "shell",
             "command": "uv",
@@ -49,7 +49,8 @@
                 "run",
                 "-m",
                 "linkedin_mcp_server",
-                "--debug",
+                "--log-level",
+                "DEBUG",
                 "--no-headless",
                 "--no-lazy-init"
             ],
