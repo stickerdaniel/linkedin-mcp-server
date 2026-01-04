@@ -1,6 +1,21 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
+  "extends": ["config:best-practices", "group:allNonMajor"],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "schedule": ["at any time"]
+  },
+  "packageRules": [
+    {
+      "matchPackageNames": ["fastmcp", "mcp"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "MCP ecosystem"
+    },
+    {
+      "matchPackageNames": ["pytest**", "ruff", "pre-commit", "ty"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    }
   ]
 }
