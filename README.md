@@ -37,7 +37,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 
 ## Features & Tool Status
 >
-> [!TIP] Available Tools
+> [!TIP]
 >
 > - **Profile Scraping** (`get_person_profile`): Get detailed information from a LinkedIn profile including work history, education, skills, and connections
 > - **Company Analysis** (`get_company_profile`): Extract comprehensive company information from a LinkedIn company profile name
@@ -55,7 +55,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 | `get_recommended_jobs` | Fails | See #70 for details |
 | `get_job_details` | Fails | See #71 for details |
 
-> [!NOTE] Authentication
+> [!NOTE]
 > The most reliable way to authenticate is to clone this repository and run the server manually in `--no-headless` mode where you can see the process visually and solve login challenges in the automated browser.
 >
 > The server can login with your email and password first time, and extract the cookie from the session for subsequent runs. From time to time, you might need to get a new cookie.
@@ -115,7 +115,7 @@ docker run -it --rm \
 Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client configuration. If this fails with a captcha challenge, use the method above.
 </details>
 
-> [!NOTE] Cookie Issues
+> [!NOTE]
 > The cookie might expire after some time. Just get the new cookie and update your client config. If you encounter issues logging in, please try the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in `--no-headless` mode where you can debug the login process (solve captcha manually).
 
 ### Docker Setup Help
@@ -218,7 +218,7 @@ docker run -it --rm \
 Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client configuration. If this fails with a captcha challenge, use the method above.
 </details>
 
-> [!NOTE] Cookie Issues
+> [!NOTE]
 > The cookie might expire after some time. Just get the new cookie and update your client config. If you encounter issues logging in, please try the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in `--no-headless` mode where you can debug the login process (solve captcha manually).
 
 ### DXT Extension Setup Help
@@ -286,7 +286,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server \
 Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client configuration. If this fails with a captcha challenge, use the method above.
 </details>
 
-> [!NOTE] Cookie Issues
+> [!NOTE]
 > The cookie might expire after some time. Just get the new cookie and update your client config. If you encounter issues logging in, please try the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in `--no-headless` mode where you can debug the login process (solve captcha manually).
 
 ### uvx Setup Help
