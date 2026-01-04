@@ -111,3 +111,5 @@ def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> 
     logging.getLogger("selenium").setLevel(logging.ERROR)
     logging.getLogger("urllib3").setLevel(logging.ERROR)
     logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+    logging.getLogger("fakeredis").setLevel(logging.WARNING)
+    logging.getLogger("docket").setLevel(logging.WARNING)
