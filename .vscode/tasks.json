@@ -41,13 +41,14 @@
             "problemMatcher": []
         },
         {
-            "label": "uv run main.py --debug --no-headless --no-lazy-init",
-            "detail": "Run main.py in debug mode with visible window and login immediately",
+            "label": "uv run -m linkedin_mcp_server --debug --no-headless --no-lazy-init",
+            "detail": "Run server in debug mode with visible window and login immediately",
             "type": "shell",
             "command": "uv",
             "args": [
                 "run",
-                "main.py",
+                "-m",
+                "linkedin_mcp_server",
                 "--debug",
                 "--no-headless",
                 "--no-lazy-init"
@@ -64,13 +65,14 @@
             "problemMatcher": []
         },
         {
-            "label": "uv run main.py --no-headless --no-lazy-init",
-            "detail": "Run main.py with visible window and login immediately",
+            "label": "uv run -m linkedin_mcp_server --no-headless --no-lazy-init",
+            "detail": "Run server with visible window and login immediately",
             "type": "shell",
             "command": "uv",
             "args": [
                 "run",
-                "main.py",
+                "-m",
+                "linkedin_mcp_server",
                 "--no-headless",
                 "--no-lazy-init"
             ],
@@ -85,13 +87,14 @@
             "problemMatcher": []
         },
         {
-            "label": "uv run main.py --no-headless --no-lazy-init --transport streamable-http",
+            "label": "uv run -m linkedin_mcp_server --no-headless --no-lazy-init --transport streamable-http",
             "detail": "Start HTTP MCP server on localhost:8000/mcp",
             "type": "shell",
             "command": "uv",
             "args": [
                 "run",
-                "main.py",
+                "-m",
+                "linkedin_mcp_server",
                 "--no-headless",
                 "--no-lazy-init",
                 "--transport",
