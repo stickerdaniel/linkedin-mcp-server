@@ -1,0 +1,3 @@
+[submodule "docs/references/linkedin_scraper"]
+	path = docs/references/linkedin_scraper
+	url = https://github.com/joeyism/linkedin_scraper.git
