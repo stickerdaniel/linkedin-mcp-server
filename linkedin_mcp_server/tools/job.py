@@ -1,23 +1,23 @@
-# src/linkedin_mcp_server/tools/job.py
 """
-LinkedIn job scraping tools with search and detail extraction capabilities.
+LinkedIn job scraping tools with search and detail extraction.
 
-Provides MCP tools for job posting details, job searches, and recommendations
+Provides MCP tools for job posting details and job searches
 with comprehensive filtering and structured data extraction.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
-from linkedin_scraper import Job, JobSearch
+from linkedin_scraper import JobScraper, JobSearchScraper
 from mcp.types import ToolAnnotations
 
-from linkedin_mcp_server.error_handler import (
-    handle_tool_error,
-    handle_tool_error_list,
-    safe_get_driver,
+from linkedin_mcp_server.callbacks import MCPProgressCallback
+from linkedin_mcp_server.drivers.browser import (
+    ensure_authenticated,
+    get_or_create_browser,
 )
+from linkedin_mcp_server.error_handler import handle_tool_error, handle_tool_error_list
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def register_job_tools(mcp: FastMCP) -> None:
     Register all job-related tools with the MCP server.
 
     Args:
-        mcp (FastMCP): The MCP server instance
+        mcp: The MCP server instance
     """
 
     @mcp.tool(
@@ -40,26 +40,30 @@ def register_job_tools(mcp: FastMCP) -> None:
     )
     async def get_job_details(job_id: str) -> Dict[str, Any]:
         """
-        Get job details for a specific job posting on LinkedIn
+        Get job details for a specific job posting on LinkedIn.
 
         Args:
-            job_id (str): LinkedIn job ID (e.g., "4252026496", "3856789012")
+            job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
 
         Returns:
-            Dict[str, Any]: Structured job data including title, company, location, posting date,
-                          application count, and job description (may be empty if content is protected)
+            Structured job data including title, company, location,
+            posting date, and job description.
         """
         try:
-            # Construct clean LinkedIn URL from job ID
+            # Validate session before scraping
+            await ensure_authenticated()
+
+            # Construct LinkedIn URL from job ID
             job_url = f"https://www.linkedin.com/jobs/view/{job_id}/"
 
-            driver = safe_get_driver()
-
             logger.info(f"Scraping job: {job_url}")
-            job = Job(job_url, driver=driver, close_on_complete=False)
 
-            # Convert job object to a dictionary
+            browser = await get_or_create_browser()
+            scraper = JobScraper(browser.page, callback=MCPProgressCallback())
+            job = await scraper.scrape(job_url)
+
             return job.to_dict()
+
         except Exception as e:
             return handle_tool_error(e, "get_job_details")
 
@@ -71,57 +75,38 @@ def register_job_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         )
     )
-    async def search_jobs(search_term: str) -> List[Dict[str, Any]]:
+    async def search_jobs(
+        keywords: str,
+        location: Optional[str] = None,
+        limit: int = 25,
+    ) -> List[str] | List[Dict[str, Any]]:
         """
-        Search for jobs on LinkedIn using a search term.
+        Search for jobs on LinkedIn.
 
         Args:
-            search_term (str): Search term to use for the job search.
+            keywords: Search keywords (e.g., "software engineer", "data scientist")
+            location: Optional location filter (e.g., "San Francisco", "Remote")
+            limit: Maximum number of job URLs to return (default: 25)
 
         Returns:
-            List[Dict[str, Any]]: List of job search results
+            List of job posting URLs. Use get_job_details to get full details
+            for specific jobs.
         """
         try:
-            driver = safe_get_driver()
+            # Validate session before scraping
+            await ensure_authenticated()
 
-            logger.info(f"Searching jobs: {search_term}")
-            job_search = JobSearch(driver=driver, close_on_complete=False, scrape=False)
-            jobs = job_search.search(search_term)
+            logger.info(f"Searching jobs: keywords='{keywords}', location='{location}'")
 
-            # Convert job objects to dictionaries
-            return [job.to_dict() for job in jobs]
-        except Exception as e:
-            return handle_tool_error_list(e, "search_jobs")
-
-    @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Recommended Jobs",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
-    )
-    async def get_recommended_jobs() -> List[Dict[str, Any]]:
-        """
-        Get your personalized recommended jobs from LinkedIn
-
-        Returns:
-            List[Dict[str, Any]]: List of recommended jobs
-        """
-        try:
-            driver = safe_get_driver()
-
-            logger.info("Getting recommended jobs")
-            job_search = JobSearch(
-                driver=driver,
-                close_on_complete=False,
-                scrape=True,  # Enable scraping to get recommended jobs
-                scrape_recommended_jobs=True,
+            browser = await get_or_create_browser()
+            scraper = JobSearchScraper(browser.page, callback=MCPProgressCallback())
+            job_urls = await scraper.search(
+                keywords=keywords,
+                location=location,
+                limit=limit,
             )
 
-            if hasattr(job_search, "recommended_jobs") and job_search.recommended_jobs:
-                return [job.to_dict() for job in job_search.recommended_jobs]
-            else:
-                return []
+            return job_urls
+
         except Exception as e:
-            return handle_tool_error_list(e, "get_recommended_jobs")
+            return handle_tool_error_list(e, "search_jobs")
