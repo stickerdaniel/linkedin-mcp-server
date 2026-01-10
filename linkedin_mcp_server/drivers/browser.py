@@ -1,0 +1,155 @@
+"""
+Playwright browser management for LinkedIn scraping.
+
+This module provides async browser lifecycle management using linkedin_scraper v3's
+BrowserManager. Implements a singleton pattern for browser reuse across tool calls
+with session persistence via JSON files.
+"""
+
+import logging
+from pathlib import Path
+from typing import Optional, cast
+
+from linkedin_scraper import (
+    AuthenticationError,
+    BrowserManager,
+    is_logged_in,
+    login_with_cookie,
+)
+from linkedin_scraper.core import detect_rate_limit, warm_up_browser
+
+logger = logging.getLogger(__name__)
+
+
+def _get_linkedin_cookie() -> Optional[str]:
+    """Get LinkedIn cookie from environment variable."""
+    import os
+
+    return os.environ.get("LINKEDIN_COOKIE")
+
+
+# Default session file location
+DEFAULT_SESSION_PATH = Path.home() / ".linkedin-mcp" / "session.json"
+
+# Global browser instance (singleton)
+_browser: Optional[BrowserManager] = None
+_headless: bool = True
+
+
+async def get_or_create_browser(
+    headless: Optional[bool] = None,
+    session_path: Optional[Path] = None,
+) -> BrowserManager:
+    """
+    Get existing browser or create and initialize a new one.
+
+    Uses a singleton pattern to reuse the browser across tool calls.
+    Loads session from file if available.
+
+    Args:
+        headless: Run browser in headless mode. Defaults to config value.
+        session_path: Path to session file. Defaults to ~/.linkedin-mcp/session.json
+
+    Returns:
+        Initialized BrowserManager instance
+    """
+    global _browser, _headless
+
+    if headless is not None:
+        _headless = headless
+
+    if session_path is None:
+        session_path = DEFAULT_SESSION_PATH
+
+    if _browser is not None:
+        return cast(BrowserManager, _browser)
+
+    logger.info(f"Creating new browser (headless={_headless})")
+    _browser = BrowserManager(headless=_headless)
+    await _browser.start()
+
+    # Priority 1: Load session file if available
+    if session_path.exists():
+        try:
+            await _browser.load_session(str(session_path))
+            logger.info(f"Loaded session from {session_path}")
+            return _browser
+        except Exception as e:
+            logger.warning(f"Failed to load session: {e}")
+
+    # Priority 2: Use cookie from environment
+    if cookie := _get_linkedin_cookie():
+        try:
+            await login_with_cookie(_browser.page, cookie)
+            logger.info("Authenticated using LINKEDIN_COOKIE")
+            return _browser
+        except Exception as e:
+            logger.warning(f"Cookie authentication failed: {e}")
+
+    # No auth available - warm up for manual login
+    logger.info("No authentication found, warming up browser...")
+    await warm_up_browser(_browser.page)
+
+    return _browser
+
+
+async def close_browser() -> None:
+    """Close the browser and cleanup resources."""
+    global _browser
+
+    if _browser is not None:
+        browser = cast(BrowserManager, _browser)
+        logger.info("Closing browser...")
+        await browser.close()
+        _browser = None
+        logger.info("Browser closed")
+
+
+def session_exists(session_path: Optional[Path] = None) -> bool:
+    """Check if a session file exists."""
+    if session_path is None:
+        session_path = DEFAULT_SESSION_PATH
+    return session_path.exists()
+
+
+def set_headless(headless: bool) -> None:
+    """Set headless mode for future browser creation."""
+    global _headless
+    _headless = headless
+
+
+async def validate_session() -> bool:
+    """
+    Check if the current session is still valid (logged in).
+
+    Returns:
+        True if session is valid and user is logged in
+    """
+    browser = await get_or_create_browser()
+    return await is_logged_in(browser.page)
+
+
+async def ensure_authenticated() -> None:
+    """
+    Validate session and raise if expired.
+
+    Raises:
+        AuthenticationError: If session is expired or invalid
+    """
+    if not await validate_session():
+        raise AuthenticationError(
+            "Session expired or invalid. Run with --get-session to re-authenticate."
+        )
+
+
+async def check_rate_limit() -> None:
+    """
+    Proactively check for rate limiting.
+
+    Should be called after navigation to detect if LinkedIn is blocking requests.
+
+    Raises:
+        RateLimitError: If rate limiting is detected
+    """
+    browser = await get_or_create_browser()
+    await detect_rate_limit(browser.page)

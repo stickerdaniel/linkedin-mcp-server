@@ -14,8 +14,6 @@ from typing import Any, Dict, List
 
 import pyperclip  # type: ignore
 
-from linkedin_mcp_server.config import get_config
-
 logger = logging.getLogger(__name__)
 
 
@@ -26,7 +24,6 @@ def print_claude_config() -> None:
     This function generates the configuration needed for Claude Desktop
     and copies it to the clipboard for easy pasting.
     """
-    config = get_config()
     current_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
     # Find the full path to uv executable
@@ -48,17 +45,7 @@ def print_claude_config() -> None:
         "run",
         "-m",
         "linkedin_mcp_server",
-        "--no-setup",
     ]
-
-    # Add environment variables to the configuration
-    env_vars: Dict[str, str] = {}
-    if config.linkedin.email:
-        env_vars["LINKEDIN_EMAIL"] = config.linkedin.email
-    if config.linkedin.password:
-        env_vars["LINKEDIN_PASSWORD"] = config.linkedin.password
-    if config.chrome.chromedriver_path:
-        env_vars["CHROMEDRIVER"] = config.chrome.chromedriver_path
 
     config_json: Dict[str, Any] = {
         "mcpServers": {
@@ -75,10 +62,6 @@ def print_claude_config() -> None:
             }
         }
     }
-
-    # Add environment variables if available
-    if env_vars:
-        config_json["mcpServers"]["linkedin-scraper"]["env"] = env_vars
 
     # Convert to string for clipboard
     config_str = json.dumps(config_json, indent=2)
