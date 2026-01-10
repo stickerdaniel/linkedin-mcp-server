@@ -1,305 +1,99 @@
-# linkedin_mcp_server/setup.py
 """
-Interactive setup flows for LinkedIn MCP Server authentication configuration.
+Interactive setup flows for LinkedIn MCP Server authentication.
 
-Handles credential collection, cookie extraction, validation, and secure storage
-with multiple authentication methods including cookie input and credential-based login.
-Provides temporary driver management and comprehensive retry logic.
+Handles session creation through interactive browser login using Playwright.
+Uses linkedin_scraper v3's wait_for_manual_login for authentication.
 """
 
+import asyncio
 import logging
-from contextlib import contextmanager
-from typing import Dict, Iterator
+from pathlib import Path
+from typing import Optional
 
-import inquirer
-from selenium import webdriver
+from linkedin_scraper import BrowserManager, wait_for_manual_login
 
-from linkedin_mcp_server.authentication import store_authentication
-from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.messages import ErrorMessages, InfoMessages
-from linkedin_mcp_server.config.providers import (
-    get_credentials_from_keyring,
-    save_credentials_to_keyring,
-)
-from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.exceptions import CredentialsNotFoundError
+from linkedin_mcp_server.drivers.browser import DEFAULT_SESSION_PATH
 
 logger = logging.getLogger(__name__)
 
 
-def get_credentials_for_setup() -> Dict[str, str]:
+async def interactive_login_and_save(session_path: Optional[Path] = None) -> bool:
     """
-    Get LinkedIn credentials for setup purposes.
+    Open browser for manual LinkedIn login and save session.
+
+    Opens a non-headless browser, navigates to LinkedIn login page,
+    and waits for user to complete authentication (including 2FA, captcha, etc.).
+
+    Args:
+        session_path: Path to save session. Defaults to ~/.linkedin-mcp/session.json
 
     Returns:
-        Dict[str, str]: Dictionary with email and password
+        True if login was successful and session was saved
 
     Raises:
-        CredentialsNotFoundError: If credentials cannot be obtained
+        Exception: If login fails or times out
     """
-    config = get_config()
+    if session_path is None:
+        session_path = DEFAULT_SESSION_PATH
 
-    # First, try configuration (includes environment variables)
-    if config.linkedin.email and config.linkedin.password:
-        logger.info("Using LinkedIn credentials from configuration")
-        return {"email": config.linkedin.email, "password": config.linkedin.password}
+    print("🔗 Opening browser for LinkedIn login...")
+    print("   Please log in manually. You have 5 minutes to complete authentication.")
+    print("   (This handles 2FA, captcha, and any security challenges)")
 
-    # Second, try keyring
-    credentials = get_credentials_from_keyring()
-    if credentials["email"] and credentials["password"]:
-        logger.info("Using LinkedIn credentials from keyring")
-        return {"email": credentials["email"], "password": credentials["password"]}
+    async with BrowserManager(headless=False) as browser:
+        # Navigate to LinkedIn login
+        await browser.page.goto("https://www.linkedin.com/login")
 
-    # If in non-interactive mode and no credentials found, raise error
-    if not config.is_interactive:
-        raise CredentialsNotFoundError(ErrorMessages.no_credentials_found())
+        # Wait for manual login completion (5 minute timeout)
+        await wait_for_manual_login(browser.page, timeout=300000)
 
-    # Otherwise, prompt for credentials
-    return prompt_for_credentials()
+        # Save session for future use
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        await browser.save_session(str(session_path))
+
+        print(f"✅ Session saved to {session_path}")
+        return True
 
 
-def prompt_for_credentials() -> Dict[str, str]:
+def run_session_creation(output_path: Optional[str] = None) -> bool:
     """
-    Prompt user for LinkedIn credentials.
+    Create session via interactive login and save to file.
+
+    Args:
+        output_path: Path to save session file. Defaults to ~/.linkedin-mcp/session.json
 
     Returns:
-        Dict[str, str]: Dictionary with email and password
-
-    Raises:
-        KeyboardInterrupt: If user cancels input
+        True if session was created successfully
     """
-    print("🔑 LinkedIn credentials required for setup")
-    questions = [
-        inquirer.Text("email", message="LinkedIn Email"),
-        inquirer.Password("password", message="LinkedIn Password"),
-    ]
-    credentials: Dict[str, str] = inquirer.prompt(questions)
-
-    if not credentials:
-        raise KeyboardInterrupt("Credential input was cancelled")
-
-    # Store credentials securely in keyring
-    if save_credentials_to_keyring(credentials["email"], credentials["password"]):
-        logger.info(InfoMessages.credentials_stored_securely())
+    # Expand ~ in path
+    if output_path:
+        session_path = Path(output_path).expanduser()
     else:
-        logger.warning(InfoMessages.keyring_storage_failed())
+        session_path = DEFAULT_SESSION_PATH
 
-    return credentials
+    print("🔗 LinkedIn MCP Server - Session Creation")
+    print(f"   Session will be saved to: {session_path}")
 
-
-@contextmanager
-def temporary_chrome_driver() -> Iterator[webdriver.Chrome]:
-    """
-    Context manager for creating temporary Chrome driver with automatic cleanup.
-
-    Yields:
-        webdriver.Chrome: Configured Chrome WebDriver instance
-
-    Raises:
-        Exception: If driver creation fails
-    """
-    from linkedin_mcp_server.drivers.chrome import create_temporary_chrome_driver
-
-    driver = None
     try:
-        # Create temporary driver using shared function
-        driver = create_temporary_chrome_driver()
-        yield driver
-    finally:
-        if driver:
-            driver.quit()
-
-
-def capture_cookie_from_credentials(email: str, password: str) -> str:
-    """
-    Login with credentials and capture session cookie using temporary driver.
-
-    Args:
-        email: LinkedIn email
-        password: LinkedIn password
-
-    Returns:
-        str: Captured session cookie
-
-    Raises:
-        Exception: If login or cookie capture fails
-    """
-    with temporary_chrome_driver() as driver:
-        # Login using linkedin-scraper
-        from linkedin_scraper import actions
-
-        config: AppConfig = get_config()
-        interactive: bool = config.is_interactive
-        logger.info(f"Logging in to LinkedIn... Interactive: {interactive}")
-        actions.login(
-            driver,
-            email,
-            password,
-            timeout=60,  # longer timeout for login (captcha, mobile verification, etc.)
-            interactive=interactive,  # type: ignore  # Respect configuration setting
-        )
-
-        # Capture cookie
-        cookie_obj: Dict[str, str] = driver.get_cookie("li_at")
-        if cookie_obj and cookie_obj.get("value"):
-            cookie: str = cookie_obj["value"]
-            logger.info("Successfully captured session cookie")
-            return cookie
-        else:
-            raise Exception("Failed to capture session cookie from browser")
-
-
-def test_cookie_validity(cookie: str) -> bool:
-    """
-    Test if a cookie is valid by attempting to use it with a temporary driver.
-
-    Args:
-        cookie: LinkedIn session cookie to test
-
-    Returns:
-        bool: True if cookie is valid, False otherwise
-    """
-    try:
-        with temporary_chrome_driver() as driver:
-            from linkedin_mcp_server.drivers.chrome import login_with_cookie
-
-            return login_with_cookie(driver, cookie)
+        success = asyncio.run(interactive_login_and_save(session_path))
+        return success
     except Exception as e:
-        logger.warning(f"Cookie validation failed: {e}")
+        print(f"❌ Session creation failed: {e}")
         return False
 
 
-def prompt_for_cookie() -> str:
+def run_interactive_setup() -> bool:
     """
-    Prompt user to input LinkedIn cookie directly.
+    Run interactive setup - browser login only.
 
     Returns:
-        str: LinkedIn session cookie
-
-    Raises:
-        KeyboardInterrupt: If user cancels input
-        ValueError: If cookie format is invalid
-    """
-    print("🍪 Please provide your LinkedIn session cookie")
-    cookie = inquirer.text("LinkedIn Cookie")
-
-    if not cookie:
-        raise KeyboardInterrupt("Cookie input was cancelled")
-
-    # Normalize cookie format
-    if cookie.startswith("li_at="):
-        cookie: str = cookie.split("li_at=")[1]
-
-    return cookie
-
-
-def run_interactive_setup() -> str:
-    """
-    Run interactive setup to configure authentication.
-
-    Returns:
-        str: Configured LinkedIn session cookie
-
-    Raises:
-        Exception: If setup fails
+        True if setup completed successfully
     """
     print("🔗 LinkedIn MCP Server Setup")
-    print("Choose how you'd like to authenticate:")
+    print("   Opening browser for manual login...")
 
-    # Ask user for setup method
-    setup_method = inquirer.list_input(
-        "Setup method",
-        choices=[
-            ("I have a LinkedIn cookie", "cookie"),
-            ("Login with email/password to get cookie", "credentials"),
-        ],
-        default="cookie",
-    )
-
-    if setup_method == "cookie":
-        # User provides cookie directly
-        cookie = prompt_for_cookie()
-
-        # Test the cookie with a temporary driver
-        print("🔍 Testing provided cookie...")
-        if test_cookie_validity(cookie):
-            # Store the valid cookie
-            store_authentication(cookie)
-            logger.info("✅ Authentication configured successfully")
-            return cookie
-        else:
-            print("❌ The provided cookie is invalid or expired")
-            retry = inquirer.confirm(
-                "Would you like to try with email/password instead?", default=True
-            )
-            if not retry:
-                raise Exception("Setup cancelled - invalid cookie provided")
-
-            # Fall through to credentials flow
-            setup_method = "credentials"
-
-    if setup_method == "credentials":
-        # Get credentials and attempt login with retry
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                credentials = get_credentials_for_setup()
-
-                print("🔑 Logging in to capture session cookie...")
-                cookie = capture_cookie_from_credentials(
-                    credentials["email"], credentials["password"]
-                )
-
-                # Store the captured cookie
-                store_authentication(cookie)
-                logger.info("✅ Authentication configured successfully")
-                return cookie
-
-            except Exception as e:
-                logger.error(f"Login failed: {e}")
-                print(f"❌ Login failed: {e}")
-
-                if attempt < max_retries - 1:
-                    retry = inquirer.confirm(
-                        "Would you like to try with different credentials?",
-                        default=True,
-                    )
-                    if not retry:
-                        break
-                    # Clear stored credentials to prompt for new ones
-                    from linkedin_mcp_server.config.providers import (
-                        clear_credentials_from_keyring,
-                    )
-
-                    clear_credentials_from_keyring()
-                else:
-                    raise Exception(f"Setup failed after {max_retries} attempts")
-
-        raise Exception("Setup cancelled by user")
-
-    # This should never be reached, but ensures type checker knows all paths are covered
-    raise Exception("Unexpected setup flow completion")
-
-
-def run_cookie_extraction_setup() -> str:
-    """
-    Run setup specifically for cookie extraction (--get-cookie mode).
-
-    Returns:
-        str: Captured LinkedIn session cookie for display
-
-    Raises:
-        Exception: If setup fails
-    """
-    logger.info("🔗 LinkedIn MCP Server - Cookie Extraction mode started")
-    print("🔗 LinkedIn MCP Server - Cookie Extraction")
-
-    # Get credentials
-    credentials: Dict[str, str] = get_credentials_for_setup()
-
-    # Capture cookie
-    cookie: str = capture_cookie_from_credentials(
-        credentials["email"], credentials["password"]
-    )
-
-    return cookie
+    try:
+        return asyncio.run(interactive_login_and_save())
+    except Exception as e:
+        print(f"❌ Login failed: {e}")
+        return False

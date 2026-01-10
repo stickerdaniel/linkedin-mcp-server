@@ -1,19 +1,23 @@
-# src/linkedin_mcp_server/tools/person.py
 """
-LinkedIn person profile scraping tools with structured data extraction.
+LinkedIn person profile scraping tools.
 
 Provides MCP tools for extracting comprehensive LinkedIn profile information including
-experience, education, skills, and contact details with proper error handling.
+experience, education, skills, and contact details.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from fastmcp import FastMCP
-from linkedin_scraper import Person
+from linkedin_scraper import PersonScraper
 from mcp.types import ToolAnnotations
 
-from linkedin_mcp_server.error_handler import handle_tool_error, safe_get_driver
+from linkedin_mcp_server.callbacks import MCPProgressCallback
+from linkedin_mcp_server.drivers.browser import (
+    ensure_authenticated,
+    get_or_create_browser,
+)
+from linkedin_mcp_server.error_handler import handle_tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +27,7 @@ def register_person_tools(mcp: FastMCP) -> None:
     Register all person-related tools with the MCP server.
 
     Args:
-        mcp (FastMCP): The MCP server instance
+        mcp: The MCP server instance
     """
 
     @mcp.tool(
@@ -39,77 +43,26 @@ def register_person_tools(mcp: FastMCP) -> None:
         Get a specific person's LinkedIn profile.
 
         Args:
-            linkedin_username (str): LinkedIn username (e.g., "stickerdaniel", "anistji")
+            linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates")
 
         Returns:
-            Dict[str, Any]: Structured data from the person's profile
+            Structured data from the person's profile including name, about,
+            experiences, educations, and more.
         """
         try:
-            # Construct clean LinkedIn URL from username
+            # Validate session before scraping
+            await ensure_authenticated()
+
+            # Construct LinkedIn URL from username
             linkedin_url = f"https://www.linkedin.com/in/{linkedin_username}/"
 
-            driver = safe_get_driver()
-
             logger.info(f"Scraping profile: {linkedin_url}")
-            person = Person(linkedin_url, driver=driver, close_on_complete=False)
 
-            # Convert experiences to structured dictionaries
-            experiences: List[Dict[str, Any]] = [
-                {
-                    "position_title": exp.position_title,
-                    "company": exp.institution_name,
-                    "from_date": exp.from_date,
-                    "to_date": exp.to_date,
-                    "duration": exp.duration,
-                    "location": exp.location,
-                    "description": exp.description,
-                }
-                for exp in person.experiences
-            ]
+            browser = await get_or_create_browser()
+            scraper = PersonScraper(browser.page, callback=MCPProgressCallback())
+            person = await scraper.scrape(linkedin_url)
 
-            # Convert educations to structured dictionaries
-            educations: List[Dict[str, Any]] = [
-                {
-                    "institution": edu.institution_name,
-                    "degree": edu.degree,
-                    "from_date": edu.from_date,
-                    "to_date": edu.to_date,
-                    "description": edu.description,
-                }
-                for edu in person.educations
-            ]
+            return person.to_dict()
 
-            # Convert interests to list of titles
-            interests: List[str] = [interest.title for interest in person.interests]
-
-            # Convert accomplishments to structured dictionaries
-            accomplishments: List[Dict[str, str]] = [
-                {"category": acc.category, "title": acc.title}
-                for acc in person.accomplishments
-            ]
-
-            # Convert contacts to structured dictionaries
-            contacts: List[Dict[str, str]] = [
-                {
-                    "name": contact.name,
-                    "occupation": contact.occupation,
-                    "url": contact.url,
-                }
-                for contact in person.contacts
-            ]
-
-            # Return the complete profile data
-            return {
-                "name": person.name,
-                "about": person.about,
-                "experiences": experiences,
-                "educations": educations,
-                "interests": interests,
-                "accomplishments": accomplishments,
-                "contacts": contacts,
-                "company": person.company,
-                "job_title": person.job_title,
-                "open_to_work": getattr(person, "open_to_work", False),
-            }
         except Exception as e:
             return handle_tool_error(e, "get_person_profile")
