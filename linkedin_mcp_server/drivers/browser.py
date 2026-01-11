@@ -7,6 +7,7 @@ with session persistence via JSON files.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional, cast
 
@@ -23,8 +24,6 @@ logger = logging.getLogger(__name__)
 
 def _get_linkedin_cookie() -> Optional[str]:
     """Get LinkedIn cookie from environment variable."""
-    import os
-
     return os.environ.get("LINKEDIN_COOKIE")
 
 

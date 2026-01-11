@@ -99,7 +99,7 @@ Create a session file locally, then mount it into Docker.
 uvx linkedin-mcp-server --get-session
 ```
 
-This opens a browser window where you log in manually. The session is saved to `~/.linkedin-mcp/session.json`.
+This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -120,6 +120,9 @@ This opens a browser window where you log in manually. The session is saved to `
 
 > [!NOTE]
 > Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-mcp-server --get-session` again locally, or use a fresh `li_at` cookie.
+
+> [!WARNING]
+> The session file at `~/.linkedin-mcp/session.json` contains sensitive authentication data. Keep it secure and do not share it.
 
 > [!NOTE]
 > **Why can't I run `--get-session` in Docker?** Docker containers don't have a display server, so Playwright can't show a browser window. You must create the session on your host machine first, then mount it into Docker.
@@ -232,7 +235,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server \
   linkedin-mcp-server --get-session
 ```
 
-This opens a browser for you to log in manually. The session is saved to `~/.linkedin-mcp/session.json`.
+This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
 
 **Step 2: Run the server**
 

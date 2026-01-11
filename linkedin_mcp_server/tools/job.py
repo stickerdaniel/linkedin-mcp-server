@@ -6,7 +6,7 @@ with comprehensive filtering and structured data extraction.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from fastmcp import Context, FastMCP
 from linkedin_scraper import JobScraper, JobSearchScraper
@@ -81,7 +81,7 @@ def register_job_tools(mcp: FastMCP) -> None:
         ctx: Context,
         location: Optional[str] = None,
         limit: int = 25,
-    ) -> List[str] | Dict[str, Any]:
+    ) -> Dict[str, Any]:
         """
         Search for jobs on LinkedIn.
 
@@ -92,8 +92,8 @@ def register_job_tools(mcp: FastMCP) -> None:
             limit: Maximum number of job URLs to return (default: 25)
 
         Returns:
-            List of job posting URLs. Use get_job_details to get full details
-            for specific jobs.
+            Dict with job_urls list and count. Use get_job_details to get
+            full details for specific jobs.
         """
         try:
             # Validate session before scraping
@@ -111,7 +111,7 @@ def register_job_tools(mcp: FastMCP) -> None:
                 limit=limit,
             )
 
-            return job_urls
+            return {"job_urls": job_urls, "count": len(job_urls)}
 
         except Exception as e:
             return handle_tool_error(e, "search_jobs")
