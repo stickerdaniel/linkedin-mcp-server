@@ -8,7 +8,7 @@ and cookie-based authentication for Docker headless mode.
 import logging
 import os
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from linkedin_mcp_server.drivers.browser import (
     DEFAULT_SESSION_PATH,
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 AuthSource = Literal["session", "cookie"]
 
 
-def get_linkedin_cookie() -> Optional[str]:
+def get_linkedin_cookie() -> str | None:
     """Get LinkedIn cookie from environment variable."""
     return os.environ.get("LINKEDIN_COOKIE")
 
@@ -62,7 +62,7 @@ def get_authentication_source() -> AuthSource:
     )
 
 
-def clear_session(session_path: Optional[Path] = None) -> bool:
+def clear_session(session_path: Path | None = None) -> bool:
     """
     Clear stored session file.
 
