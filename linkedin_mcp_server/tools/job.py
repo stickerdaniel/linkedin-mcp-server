@@ -8,11 +8,11 @@ with comprehensive filtering and structured data extraction.
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from linkedin_scraper import JobScraper, JobSearchScraper
 from mcp.types import ToolAnnotations
 
-from linkedin_mcp_server.callbacks import MCPProgressCallback
+from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.drivers.browser import (
     ensure_authenticated,
     get_or_create_browser,
@@ -38,12 +38,13 @@ def register_job_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         )
     )
-    async def get_job_details(job_id: str) -> Dict[str, Any]:
+    async def get_job_details(job_id: str, ctx: Context) -> Dict[str, Any]:
         """
         Get job details for a specific job posting on LinkedIn.
 
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
+            ctx: FastMCP context for progress reporting
 
         Returns:
             Structured job data including title, company, location,
@@ -59,7 +60,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             logger.info(f"Scraping job: {job_url}")
 
             browser = await get_or_create_browser()
-            scraper = JobScraper(browser.page, callback=MCPProgressCallback())
+            scraper = JobScraper(browser.page, callback=MCPContextProgressCallback(ctx))
             job = await scraper.scrape(job_url)
 
             return job.to_dict()
@@ -77,6 +78,7 @@ def register_job_tools(mcp: FastMCP) -> None:
     )
     async def search_jobs(
         keywords: str,
+        ctx: Context,
         location: Optional[str] = None,
         limit: int = 25,
     ) -> List[str] | List[Dict[str, Any]]:
@@ -85,6 +87,7 @@ def register_job_tools(mcp: FastMCP) -> None:
 
         Args:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
+            ctx: FastMCP context for progress reporting
             location: Optional location filter (e.g., "San Francisco", "Remote")
             limit: Maximum number of job URLs to return (default: 25)
 
@@ -99,7 +102,9 @@ def register_job_tools(mcp: FastMCP) -> None:
             logger.info(f"Searching jobs: keywords='{keywords}', location='{location}'")
 
             browser = await get_or_create_browser()
-            scraper = JobSearchScraper(browser.page, callback=MCPProgressCallback())
+            scraper = JobSearchScraper(
+                browser.page, callback=MCPContextProgressCallback(ctx)
+            )
             job_urls = await scraper.search(
                 keywords=keywords,
                 location=location,
