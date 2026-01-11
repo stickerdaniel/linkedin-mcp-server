@@ -7,7 +7,6 @@ with session persistence via JSON files.
 """
 
 import logging
-import os
 from pathlib import Path
 from typing import cast
 
@@ -17,14 +16,11 @@ from linkedin_scraper import (
     is_logged_in,
     login_with_cookie,
 )
-from linkedin_scraper.core import detect_rate_limit, warm_up_browser
+from linkedin_scraper.core import detect_rate_limit
+
+from linkedin_mcp_server.utils import get_linkedin_cookie
 
 logger = logging.getLogger(__name__)
-
-
-def _get_linkedin_cookie() -> str | None:
-    """Get LinkedIn cookie from environment variable."""
-    return os.environ.get("LINKEDIN_COOKIE")
 
 
 # Default session file location
@@ -77,7 +73,7 @@ async def get_or_create_browser(
             logger.warning(f"Failed to load session: {e}")
 
     # Priority 2: Use cookie from environment
-    if cookie := _get_linkedin_cookie():
+    if cookie := get_linkedin_cookie():
         try:
             await login_with_cookie(_browser.page, cookie)
             logger.info("Authenticated using LINKEDIN_COOKIE")
@@ -85,11 +81,10 @@ async def get_or_create_browser(
         except Exception as e:
             logger.warning(f"Cookie authentication failed: {e}")
 
-    # No auth available - warm up for manual login
-    logger.info("No authentication found, warming up browser...")
-    await warm_up_browser(_browser.page)
-
-    return _browser
+    # No auth available - fail fast with clear error
+    raise AuthenticationError(
+        "No authentication found. Run with --get-session to create a session."
+    )
 
 
 async def close_browser() -> None:
