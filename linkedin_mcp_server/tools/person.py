@@ -8,11 +8,11 @@ experience, education, skills, and contact details.
 import logging
 from typing import Any, Dict
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from linkedin_scraper import PersonScraper
 from mcp.types import ToolAnnotations
 
-from linkedin_mcp_server.callbacks import MCPProgressCallback
+from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.drivers.browser import (
     ensure_authenticated,
     get_or_create_browser,
@@ -38,12 +38,15 @@ def register_person_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         )
     )
-    async def get_person_profile(linkedin_username: str) -> Dict[str, Any]:
+    async def get_person_profile(
+        linkedin_username: str, ctx: Context
+    ) -> Dict[str, Any]:
         """
         Get a specific person's LinkedIn profile.
 
         Args:
             linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates")
+            ctx: FastMCP context for progress reporting
 
         Returns:
             Structured data from the person's profile including name, about,
@@ -59,7 +62,9 @@ def register_person_tools(mcp: FastMCP) -> None:
             logger.info(f"Scraping profile: {linkedin_url}")
 
             browser = await get_or_create_browser()
-            scraper = PersonScraper(browser.page, callback=MCPProgressCallback())
+            scraper = PersonScraper(
+                browser.page, callback=MCPContextProgressCallback(ctx)
+            )
             person = await scraper.scrape(linkedin_url)
 
             return person.to_dict()
