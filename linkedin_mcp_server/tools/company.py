@@ -8,11 +8,11 @@ with comprehensive error handling.
 import logging
 from typing import Any, Dict
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from linkedin_scraper import CompanyScraper
 from mcp.types import ToolAnnotations
 
-from linkedin_mcp_server.callbacks import MCPProgressCallback
+from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.drivers.browser import (
     ensure_authenticated,
     get_or_create_browser,
@@ -38,12 +38,13 @@ def register_company_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         )
     )
-    async def get_company_profile(company_name: str) -> Dict[str, Any]:
+    async def get_company_profile(company_name: str, ctx: Context) -> Dict[str, Any]:
         """
         Get a specific company's LinkedIn profile.
 
         Args:
             company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
+            ctx: FastMCP context for progress reporting
 
         Returns:
             Structured data from the company's profile including name, about,
@@ -59,7 +60,9 @@ def register_company_tools(mcp: FastMCP) -> None:
             logger.info(f"Scraping company: {linkedin_url}")
 
             browser = await get_or_create_browser()
-            scraper = CompanyScraper(browser.page, callback=MCPProgressCallback())
+            scraper = CompanyScraper(
+                browser.page, callback=MCPContextProgressCallback(ctx)
+            )
             company = await scraper.scrape(linkedin_url)
 
             return company.to_dict()
