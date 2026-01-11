@@ -6,7 +6,6 @@ and cookie-based authentication for Docker headless mode.
 """
 
 import logging
-import os
 from pathlib import Path
 from typing import Literal
 
@@ -15,15 +14,11 @@ from linkedin_mcp_server.drivers.browser import (
     session_exists,
 )
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
+from linkedin_mcp_server.utils import get_linkedin_cookie
 
 logger = logging.getLogger(__name__)
 
 AuthSource = Literal["session", "cookie"]
-
-
-def get_linkedin_cookie() -> str | None:
-    """Get LinkedIn cookie from environment variable."""
-    return os.environ.get("LINKEDIN_COOKIE")
 
 
 def get_authentication_source() -> AuthSource:
@@ -57,8 +52,9 @@ def get_authentication_source() -> AuthSource:
         "  2. Set LINKEDIN_COOKIE environment variable with your li_at cookie\n"
         "  3. Run with --no-headless to login interactively\n\n"
         "For Docker users:\n"
-        "  docker run -it -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \\\n"
-        "    stickerdaniel/linkedin-mcp-server:latest --get-session"
+        "  Create session on host first: uvx linkedin-mcp-server --get-session\n"
+        "  Then mount into Docker: -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp\n"
+        "  Or set LINKEDIN_COOKIE environment variable: -e LINKEDIN_COOKIE=your_li_at"
     )
 
 
