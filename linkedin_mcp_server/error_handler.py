@@ -80,7 +80,7 @@ def convert_exception_to_response(
         return {
             "error": "authentication_failed",
             "message": str(exception),
-            "resolution": "Check your LinkedIn session. You may need to re-authenticate or complete a security challenge.",
+            "resolution": "Run with --get-session to re-authenticate (opens visible browser, not available in Docker), or set LINKEDIN_COOKIE environment variable.",
         }
 
     elif isinstance(exception, RateLimitError):

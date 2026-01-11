@@ -131,9 +131,7 @@ async def ensure_authenticated() -> None:
         AuthenticationError: If session is expired or invalid
     """
     if not await validate_session():
-        raise AuthenticationError(
-            "Session expired or invalid. Run with --get-session to re-authenticate."
-        )
+        raise AuthenticationError("Session expired or invalid.")
 
 
 async def check_rate_limit() -> None:
