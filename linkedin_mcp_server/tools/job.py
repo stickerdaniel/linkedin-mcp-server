@@ -6,7 +6,7 @@ with comprehensive filtering and structured data extraction.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from fastmcp import Context, FastMCP
 from linkedin_scraper import JobScraper, JobSearchScraper
@@ -79,7 +79,7 @@ def register_job_tools(mcp: FastMCP) -> None:
     async def search_jobs(
         keywords: str,
         ctx: Context,
-        location: Optional[str] = None,
+        location: str | None = None,
         limit: int = 25,
     ) -> Dict[str, Any]:
         """

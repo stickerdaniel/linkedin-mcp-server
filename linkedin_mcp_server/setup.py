@@ -8,7 +8,6 @@ Uses linkedin_scraper v3's wait_for_manual_login for authentication.
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
 
 from linkedin_scraper import BrowserManager, wait_for_manual_login
 
@@ -17,7 +16,7 @@ from linkedin_mcp_server.drivers.browser import DEFAULT_SESSION_PATH
 logger = logging.getLogger(__name__)
 
 
-async def interactive_login_and_save(session_path: Optional[Path] = None) -> bool:
+async def interactive_login_and_save(session_path: Path | None = None) -> bool:
     """
     Open browser for manual LinkedIn login and save session.
 
@@ -56,7 +55,7 @@ async def interactive_login_and_save(session_path: Optional[Path] = None) -> boo
         return True
 
 
-def run_session_creation(output_path: Optional[str] = None) -> bool:
+def run_session_creation(output_path: str | None = None) -> bool:
     """
     Create session via interactive login and save to file.
 
