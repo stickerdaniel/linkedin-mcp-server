@@ -9,7 +9,7 @@ with session persistence via JSON files.
 import logging
 import os
 from pathlib import Path
-from typing import Optional, cast
+from typing import cast
 
 from linkedin_scraper import (
     AuthenticationError,
@@ -22,7 +22,7 @@ from linkedin_scraper.core import detect_rate_limit, warm_up_browser
 logger = logging.getLogger(__name__)
 
 
-def _get_linkedin_cookie() -> Optional[str]:
+def _get_linkedin_cookie() -> str | None:
     """Get LinkedIn cookie from environment variable."""
     return os.environ.get("LINKEDIN_COOKIE")
 
@@ -31,13 +31,13 @@ def _get_linkedin_cookie() -> Optional[str]:
 DEFAULT_SESSION_PATH = Path.home() / ".linkedin-mcp" / "session.json"
 
 # Global browser instance (singleton)
-_browser: Optional[BrowserManager] = None
+_browser: BrowserManager | None = None
 _headless: bool = True
 
 
 async def get_or_create_browser(
-    headless: Optional[bool] = None,
-    session_path: Optional[Path] = None,
+    headless: bool | None = None,
+    session_path: Path | None = None,
 ) -> BrowserManager:
     """
     Get existing browser or create and initialize a new one.
@@ -104,7 +104,7 @@ async def close_browser() -> None:
         logger.info("Browser closed")
 
 
-def session_exists(session_path: Optional[Path] = None) -> bool:
+def session_exists(session_path: Path | None = None) -> bool:
     """Check if a session file exists."""
     if session_path is None:
         session_path = DEFAULT_SESSION_PATH

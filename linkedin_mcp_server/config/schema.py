@@ -6,7 +6,7 @@ structure with type-safe configuration objects and default values.
 """
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal
 
 
 class ConfigurationError(Exception):
@@ -21,7 +21,7 @@ class BrowserConfig:
 
     headless: bool = True
     slow_mo: int = 0  # Milliseconds between browser actions (debugging)
-    user_agent: Optional[str] = None  # Custom browser user agent
+    user_agent: str | None = None  # Custom browser user agent
     viewport_width: int = 1280
     viewport_height: int = 720
 
@@ -34,7 +34,7 @@ class ServerConfig:
     transport_explicitly_set: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "WARNING"
     get_session: bool = False
-    session_output_path: Optional[str] = None
+    session_output_path: str | None = None
     session_info: bool = False  # Check session validity and exit
     clear_session: bool = False
     # HTTP transport configuration
@@ -42,7 +42,7 @@ class ServerConfig:
     port: int = 8000
     path: str = "/mcp"
     # Cookie authentication
-    linkedin_cookie: Optional[str] = None
+    linkedin_cookie: str | None = None
 
 
 @dataclass

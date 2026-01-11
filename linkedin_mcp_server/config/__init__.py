@@ -6,7 +6,6 @@ loading from CLI arguments and environment variables.
 """
 
 import logging
-from typing import Optional
 
 from .loaders import load_config
 from .schema import AppConfig, BrowserConfig, ServerConfig
@@ -14,7 +13,7 @@ from .schema import AppConfig, BrowserConfig, ServerConfig
 logger = logging.getLogger(__name__)
 
 # Singleton pattern for configuration
-_config: Optional[AppConfig] = None
+_config: AppConfig | None = None
 
 
 def get_config() -> AppConfig:
