@@ -1,0 +1,10 @@
+version: '3.8'
+services:
+  linkedin-mcp:
+    image: stickerdaniel/linkedin-mcp-server:latest
+    volumes:
+      - ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp
+    environment:
+      - LOG_LEVEL=WARNING
+    stdin_open: true
+    tty: true
