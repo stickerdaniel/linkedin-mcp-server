@@ -41,8 +41,8 @@
             "problemMatcher": []
         },
         {
-            "label": "uv run -m linkedin_mcp_server --log-level DEBUG --no-headless --no-lazy-init",
-            "detail": "Run server in debug mode with visible window and login immediately",
+            "label": "uv run -m linkedin_mcp_server --log-level DEBUG --no-headless",
+            "detail": "Run server in debug mode with visible browser window",
             "type": "shell",
             "command": "uv",
             "args": [
@@ -51,8 +51,7 @@
                 "linkedin_mcp_server",
                 "--log-level",
                 "DEBUG",
-                "--no-headless",
-                "--no-lazy-init"
+                "--no-headless"
             ],
             "group": {
                 "kind": "build",
@@ -66,16 +65,15 @@
             "problemMatcher": []
         },
         {
-            "label": "uv run -m linkedin_mcp_server --no-headless --no-lazy-init",
-            "detail": "Run server with visible window and login immediately",
+            "label": "uv run -m linkedin_mcp_server --no-headless",
+            "detail": "Run server with visible browser window",
             "type": "shell",
             "command": "uv",
             "args": [
                 "run",
                 "-m",
                 "linkedin_mcp_server",
-                "--no-headless",
-                "--no-lazy-init"
+                "--no-headless"
             ],
             "group": {
                 "kind": "build"
@@ -88,7 +86,7 @@
             "problemMatcher": []
         },
         {
-            "label": "uv run -m linkedin_mcp_server --no-headless --no-lazy-init --transport streamable-http",
+            "label": "uv run -m linkedin_mcp_server --no-headless --transport streamable-http",
             "detail": "Start HTTP MCP server on localhost:8000/mcp",
             "type": "shell",
             "command": "uv",
@@ -97,7 +95,6 @@
                 "-m",
                 "linkedin_mcp_server",
                 "--no-headless",
-                "--no-lazy-init",
                 "--transport",
                 "streamable-http"
             ],
@@ -114,8 +111,8 @@
             "problemMatcher": []
         },
         {
-            "label": "uv run tail -n 20 -F ~/Library/Logs/Claude/mcp*.log",
-            "detail": "Follow Claude Desktop logs",
+            "label": "tail -n 20 -F ~/Library/Logs/Claude/mcp*.log",
+            "detail": "Follow Claude Desktop MCP logs",
             "type": "shell",
             "command": "tail",
             "args": [
