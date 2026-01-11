@@ -37,9 +37,6 @@ class ServerConfig:
     session_output_path: Optional[str] = None
     session_info: bool = False  # Check session validity and exit
     clear_session: bool = False
-    # Retry configuration
-    retry_attempts: int = 3
-    retry_backoff: float = 2.0
     # HTTP transport configuration
     host: str = "127.0.0.1"
     port: int = 8000

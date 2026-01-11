@@ -140,23 +140,6 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Browser viewport size (default: 1280x720)",
     )
 
-    # Retry configuration
-    parser.add_argument(
-        "--retry-attempts",
-        type=int,
-        default=3,
-        metavar="N",
-        help="Max retry attempts for transient failures (default: 3)",
-    )
-
-    parser.add_argument(
-        "--retry-backoff",
-        type=float,
-        default=2.0,
-        metavar="S",
-        help="Backoff multiplier between retries (default: 2.0)",
-    )
-
     # Session management
     parser.add_argument(
         "--get-session",
@@ -215,10 +198,6 @@ def load_from_args(config: AppConfig) -> AppConfig:
             config.browser.viewport_height = int(height)
         except ValueError:
             logger.warning(f"Invalid viewport format: {args.viewport}, using default")
-
-    # Retry configuration
-    config.server.retry_attempts = args.retry_attempts
-    config.server.retry_backoff = args.retry_backoff
 
     # Session management
     if args.get_session is not None:
