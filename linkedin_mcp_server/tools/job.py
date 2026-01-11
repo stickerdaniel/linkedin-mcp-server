@@ -17,7 +17,7 @@ from linkedin_mcp_server.drivers.browser import (
     ensure_authenticated,
     get_or_create_browser,
 )
-from linkedin_mcp_server.error_handler import handle_tool_error, handle_tool_error_list
+from linkedin_mcp_server.error_handler import handle_tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def register_job_tools(mcp: FastMCP) -> None:
         ctx: Context,
         location: Optional[str] = None,
         limit: int = 25,
-    ) -> List[str] | List[Dict[str, Any]]:
+    ) -> List[str] | Dict[str, Any]:
         """
         Search for jobs on LinkedIn.
 
@@ -114,4 +114,4 @@ def register_job_tools(mcp: FastMCP) -> None:
             return job_urls
 
         except Exception as e:
-            return handle_tool_error_list(e, "search_jobs")
+            return handle_tool_error(e, "search_jobs")
