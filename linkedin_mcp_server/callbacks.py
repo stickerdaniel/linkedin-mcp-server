@@ -5,13 +5,10 @@ Provides callback implementations that log progress for LinkedIn scraping operat
 and report progress to MCP clients via FastMCP Context.
 """
 
-import logging
 from typing import Any
 
 from fastmcp import Context
 from linkedin_scraper.callbacks import ProgressCallback
-
-logger = logging.getLogger(__name__)
 
 
 class MCPContextProgressCallback(ProgressCallback):
@@ -33,7 +30,3 @@ class MCPContextProgressCallback(ProgressCallback):
     async def on_complete(self, scraper_type: str, result: Any) -> None:
         """Report completion to MCP client."""
         await self.ctx.report_progress(progress=100, total=100, message="Complete")
-
-    async def on_error(self, error: Exception) -> None:
-        """Log errors (errors are handled by tool error handling)."""
-        logger.error(f"Scrape error: {error}")
