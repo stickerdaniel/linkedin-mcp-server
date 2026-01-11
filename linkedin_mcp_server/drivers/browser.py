@@ -153,3 +153,10 @@ async def check_rate_limit() -> None:
     """
     browser = await get_or_create_browser()
     await detect_rate_limit(browser.page)
+
+
+def reset_browser_for_testing() -> None:
+    """Reset global browser state for test isolation."""
+    global _browser, _headless
+    _browser = None
+    _headless = True
