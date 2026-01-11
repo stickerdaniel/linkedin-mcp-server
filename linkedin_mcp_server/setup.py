@@ -44,7 +44,8 @@ async def interactive_login_and_save(session_path: Optional[Path] = None) -> boo
         # Navigate to LinkedIn login
         await browser.page.goto("https://www.linkedin.com/login")
 
-        # Wait for manual login completion (5 minute timeout)
+        # Wait for manual login completion
+        # 5 minute timeout (300000ms) allows time for 2FA, captcha, security challenges
         await wait_for_manual_login(browser.page, timeout=300000)
 
         # Save session for future use
