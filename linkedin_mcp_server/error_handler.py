@@ -6,7 +6,7 @@ format, specific LinkedIn error categorization, and proper logging integration.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from linkedin_scraper.core.exceptions import (
     AuthenticationError,
@@ -40,22 +40,6 @@ def handle_tool_error(exception: Exception, context: str = "") -> Dict[str, Any]
         Structured error response dictionary
     """
     return convert_exception_to_response(exception, context)
-
-
-def handle_tool_error_list(
-    exception: Exception, context: str = ""
-) -> List[Dict[str, Any]]:
-    """
-    Handle errors from tool functions that return lists.
-
-    Args:
-        exception: The exception that occurred
-        context: Context about which tool failed
-
-    Returns:
-        List containing structured error response dictionary
-    """
-    return [convert_exception_to_response(exception, context)]
 
 
 def convert_exception_to_response(

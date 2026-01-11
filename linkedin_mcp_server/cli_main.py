@@ -318,8 +318,12 @@ def main() -> None:
 
 
 def exit_gracefully(exit_code: int = 0) -> None:
-    """Exit the application gracefully."""
+    """Exit the application gracefully with browser cleanup."""
     print("👋 Shutting down LinkedIn MCP server...")
+    try:
+        asyncio.run(close_browser())
+    except Exception:
+        pass  # Best effort cleanup
     sys.exit(exit_code)
 
 
