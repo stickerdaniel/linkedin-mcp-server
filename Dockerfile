@@ -13,12 +13,8 @@ COPY --chown=pwuser:pwuser . /app
 # Switch to non-root user
 USER pwuser
 
-# Create uv cache directory with correct ownership (required for cache mount)
-RUN mkdir -p /home/pwuser/.cache/uv
-
-# Sync dependencies and install project (with cache for faster rebuilds)
-RUN --mount=type=cache,target=/home/pwuser/.cache/uv,uid=1000,gid=1000 \
-    uv sync --frozen
+# Sync dependencies and install project
+RUN uv sync --frozen
 
 # Set entrypoint and default arguments
 ENTRYPOINT ["uv", "run", "-m", "linkedin_mcp_server"]
