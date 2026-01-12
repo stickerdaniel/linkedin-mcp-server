@@ -835,6 +835,7 @@ dependencies = [
     { name = "linkedin-scraper" },
     { name = "playwright" },
     { name = "pyperclip" },
+    { name = "python-dotenv" },
 ]
 
 [package.dev-dependencies]
@@ -855,6 +856,7 @@ requires-dist = [
     { name = "linkedin-scraper", specifier = ">=3.0.0" },
     { name = "playwright", specifier = ">=1.40.0" },
     { name = "pyperclip", specifier = ">=1.9.0" },
+    { name = "python-dotenv", specifier = ">=1.1.1" },
 ]
 
 [package.metadata.requires-dev]
