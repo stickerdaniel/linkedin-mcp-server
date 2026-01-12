@@ -827,7 +827,7 @@ wheels = [
 
 [[package]]
 name = "linkedin-mcp-server"
-version = "1.4.1"
+version = "2.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },

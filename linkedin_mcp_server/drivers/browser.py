@@ -68,7 +68,8 @@ async def get_or_create_browser(
         try:
             await _browser.load_session(str(session_path))
             logger.info(f"Loaded session from {session_path}")
-            # Validate session is actually logged in
+            # Navigate to LinkedIn to validate session
+            await _browser.page.goto("https://www.linkedin.com/feed/")
             if await is_logged_in(_browser.page):
                 _browser.page.set_default_timeout(
                     5000
