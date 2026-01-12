@@ -48,10 +48,6 @@
       "description": "Search for jobs with filters like keywords and location"
     },
     {
-      "name": "get_recommended_jobs",
-      "description": "Get personalized job recommendations based on your profile"
-    },
-    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
     }
