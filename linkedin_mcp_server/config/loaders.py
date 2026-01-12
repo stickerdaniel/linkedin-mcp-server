@@ -9,7 +9,12 @@ import logging
 import os
 import sys
 
+from dotenv import load_dotenv
+
 from .schema import AppConfig
+
+# Load .env file if present
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
