@@ -65,7 +65,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 ```
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again. For debugging login issues, use `--no-headless` to see the browser window.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again.
 
 ### uvx Setup Help
 
@@ -104,6 +104,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
 - `--clear-session` - Clear stored LinkedIn session file
+- `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 
 **Basic Usage Examples:**
 
@@ -118,7 +119,8 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 **HTTP Mode Example (for web-based MCP clients):**
 
 ```bash
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server \
+  --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
 **Test with mcp inspector:**
@@ -149,6 +151,12 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
 - You might get a captcha challenge if you logged in frequently
+
+**Timeout issues:**
+
+- If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
+- Users on slow connections may need higher values (e.g., 15000-30000ms)
+- Can also set via environment variable: `DEFAULT_TIMEOUT=10000`
 
 </details>
 
@@ -245,6 +253,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
 - `--clear-session` - Clear stored LinkedIn session file
+- `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 
 **HTTP Mode Example (for web-based MCP clients):**
 
@@ -281,6 +290,12 @@ docker run -it --rm \
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
 - You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
 
+**Timeout issues:**
+
+- If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
+- Users on slow connections may need higher values (e.g., 15000-30000ms)
+- Can also set via environment variable: `DEFAULT_TIMEOUT=10000`
+
 </details>
 
 <br/>
@@ -314,6 +329,12 @@ docker run -it --rm \
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
 - You might get a captcha challenge if you logged in frequently, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode
+
+**Timeout issues:**
+
+- If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
+- Users on slow connections may need higher values (e.g., 15000-30000ms)
+- Can also set via environment variable: `DEFAULT_TIMEOUT=10000`
 
 </details>
 
@@ -364,6 +385,7 @@ uv run -m linkedin_mcp_server --no-headless
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
 - `--clear-session` - Clear stored LinkedIn session file
+- `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--help` - Show help
 
 **HTTP Mode Example (for web-based MCP clients):**
@@ -407,6 +429,12 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 - Reinstall Playwright: `uv run playwright install chromium`
 - Reinstall dependencies: `uv sync --reinstall`
 
+**Timeout issues:**
+
+- If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
+- Users on slow connections may need higher values (e.g., 15000-30000ms)
+- Can also set via environment variable: `DEFAULT_TIMEOUT=10000`
+
 </details>
 
 Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) or [PR](https://github.com/stickerdaniel/linkedin-mcp-server/pulls)!
@@ -419,6 +447,14 @@ Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-serve
 Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@joeyism](https://github.com/joeyism) and [FastMCP](https://gofastmcp.com/).
 
 ⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+
+## Star History
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=stickerdaniel/linkedin-mcp-server&type=Date&theme=dark" />
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=stickerdaniel/linkedin-mcp-server&type=Date" />
+  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=stickerdaniel/linkedin-mcp-server&type=Date" />
+</picture>
 
 ## License
 
