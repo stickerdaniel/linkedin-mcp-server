@@ -6,7 +6,7 @@
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/badge/License-Apache%202.0-brightgreen?labelColor=32383f" alt="License"></a>
 </p>
 
-Through this LinkedIn MCP server, AI assistants like Claude can connect to your LinkedIn. Give access to profiles and companies, search for jobs, or get job details. All from a Docker container on your machine.
+Through this LinkedIn MCP server, AI assistants like Claude can connect to your LinkedIn. Access profiles and companies, search for jobs, or get job details.
 
 ## Installation Methods
 
@@ -40,6 +40,9 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 | `search_jobs` | Search for jobs with keywords and location filters | Broken (upstream) |
 | `get_job_details` | Get detailed information about a specific job posting | Working |
 | `close_session` | Close browser session and clean up resources | Working |
+
+> [!WARNING]
+> The session file at `~/.linkedin-mcp/session.json` contains sensitive authentication data. Keep it secure and do not share it.
 
 <br/>
 <br/>
@@ -96,13 +99,13 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 
 **CLI Options:**
 
-- `--no-headless` - Show browser window (useful for login and debugging)
+- `--get-session [PATH]` - Open browser to log in and save session (default: ~/.linkedin-mcp/session.json)
+- `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
 - `--clear-session` - Clear stored LinkedIn session file
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 
@@ -150,7 +153,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 **Login issues:**
 
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in frequently
+- You might get a captcha challenge if you logged in frequently. Run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` which opens a browser where you can solve it manually.
 
 **Timeout issues:**
 
@@ -227,11 +230,10 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 > [!NOTE]
 > Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again locally, or use a fresh `li_at` cookie.
 
-> [!WARNING]
-> The session file at `~/.linkedin-mcp/session.json` contains sensitive authentication data. Keep it secure and do not share it.
-
 > [!NOTE]
-> **Why can't I run `--get-session` in Docker?** Docker containers don't have a display server, so Playwright can't show a browser window. You must create the session on your host machine first, then mount it into Docker.
+> **Why can't I run `--get-session` in Docker?** Docker containers don't have a display server. You have two options:
+> 1. Create a session on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker
+> 2. Pass your `li_at` cookie via `LINKEDIN_COOKIE` (if you encounter auth challenges, use option 1 instead)
 
 ### Docker Setup Help
 
@@ -245,15 +247,16 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 
 **CLI Options:**
 
-- `--no-headless` - Show browser window (useful for login and debugging)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
 - `--clear-session` - Clear stored LinkedIn session file
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
+
+> [!NOTE]
+> `--get-session` and `--no-headless` are not available in Docker (no display server). Use the [uvx setup](#-uvx-setup-recommended---universal) to create sessions.
 
 **HTTP Mode Example (for web-based MCP clients):**
 
@@ -288,7 +291,7 @@ docker run -it --rm \
 
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
+- You might get a captcha challenge if you logged in frequently. Run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 
 **Timeout issues:**
 
@@ -309,10 +312,10 @@ docker run -it --rm \
 
 1. Download the [DXT extension](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
 2. Double-click to install into Claude Desktop
-3. Create a session using `--get-session` (see Docker instructions above)
+3. Create a session: `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session`
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again. For debugging login issues, use the [local setup](#-local-setup-develop--contribute) with `--no-headless` mode.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again.
 
 ### DXT Extension Setup Help
 
@@ -328,7 +331,7 @@ docker run -it --rm \
 
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in frequently, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode
+- You might get a captcha challenge if you logged in frequently. Run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 
 **Timeout issues:**
 
@@ -365,9 +368,11 @@ uv run playwright install chromium
 # 5. Install pre-commit hooks
 uv run pre-commit install
 
-# 6. Start the server (first run opens browser for manual login)
-# Login in the browser window - session will be saved to ~/.linkedin-mcp/session.json
-uv run -m linkedin_mcp_server --no-headless
+# 6. Create a session (first time only)
+uv run -m linkedin_mcp_server --get-session
+
+# 7. Start the server
+uv run -m linkedin_mcp_server
 ```
 
 ### Local Setup Help
@@ -377,13 +382,13 @@ uv run -m linkedin_mcp_server --no-headless
 
 **CLI Options:**
 
-- `--no-headless` - Show browser window (useful for login and debugging)
+- `--get-session [PATH]` - Open browser to log in and save session (default: ~/.linkedin-mcp/session.json)
+- `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
 - `--clear-session` - Clear stored LinkedIn session file
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--help` - Show help
@@ -412,11 +417,16 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 <details>
 <summary><b>❗ Troubleshooting</b></summary>
 
-**Login/Scraping issues:**
+**Login issues:**
 
-- Use `--no-headless` to see browser actions (captcha challenge, LinkedIn mobile app 2fa, ...)
-- Add `--log-level DEBUG` to see more detailed logging
 - Make sure you have only one active LinkedIn session at a time
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
+- You might get a captcha challenge if you logged in frequently. The `--get-session` command opens a browser where you can solve it manually.
+
+**Scraping issues:**
+
+- Use `--no-headless` to see browser actions and debug scraping problems
+- Add `--log-level DEBUG` to see more detailed logging
 
 **Session issues:**
 
