@@ -51,6 +51,9 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 | `get_job_details` | Working |
 | `close_session` | Working |
 
+<br/>
+<br/>
+
 ## 🐳 Docker Setup (Recommended - Universal)
 
 **Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running.
