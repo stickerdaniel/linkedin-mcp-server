@@ -46,7 +46,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 
 ## 🚀 uvx Setup (Recommended - Universal)
 
-**Prerequisites:** Make sure you have [uv](https://docs.astral.sh/uv/) installed.
+**Prerequisites:** Make sure you have [uv](https://docs.astral.sh/uv/) and Playwright `uvx playwright install chromium` installed.
 
 ### Installation
 
