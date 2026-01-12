@@ -1,21 +1,12 @@
-# src/linkedin_mcp_server/config/schema.py
 """
 Configuration schema definitions for LinkedIn MCP Server.
 
-This module defines the dataclass schemas that represent the application's configuration
-structure. It provides type-safe configuration objects with validation and default values
-for all aspects of the server including Chrome driver settings, LinkedIn credentials,
-and MCP server parameters.
-
-Key Components:
-- ChromeConfig: Chrome driver and browser configuration
-- LinkedInConfig: LinkedIn authentication and connection settings
-- ServerConfig: MCP server transport and operational settings
-- AppConfig: Main application configuration combining all components
+Defines the dataclass schemas that represent the application's configuration
+structure with type-safe configuration objects and default values.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional
+from typing import Literal
 
 
 class ConfigurationError(Exception):
@@ -25,22 +16,14 @@ class ConfigurationError(Exception):
 
 
 @dataclass
-class ChromeConfig:
-    """Configuration for Chrome driver."""
+class BrowserConfig:
+    """Configuration for browser settings."""
 
     headless: bool = True
-    chromedriver_path: Optional[str] = None
-    browser_args: List[str] = field(default_factory=list)
-    user_agent: Optional[str] = None
-
-
-@dataclass
-class LinkedInConfig:
-    """LinkedIn connection configuration."""
-
-    email: Optional[str] = None
-    password: Optional[str] = None
-    cookie: Optional[str] = None
+    slow_mo: int = 0  # Milliseconds between browser actions (debugging)
+    user_agent: str | None = None  # Custom browser user agent
+    viewport_width: int = 1280
+    viewport_height: int = 720
 
 
 @dataclass
@@ -48,39 +31,41 @@ class ServerConfig:
     """MCP server configuration."""
 
     transport: Literal["stdio", "streamable-http"] = "stdio"
-    transport_explicitly_set: bool = False  # Track if transport was explicitly set
-    lazy_init: bool = True
+    transport_explicitly_set: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "WARNING"
-    get_cookie: bool = False
-    clear_keychain: bool = False
+    get_session: bool = False
+    session_output_path: str | None = None
+    session_info: bool = False  # Check session validity and exit
+    clear_session: bool = False
     # HTTP transport configuration
     host: str = "127.0.0.1"
     port: int = 8000
     path: str = "/mcp"
+    # Cookie authentication
+    linkedin_cookie: str | None = None
 
 
 @dataclass
 class AppConfig:
     """Main application configuration."""
 
-    chrome: ChromeConfig = field(default_factory=ChromeConfig)
-    linkedin: LinkedInConfig = field(default_factory=LinkedInConfig)
+    browser: BrowserConfig = field(default_factory=BrowserConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     is_interactive: bool = field(default=False)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
-        self._validate_transport_config()
+        if self.server.transport == "streamable-http":
+            self._validate_transport_config()
+            self._validate_path_format()
         self._validate_port_range()
-        self._validate_path_format()
 
     def _validate_transport_config(self) -> None:
         """Validate transport configuration is consistent."""
-        if self.server.transport == "streamable-http":
-            if not self.server.host:
-                raise ConfigurationError("HTTP transport requires a valid host")
-            if not self.server.port:
-                raise ConfigurationError("HTTP transport requires a valid port")
+        if not self.server.host:
+            raise ConfigurationError("HTTP transport requires a valid host")
+        if not self.server.port:
+            raise ConfigurationError("HTTP transport requires a valid port")
 
     def _validate_port_range(self) -> None:
         """Validate port is in valid range."""
@@ -91,12 +76,11 @@ class AppConfig:
 
     def _validate_path_format(self) -> None:
         """Validate path format for HTTP transport."""
-        if self.server.transport == "streamable-http":
-            if not self.server.path.startswith("/"):
-                raise ConfigurationError(
-                    f"HTTP path '{self.server.path}' must start with '/'"
-                )
-            if len(self.server.path) < 2:
-                raise ConfigurationError(
-                    f"HTTP path '{self.server.path}' must be at least 2 characters"
-                )
+        if not self.server.path.startswith("/"):
+            raise ConfigurationError(
+                f"HTTP path '{self.server.path}' must start with '/'"
+            )
+        if len(self.server.path) < 2:
+            raise ConfigurationError(
+                f"HTTP path '{self.server.path}' must be at least 2 characters"
+            )
