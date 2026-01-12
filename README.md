@@ -6,7 +6,7 @@
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/badge/License-Apache%202.0-brightgreen?labelColor=32383f" alt="License"></a>
 </p>
 
-Through this LinkedIn MCP server, AI assistants like Claude can connect to your LinkedIn. Give access to profiles and companies, get your recommended jobs, or search for keywords. All from a Docker container on your machine.
+Through this LinkedIn MCP server, AI assistants like Claude can connect to your LinkedIn. Give access to profiles and companies, search for jobs, or get job details. All from a Docker container on your machine.
 
 ## Installation Methods
 
@@ -18,10 +18,6 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 <https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680>
 
 ## Usage Examples
-
-```
-What are my recommended jobs I can apply to?
-```
 
 ```
 Research the background of this candidate https://www.linkedin.com/in/stickerdaniel/
@@ -41,34 +37,65 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 >
 > - **Profile Scraping** (`get_person_profile`): Get detailed information from a LinkedIn profile including work history, education, skills, and connections
 > - **Company Analysis** (`get_company_profile`): Extract comprehensive company information from a LinkedIn company profile name
-> - **Job Search** (`search_jobs`): Search for jobs with filters like keywords and location
+> - **Job Search** (`search_jobs`): Search for jobs with keywords and location filters
+> - **Job Details** (`get_job_details`): Get detailed information about a specific job posting
 > - **Session Management** (`close_session`): Properly close browser session and clean up resources
 
-**January 2026 Tool Status:**
+**Tool Status:**
 
-| Tool | Status | Notes |
-|------|--------|-------|
-| `get_person_profile` | Works | Minor data formatting quirks |
-| `get_company_profile` | Works | Minor data formatting quirks |
-| `search_jobs` | Works | |
-| `close_session` | Works | |
-| `get_recommended_jobs` | Fails | See #70 for details |
-| `get_job_details` | Fails | See #71 for details |
-
-> [!NOTE]
-> The most reliable way to authenticate is to clone this repository and run the server manually in `--no-headless` mode where you can see the process visually and solve login challenges in the automated browser.
->
-> The server can login with your email and password first time, and extract the cookie from the session for subsequent runs. From time to time, you might need to get a new cookie.
->
-> Please try this approach first before opening an authentication related issue.
+| Tool | Status |
+|------|--------|
+| `get_person_profile` | Working |
+| `get_company_profile` | Working |
+| `search_jobs` | Broken (upstream) |
+| `get_job_details` | Working |
+| `close_session` | Working |
 
 ## 🐳 Docker Setup (Recommended - Universal)
 
 **Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running.
 
-### Installation
+### Authentication Options
 
-**Client Configuration:**
+Docker runs headless (no browser window), so you need to authenticate using one of these methods:
+
+#### Option 1: Cookie Authentication (Simplest)
+
+Get your LinkedIn `li_at` cookie and pass it to Docker:
+
+```json
+{
+  "mcpServers": {
+    "linkedin": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "LINKEDIN_COOKIE", "stickerdaniel/linkedin-mcp-server"],
+      "env": {
+        "LINKEDIN_COOKIE": "your_li_at_cookie_value"
+      }
+    }
+  }
+}
+```
+
+**To get your `li_at` cookie:**
+
+1. Open LinkedIn in your browser and log in
+2. Open DevTools (F12) → Application → Cookies → linkedin.com
+3. Copy the `li_at` cookie value
+
+#### Option 2: Session File (More Reliable)
+
+Create a session file locally, then mount it into Docker.
+
+**Step 1: Create session using uvx (one-time setup)**
+
+```bash
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
+```
+
+This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
+
+**Step 2: Configure Claude Desktop with Docker**
 
 ```json
 {
@@ -77,46 +104,22 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
-        "-e", "LINKEDIN_COOKIE",
+        "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "stickerdaniel/linkedin-mcp-server:latest"
-      ],
-      "env": {
-        "LINKEDIN_COOKIE": "li_at=YOUR_COOKIE_VALUE"
-      }
+      ]
     }
   }
 }
 ```
 
-### Getting the LinkedIn Cookie
+> [!NOTE]
+> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again locally, or use a fresh `li_at` cookie.
 
-<details>
-<summary><b>🌐 Chrome DevTools Guide</b></summary>
-
-1. Open LinkedIn and login
-2. Open Chrome DevTools (F12 or right-click → Inspect)
-3. Go to **Application** > **Storage** > **Cookies** > **<https://www.linkedin.com>**
-4. Find the cookie named `li_at`
-5. Copy the **Value** field (this is your LinkedIn session cookie)
-6. Use this value as your `LINKEDIN_COOKIE` in the configuration
-
-</details>
-<details>
-<summary><b>🐳 Docker get-cookie method</b></summary>
-
-**Run the server with the `--get-cookie` flag:**
-
-```bash
-docker run -it --rm \
-  stickerdaniel/linkedin-mcp-server:latest \
-  --get-cookie
-```
-
-Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client configuration. If this fails with a captcha challenge, use the method above.
-</details>
+> [!WARNING]
+> The session file at `~/.linkedin-mcp/session.json` contains sensitive authentication data. Keep it secure and do not share it.
 
 > [!NOTE]
-> The cookie might expire after some time. Just get the new cookie and update your client config. If you encounter issues logging in, please try the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in `--no-headless` mode where you can debug the login process (solve captcha manually).
+> **Why can't I run `--get-session` in Docker?** Docker containers don't have a display server, so Playwright can't show a browser window. You must create the session on your host machine first, then mount it into Docker.
 
 ### Docker Setup Help
 
@@ -130,21 +133,20 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 
 **CLI Options:**
 
+- `--no-headless` - Show browser window (useful for login and debugging)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--get-cookie` - Attempt to login with email and password and extract the LinkedIn cookie
-- `--cookie {cookie}` - Pass a specific LinkedIn cookie for login
-- `--user-agent {user_agent}` - Specify custom user agent string to prevent anti-scraping detection
+- `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
+- `--clear-session` - Clear stored LinkedIn session file
 
 **HTTP Mode Example (for web-based MCP clients):**
 
 ```bash
 docker run -it --rm \
-  -e LINKEDIN_COOKIE="li_at=YOUR_COOKIE_VALUE" \
+  -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
@@ -171,9 +173,8 @@ docker run -it --rm \
 
 **Login issues:**
 
-- Ensure your LinkedIn cookie is set and correct
-- Make sure you have only one active LinkedIn session per cookie at a time. Trying to open multiple sessions with the same cookie will result in a cookie invalid error.
-- LinkedIn may require a login confirmation in the LinkedIn mobile app for --get-cookie
+- Make sure you have only one active LinkedIn session at a time
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
 - You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
 
 </details>
@@ -189,37 +190,10 @@ docker run -it --rm \
 
 1. Download the [DXT extension](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
 2. Double-click to install into Claude Desktop
-3. Set your LinkedIn cookie in the extension settings
-
-### Getting the LinkedIn Cookie
-
-<details>
-<summary><b>🌐 Chrome DevTools Guide</b></summary>
-
-1. Open LinkedIn and login
-2. Open Chrome DevTools (F12 or right-click → Inspect)
-3. Go to **Application** > **Storage** > **Cookies** > **<https://www.linkedin.com>**
-4. Find the cookie named `li_at`
-5. Copy the **Value** field (this is your LinkedIn session cookie)
-6. Use this value as your `LINKEDIN_COOKIE` in the configuration
-
-</details>
-<details>
-<summary><b>🐳 Docker get-cookie method</b></summary>
-
-**Run the server with the `--get-cookie` flag:**
-
-```bash
-docker run -it --rm \
-  stickerdaniel/linkedin-mcp-server:latest \
-  --get-cookie
-```
-
-Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client configuration. If this fails with a captcha challenge, use the method above.
-</details>
+3. Create a session using `--get-session` (see Docker instructions above)
 
 > [!NOTE]
-> The cookie might expire after some time. Just get the new cookie and update your client config. If you encounter issues logging in, please try the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in `--no-headless` mode where you can debug the login process (solve captcha manually).
+> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again. For debugging login issues, use the [local setup](#-local-setup-develop--contribute) with `--no-headless` mode.
 
 ### DXT Extension Setup Help
 
@@ -233,10 +207,9 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 
 **Login issues:**
 
-- Ensure your LinkedIn cookie is set and correct
-- Make sure you have only one active LinkedIn session per cookie at a time. Trying to open multiple sessions with the same cookie will result in a cookie invalid error.
-- LinkedIn may require a login confirmation in the LinkedIn mobile app for --get-cookie
-- You might get a captcha challenge if you logged in a lot of times in a short period of time, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode where you can debug the login process (solve captcha manually)
+- Make sure you have only one active LinkedIn session at a time
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
+- You might get a captcha challenge if you logged in frequently, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode
 
 </details>
 
@@ -249,45 +222,23 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 
 ### Installation
 
-Run directly from GitHub without cloning:
-
-```bash
-# Run directly from GitHub (latest version)
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --help
-
-# Run with your LinkedIn cookie
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --cookie "li_at=YOUR_COOKIE_VALUE"
-```
-
-### Getting the LinkedIn Cookie
-
-<details>
-<summary><b>🌐 Chrome DevTools Guide</b></summary>
-
-1. Open LinkedIn and login
-2. Open Chrome DevTools (F12 or right-click → Inspect)
-3. Go to **Application** > **Storage** > **Cookies** > **<https://www.linkedin.com>**
-4. Find the cookie named `li_at`
-5. Copy the **Value** field (this is your LinkedIn session cookie)
-6. Use this value as your `LINKEDIN_COOKIE` in the configuration
-
-</details>
-
-<details>
-<summary><b>🚀 uvx get-cookie method</b></summary>
-
-**Run the server with the `--get-cookie` flag:**
+**Step 1: Create a session (first time only)**
 
 ```bash
 uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server \
-  linkedin-mcp-server --get-cookie
+  linkedin-mcp-server --get-session
 ```
 
-Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client configuration. If this fails with a captcha challenge, use the method above.
-</details>
+This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
+
+**Step 2: Run the server**
+
+```bash
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server
+```
 
 > [!NOTE]
-> The cookie might expire after some time. Just get the new cookie and update your client config. If you encounter issues logging in, please try the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in `--no-headless` mode where you can debug the login process (solve captcha manually).
+> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again. For debugging login issues, use `--no-headless` to see the browser window.
 
 ### uvx Setup Help
 
@@ -305,10 +256,7 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
         "--from",
         "git+https://github.com/stickerdaniel/linkedin-mcp-server",
         "linkedin-mcp-server"
-      ],
-      "env": {
-        "LINKEDIN_COOKIE": "li_at=YOUR_COOKIE_VALUE"
-      }
+      ]
     }
   }
 }
@@ -321,30 +269,23 @@ Copy the cookie from the output and set it as `LINKEDIN_COOKIE` in your client c
 
 **CLI Options:**
 
+- `--no-headless` - Show browser window (useful for login and debugging)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--get-cookie` - Attempt to login with email and password and extract the LinkedIn cookie
-- `--cookie {cookie}` - Pass a specific LinkedIn cookie for login
-- `--user-agent {user_agent}` - Specify custom user agent string to prevent anti-scraping detection
+- `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
+- `--clear-session` - Clear stored LinkedIn session file
 
 **Basic Usage Examples:**
 
 ```bash
-# Run with cookie from environment variable
-LINKEDIN_COOKIE="YOUR_COOKIE_VALUE" uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server
-
-# Run with cookie via flag
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --cookie "YOUR_COOKIE_VALUE"
+# Create a session interactively
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
 
 # Run with debug logging
 uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --log-level DEBUG
-
-# Extract cookie with credentials
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-cookie
 ```
 
 **HTTP Mode Example (for web-based MCP clients):**
@@ -373,16 +314,15 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 - Ensure you have uv installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Check uv version: `uv --version` (should be 0.4.0 or higher)
 
-**Cookie issues:**
+**Session issues:**
 
-- Ensure your LinkedIn cookie is set and correct
-- Cookie can be passed via `--cookie` flag or `LINKEDIN_COOKIE` environment variable
-- Make sure you have only one active LinkedIn session per cookie at a time
+- Session is stored at `~/.linkedin-mcp/session.json`
+- Make sure you have only one active LinkedIn session at a time
 
 **Login issues:**
 
-- LinkedIn may require a login confirmation in the LinkedIn mobile app for --get-cookie
-- You might get a captcha challenge if you logged in a lot of times in a short period
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
+- You might get a captcha challenge if you logged in frequently
 
 </details>
 
@@ -391,16 +331,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 
 ## 🐍 Local Setup (Develop & Contribute)
 
-**Prerequisites:** [Chrome browser](https://www.google.com/chrome/) and [Git](https://git-scm.com/downloads) installed
-
-**ChromeDriver Setup:**
-
-1. **Check Chrome version**: Chrome → menu (⋮) → Help → About Google Chrome
-2. **Download matching ChromeDriver**: [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)
-3. **Make it accessible**:
-   - Place ChromeDriver in PATH (`/usr/local/bin` on macOS/Linux)
-   - Or set: `export CHROMEDRIVER_PATH=/path/to/chromedriver`
-   - if no CHROMEDRIVER_PATH is set, the server will try to find it automatically by checking common locations
+**Prerequisites:** [Git](https://git-scm.com/downloads) and [uv](https://docs.astral.sh/uv/) installed
 
 ### Installation
 
@@ -409,21 +340,22 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 git clone https://github.com/stickerdaniel/linkedin-mcp-server
 cd linkedin-mcp-server
 
-# 2. Install UV package manager
+# 2. Install UV package manager (if not already installed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv python # install python if you don't have it
 
-# 3. Install dependencies and dev dependencies
+# 3. Install dependencies
 uv sync
 uv sync --group dev
 
-# 4. Install pre-commit hooks
+# 4. Install Playwright browser
+uv run playwright install chromium
+
+# 5. Install pre-commit hooks
 uv run pre-commit install
 
-# 5. Start the server once manually
-# You will be prompted to enter your LinkedIn credentials, and they will be securely stored in your OS keychain
-# Once logged in, your cookie will be stored in your OS keychain and used for subsequent runs until it expires
-uv run -m linkedin_mcp_server --no-headless --no-lazy-init
+# 6. Start the server (first run opens browser for manual login)
+# Login in the browser window - session will be saved to ~/.linkedin-mcp/session.json
+uv run -m linkedin_mcp_server --no-headless
 ```
 
 ### Local Setup Help
@@ -433,17 +365,14 @@ uv run -m linkedin_mcp_server --no-headless --no-lazy-init
 
 **CLI Options:**
 
-- `--no-headless` - Show browser window (debugging)
+- `--no-headless` - Show browser window (useful for login and debugging)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--no-lazy-init` - Login to LinkedIn immediately instead of waiting for the first tool call
-- `--get-cookie` - Login with email and password and extract the LinkedIn cookie
-- `--clear-keychain` - Clear all stored LinkedIn credentials and cookies from system keychain
-- `--cookie {cookie}` - Pass a specific LinkedIn cookie for login
-- `--user-agent {user_agent}` - Specify custom user agent string to prevent anti-scraping detection
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
+- `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
+- `--clear-session` - Clear stored LinkedIn session file
 - `--help` - Show help
 
 **HTTP Mode Example (for web-based MCP clients):**
@@ -454,7 +383,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 **Claude Desktop:**
 
-```**json**
+```json
 {
   "mcpServers": {
     "linkedin": {
@@ -473,18 +402,18 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 **Login/Scraping issues:**
 
 - Use `--no-headless` to see browser actions (captcha challenge, LinkedIn mobile app 2fa, ...)
-- Add `--no-lazy-init` to attempt to login to LinkedIn immediately instead of waiting for the first tool call
 - Add `--log-level DEBUG` to see more detailed logging
-- Make sure you have only one active LinkedIn session per cookie at a time. Trying to open multiple sessions with the same cookie will result in a cookie invalid error. E.g. if you have a logged in browser session with a docker container, you can't use the same cookie to login with the local setup while the docker container is running / session is not closed.
+- Make sure you have only one active LinkedIn session at a time
 
-**ChromeDriver issues:**
+**Session issues:**
 
-- Ensure Chrome and ChromeDriver versions match
-- Check ChromeDriver is in PATH or set `CHROMEDRIVER_PATH` in your env
+- Session is stored in `~/.linkedin-mcp/session.json`
+- Use `--clear-session` to clear the session and start fresh
 
-**Python issues:**
+**Python/Playwright issues:**
 
-- Check Python version: `uv python --version` (should be 3.12+)
+- Check Python version: `python --version` (should be 3.12+)
+- Reinstall Playwright: `uv run playwright install chromium`
 - Reinstall dependencies: `uv sync --reinstall`
 
 </details>

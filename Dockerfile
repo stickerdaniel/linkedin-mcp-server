@@ -1,28 +1,21 @@
-FROM python:3.13-alpine
+FROM mcr.microsoft.com/playwright/python:v1.57.0-noble
 
-# Install system dependencies including Chromium and ChromeDriver
-RUN apk add --no-cache \
-    git \
-    curl \
-    chromium \
-    chromium-chromedriver
-
-# Install uv from official image
+# Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Set working directory
+# Set working directory and fix ownership
 WORKDIR /app
+RUN chown pwuser:pwuser /app
 
-# Copy project files
-COPY . /app
+# Copy project files and set ownership
+COPY --chown=pwuser:pwuser . /app
 
-# Sync dependencies and install project
-RUN --mount=type=cache,target=/root/.cache/uv \
+# Switch to non-root user
+USER pwuser
+
+# Sync dependencies and install project (with cache for faster rebuilds)
+RUN --mount=type=cache,target=/home/pwuser/.cache/uv,uid=1000,gid=1000 \
     uv sync --frozen
-
-# Create a non-root user
-RUN adduser -D -u 1000 mcpuser && chown -R mcpuser:mcpuser /app
-USER mcpuser
 
 # Set entrypoint and default arguments
 ENTRYPOINT ["uv", "run", "-m", "linkedin_mcp_server"]

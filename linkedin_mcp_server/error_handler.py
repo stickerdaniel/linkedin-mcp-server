@@ -1,28 +1,31 @@
-# src/linkedin_mcp_server/error_handler.py
 """
 Centralized error handling for LinkedIn MCP Server with structured responses.
 
 Provides DRY approach to error handling across all tools with consistent MCP response
 format, specific LinkedIn error categorization, and proper logging integration.
-Eliminates code duplication while ensuring user-friendly error messages.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-from linkedin_scraper.exceptions import (
-    CaptchaRequiredError,
-    InvalidCredentialsError,
-    LoginTimeoutError,
+from linkedin_scraper.core.exceptions import (
+    AuthenticationError,
+    ElementNotFoundError,
+    LinkedInScraperException,
+    NetworkError,
+    ProfileNotFoundError,
     RateLimitError,
-    SecurityChallengeError,
-    TwoFactorAuthError,
+    ScrapingError,
 )
 
 from linkedin_mcp_server.exceptions import (
+    CookieAuthenticationError,
     CredentialsNotFoundError,
     LinkedInMCPError,
+    SessionExpiredError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def handle_tool_error(exception: Exception, context: str = "") -> Dict[str, Any]:
@@ -37,22 +40,6 @@ def handle_tool_error(exception: Exception, context: str = "") -> Dict[str, Any]
         Structured error response dictionary
     """
     return convert_exception_to_response(exception, context)
-
-
-def handle_tool_error_list(
-    exception: Exception, context: str = ""
-) -> List[Dict[str, Any]]:
-    """
-    Handle errors from tool functions that return lists.
-
-    Args:
-        exception: The exception that occurred
-        context: Context about which tool failed
-
-    Returns:
-        List containing structured error response dictionary
-    """
-    return convert_exception_to_list_response(exception, context)
 
 
 def convert_exception_to_response(
@@ -72,59 +59,81 @@ def convert_exception_to_response(
         return {
             "error": "authentication_not_found",
             "message": str(exception),
-            "resolution": "Provide LinkedIn cookie via LINKEDIN_COOKIE environment variable or run setup",
+            "resolution": "Run with --get-session to create a session file",
         }
 
-    elif isinstance(exception, InvalidCredentialsError):
+    elif isinstance(exception, SessionExpiredError):
         return {
-            "error": "invalid_credentials",
+            "error": "session_expired",
             "message": str(exception),
-            "resolution": "Check your LinkedIn email and password",
+            "resolution": "Run with --get-session to create a new session",
         }
 
-    elif isinstance(exception, CaptchaRequiredError):
+    elif isinstance(exception, CookieAuthenticationError):
         return {
-            "error": "captcha_required",
+            "error": "cookie_auth_failed",
             "message": str(exception),
-            "captcha_url": exception.captcha_url,
-            "resolution": "Complete the captcha challenge manually",
+            "resolution": "Check your LINKEDIN_COOKIE value or create a session file",
         }
 
-    elif isinstance(exception, SecurityChallengeError):
+    elif isinstance(exception, AuthenticationError):
         return {
-            "error": "security_challenge_required",
+            "error": "authentication_failed",
             "message": str(exception),
-            "challenge_url": getattr(exception, "challenge_url", None),
-            "resolution": "Complete the security challenge manually",
-        }
-
-    elif isinstance(exception, TwoFactorAuthError):
-        return {
-            "error": "two_factor_auth_required",
-            "message": str(exception),
-            "resolution": "Complete 2FA verification",
+            "resolution": "Run with --get-session to re-authenticate (opens visible browser, not available in Docker), or set LINKEDIN_COOKIE environment variable.",
         }
 
     elif isinstance(exception, RateLimitError):
+        wait_time = getattr(exception, "suggested_wait_time", 300)
         return {
             "error": "rate_limit",
             "message": str(exception),
-            "resolution": "Wait before attempting to login again",
+            "suggested_wait_seconds": wait_time,
+            "resolution": f"LinkedIn rate limit detected. Wait {wait_time} seconds before trying again.",
         }
 
-    elif isinstance(exception, LoginTimeoutError):
+    elif isinstance(exception, ProfileNotFoundError):
         return {
-            "error": "login_timeout",
+            "error": "profile_not_found",
             "message": str(exception),
-            "resolution": "Check network connection and try again",
+            "resolution": "Check the profile URL is correct and the profile exists.",
+        }
+
+    elif isinstance(exception, ElementNotFoundError):
+        return {
+            "error": "element_not_found",
+            "message": str(exception),
+            "resolution": "LinkedIn page structure may have changed. Please report this issue.",
+        }
+
+    elif isinstance(exception, NetworkError):
+        return {
+            "error": "network_error",
+            "message": str(exception),
+            "resolution": "Check your network connection and try again.",
+        }
+
+    elif isinstance(exception, ScrapingError):
+        return {
+            "error": "scraping_error",
+            "message": str(exception),
+            "resolution": "Failed to extract data from LinkedIn. The page structure may have changed.",
+        }
+
+    elif isinstance(exception, LinkedInScraperException):
+        return {
+            "error": "linkedin_scraper_error",
+            "message": str(exception),
         }
 
     elif isinstance(exception, LinkedInMCPError):
-        return {"error": "linkedin_error", "message": str(exception)}
+        return {
+            "error": "linkedin_mcp_error",
+            "message": str(exception),
+        }
 
     else:
         # Generic error handling with structured logging
-        logger = logging.getLogger(__name__)
         logger.error(
             f"Error in {context}: {exception}",
             extra={
@@ -137,44 +146,3 @@ def convert_exception_to_response(
             "error": "unknown_error",
             "message": f"Failed to execute {context}: {str(exception)}",
         }
-
-
-def convert_exception_to_list_response(
-    exception: Exception, context: str = ""
-) -> List[Dict[str, Any]]:
-    """
-    Convert an exception to a list-formatted structured MCP response.
-
-    Some tools return lists, so this provides the same error handling
-    but wrapped in a list format.
-
-    Args:
-        exception: The exception to convert
-        context: Additional context about where the error occurred
-
-    Returns:
-        List containing single structured error response dictionary
-    """
-    return [convert_exception_to_response(exception, context)]
-
-
-def safe_get_driver():
-    """
-    Safely get or create a driver with proper error handling.
-
-    Returns:
-        Driver instance
-
-    Raises:
-        LinkedInMCPError: If driver initialization fails
-    """
-    from linkedin_mcp_server.authentication import ensure_authentication
-    from linkedin_mcp_server.drivers.chrome import get_or_create_driver
-
-    # Get authentication first
-    authentication = ensure_authentication()
-
-    # Create driver with authentication
-    driver = get_or_create_driver(authentication)
-
-    return driver
