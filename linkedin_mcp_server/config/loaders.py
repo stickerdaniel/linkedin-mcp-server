@@ -11,7 +11,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from .schema import AppConfig
+from .schema import AppConfig, ConfigurationError
 
 # Load .env file if present
 load_dotenv()
@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 # Boolean value mappings for environment variable parsing
 TRUTHY_VALUES = ("1", "true", "True", "yes", "Yes")
 FALSY_VALUES = ("0", "false", "False", "no", "No")
+
+
+def positive_int(value: str) -> int:
+    """Argparse type for positive integers."""
+    ivalue = int(value)
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"must be positive, got {value}")
+    return ivalue
 
 
 class EnvironmentKeys:
@@ -77,12 +85,15 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if timeout_env := os.environ.get(EnvironmentKeys.DEFAULT_TIMEOUT):
         try:
             timeout_ms = int(timeout_env)
-            if timeout_ms > 0:
-                config.browser.default_timeout = timeout_ms
-            else:
-                logger.warning(f"Invalid timeout: {timeout_env}, must be positive")
+            if timeout_ms <= 0:
+                raise ConfigurationError(
+                    f"Invalid DEFAULT_TIMEOUT: {timeout_env}. Must be a positive integer."
+                )
+            config.browser.default_timeout = timeout_ms
         except ValueError:
-            logger.warning(f"Invalid timeout value: {timeout_env}, using default")
+            raise ConfigurationError(
+                f"Invalid DEFAULT_TIMEOUT: '{timeout_env}'. Must be an integer."
+            )
 
     return config
 
@@ -159,7 +170,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     parser.add_argument(
         "--timeout",
-        type=int,
+        type=positive_int,
         default=None,
         metavar="MS",
         help="Browser timeout for page operations in milliseconds (default: 5000)",
@@ -225,10 +236,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
             logger.warning(f"Invalid viewport format: {args.viewport}, using default")
 
     if args.timeout is not None:
-        if args.timeout > 0:
-            config.browser.default_timeout = args.timeout
-        else:
-            logger.warning(f"Invalid timeout: {args.timeout}, must be positive")
+        config.browser.default_timeout = args.timeout
 
     # Session management
     if args.get_session is not None:
