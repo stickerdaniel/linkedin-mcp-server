@@ -71,7 +71,13 @@ async def get_or_create_browser(
         "width": config.browser.viewport_width,
         "height": config.browser.viewport_height,
     }
-    logger.info(f"Creating new browser (headless={_headless})")
+    logger.info(
+        "Creating new browser (headless=%s, slow_mo=%sms, viewport=%sx%s)",
+        _headless,
+        config.browser.slow_mo,
+        viewport["width"],
+        viewport["height"],
+    )
     _browser = BrowserManager(
         headless=_headless,
         slow_mo=config.browser.slow_mo,
