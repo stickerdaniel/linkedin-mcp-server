@@ -32,24 +32,14 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 ```
 
 ## Features & Tool Status
->
-> [!TIP]
->
-> - **Profile Scraping** (`get_person_profile`): Get detailed information from a LinkedIn profile including work history, education, skills, and connections
-> - **Company Analysis** (`get_company_profile`): Extract comprehensive company information from a LinkedIn company profile name
-> - **Job Search** (`search_jobs`): Search for jobs with keywords and location filters
-> - **Job Details** (`get_job_details`): Get detailed information about a specific job posting
-> - **Session Management** (`close_session`): Properly close browser session and clean up resources
 
-**Tool Status:**
-
-| Tool | Status |
-|------|--------|
-| `get_person_profile` | Working |
-| `get_company_profile` | Working |
-| `search_jobs` | Broken (upstream) |
-| `get_job_details` | Working |
-| `close_session` | Working |
+| Tool | Description | Status |
+|------|-------------|--------|
+| `get_person_profile` | Get detailed profile info including work history, education, skills | Working |
+| `get_company_profile` | Extract company information from a LinkedIn company name | Working |
+| `search_jobs` | Search for jobs with keywords and location filters | Broken (upstream) |
+| `get_job_details` | Get detailed information about a specific job posting | Working |
+| `close_session` | Close browser session and clean up resources | Working |
 
 <br/>
 <br/>
