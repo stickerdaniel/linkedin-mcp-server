@@ -24,7 +24,7 @@
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
-        "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-v", "${HOME}/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "-e", "LOG_LEVEL=DEBUG",
         "stickerdaniel/linkedin-mcp-server:2.1.0"
       ]
