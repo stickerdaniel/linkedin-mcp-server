@@ -54,7 +54,120 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 <br/>
 <br/>
 
-## 🐳 Docker Setup (Recommended - Universal)
+## 🚀 uvx Setup (Recommended - Universal)
+
+**Prerequisites:** Make sure you have [uv](https://docs.astral.sh/uv/) installed.
+
+### Installation
+
+**Step 1: Create a session (first time only)**
+
+```bash
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server \
+  linkedin-mcp-server --get-session
+```
+
+This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
+
+**Step 2: Run the server**
+
+```bash
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server
+```
+
+> [!NOTE]
+> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again. For debugging login issues, use `--no-headless` to see the browser window.
+
+### uvx Setup Help
+
+<details>
+<summary><b>🔧 Configuration</b></summary>
+
+**Client Configuration:**
+
+```json
+{
+  "mcpServers": {
+    "linkedin": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/stickerdaniel/linkedin-mcp-server",
+        "linkedin-mcp-server"
+      ]
+    }
+  }
+}
+```
+
+**Transport Modes:**
+
+- **Default (stdio)**: Standard communication for local MCP servers
+- **Streamable HTTP**: For web-based MCP server
+
+**CLI Options:**
+
+- `--no-headless` - Show browser window (useful for login and debugging)
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
+- `--transport {stdio,streamable-http}` - Set transport mode
+- `--host HOST` - HTTP server host (default: 127.0.0.1)
+- `--port PORT` - HTTP server port (default: 8000)
+- `--path PATH` - HTTP server path (default: /mcp)
+- `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
+- `--clear-session` - Clear stored LinkedIn session file
+
+**Basic Usage Examples:**
+
+```bash
+# Create a session interactively
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
+
+# Run with debug logging
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --log-level DEBUG
+```
+
+**HTTP Mode Example (for web-based MCP clients):**
+
+```bash
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server \
+  --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
+```
+
+**Test with mcp inspector:**
+
+1. Install and run mcp inspector ```bunx @modelcontextprotocol/inspector```
+2. Click pre-filled token url to open the inspector in your browser
+3. Select `Streamable HTTP` as `Transport Type`
+4. Set `URL` to `http://localhost:8080/mcp`
+5. Connect
+6. Test tools
+
+</details>
+
+<details>
+<summary><b>❗ Troubleshooting</b></summary>
+
+**Installation issues:**
+
+- Ensure you have uv installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- Check uv version: `uv --version` (should be 0.4.0 or higher)
+
+**Session issues:**
+
+- Session is stored at `~/.linkedin-mcp/session.json`
+- Make sure you have only one active LinkedIn session at a time
+
+**Login issues:**
+
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
+- You might get a captcha challenge if you logged in frequently
+
+</details>
+
+<br/>
+<br/>
+
+## 🐳 Docker Setup
 
 **Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running.
 
@@ -213,119 +326,6 @@ docker run -it --rm \
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
 - You might get a captcha challenge if you logged in frequently, then try again later or follow the [local setup instructions](#-local-setup-develop--contribute) to run the server manually in --no-headless mode
-
-</details>
-
-<br/>
-<br/>
-
-## 🚀 uvx Setup (Quick Install - Universal)
-
-**Prerequisites:** Make sure you have [uv](https://docs.astral.sh/uv/) installed.
-
-### Installation
-
-**Step 1: Create a session (first time only)**
-
-```bash
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server \
-  linkedin-mcp-server --get-session
-```
-
-This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
-
-**Step 2: Run the server**
-
-```bash
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server
-```
-
-> [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again. For debugging login issues, use `--no-headless` to see the browser window.
-
-### uvx Setup Help
-
-<details>
-<summary><b>🔧 Configuration</b></summary>
-
-**Client Configuration:**
-
-```json
-{
-  "mcpServers": {
-    "linkedin": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/stickerdaniel/linkedin-mcp-server",
-        "linkedin-mcp-server"
-      ]
-    }
-  }
-}
-```
-
-**Transport Modes:**
-
-- **Default (stdio)**: Standard communication for local MCP servers
-- **Streamable HTTP**: For web-based MCP server
-
-**CLI Options:**
-
-- `--no-headless` - Show browser window (useful for login and debugging)
-- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--transport {stdio,streamable-http}` - Set transport mode
-- `--host HOST` - HTTP server host (default: 127.0.0.1)
-- `--port PORT` - HTTP server port (default: 8000)
-- `--path PATH` - HTTP server path (default: /mcp)
-- `--get-session [PATH]` - Login interactively and save session (default: ~/.linkedin-mcp/session.json)
-- `--clear-session` - Clear stored LinkedIn session file
-
-**Basic Usage Examples:**
-
-```bash
-# Create a session interactively
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
-
-# Run with debug logging
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --log-level DEBUG
-```
-
-**HTTP Mode Example (for web-based MCP clients):**
-
-```bash
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server \
-  --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
-```
-
-**Test with mcp inspector:**
-
-1. Install and run mcp inspector ```bunx @modelcontextprotocol/inspector```
-2. Click pre-filled token url to open the inspector in your browser
-3. Select `Streamable HTTP` as `Transport Type`
-4. Set `URL` to `http://localhost:8080/mcp`
-5. Connect
-6. Test tools
-
-</details>
-
-<details>
-<summary><b>❗ Troubleshooting</b></summary>
-
-**Installation issues:**
-
-- Ensure you have uv installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- Check uv version: `uv --version` (should be 0.4.0 or higher)
-
-**Session issues:**
-
-- Session is stored at `~/.linkedin-mcp/session.json`
-- Make sure you have only one active LinkedIn session at a time
-
-**Login issues:**
-
-- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in frequently
 
 </details>
 
