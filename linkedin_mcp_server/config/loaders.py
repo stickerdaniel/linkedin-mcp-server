@@ -30,6 +30,7 @@ class EnvironmentKeys:
     LOG_LEVEL = "LOG_LEVEL"
     TRANSPORT = "TRANSPORT"
     LINKEDIN_COOKIE = "LINKEDIN_COOKIE"
+    DEFAULT_TIMEOUT = "DEFAULT_TIMEOUT"
 
 
 def is_interactive_environment() -> bool:
@@ -71,6 +72,17 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # LinkedIn cookie for headless auth
     if cookie := os.environ.get(EnvironmentKeys.LINKEDIN_COOKIE):
         config.server.linkedin_cookie = cookie
+
+    # Default timeout for page operations
+    if timeout_env := os.environ.get(EnvironmentKeys.DEFAULT_TIMEOUT):
+        try:
+            timeout_ms = int(timeout_env)
+            if timeout_ms > 0:
+                config.browser.default_timeout = timeout_ms
+            else:
+                logger.warning(f"Invalid timeout: {timeout_env}, must be positive")
+        except ValueError:
+            logger.warning(f"Invalid timeout value: {timeout_env}, using default")
 
     return config
 
@@ -145,6 +157,14 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Browser viewport size (default: 1280x720)",
     )
 
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="Browser timeout for page operations in milliseconds (default: 5000)",
+    )
+
     # Session management
     parser.add_argument(
         "--get-session",
@@ -203,6 +223,12 @@ def load_from_args(config: AppConfig) -> AppConfig:
             config.browser.viewport_height = int(height)
         except ValueError:
             logger.warning(f"Invalid viewport format: {args.viewport}, using default")
+
+    if args.timeout is not None:
+        if args.timeout > 0:
+            config.browser.default_timeout = args.timeout
+        else:
+            logger.warning(f"Invalid timeout: {args.timeout}, must be positive")
 
     # Session management
     if args.get_session is not None:
