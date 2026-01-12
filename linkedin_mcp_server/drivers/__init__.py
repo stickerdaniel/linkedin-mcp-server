@@ -1,16 +1,38 @@
-# src/linkedin_mcp_server/drivers/__init__.py
 """
-Driver management package for LinkedIn scraping.
+Browser management package for LinkedIn scraping.
 
-This package provides Chrome WebDriver management and automation capabilities
-for LinkedIn scraping. It implements a singleton pattern for driver instances
+This package provides Playwright browser management using linkedin_scraper v3's
+BrowserManager. It implements a singleton pattern for browser instances
 to ensure session persistence across multiple tool calls while handling
 authentication, session management, and proper resource cleanup.
 
 Key Components:
-- Chrome WebDriver initialization and configuration
-- LinkedIn authentication and session management
-- Singleton pattern for driver reuse across tools
-- Automatic driver cleanup and resource management
-- Cross-platform Chrome driver detection and setup
+- Playwright browser initialization via BrowserManager
+- LinkedIn authentication with session persistence
+- Singleton pattern for browser reuse across tools
+- Automatic cleanup and resource management
 """
+
+from linkedin_mcp_server.drivers.browser import (
+    DEFAULT_SESSION_PATH,
+    check_rate_limit,
+    close_browser,
+    ensure_authenticated,
+    get_or_create_browser,
+    reset_browser_for_testing,
+    session_exists,
+    set_headless,
+    validate_session,
+)
+
+__all__ = [
+    "DEFAULT_SESSION_PATH",
+    "check_rate_limit",
+    "close_browser",
+    "ensure_authenticated",
+    "get_or_create_browser",
+    "reset_browser_for_testing",
+    "session_exists",
+    "set_headless",
+    "validate_session",
+]

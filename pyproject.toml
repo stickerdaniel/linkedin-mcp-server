@@ -7,9 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=2.14.0",
     "inquirer>=3.4.0",
-    "keyring>=25.6.0",
-    "linkedin-scraper",
+    "linkedin-scraper>=3.0.0",
+    "playwright>=1.40.0",
     "pyperclip>=1.9.0",
+    "python-dotenv>=1.1.1",
 ]
 
 [project.scripts]
@@ -26,9 +27,6 @@ exclude = ["assets*", "docs*", "tests*"]
 [tool.setuptools.package-data]
 linkedin_mcp_server = ["py.typed"]
 
-[tool.uv.sources]
-linkedin-scraper = { git = "https://github.com/stickerdaniel/linkedin_scraper.git" }
-
 [dependency-groups]
 dev = [
     "aiohttp>=3.12.13",
@@ -39,3 +37,6 @@ dev = [
     "ruff>=0.11.11",
     "ty>=0.0.1a12",
 ]
+
+[tool.ty.src]
+exclude = ["docs/references/"]
