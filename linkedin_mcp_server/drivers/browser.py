@@ -18,6 +18,7 @@ from linkedin_scraper import (
 )
 from linkedin_scraper.core import detect_rate_limit
 
+from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.utils import get_linkedin_cookie
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,12 @@ DEFAULT_SESSION_PATH = Path.home() / ".linkedin-mcp" / "session.json"
 # Global browser instance (singleton)
 _browser: BrowserManager | None = None
 _headless: bool = True
+
+
+def _apply_browser_settings(browser: BrowserManager) -> None:
+    """Apply configuration settings to browser instance."""
+    config = get_config()
+    browser.page.set_default_timeout(config.browser.default_timeout)
 
 
 async def get_or_create_browser(
@@ -71,9 +78,7 @@ async def get_or_create_browser(
             # Navigate to LinkedIn to validate session
             await _browser.page.goto("https://www.linkedin.com/feed/")
             if await is_logged_in(_browser.page):
-                _browser.page.set_default_timeout(
-                    5000
-                )  # 5s timeout for element operations
+                _apply_browser_settings(_browser)
                 return _browser
             logger.warning(
                 "Session loaded but expired, trying to create session from cookie"
@@ -86,7 +91,7 @@ async def get_or_create_browser(
         try:
             await login_with_cookie(_browser.page, cookie)
             logger.info("Authenticated using LINKEDIN_COOKIE")
-            _browser.page.set_default_timeout(5000)  # 5s timeout for element operations
+            _apply_browser_settings(_browser)
             return _browser
         except Exception as e:
             logger.warning(f"Cookie authentication failed: {e}")

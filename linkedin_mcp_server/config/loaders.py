@@ -11,7 +11,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from .schema import AppConfig
+from .schema import AppConfig, ConfigurationError
 
 # Load .env file if present
 load_dotenv()
@@ -23,6 +23,14 @@ TRUTHY_VALUES = ("1", "true", "True", "yes", "Yes")
 FALSY_VALUES = ("0", "false", "False", "no", "No")
 
 
+def positive_int(value: str) -> int:
+    """Argparse type for positive integers."""
+    ivalue = int(value)
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"must be positive, got {value}")
+    return ivalue
+
+
 class EnvironmentKeys:
     """Environment variable names used by the application."""
 
@@ -30,6 +38,7 @@ class EnvironmentKeys:
     LOG_LEVEL = "LOG_LEVEL"
     TRANSPORT = "TRANSPORT"
     LINKEDIN_COOKIE = "LINKEDIN_COOKIE"
+    DEFAULT_TIMEOUT = "DEFAULT_TIMEOUT"
 
 
 def is_interactive_environment() -> bool:
@@ -71,6 +80,20 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # LinkedIn cookie for headless auth
     if cookie := os.environ.get(EnvironmentKeys.LINKEDIN_COOKIE):
         config.server.linkedin_cookie = cookie
+
+    # Default timeout for page operations
+    if timeout_env := os.environ.get(EnvironmentKeys.DEFAULT_TIMEOUT):
+        try:
+            timeout_ms = int(timeout_env)
+            if timeout_ms <= 0:
+                raise ConfigurationError(
+                    f"Invalid DEFAULT_TIMEOUT: {timeout_env}. Must be a positive integer."
+                )
+            config.browser.default_timeout = timeout_ms
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid DEFAULT_TIMEOUT: '{timeout_env}'. Must be an integer."
+            )
 
     return config
 
@@ -145,6 +168,14 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Browser viewport size (default: 1280x720)",
     )
 
+    parser.add_argument(
+        "--timeout",
+        type=positive_int,
+        default=None,
+        metavar="MS",
+        help="Browser timeout for page operations in milliseconds (default: 5000)",
+    )
+
     # Session management
     parser.add_argument(
         "--get-session",
@@ -203,6 +234,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
             config.browser.viewport_height = int(height)
         except ValueError:
             logger.warning(f"Invalid viewport format: {args.viewport}, using default")
+
+    if args.timeout is not None:
+        config.browser.default_timeout = args.timeout
 
     # Session management
     if args.get_session is not None:
