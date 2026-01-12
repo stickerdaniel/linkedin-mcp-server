@@ -111,6 +111,28 @@
             "problemMatcher": []
         },
         {
+            "label": "uv run -m linkedin_mcp_server --get-session",
+            "detail": "Login to LinkedIn and save session (opens visible browser)",
+            "type": "shell",
+            "command": "uv",
+            "args": [
+                "run",
+                "-m",
+                "linkedin_mcp_server",
+                "--get-session"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": true
+            },
+            "problemMatcher": []
+        },
+        {
             "label": "tail -n 20 -F ~/Library/Logs/Claude/mcp*.log",
             "detail": "Follow Claude Desktop MCP logs",
             "type": "shell",

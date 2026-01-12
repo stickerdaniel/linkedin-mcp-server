@@ -43,20 +43,13 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 
 **Tool Status:**
 
-| Tool | Status | Notes |
-|------|--------|-------|
-| `get_person_profile` | ✅ Works | |
-| `get_company_profile` | ✅ Works | |
-| `search_jobs` | ✅ Works | Returns job URLs |
-| `get_job_details` | ✅ Works | |
-| `close_session` | ✅ Works | |
-
-> [!NOTE]
-> The most reliable way to authenticate is to clone this repository and run the server manually in `--no-headless` mode where you can see the process visually and solve login challenges in the automated browser.
->
-> The server saves your session to `~/.linkedin-mcp/session.json` after successful login. Sessions may expire over time, requiring re-authentication.
->
-> Please try this approach first before opening an authentication related issue.
+| Tool | Status |
+|------|--------|
+| `get_person_profile` | Working |
+| `get_company_profile` | Working |
+| `search_jobs` | Broken (upstream) |
+| `get_job_details` | Working |
+| `close_session` | Working |
 
 ## 🐳 Docker Setup (Recommended - Universal)
 
@@ -85,6 +78,7 @@ Get your LinkedIn `li_at` cookie and pass it to Docker:
 ```
 
 **To get your `li_at` cookie:**
+
 1. Open LinkedIn in your browser and log in
 2. Open DevTools (F12) → Application → Cookies → linkedin.com
 3. Copy the `li_at` cookie value
@@ -96,7 +90,7 @@ Create a session file locally, then mount it into Docker.
 **Step 1: Create session using uvx (one-time setup)**
 
 ```bash
-uvx linkedin-mcp-server --get-session
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
 ```
 
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
@@ -119,7 +113,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-mcp-server --get-session` again locally, or use a fresh `li_at` cookie.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again locally, or use a fresh `li_at` cookie.
 
 > [!WARNING]
 > The session file at `~/.linkedin-mcp/session.json` contains sensitive authentication data. Keep it secure and do not share it.
@@ -199,7 +193,7 @@ docker run -it --rm \
 3. Create a session using `--get-session` (see Docker instructions above)
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `--get-session` again. For debugging login issues, use the [local setup](#-local-setup-develop--contribute) with `--no-headless` mode.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again. For debugging login issues, use the [local setup](#-local-setup-develop--contribute) with `--no-headless` mode.
 
 ### DXT Extension Setup Help
 
@@ -244,7 +238,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 ```
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `--get-session` again. For debugging login issues, use `--no-headless` to see the browser window.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again. For debugging login issues, use `--no-headless` to see the browser window.
 
 ### uvx Setup Help
 

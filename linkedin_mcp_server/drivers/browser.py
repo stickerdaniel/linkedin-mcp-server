@@ -68,7 +68,15 @@ async def get_or_create_browser(
         try:
             await _browser.load_session(str(session_path))
             logger.info(f"Loaded session from {session_path}")
-            return _browser
+            # Validate session is actually logged in
+            if await is_logged_in(_browser.page):
+                _browser.page.set_default_timeout(
+                    5000
+                )  # 5s timeout for element operations
+                return _browser
+            logger.warning(
+                "Session loaded but expired, trying to create session from cookie"
+            )
         except Exception as e:
             logger.warning(f"Failed to load session: {e}")
 
@@ -77,6 +85,7 @@ async def get_or_create_browser(
         try:
             await login_with_cookie(_browser.page, cookie)
             logger.info("Authenticated using LINKEDIN_COOKIE")
+            _browser.page.set_default_timeout(5000)  # 5s timeout for element operations
             return _browser
         except Exception as e:
             logger.warning(f"Cookie authentication failed: {e}")
