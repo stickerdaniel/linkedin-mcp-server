@@ -24,6 +24,7 @@ class BrowserConfig:
     user_agent: str | None = None  # Custom browser user agent
     viewport_width: int = 1280
     viewport_height: int = 720
+    default_timeout: int = 5000  # Milliseconds for page operations
 
 
 @dataclass
