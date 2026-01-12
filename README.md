@@ -53,8 +53,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 **Step 1: Create a session (first time only)**
 
 ```bash
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server \
-  linkedin-mcp-server --get-session
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
 ```
 
 This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
@@ -119,8 +118,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 **HTTP Mode Example (for web-based MCP clients):**
 
 ```bash
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server \
-  --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
+uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
 **Test with mcp inspector:**
@@ -421,14 +419,6 @@ Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-serve
 Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@joeyism](https://github.com/joeyism) and [FastMCP](https://gofastmcp.com/).
 
 ⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
-
-## Star History
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=stickerdaniel/linkedin-mcp-server&type=Date&theme=dark" />
-  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=stickerdaniel/linkedin-mcp-server&type=Date" />
-  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=stickerdaniel/linkedin-mcp-server&type=Date" />
-</picture>
 
 ## License
 
