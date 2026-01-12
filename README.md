@@ -306,7 +306,7 @@ docker run -it --rm \
 
 ## 📦 Claude Desktop (DXT Extension)
 
-**Prerequisites:** [Claude Desktop](https://claude.ai/download) and [Docker](https://www.docker.com/get-started/) installed
+**Prerequisites:** [Claude Desktop](https://claude.ai/download) and [Docker](https://www.docker.com/get-started/) installed & running
 
 **One-click installation** for Claude Desktop users:
 
