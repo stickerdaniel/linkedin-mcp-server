@@ -19,7 +19,6 @@ assignees: ''
   - [ ] get_company_profile
   - [ ] get_job_details
   - [ ] search_jobs
-  - [ ] get_recommended_jobs
   - [ ] close_session
 
 ## MCP Client Configuration
