@@ -1,41 +1,39 @@
-# linkedin_mcp_server/cli_main.py
 """
 LinkedIn MCP Server - Main CLI application entry point.
 
-Implements a three-phase startup:
-1. Authentication Setup Phase - Credential validation and session establishment
-2. Driver Management Phase - Chrome WebDriver initialization with LinkedIn login
-3. Server Runtime Phase - MCP server startup with transport selection
-
+Implements a simplified two-phase startup:
+1. Authentication Check - Verify session file is available
+2. Server Runtime - MCP server startup with transport selection
 """
 
+import asyncio
 import io
 import logging
 import sys
 from typing import Literal
 
-import inquirer  # type: ignore
-from linkedin_scraper.exceptions import (
-    CaptchaRequiredError,
-    InvalidCredentialsError,
-    LoginTimeoutError,
-    RateLimitError,
-    SecurityChallengeError,
-    TwoFactorAuthError,
-)
+import inquirer
 
-from linkedin_mcp_server.cli import print_claude_config
-from linkedin_mcp_server.config import (
-    check_keychain_data_exists,
-    clear_all_keychain_data,
-    get_config,
-    get_keyring_name,
+from linkedin_scraper import is_logged_in
+from linkedin_scraper.core.exceptions import AuthenticationError, RateLimitError
+
+from linkedin_mcp_server.authentication import (
+    clear_session,
+    get_authentication_source,
 )
-from linkedin_mcp_server.drivers.chrome import close_all_drivers, get_or_create_driver
-from linkedin_mcp_server.exceptions import CredentialsNotFoundError, LinkedInMCPError
+from linkedin_mcp_server.cli import print_claude_config
+from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.drivers.browser import (
+    DEFAULT_SESSION_PATH,
+    close_browser,
+    get_or_create_browser,
+    session_exists,
+    set_headless,
+)
+from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 from linkedin_mcp_server.logging_config import configure_logging
-from linkedin_mcp_server.server import create_mcp_server, shutdown_handler
-from linkedin_mcp_server.setup import run_cookie_extraction_setup, run_interactive_setup
+from linkedin_mcp_server.server import create_mcp_server
+from linkedin_mcp_server.setup import run_interactive_setup, run_session_creation
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
@@ -63,57 +61,28 @@ def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
     return answers["transport"]
 
 
-def clear_keychain_and_exit() -> None:
-    """Clear LinkedIn keychain data and exit."""
+def clear_session_and_exit() -> None:
+    """Clear LinkedIn session and exit."""
     config = get_config()
 
-    # Configure logging
     configure_logging(
         log_level=config.server.log_level,
         json_format=not config.is_interactive and config.server.log_level != "DEBUG",
     )
 
-    # Get version for logging
     version = get_version()
+    logger.info(f"LinkedIn MCP Server v{version} - Session Clear mode")
 
-    logger.info(f"LinkedIn MCP Server v{version} - Keychain Clear mode started")
-
-    # Check what exists in keychain
-    existing = check_keychain_data_exists()
-
-    # If nothing exists, inform user and exit
-    if not existing["has_any"]:
-        print("ℹ️  No LinkedIn data found in keychain")
+    if not session_exists():
+        print("ℹ️  No session file found")
         print("Nothing to clear.")
         sys.exit(0)
 
-    # Show confirmation prompt for existing items only
-    keyring_name = get_keyring_name()
-    print(f"🔑 Clear LinkedIn data from {keyring_name}?")
-    print("This will remove:")
+    print(f"🔑 Clear LinkedIn session from {DEFAULT_SESSION_PATH}?")
 
-    items_to_remove = []
-    if existing["has_credentials"]:
-        credential_parts = []
-        if existing["has_email"]:
-            credential_parts.append("email")
-        if existing["has_password"]:
-            credential_parts.append("password")
-        items_to_remove.append(f"  • LinkedIn {' and '.join(credential_parts)}")
-
-    if existing["has_cookie"]:
-        items_to_remove.append("  • LinkedIn session cookie")
-
-    for item in items_to_remove:
-        print(item)
-    print()
-
-    # Get user confirmation
     try:
         confirmation = (
-            input("Are you sure you want to clear this keychain data? (y/N): ")
-            .strip()
-            .lower()
+            input("Are you sure you want to clear the session? (y/N): ").strip().lower()
         )
         if confirmation not in ("y", "yes"):
             print("❌ Operation cancelled")
@@ -122,154 +91,109 @@ def clear_keychain_and_exit() -> None:
         print("\n❌ Operation cancelled")
         sys.exit(0)
 
-    try:
-        # Clear all keychain data
-        success = clear_all_keychain_data()
-
-        if success:
-            logger.info("Keychain data cleared successfully")
-            print("✅ LinkedIn keychain data cleared successfully!")
-        else:
-            logger.error("Failed to clear keychain data")
-            print("❌ Failed to clear some keychain data - check logs for details")
-            sys.exit(1)
-
-    except Exception as e:
-        logger.error(f"Error clearing keychain: {e}")
-        print(f"❌ Error clearing keychain: {e}")
+    if clear_session():
+        print("✅ LinkedIn session cleared successfully!")
+    else:
+        print("❌ Failed to clear session")
         sys.exit(1)
 
     sys.exit(0)
 
 
-def get_cookie_and_exit() -> None:
-    """Get LinkedIn cookie and exit (for Docker setup)."""
+def get_session_and_exit() -> None:
+    """Create session interactively and exit."""
     config = get_config()
 
-    # Configure logging
     configure_logging(
         log_level=config.server.log_level,
         json_format=not config.is_interactive and config.server.log_level != "DEBUG",
     )
 
-    # Get version for logging
     version = get_version()
+    logger.info(f"LinkedIn MCP Server v{version} - Session Creation mode")
 
-    logger.info(f"LinkedIn MCP Server v{version} - Cookie Extraction mode started")
+    output_path = config.server.session_output_path
+    success = run_session_creation(output_path)
 
-    try:
-        # Run cookie extraction setup
-        cookie = run_cookie_extraction_setup()
+    sys.exit(0 if success else 1)
 
-        logger.info("Cookie extraction successful")
-        print("✅ Login successful!")
-        print("🍪 LinkedIn Cookie extracted:")
-        print(cookie)
 
-        # Try to copy to clipboard
-        clipboard_success = False
-        try:
-            import pyperclip
+def session_info_and_exit() -> None:
+    """Check session validity and display info, then exit."""
+    config = get_config()
 
-            pyperclip.copy(cookie)
-            clipboard_success = True
-            print("📋 Cookie copied to clipboard!")
-        except Exception as e:
-            logger.debug(f"pyperclip clipboard failed: {e}")
+    configure_logging(
+        log_level=config.server.log_level,
+        json_format=not config.is_interactive and config.server.log_level != "DEBUG",
+    )
 
-        if not clipboard_success:
-            print(
-                "💡 Set this cookie as an environment variable in your config or pass it with --cookie flag"
-            )
+    version = get_version()
+    logger.info(f"LinkedIn MCP Server v{version} - Session Info mode")
 
-    except Exception as e:
-        logger.error(f"Error getting cookie: {e}")
-
-        # Provide specific guidance for security challenges
-        error_msg = str(e).lower()
-        if "security challenge" in error_msg or "captcha" in error_msg:
-            print("❌ LinkedIn security challenge detected")
-            print("💡 Try one of these solutions:")
-            print(
-                "   1. Use an existing LinkedIn cookie from your browser instead (see instructions below)"
-            )
-            print(
-                "   2. Use --no-headless flag (manual installation required, does not work with Docker) and solve the security challenge manually"
-            )
-            print("\n🍪 To get your LinkedIn cookie manually:")
-            print("   1. Login to LinkedIn in your browser")
-            print("   2. Open Developer Tools (F12)")
-            print("   3. Go to Application/Storage > Cookies > www.linkedin.com")
-            print("   4. Copy the 'li_at' cookie value")
-            print("   5. Set LINKEDIN_COOKIE environment variable or use --cookie flag")
-        elif "invalid credentials" in error_msg:
-            print("❌ Invalid LinkedIn credentials")
-            print("💡 Please check your email and password")
-        else:
-            print("❌ Failed to obtain cookie - check your credentials")
+    # Check if session file exists first
+    if not session_exists():
+        print(f"❌ No session file found at {DEFAULT_SESSION_PATH}")
+        print("   Run with --get-session to create a session")
         sys.exit(1)
 
-    sys.exit(0)
+    # Check if session is valid by testing login status
+    async def check_session() -> bool:
+        try:
+            set_headless(True)  # Always check headless
+            browser = await get_or_create_browser()
+            valid = await is_logged_in(browser.page)
+            await close_browser()
+            return valid
+        except Exception as e:
+            logger.error(f"Error checking session: {e}")
+            return False
+
+    valid = asyncio.run(check_session())
+
+    if valid:
+        print(f"✅ Session is valid: {DEFAULT_SESSION_PATH}")
+        sys.exit(0)
+    else:
+        print(f"❌ Session expired or invalid: {DEFAULT_SESSION_PATH}")
+        print("   Run with --get-session to re-authenticate")
+        sys.exit(1)
 
 
-def ensure_authentication_ready() -> str:
+def ensure_authentication_ready() -> None:
     """
-    Phase 1: Ensure authentication is ready before any drivers are created.
+    Phase 1: Ensure authentication is ready.
 
-    Returns:
-        str: Valid LinkedIn session cookie
+    Checks for existing session file.
+    If not found, runs interactive setup in interactive mode.
 
     Raises:
         CredentialsNotFoundError: If authentication setup fails
     """
     config = get_config()
 
-    # Check if we already have a cookie in config (from keyring, env, or args)
-    if config.linkedin.cookie:
-        logger.info("Using LinkedIn cookie from configuration")
-        return config.linkedin.cookie
-
-    # If in non-interactive mode and no cookie, fail immediately
-    if not config.is_interactive:
-        raise CredentialsNotFoundError(
-            "No LinkedIn cookie found for non-interactive mode. You can:\n"
-            "  1. Run with --get-cookie to extract a cookie using email/password\n"
-            "  2. Set LINKEDIN_COOKIE environment variable with a valid LinkedIn session cookie"
-        )
-
-    # Run interactive setup to get credentials and obtain cookie
-    logger.info("Setting up LinkedIn authentication...")
-    return run_interactive_setup()
-
-
-def initialize_driver_with_auth(authentication: str) -> None:
-    """
-    Phase 2: Initialize driver using existing authentication.
-
-    Args:
-        authentication: LinkedIn session cookie
-
-    Raises:
-        Various exceptions if driver creation or login fails
-    """
-    config = get_config()
-
-    if config.server.lazy_init:
-        logger.info(
-            "Using lazy initialization - driver will be created on first tool call"
-        )
+    # Check for existing session
+    try:
+        get_authentication_source()
         return
 
-    logger.info("Initializing Chrome WebDriver and logging in...")
+    except CredentialsNotFoundError:
+        pass
 
-    try:
-        # Create driver and login with provided authentication
-        get_or_create_driver(authentication)
-        logger.info("✅ Web driver initialized and authenticated successfully")
+    # No authentication found - try interactive setup if possible
+    if not config.is_interactive:
+        raise CredentialsNotFoundError(
+            "No LinkedIn session found.\n"
+            "Options:\n"
+            "  1. Run with --get-session to create a session\n"
+            "  2. Run with --no-headless to login interactively"
+        )
 
-    except Exception as e:
-        logger.error(f"Failed to initialize driver: {e}")
-        raise e
+    # Run interactive setup
+    logger.info("No authentication found, starting interactive setup...")
+    success = run_interactive_setup()
+
+    if not success:
+        raise CredentialsNotFoundError("Interactive setup was cancelled or failed")
 
 
 def get_version() -> str:
@@ -289,131 +213,90 @@ def get_version() -> str:
 
 
 def main() -> None:
-    """Main application entry point with clear phase separation."""
-
-    # Get configuration (this sets config.is_interactive)
+    """Main application entry point."""
     config = get_config()
 
-    # Configure logging FIRST (before any logger usage)
+    # Configure logging
     configure_logging(
         log_level=config.server.log_level,
         json_format=not config.is_interactive and config.server.log_level != "DEBUG",
     )
 
-    # Get version for logging/display
     version = get_version()
 
-    # Only print banner in interactive mode (to avoid interfering with MCP protocol)
+    # Print banner in interactive mode
     if config.is_interactive:
         print(f"🔗 LinkedIn MCP Server v{version} 🔗")
         print("=" * 40)
 
-    # Always log version (this goes to stderr/logging, not stdout)
-    logger.info(f"🔗 LinkedIn MCP Server v{version} 🔗")
+    logger.info(f"LinkedIn MCP Server v{version}")
 
-    # Handle --clear-keychain flag immediately
-    if config.server.clear_keychain:
-        clear_keychain_and_exit()
+    # Set headless mode from config
+    set_headless(config.browser.headless)
 
-    # Handle --get-cookie flag immediately
-    if config.server.get_cookie:
-        get_cookie_and_exit()
+    # Handle --clear-session flag
+    if config.server.clear_session:
+        clear_session_and_exit()
+
+    # Handle --get-session flag
+    if config.server.get_session:
+        get_session_and_exit()
+
+    # Handle --session-info flag
+    if config.server.session_info:
+        session_info_and_exit()
 
     logger.debug(f"Server configuration: {config}")
 
     # Phase 1: Ensure Authentication is Ready
     try:
-        authentication = ensure_authentication_ready()
+        ensure_authentication_ready()
         print("✅ Authentication ready")
         logger.info("Authentication ready")
+
     except CredentialsNotFoundError as e:
         logger.error(f"Authentication setup failed: {e}")
         if config.is_interactive:
-            print(
-                "\n❌ Authentication required - please provide LinkedIn's li_at cookie"
-            )
+            print("\n❌ Authentication required")
+            print(str(e))
         else:
-            # TODO: make claude desktop handle this without terminating
-            print("\n❌ Cookie required for Docker/non-interactive mode")
-
+            print("\n❌ Authentication required for non-interactive mode")
         sys.exit(1)
+
     except KeyboardInterrupt:
         print("\n\n👋 Setup cancelled by user")
         sys.exit(0)
-    except Exception as e:
-        logger.error(f"Unexpected error during authentication setup: {e}")
-        print("\n❌ Setup failed - please try again")
+
+    except (AuthenticationError, RateLimitError) as e:
+        logger.error(f"LinkedIn error during setup: {e}")
+        print(f"\n❌ {str(e)}")
         sys.exit(1)
 
-    # Phase 2: Initialize Driver (if not lazy)
-    try:
-        initialize_driver_with_auth(authentication)
-    except InvalidCredentialsError as e:
-        logger.error(f"Driver initialization failed with invalid credentials: {e}")
-
-        # Cookie was already cleared in driver layer
-        # In interactive mode, try setup again
-        if config.is_interactive:
-            print(f"\n❌ {str(e)}")
-            print("🔄 Starting interactive setup for new authentication...")
-            try:
-                new_authentication = run_interactive_setup()
-                # Try again with new authentication
-                initialize_driver_with_auth(new_authentication)
-                logger.info("✅ Successfully authenticated with new credentials")
-            except Exception as setup_error:
-                logger.error(f"Setup failed: {setup_error}")
-                print(f"\n❌ Setup failed: {setup_error}")
-                sys.exit(1)
-        else:
-            print(f"\n❌ {str(e)}")
-            if not config.server.lazy_init:
-                sys.exit(1)
-    except (
-        LinkedInMCPError,
-        CaptchaRequiredError,
-        SecurityChallengeError,
-        TwoFactorAuthError,
-        RateLimitError,
-        LoginTimeoutError,
-    ) as e:
-        logger.error(f"Driver initialization failed: {e}")
-        print(f"\n❌ {str(e)}")
-        if not config.server.lazy_init:
-            sys.exit(1)
     except Exception as e:
-        logger.error(f"Unexpected error during driver initialization: {e}")
-        print(f"\n❌ Driver initialization failed: {e}")
-        if not config.server.lazy_init:
-            sys.exit(1)
+        logger.error(f"Unexpected error during authentication setup: {e}")
+        print(f"\n❌ Setup failed: {e}")
+        sys.exit(1)
 
-    # Phase 3: Server Runtime
+    # Phase 2: Server Runtime
     try:
-        # Decide transport using the new config system
         transport = config.server.transport
 
-        # Only show transport prompt if:
-        # a) running in interactive environment AND
-        # b) transport wasn't explicitly set via CLI/env
+        # Prompt for transport in interactive mode if not explicitly set
         if config.is_interactive and not config.server.transport_explicitly_set:
             print("\n🚀 Server ready! Choose transport mode:")
             transport = choose_transport_interactive()
-        elif not config.is_interactive and not config.server.transport_explicitly_set:
-            # If non-interactive and no transport explicitly set, use default (stdio)
-            transport = config.server.transport
 
-        # Print configuration for Claude if in interactive mode and using stdio transport
+        # Print Claude config in interactive stdio mode
         if config.is_interactive and transport == "stdio":
             print_claude_config()
 
         # Create and run the MCP server
         mcp = create_mcp_server()
 
-        # Start server
         print(f"\n🚀 Running LinkedIn MCP server ({transport.upper()} mode)...")
         if transport == "streamable-http":
             print(
-                f"📡 HTTP server will be available at http://{config.server.host}:{config.server.port}{config.server.path}"
+                f"📡 HTTP server at http://{config.server.host}:{config.server.port}{config.server.path}"
             )
             mcp.run(
                 transport=transport,
@@ -427,6 +310,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n⏹️  Server stopped by user")
         exit_gracefully(0)
+
     except Exception as e:
         logger.error(f"Server runtime error: {e}")
         print(f"\n❌ Server error: {e}")
@@ -434,15 +318,12 @@ def main() -> None:
 
 
 def exit_gracefully(exit_code: int = 0) -> None:
-    """Exit the application gracefully, cleaning up resources."""
+    """Exit the application gracefully with browser cleanup."""
     print("👋 Shutting down LinkedIn MCP server...")
-
-    # Clean up drivers
-    close_all_drivers()
-
-    # Clean up server
-    shutdown_handler()
-
+    try:
+        asyncio.run(close_browser())
+    except Exception:
+        pass  # Best effort cleanup
     sys.exit(exit_code)
 
 

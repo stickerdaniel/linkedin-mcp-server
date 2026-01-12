@@ -1,105 +1,82 @@
-# linkedin_mcp_server/authentication.py
 """
-Pure authentication logic for LinkedIn MCP Server.
+Authentication logic for LinkedIn MCP Server.
 
-Handles LinkedIn session cookie management with secure storage and retrieval.
-Provides layered authentication resolution from configuration, keyring, and user input.
-Implements proper error handling with context-aware messaging.
+Handles LinkedIn session management with file-based session persistence
+and cookie-based authentication for Docker headless mode.
 """
 
 import logging
+from pathlib import Path
+from typing import Literal
 
-from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.messages import ErrorMessages, InfoMessages
-from linkedin_mcp_server.config.providers import (
-    clear_cookie_from_keyring,
-    get_cookie_from_keyring,
-    save_cookie_to_keyring,
+from linkedin_mcp_server.drivers.browser import (
+    DEFAULT_SESSION_PATH,
+    session_exists,
 )
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
-
-# Constants for cookie validation
-MIN_RAW_COOKIE_LENGTH = 110
-MIN_COOKIE_LENGTH = MIN_RAW_COOKIE_LENGTH + len("li_at=")
+from linkedin_mcp_server.utils import get_linkedin_cookie
 
 logger = logging.getLogger(__name__)
 
+AuthSource = Literal["session", "cookie"]
 
-def get_authentication() -> str:
+
+def get_authentication_source() -> AuthSource:
     """
-    Get LinkedIn cookie from available sources.
+    Check available authentication methods in priority order.
+
+    Priority:
+    1. Session file (most reliable)
+    2. LINKEDIN_COOKIE env var (Docker headless)
 
     Returns:
-        str: LinkedIn session cookie
+        String indicating auth source: "session" or "cookie"
 
     Raises:
-        CredentialsNotFoundError: If no authentication is available
+        CredentialsNotFoundError: If no authentication method available
     """
-    config = get_config()
+    # Priority 1: Session file
+    if session_exists():
+        logger.info(f"Using session from {DEFAULT_SESSION_PATH}")
+        return "session"
 
-    # First, try environment variable or command line
-    if config.linkedin.cookie:
-        logger.info(InfoMessages.using_cookie_from("configuration"))
-        return config.linkedin.cookie
+    # Priority 2: Cookie from environment
+    if get_linkedin_cookie():
+        logger.info("Using LINKEDIN_COOKIE from environment")
+        return "cookie"
 
-    # Second, try keyring
-    cookie = get_cookie_from_keyring()
-    if cookie:
-        logger.info(InfoMessages.using_cookie_from("keyring"))
-        return cookie
+    raise CredentialsNotFoundError(
+        "No LinkedIn authentication found.\n\n"
+        "Options:\n"
+        "  1. Run with --get-session to create a session file (recommended)\n"
+        "  2. Set LINKEDIN_COOKIE environment variable with your li_at cookie\n"
+        "  3. Run with --no-headless to login interactively\n\n"
+        "For Docker users:\n"
+        "  Create session on host first: uvx linkedin-mcp-server --get-session\n"
+        "  Then mount into Docker: -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp\n"
+        "  Or set LINKEDIN_COOKIE environment variable: -e LINKEDIN_COOKIE=your_li_at"
+    )
 
-    # No authentication available
-    raise CredentialsNotFoundError("No LinkedIn cookie found")
 
-
-def store_authentication(cookie: str) -> bool:
+def clear_session(session_path: Path | None = None) -> bool:
     """
-    Store LinkedIn cookie securely.
+    Clear stored session file.
 
     Args:
-        cookie: LinkedIn session cookie to store
+        session_path: Path to session file
 
     Returns:
-        bool: True if storage was successful, False otherwise
+        True if clearing was successful
     """
-    success = save_cookie_to_keyring(cookie)
-    if success:
-        logger.info(InfoMessages.cookie_stored_securely())
-    else:
-        logger.warning(InfoMessages.keyring_storage_failed())
-    return success
+    if session_path is None:
+        session_path = DEFAULT_SESSION_PATH
 
-
-def clear_authentication() -> bool:
-    """
-    Clear stored authentication.
-
-    Returns:
-        bool: True if clearing was successful, False otherwise
-    """
-    success = clear_cookie_from_keyring()
-    if success:
-        logger.info("Authentication cleared from keyring")
-    else:
-        logger.warning("Could not clear authentication from keyring")
-    return success
-
-
-def ensure_authentication() -> str:
-    """
-    Ensure authentication is available with clear error messages.
-
-    Returns:
-        str: Valid LinkedIn session cookie
-
-    Raises:
-        CredentialsNotFoundError: If no authentication is available with clear instructions
-    """
-    try:
-        return get_authentication()
-    except CredentialsNotFoundError:
-        config = get_config()
-
-        raise CredentialsNotFoundError(
-            ErrorMessages.no_cookie_found(config.is_interactive)
-        )
+    if session_path.exists():
+        try:
+            session_path.unlink()
+            logger.info(f"Session cleared from {session_path}")
+            return True
+        except OSError as e:
+            logger.warning(f"Could not clear session: {e}")
+            return False
+    return True
