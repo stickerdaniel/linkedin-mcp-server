@@ -66,8 +66,18 @@ async def get_or_create_browser(
     if _browser is not None:
         return cast(BrowserManager, _browser)
 
+    config = get_config()
+    viewport = {
+        "width": config.browser.viewport_width,
+        "height": config.browser.viewport_height,
+    }
     logger.info(f"Creating new browser (headless={_headless})")
-    _browser = BrowserManager(headless=_headless)
+    _browser = BrowserManager(
+        headless=_headless,
+        slow_mo=config.browser.slow_mo,
+        user_agent=config.browser.user_agent,
+        viewport=viewport,
+    )
     await _browser.start()
 
     # Priority 1: Load session file if available
