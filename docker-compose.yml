@@ -1,6 +1,6 @@
 services:
   linkedin-mcp:
-    image: stickerdaniel/linkedin-mcp-server:latest
+    image: stickerdaniel/linkedin-mcp-server:latest@sha256:5340e9f5826b375a08172918f83aee74ef1e2232715147e5beb372ca014f7187
     volumes:
       - ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp
     environment:
