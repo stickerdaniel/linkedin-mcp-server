@@ -194,7 +194,7 @@ Get your LinkedIn `li_at` cookie and pass it to Docker:
 
 **To get your `li_at` cookie:**
 
-1. Open LinkedIn in your browser and log in
+1. Open LinkedIn in your browser in an **incognito** tab and log in
 2. Open DevTools (F12) → Application → Cookies → linkedin.com
 3. Copy the `li_at` cookie value
 
