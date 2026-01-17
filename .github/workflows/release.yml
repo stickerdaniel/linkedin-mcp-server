@@ -67,7 +67,7 @@ jobs:
           enable-cache: true
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@db6bcf6eb8d88a8aa03265b887ec7bd84d64cd68 # v2
+        uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
 
       - name: Update manifest.json version and Docker image
         run: |
