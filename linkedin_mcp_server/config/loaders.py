@@ -38,7 +38,13 @@ class EnvironmentKeys:
     LOG_LEVEL = "LOG_LEVEL"
     TRANSPORT = "TRANSPORT"
     LINKEDIN_COOKIE = "LINKEDIN_COOKIE"
-    DEFAULT_TIMEOUT = "DEFAULT_TIMEOUT"
+    TIMEOUT = "TIMEOUT"
+    USER_AGENT = "USER_AGENT"
+    HOST = "HOST"
+    PORT = "PORT"
+    HTTP_PATH = "HTTP_PATH"
+    SLOW_MO = "SLOW_MO"
+    VIEWPORT = "VIEWPORT"
 
 
 def is_interactive_environment() -> bool:
@@ -76,23 +82,61 @@ def load_from_env(config: AppConfig) -> AppConfig:
             config.server.transport = "stdio"
         elif transport_env == "streamable-http":
             config.server.transport = "streamable-http"
+        else:
+            raise ConfigurationError(
+                f"Invalid TRANSPORT: '{transport_env}'. Must be 'stdio' or 'streamable-http'."
+            )
 
     # LinkedIn cookie for headless auth
     if cookie := os.environ.get(EnvironmentKeys.LINKEDIN_COOKIE):
         config.server.linkedin_cookie = cookie
 
-    # Default timeout for page operations
-    if timeout_env := os.environ.get(EnvironmentKeys.DEFAULT_TIMEOUT):
+    # Timeout for page operations (semantic validation in BrowserConfig.__post_init__)
+    if timeout_env := os.environ.get(EnvironmentKeys.TIMEOUT):
         try:
-            timeout_ms = int(timeout_env)
-            if timeout_ms <= 0:
-                raise ConfigurationError(
-                    f"Invalid DEFAULT_TIMEOUT: {timeout_env}. Must be a positive integer."
-                )
-            config.browser.default_timeout = timeout_ms
+            config.browser.default_timeout = int(timeout_env)
         except ValueError:
             raise ConfigurationError(
-                f"Invalid DEFAULT_TIMEOUT: '{timeout_env}'. Must be an integer."
+                f"Invalid TIMEOUT: '{timeout_env}'. Must be an integer."
+            )
+
+    # Custom user agent
+    if user_agent_env := os.environ.get(EnvironmentKeys.USER_AGENT):
+        config.browser.user_agent = user_agent_env
+
+    # HTTP server host
+    if host_env := os.environ.get(EnvironmentKeys.HOST):
+        config.server.host = host_env
+
+    # HTTP server port (range validation in AppConfig.__post_init__)
+    if port_env := os.environ.get(EnvironmentKeys.PORT):
+        try:
+            config.server.port = int(port_env)
+        except ValueError:
+            raise ConfigurationError(f"Invalid PORT: '{port_env}'. Must be an integer.")
+
+    # HTTP server path
+    if path_env := os.environ.get(EnvironmentKeys.HTTP_PATH):
+        config.server.path = path_env
+
+    # Slow motion delay for debugging (semantic validation in BrowserConfig.__post_init__)
+    if slow_mo_env := os.environ.get(EnvironmentKeys.SLOW_MO):
+        try:
+            config.browser.slow_mo = int(slow_mo_env)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid SLOW_MO: '{slow_mo_env}'. Must be an integer."
+            )
+
+    # Browser viewport (dimension validation in BrowserConfig.__post_init__)
+    if viewport_env := os.environ.get(EnvironmentKeys.VIEWPORT):
+        try:
+            width, height = viewport_env.lower().split("x")
+            config.browser.viewport_width = int(width)
+            config.browser.viewport_height = int(height)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid VIEWPORT: '{viewport_env}'. Must be in format WxH (e.g., 1280x720)."
             )
 
     return config
@@ -163,7 +207,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
     parser.add_argument(
         "--viewport",
         type=str,
-        default="1280x720",
+        default=None,
         metavar="WxH",
         help="Browser viewport size (default: 1280x720)",
     )
@@ -198,6 +242,13 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Clear stored LinkedIn session file",
     )
 
+    parser.add_argument(
+        "--linkedin-cookie",
+        type=str,
+        default=None,
+        help="LinkedIn session cookie (li_at) for authentication",
+    )
+
     args = parser.parse_args()
 
     # Update configuration with parsed arguments
@@ -227,13 +278,16 @@ def load_from_args(config: AppConfig) -> AppConfig:
     if args.user_agent:
         config.browser.user_agent = args.user_agent
 
+    # Viewport (dimension validation in BrowserConfig.__post_init__)
     if args.viewport:
         try:
             width, height = args.viewport.lower().split("x")
             config.browser.viewport_width = int(width)
             config.browser.viewport_height = int(height)
         except ValueError:
-            logger.warning(f"Invalid viewport format: {args.viewport}, using default")
+            raise ConfigurationError(
+                f"Invalid --viewport: '{args.viewport}'. Must be in format WxH (e.g., 1280x720)."
+            )
 
     if args.timeout is not None:
         config.browser.default_timeout = args.timeout
@@ -248,6 +302,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.clear_session:
         config.server.clear_session = True
+
+    if args.linkedin_cookie:
+        config.server.linkedin_cookie = args.linkedin_cookie
 
     return config
 
@@ -276,5 +333,8 @@ def load_config() -> AppConfig:
 
     # Override with command line arguments (highest priority)
     config = load_from_args(config)
+
+    # Validate final configuration
+    config.validate()
 
     return config
