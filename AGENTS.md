@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Use `uv` for dependency management: `uv sync` (installs all dependencies)
 - Development dependencies: `uv sync --group dev`
-- Bump version: `uv version --bump minor` (or `major`, `patch`)
+- Bump version: `uv version --bump minor` (or `major`, `patch`) - git tag is created automatically by release workflow. Once Docker image is published, manually file a PR in the MCP registry to update the version.
 - Run server locally: `uv run -m linkedin_mcp_server --no-headless`
 - Run in Docker: `docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp stickerdaniel/linkedin-mcp-server:latest`
 
