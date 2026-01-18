@@ -159,7 +159,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 
 - If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
 - Users on slow connections may need higher values (e.g., 15000-30000ms)
-- Can also set via environment variable: `DEFAULT_TIMEOUT=10000`
+- Can also set via environment variable: `TIMEOUT=10000`
 
 </details>
 
@@ -297,7 +297,7 @@ docker run -it --rm \
 
 - If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
 - Users on slow connections may need higher values (e.g., 15000-30000ms)
-- Can also set via environment variable: `DEFAULT_TIMEOUT=10000`
+- Can also set via environment variable: `TIMEOUT=10000`
 
 </details>
 
@@ -337,7 +337,7 @@ docker run -it --rm \
 
 - If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
 - Users on slow connections may need higher values (e.g., 15000-30000ms)
-- Can also set via environment variable: `DEFAULT_TIMEOUT=10000`
+- Can also set via environment variable: `TIMEOUT=10000`
 
 </details>
 
@@ -391,7 +391,14 @@ uv run -m linkedin_mcp_server
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--clear-session` - Clear stored LinkedIn session file
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
+- `--session-info` - Check if current session is valid and exit
+- `--linkedin-cookie COOKIE` - LinkedIn session cookie (li_at) for authentication
+- `--slow-mo MS` - Delay between browser actions in milliseconds (default: 0, useful for debugging)
+- `--user-agent STRING` - Custom browser user agent
+- `--viewport WxH` - Browser viewport size (default: 1280x720)
 - `--help` - Show help
+
+> **Note:** Most CLI options have environment variable equivalents. See `.env.example` for details.
 
 **HTTP Mode Example (for web-based MCP clients):**
 
@@ -443,7 +450,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 - If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
 - Users on slow connections may need higher values (e.g., 15000-30000ms)
-- Can also set via environment variable: `DEFAULT_TIMEOUT=10000`
+- Can also set via environment variable: `TIMEOUT=10000`
 
 </details>
 
