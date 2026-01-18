@@ -16,14 +16,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Lint: `uv run ruff check .` (auto-fix with `--fix`)
 - Format: `uv run ruff format .`
-- Type check: `uv run mypy .` (if mypy is configured)
+- Type check: `uv run ty check` (using ty, not mypy)
 - Tests: `uv run pytest` (with coverage: `uv run pytest --cov`)
 - Pre-commit hooks: `uv run pre-commit install` then `uv run pre-commit run --all-files`
 
 **Docker Commands:**
 
 - Build: `docker build -t linkedin-mcp-server .`
-- Get session: `docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp stickerdaniel/linkedin-mcp-server:latest --get-session`
+- Get session: Use uvx locally first: `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session`
 
 ## Architecture Overview
 
@@ -79,7 +79,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 **Commit Message Format:**
 
 - Follow conventional commits: `type(scope): subject`
-- Types: feat, fix, docs, style, refactor, test, chore
+- Types: feat, fix, docs, style, refactor, test, chore, perf, ci
 - Keep subject <50 chars, imperative mood
 
 ## Commit Message Guidelines
@@ -87,7 +87,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 **Commit Message Rules:**
 
 - Always use the commit message format type(scope): subject
-- Types: feat, fix, docs, style, refactor, test, chore
+- Types: feat, fix, docs, style, refactor, test, chore, perf, ci
 - Keep subject <50 chars, imperative mood
 
 ## Important Development Notes
