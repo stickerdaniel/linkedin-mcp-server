@@ -26,6 +26,21 @@ class BrowserConfig:
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
 
+    def validate(self) -> None:
+        """Validate browser configuration values."""
+        if self.slow_mo < 0:
+            raise ConfigurationError(
+                f"slow_mo must be non-negative, got {self.slow_mo}"
+            )
+        if self.default_timeout <= 0:
+            raise ConfigurationError(
+                f"default_timeout must be positive, got {self.default_timeout}"
+            )
+        if self.viewport_width <= 0 or self.viewport_height <= 0:
+            raise ConfigurationError(
+                f"viewport dimensions must be positive, got {self.viewport_width}x{self.viewport_height}"
+            )
+
 
 @dataclass
 class ServerConfig:
@@ -54,8 +69,9 @@ class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     is_interactive: bool = field(default=False)
 
-    def __post_init__(self) -> None:
-        """Validate configuration after initialization."""
+    def validate(self) -> None:
+        """Validate all configuration values. Call after modifying config."""
+        self.browser.validate()
         if self.server.transport == "streamable-http":
             self._validate_transport_config()
             self._validate_path_format()
