@@ -1,6 +1,6 @@
 # Use slim Python base instead of full Playwright image (saves ~300-400 MB)
 # Only Chromium is installed, not Firefox/WebKit
-FROM python:3.12-slim-bookworm@sha256:4a3ceab05b4e396df42a042415e43a286bb5793352b9258f889d6c7d38ed01fb
+FROM python:3.14-slim-bookworm@sha256:adb6bdfbcc7c744c3b1a05976136555e2d82b7df01ac3efe71737d7f95ef0f2d
 
 # Install uv package manager
 COPY --from=ghcr.io/astral-sh/uv:latest@sha256:9a23023be68b2ed09750ae636228e903a54a05ea56ed03a934d00fe9fbeded4b /uv /uvx /bin/
