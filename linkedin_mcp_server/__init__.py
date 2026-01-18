@@ -22,4 +22,9 @@ Architecture:
 - Cross-platform compatibility (macOS, Windows, Linux)
 """
 
-__version__ = "1.0.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("linkedin-mcp-server")
+except PackageNotFoundError:
+    __version__ = "0.0.0.dev"  # Running from source without install
