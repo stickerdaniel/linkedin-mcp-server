@@ -37,6 +37,3 @@ dev = [
     "ruff>=0.11.11",
     "ty>=0.0.1a12",
 ]
-
-[tool.ty.src]
-exclude = ["docs/references/"]
