@@ -1,0 +1,85 @@
+{
+	"$schema": "https://btca.dev/btca.schema.json",
+	"resources": [
+		{
+			"name": "fastmcp",
+			"type": "git",
+			"url": "https://github.com/jlowin/fastmcp",
+			"branch": "main",
+			"specialNotes": "FastMCP server framework. Primary MCP library used in this project."
+		},
+		{
+			"name": "linkedinScraper",
+			"type": "git",
+			"url": "https://github.com/joeyism/linkedin_scraper",
+			"branch": "master",
+			"specialNotes": "LinkedIn scraping library with Playwright support."
+		},
+		{
+			"name": "playwright",
+			"type": "git",
+			"url": "https://github.com/microsoft/playwright-python",
+			"branch": "main",
+			"specialNotes": "Playwright Python bindings for browser automation."
+		},
+		{
+			"name": "pytest",
+			"type": "git",
+			"url": "https://github.com/pytest-dev/pytest",
+			"branch": "main",
+			"specialNotes": "Python testing framework."
+		},
+		{
+			"name": "ruff",
+			"type": "git",
+			"url": "https://github.com/astral-sh/ruff",
+			"branch": "main",
+			"specialNotes": "Fast Python linter and formatter written in Rust."
+		},
+		{
+			"name": "ty",
+			"type": "git",
+			"url": "https://github.com/astral-sh/ty",
+			"branch": "main",
+			"specialNotes": "Fast Python type checker from Astral, written in Rust."
+		},
+		{
+			"name": "uv",
+			"type": "git",
+			"url": "https://github.com/astral-sh/uv",
+			"branch": "main",
+			"specialNotes": "Fast Python package manager from Astral, written in Rust."
+		},
+		{
+			"name": "inquirer",
+			"type": "git",
+			"url": "https://github.com/magmax/python-inquirer",
+			"branch": "master",
+			"specialNotes": "Python library for CLI interactive prompts."
+		},
+		{
+			"name": "pythonDotenv",
+			"type": "git",
+			"url": "https://github.com/theskumar/python-dotenv",
+			"branch": "main",
+			"specialNotes": "Python library for loading .env files."
+		},
+		{
+			"name": "pyperclip",
+			"type": "git",
+			"url": "https://github.com/asweigart/pyperclip",
+			"branch": "master",
+			"specialNotes": "Cross-platform Python clipboard module."
+		},
+		{
+			"name": "preCommit",
+			"type": "git",
+			"url": "https://github.com/pre-commit/pre-commit",
+			"branch": "main",
+			"specialNotes": "Framework for managing pre-commit hooks."
+		}
+	],
+	"model": "claude-haiku-4-5",
+	"provider": "anthropic",
+	"providerTimeoutMs": 300000
+}
