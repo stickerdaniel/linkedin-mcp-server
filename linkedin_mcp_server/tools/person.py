@@ -49,8 +49,17 @@ def register_person_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
 
         Returns:
-            Structured data from the person's profile including name, about,
-            experiences, educations, and more.
+            Structured data from the person's profile including:
+            - linkedin_url, name, location, about, open_to_work
+            - experiences: List of work history (position_title, institution_name,
+              linkedin_url, from_date, to_date, duration, location, description)
+            - educations: List of education (institution_name, degree, linkedin_url,
+              from_date, to_date, description)
+            - interests: List of interests with category (company, group, school,
+              newsletter, influencer) and linkedin_url
+            - accomplishments: List of accomplishments (category, title)
+            - contacts: List of contact info (type: email/phone/website/linkedin/
+              twitter/birthday/address, value, label)
         """
         try:
             # Validate session before scraping
