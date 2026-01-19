@@ -10,13 +10,16 @@ import logging
 from pathlib import Path
 
 from linkedin_scraper import BrowserManager, wait_for_manual_login
+from linkedin_scraper.core import warm_up_browser
 
 from linkedin_mcp_server.drivers.browser import DEFAULT_SESSION_PATH
 
 logger = logging.getLogger(__name__)
 
 
-async def interactive_login_and_save(session_path: Path | None = None) -> bool:
+async def interactive_login_and_save(
+    session_path: Path | None = None, warm_up: bool = True
+) -> bool:
     """
     Open browser for manual LinkedIn login and save session.
 
@@ -25,6 +28,7 @@ async def interactive_login_and_save(session_path: Path | None = None) -> bool:
 
     Args:
         session_path: Path to save session. Defaults to ~/.linkedin-mcp/session.json
+        warm_up: Visit normal sites first to appear more human-like (default: True)
 
     Returns:
         True if login was successful and session was saved
@@ -35,11 +39,16 @@ async def interactive_login_and_save(session_path: Path | None = None) -> bool:
     if session_path is None:
         session_path = DEFAULT_SESSION_PATH
 
-    print("🔗 Opening browser for LinkedIn login...")
+    print("Opening browser for LinkedIn login...")
     print("   Please log in manually. You have 5 minutes to complete authentication.")
     print("   (This handles 2FA, captcha, and any security challenges)")
 
     async with BrowserManager(headless=False) as browser:
+        # Warm up browser to appear more human-like and avoid security checkpoints
+        if warm_up:
+            print("   Warming up browser (visiting normal sites first)...")
+            await warm_up_browser(browser.page)
+
         # Navigate to LinkedIn login
         await browser.page.goto("https://www.linkedin.com/login")
 
@@ -51,7 +60,7 @@ async def interactive_login_and_save(session_path: Path | None = None) -> bool:
         session_path.parent.mkdir(parents=True, exist_ok=True)
         await browser.save_session(str(session_path))
 
-        print(f"✅ Session saved to {session_path}")
+        print(f"Session saved to {session_path}")
         return True
 
 
@@ -71,14 +80,14 @@ def run_session_creation(output_path: str | None = None) -> bool:
     else:
         session_path = DEFAULT_SESSION_PATH
 
-    print("🔗 LinkedIn MCP Server - Session Creation")
+    print("LinkedIn MCP Server - Session Creation")
     print(f"   Session will be saved to: {session_path}")
 
     try:
         success = asyncio.run(interactive_login_and_save(session_path))
         return success
     except Exception as e:
-        print(f"❌ Session creation failed: {e}")
+        print(f"Session creation failed: {e}")
         return False
 
 
@@ -89,11 +98,11 @@ def run_interactive_setup() -> bool:
     Returns:
         True if setup completed successfully
     """
-    print("🔗 LinkedIn MCP Server Setup")
+    print("LinkedIn MCP Server Setup")
     print("   Opening browser for manual login...")
 
     try:
         return asyncio.run(interactive_login_and_save())
     except Exception as e:
-        print(f"❌ Login failed: {e}")
+        print(f"Login failed: {e}")
         return False
