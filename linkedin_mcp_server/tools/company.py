@@ -95,12 +95,14 @@ def register_company_tools(mcp: FastMCP) -> None:
             limit: Maximum number of posts to return (default: 10)
 
         Returns:
-            Dict with posts list containing:
-            - linkedin_url, urn, text, posted_date
-            - reactions_count, comments_count, reposts_count
-            - image_urls: List of image URLs
-            - video_url: Video URL if present
-            - article_url: Article URL if present
+            Dict containing:
+            - count: Number of posts returned
+            - posts: List of post dicts with:
+              - linkedin_url, urn, text, posted_date
+              - reactions_count, comments_count, reposts_count
+              - image_urls: List of image URLs
+              - video_url: Video URL if present
+              - article_url: Article URL if present
         """
         try:
             # Validate session before scraping
