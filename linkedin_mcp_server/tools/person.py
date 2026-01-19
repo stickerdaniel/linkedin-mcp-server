@@ -2,7 +2,7 @@
 LinkedIn person profile scraping tools.
 
 Provides MCP tools for extracting comprehensive LinkedIn profile information including
-experience, education, skills, and contact details.
+experience, education, interests, accomplishments, and contact details.
 """
 
 import logging
