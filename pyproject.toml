@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=2.14.0",
     "inquirer>=3.4.0",
-    "linkedin-scraper>=3.0.0",
+    "linkedin-scraper>=3.1.0",
     "playwright>=1.40.0",
     "pyperclip>=1.9.0",
     "python-dotenv>=1.1.1",
