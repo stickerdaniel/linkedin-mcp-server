@@ -105,3 +105,21 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
   7. First review the PR with ai agents.
   8. Manually review the PR and merge it if it's approved. Do not squash the commits.
   9. Delete the branch after the PR is merged.
+
+## btca
+
+When you need up-to-date information about technologies used in this project, use btca to query source repositories directly.
+
+**Available resources**: fastmcp, linkedinScraper, playwright, pytest, ruff, ty, uv, inquirer, pythonDotenv, pyperclip, preCommit
+
+### Usage
+
+```bash
+btca ask -r <resource> -q "<question>"
+```
+
+Use multiple `-r` flags to query multiple resources at once:
+
+```bash
+btca ask -r fastmcp -r playwright -q "How do I set up browser context with FastMCP tools?"
+```
