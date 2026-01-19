@@ -31,13 +31,18 @@ Get this company profile for partnership discussions https://www.linkedin.com/co
 Suggest improvements for my CV to target this job posting https://www.linkedin.com/jobs/view/4252026496
 ```
 
+```
+What has Anthropic been posting about recently? https://www.linkedin.com/company/anthropic/
+```
+
 ## Features & Tool Status
 
 | Tool | Description | Status |
 |------|-------------|--------|
-| `get_person_profile` | Get detailed profile info including work history, education, skills | Working |
-| `get_company_profile` | Extract company information from a LinkedIn company name | Working |
-| `search_jobs` | Search for jobs with keywords and location filters | Broken (upstream) |
+| `get_person_profile` | Get detailed profile info including work history, education, contacts, interests | Working |
+| `get_company_profile` | Extract company information including employees, affiliated companies | Working |
+| `get_company_posts` | Get recent posts from a company's LinkedIn feed | Working |
+| `search_jobs` | Search for jobs with keywords and location filters | Working |
 | `get_job_details` | Get detailed information about a specific job posting | Working |
 | `close_session` | Close browser session and clean up resources | Working |
 
