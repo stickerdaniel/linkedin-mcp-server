@@ -14,7 +14,11 @@ docker pull stickerdaniel/linkedin-mcp-server:${VERSION}
 ## 📦 Update DXT Extension Installation
 **For Claude Desktop users:**
 1. Download the `.dxt` file below
-2. Double-click to install in Claude Desktop
-3. Restart Claude Desktop
+2. Pre-pull the Docker image to avoid timeout issues:
+   ```bash
+   docker pull stickerdaniel/linkedin-mcp-server:${VERSION}
+   ```
+3. Double-click the `.dxt` file to install in Claude Desktop
+4. Restart Claude Desktop
 
-This DXT extension uses the pinned version `${VERSION}`, the Docker image will be pulled automatically.
+> **Note:** The pre-pull step is important because Claude Desktop has a ~60 second connection timeout. Without pre-pulling, the initial image download may exceed this limit.
