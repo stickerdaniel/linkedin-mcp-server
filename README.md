@@ -327,6 +327,16 @@ docker run -it --rm \
 <details>
 <summary><b>❗ Troubleshooting</b></summary>
 
+**First-time setup timeout:**
+
+- Claude Desktop has a ~60 second connection timeout
+- If the Docker image isn't cached, the pull may exceed this timeout
+- **Fix:** Pre-pull the image before first use:
+  ```bash
+  docker pull stickerdaniel/linkedin-mcp-server:2.3.0
+  ```
+- Then restart Claude Desktop
+
 **Docker issues:**
 
 - Make sure [Docker](https://www.docker.com/get-started/) is installed
