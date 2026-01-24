@@ -12,7 +12,7 @@ import os
 import subprocess
 from typing import Any, Dict, List
 
-import pyperclip  # type: ignore
+import pyperclip
 
 logger = logging.getLogger(__name__)
 
