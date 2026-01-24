@@ -22,7 +22,7 @@ def get_config() -> AppConfig:
     if _config is None:
         _config = load_config()
         logger.debug("Configuration loaded")
-    return _config  # type: ignore[return-value]
+    return _config
 
 
 def reset_config() -> None:
