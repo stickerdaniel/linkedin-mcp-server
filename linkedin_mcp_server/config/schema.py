@@ -6,6 +6,7 @@ structure with type-safe configuration objects and default values.
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 
@@ -25,6 +26,7 @@ class BrowserConfig:
     viewport_width: int = 1280
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
+    chrome_path: str | None = None  # Path to Chrome/Chromium executable
 
     def validate(self) -> None:
         """Validate browser configuration values."""
@@ -40,6 +42,16 @@ class BrowserConfig:
             raise ConfigurationError(
                 f"viewport dimensions must be positive, got {self.viewport_width}x{self.viewport_height}"
             )
+        if self.chrome_path:
+            chrome_path = Path(self.chrome_path)
+            if not chrome_path.exists():
+                raise ConfigurationError(
+                    f"chrome_path '{self.chrome_path}' does not exist"
+                )
+            if not chrome_path.is_file():
+                raise ConfigurationError(
+                    f"chrome_path '{self.chrome_path}' is not a file"
+                )
 
 
 @dataclass
