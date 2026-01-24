@@ -69,25 +69,26 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3 # v2
 
-      - name: Update manifest.json version and Docker image
+      - name: Update manifest.json and docker-compose.yml version
         run: |
           set -e
           sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
           sed -i 's/stickerdaniel\/linkedin-mcp-server:[^"]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' manifest.json
-          echo "✅ Updated manifest.json to version $VERSION"
+          sed -i 's/stickerdaniel\/linkedin-mcp-server:[^ ]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' docker-compose.yml
+          echo "✅ Updated manifest.json and docker-compose.yml to version $VERSION"
 
-      - name: Commit manifest update
+      - name: Commit version updates
         run: |
           set -e
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add manifest.json
+          git add manifest.json docker-compose.yml
           if git diff --staged --quiet; then
             echo "ℹ️ No changes to commit"
           else
-            git commit -m "chore(dxt): update manifest.json version to v$VERSION [skip ci]"
+            git commit -m "chore: update manifest.json and docker-compose.yml to v$VERSION [skip ci]"
             git push origin main
-            echo "✅ Committed manifest.json update"
+            echo "✅ Committed version updates"
           fi
 
       - name: Create release tag
