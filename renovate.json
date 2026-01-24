@@ -8,6 +8,12 @@
   },
   "packageRules": [
     {
+      "matchPackageNames": ["stickerdaniel/linkedin-mcp-server"],
+      "matchManagers": ["docker-compose"],
+      "enabled": false,
+      "description": "Managed by release workflow, not Renovate"
+    },
+    {
       "matchPackageNames": ["fastmcp", "mcp"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "MCP ecosystem"
