@@ -8,7 +8,6 @@ with session persistence via JSON files.
 
 import logging
 from pathlib import Path
-from typing import cast
 
 from linkedin_scraper import (
     AuthenticationError,
@@ -64,7 +63,7 @@ async def get_or_create_browser(
         session_path = DEFAULT_SESSION_PATH
 
     if _browser is not None:
-        return cast(BrowserManager, _browser)
+        return _browser
 
     config = get_config()
     viewport = {
@@ -123,9 +122,8 @@ async def close_browser() -> None:
     global _browser
 
     if _browser is not None:
-        browser = cast(BrowserManager, _browser)
         logger.info("Closing browser...")
-        await browser.close()
+        await _browser.close()
         _browser = None
         logger.info("Browser closed")
 
