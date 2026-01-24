@@ -113,6 +113,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--clear-session` - Clear stored LinkedIn session file
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
+- `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
 
 **Basic Usage Examples:**
 
@@ -165,6 +166,11 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 - If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
 - Users on slow connections may need higher values (e.g., 15000-30000ms)
 - Can also set via environment variable: `TIMEOUT=10000`
+
+**Custom Chrome path:**
+
+- If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
+- Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
 
 </details>
 
@@ -259,6 +265,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--clear-session` - Clear stored LinkedIn session file
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
+- `--chrome-path PATH` - Path to Chrome/Chromium executable (rarely needed in Docker)
 
 > [!NOTE]
 > `--get-session` and `--no-headless` are not available in Docker (no display server). Use the [uvx setup](#-uvx-setup-recommended---universal) to create sessions.
@@ -303,6 +310,11 @@ docker run -it --rm \
 - If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
 - Users on slow connections may need higher values (e.g., 15000-30000ms)
 - Can also set via environment variable: `TIMEOUT=10000`
+
+**Custom Chrome path:**
+
+- If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
+- Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
 
 </details>
 
@@ -411,6 +423,7 @@ uv run -m linkedin_mcp_server
 - `--slow-mo MS` - Delay between browser actions in milliseconds (default: 0, useful for debugging)
 - `--user-agent STRING` - Custom browser user agent
 - `--viewport WxH` - Browser viewport size (default: 1280x720)
+- `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
 - `--help` - Show help
 
 > **Note:** Most CLI options have environment variable equivalents. See `.env.example` for details.
@@ -466,6 +479,11 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 - If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
 - Users on slow connections may need higher values (e.g., 15000-30000ms)
 - Can also set via environment variable: `TIMEOUT=10000`
+
+**Custom Chrome path:**
+
+- If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
+- Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
 
 </details>
 
