@@ -34,7 +34,9 @@ class SearchSelectors:
     PERSON_PROFILE_LINK = "a[href*='/in/']"
 
     # Connect buttons in search results (different from profile page)
-    SEARCH_CONNECT_BUTTON = "div:has(> span:text-is('Connect')), a:has(> span:text-is('Connect'))"
+    SEARCH_CONNECT_BUTTON = (
+        "div:has(> span:text-is('Connect')), a:has(> span:text-is('Connect'))"
+    )
 
     # Search results - Companies
     COMPANY_RESULTS = "ul.reusable-search__entity-result-list"
@@ -65,7 +67,9 @@ class ProfileSelectors:
     # Connection button states
     # NOTE: LinkedIn uses div/a elements styled as buttons, not actual <button> elements
     # The Connect "button" is a clickable element containing <span>Connect</span>
-    CONNECT_BUTTON = "div:has(> span:text-is('Connect')), a:has(> span:text-is('Connect'))"
+    CONNECT_BUTTON = (
+        "div:has(> span:text-is('Connect')), a:has(> span:text-is('Connect'))"
+    )
     CONNECT_BUTTON_ALT = "button:has-text('Connect')"
     CONNECT_BUTTON_ROLE = "[role='button']:has-text('Connect')"
     MORE_BUTTON = "button[aria-label='More actions']"

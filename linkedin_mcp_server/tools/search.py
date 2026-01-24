@@ -15,7 +15,6 @@ from linkedin_mcp_server.automation import (
     CompanySearchAutomation,
     PeopleSearchAutomation,
 )
-from linkedin_mcp_server.drivers.browser import ensure_authenticated
 from linkedin_mcp_server.error_handler import handle_tool_error
 from linkedin_mcp_server.storage import SearchCacheRepository, SearchResult
 

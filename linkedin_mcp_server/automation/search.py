@@ -220,7 +220,13 @@ class PeopleSearchAutomation(BaseAutomation):
                 if name.lower().startswith(("view", "connect", "follow", "message")):
                     continue
                 # Skip if looks like navigation text
-                if name.lower() in ("home", "my network", "jobs", "messaging", "notifications"):
+                if name.lower() in (
+                    "home",
+                    "my network",
+                    "jobs",
+                    "messaging",
+                    "notifications",
+                ):
                     continue
 
                 seen_urls.add(url)
@@ -237,13 +243,22 @@ class PeopleSearchAutomation(BaseAutomation):
                         # Get all text from the card and try to extract headline
                         card_text = await card.text_content()
                         if card_text:
-                            lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                            lines = [
+                                line.strip()
+                                for line in card_text.split("\n")
+                                if line.strip()
+                            ]
                             # Headline is usually after the name
                             for j, line in enumerate(lines):
                                 if name in line and j + 1 < len(lines):
                                     potential_headline = lines[j + 1]
                                     # Skip if it's a button text
-                                    if potential_headline.lower() not in ("connect", "follow", "message", "pending"):
+                                    if potential_headline.lower() not in (
+                                        "connect",
+                                        "follow",
+                                        "message",
+                                        "pending",
+                                    ):
                                         headline = potential_headline[:100]
                                         break
                 except Exception:

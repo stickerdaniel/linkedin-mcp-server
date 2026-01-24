@@ -269,7 +269,9 @@ class ConnectionRequestAutomation(BaseAutomation):
         try:
             page = await self.get_page()
             # Use a more specific selector for the connection modal dismiss button
-            close_btn = page.locator("div[data-test-modal] button[aria-label='Dismiss']").first
+            close_btn = page.locator(
+                "div[data-test-modal] button[aria-label='Dismiss']"
+            ).first
             if await close_btn.count() > 0:
                 await close_btn.click()
                 return
