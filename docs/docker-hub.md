@@ -67,6 +67,7 @@ Create a session using the [uvx setup](https://github.com/stickerdaniel/linkedin
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
+| `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
 
 **Example with custom timeout:**
 

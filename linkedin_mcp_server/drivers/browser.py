@@ -71,6 +71,13 @@ async def get_or_create_browser(
         "width": config.browser.viewport_width,
         "height": config.browser.viewport_height,
     }
+
+    # Build launch options for custom browser path
+    launch_options: dict[str, str] = {}
+    if config.browser.chrome_path:
+        launch_options["executable_path"] = config.browser.chrome_path
+        logger.info("Using custom Chrome path: %s", config.browser.chrome_path)
+
     logger.info(
         "Creating new browser (headless=%s, slow_mo=%sms, viewport=%sx%s)",
         _headless,
@@ -83,6 +90,7 @@ async def get_or_create_browser(
         slow_mo=config.browser.slow_mo,
         user_agent=config.browser.user_agent,
         viewport=viewport,
+        **launch_options,
     )
     await _browser.start()
 
