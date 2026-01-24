@@ -2,8 +2,9 @@
 name: code-reviewer
 mode: subagent
 # https://models.dev/
-# model: 'openai/gpt-5.2-codex'
-model: 'github-copilot/gpt-5.2-codex'
+model: 'openai/gpt-5.2-codex'
+variant: 'xhigh'
+# model: 'github-copilot/gpt-5.2-codex'
 color: '#22c55e'
 description: |
   Use this agent when you need to review code for adherence to project guidelines, style guides, and best practices. This agent should be used proactively after writing or modifying code, especially before committing changes or creating pull requests. It will check for style violations, potential issues, and ensure code follows the established patterns in CLAUDE.md. Also the agent needs to know which files to focus on for the review. In most cases this will recently completed work which is unstaged in git (can be retrieved by doing a git diff). However there can be cases where this is different, make sure to specify this as the agent input when calling the agent.
