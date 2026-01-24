@@ -145,36 +145,47 @@ class ConnectionRequestAutomation(BaseAutomation):
         """Find and click the connect button."""
         page = await self.get_page()
 
-        # Try direct connect button first
+        # Try primary connect button (div/a with span containing "Connect")
+        # This is the most common pattern on LinkedIn
         try:
             connect_btn = page.locator(ProfileSelectors.CONNECT_BUTTON).first
-            if await connect_btn.is_visible(timeout=2000):
+            if await connect_btn.count() > 0:
                 await connect_btn.click()
                 await self.random_delay(0.5, 1.0)
                 return True
         except Exception:
             pass
 
-        # Try alternate connect button
+        # Try button element with Connect text (fallback)
         try:
             connect_btn = page.locator(ProfileSelectors.CONNECT_BUTTON_ALT).first
-            if await connect_btn.is_visible(timeout=2000):
+            if await connect_btn.count() > 0 and await connect_btn.is_visible():
                 await connect_btn.click()
                 await self.random_delay(0.5, 1.0)
                 return True
         except Exception:
             pass
 
-        # Try "More" dropdown
+        # Try role=button elements
+        try:
+            connect_btn = page.locator(ProfileSelectors.CONNECT_BUTTON_ROLE).first
+            if await connect_btn.count() > 0:
+                await connect_btn.click()
+                await self.random_delay(0.5, 1.0)
+                return True
+        except Exception:
+            pass
+
+        # Try "More" dropdown as last resort
         try:
             more_btn = page.locator(ProfileSelectors.MORE_BUTTON).first
-            if await more_btn.is_visible(timeout=2000):
+            if await more_btn.count() > 0 and await more_btn.is_visible():
                 await more_btn.click()
                 await self.random_delay(0.3, 0.6)
 
                 # Find Connect in dropdown
                 connect_item = page.locator(ProfileSelectors.CONNECT_IN_DROPDOWN).first
-                if await connect_item.is_visible(timeout=2000):
+                if await connect_item.count() > 0 and await connect_item.is_visible():
                     await connect_item.click()
                     await self.random_delay(0.5, 1.0)
                     return True
@@ -193,16 +204,17 @@ class ConnectionRequestAutomation(BaseAutomation):
 
             # Click "Add a note" button
             add_note_btn = page.locator(ProfileSelectors.ADD_NOTE_BUTTON).first
-            if await add_note_btn.is_visible(timeout=3000):
+            if await add_note_btn.count() > 0:
                 await add_note_btn.click()
                 await self.random_delay(0.3, 0.6)
 
                 # Type the message (limited to 300 chars)
                 message = message[:300]
                 textarea = page.locator(ProfileSelectors.NOTE_TEXTAREA).first
-                await textarea.fill(message)
-                await self.random_delay(0.3, 0.5)
-                return True
+                if await textarea.count() > 0:
+                    await textarea.fill(message)
+                    await self.random_delay(0.3, 0.5)
+                    return True
 
         except Exception as e:
             logger.debug(f"Failed to add note: {e}")
@@ -214,9 +226,9 @@ class ConnectionRequestAutomation(BaseAutomation):
         page = await self.get_page()
 
         try:
-            # Try primary send button
+            # Try primary send button (combined selector for invitation/send now)
             send_btn = page.locator(ProfileSelectors.SEND_BUTTON).first
-            if await send_btn.is_visible(timeout=3000):
+            if await send_btn.count() > 0:
                 await send_btn.click()
                 await self.random_delay(1.0, 2.0)
 
@@ -224,20 +236,25 @@ class ConnectionRequestAutomation(BaseAutomation):
                 if await self.exists(CommonSelectors.TOAST_SUCCESS, timeout=3000):
                     return True
 
-                # If no toast, check modal closed
+                # If no toast, check modal closed (also success)
                 if not await self.exists(CommonSelectors.MODAL_CONTAINER, timeout=1000):
                     return True
 
         except Exception:
             pass
 
-        # Try alternate send button
+        # Try alternate send button (text-based)
         try:
             send_btn = page.locator(ProfileSelectors.SEND_BUTTON_ALT).first
-            if await send_btn.is_visible(timeout=2000):
+            if await send_btn.count() > 0:
                 await send_btn.click()
                 await self.random_delay(1.0, 2.0)
-                return True
+
+                # Check for success
+                if await self.exists(CommonSelectors.TOAST_SUCCESS, timeout=3000):
+                    return True
+                if not await self.exists(CommonSelectors.MODAL_CONTAINER, timeout=1000):
+                    return True
         except Exception:
             pass
 
@@ -250,9 +267,16 @@ class ConnectionRequestAutomation(BaseAutomation):
     async def _close_modal(self) -> None:
         """Close any open modal dialog."""
         try:
-            close_btn = await self.wait_for_selector(
-                ProfileSelectors.CLOSE_MODAL, timeout=2000
-            )
-            await close_btn.click()
+            page = await self.get_page()
+            # Use a more specific selector for the connection modal dismiss button
+            close_btn = page.locator("div[data-test-modal] button[aria-label='Dismiss']").first
+            if await close_btn.count() > 0:
+                await close_btn.click()
+                return
+
+            # Fallback to general dismiss button
+            close_btn = page.locator(ProfileSelectors.CLOSE_MODAL).first
+            if await close_btn.count() > 0:
+                await close_btn.click()
         except Exception:
             pass

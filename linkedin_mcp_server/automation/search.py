@@ -87,7 +87,7 @@ class PeopleSearchAutomation(BaseAutomation):
         )
 
         logger.info(f"Searching people: {url}")
-        await self.navigate(url)
+        await self.navigate(url, wait_for="load")
 
         # Check for rate limiting
         if await self._check_rate_limit():
@@ -147,57 +147,145 @@ class PeopleSearchAutomation(BaseAutomation):
         results: list[SearchResult] = []
         page = await self.get_page()
 
-        # Wait for results to load
-        try:
-            await self.wait_for_selector(SearchSelectors.PEOPLE_RESULTS, timeout=10000)
-        except Exception:
-            logger.warning("No search results found")
+        # Wait for page to fully render - LinkedIn uses dynamic loading
+        await self.random_delay(2.0, 3.0)
+
+        # LinkedIn has moved to obfuscated CSS class names, so we use profile links
+        # as the anchor point and navigate to parent containers
+        profile_links = page.locator("a[href*='/in/']")
+        link_count = await profile_links.count()
+        logger.info(f"Found {link_count} profile links on page")
+
+        if link_count == 0:
+            logger.warning("No profile links found")
+            try:
+                await self.take_screenshot("debug_search_page.png")
+                logger.info("Screenshot saved to debug_search_page.png")
+            except Exception:
+                pass
             return results
 
-        # Find all person cards
-        cards = page.locator(SearchSelectors.PERSON_CARD)
-        count = await cards.count()
+        # Track seen URLs to avoid duplicates
+        seen_urls = set()
 
-        for i in range(min(count, limit)):
-            try:
-                card = cards.nth(i)
-                result = await self._extract_person_card(card)
-                if result:
-                    results.append(result)
-                    if len(results) >= limit:
-                        break
-            except Exception as e:
-                logger.debug(f"Failed to extract card {i}: {e}")
-                continue
-
-        # Handle pagination if we need more results
-        while len(results) < limit:
-            if not await self._go_to_next_page():
+        # Process each profile link
+        for i in range(link_count):
+            if len(results) >= limit:
                 break
 
-            cards = page.locator(SearchSelectors.PERSON_CARD)
-            count = await cards.count()
+            try:
+                link = profile_links.nth(i)
+                href = await link.get_attribute("href")
 
-            for i in range(count):
-                try:
-                    card = cards.nth(i)
-                    result = await self._extract_person_card(card)
-                    if result:
-                        results.append(result)
-                        if len(results) >= limit:
-                            break
-                except Exception as e:
-                    logger.debug(f"Failed to extract card {i}: {e}")
+                if not href or "/in/" not in href:
                     continue
 
+                # Clean and check URL
+                url = href.split("?")[0]
+                if not url.startswith("https://"):
+                    url = f"https://www.linkedin.com{url}"
+
+                if url in seen_urls:
+                    continue
+
+                # Get name from the link
+                name = None
+                try:
+                    # First try span with aria-hidden (common pattern)
+                    name_span = link.locator("span[aria-hidden='true']").first
+                    if await name_span.count() > 0:
+                        name = await name_span.text_content()
+                except Exception:
+                    pass
+
+                if not name:
+                    try:
+                        name = await link.text_content()
+                    except Exception:
+                        pass
+
+                if name:
+                    name = name.strip().replace("\n", " ").strip()
+                    # Clean up bullet points and extra text
+                    if "\u2022" in name:
+                        name = name.split("\u2022")[0].strip()
+                    # Take first part before connection info
+                    if "?" in name:
+                        name = name.split("?")[0].strip()
+                    name = name.strip()[:50]
+
+                # Skip non-name text
+                if not name or len(name) < 2:
+                    continue
+                if name.lower().startswith(("view", "connect", "follow", "message")):
+                    continue
+                # Skip if looks like navigation text
+                if name.lower() in ("home", "my network", "jobs", "messaging", "notifications"):
+                    continue
+
+                seen_urls.add(url)
+
+                # Try to get headline/location from parent container
+                # Navigate up to find the card container (LI element)
+                headline = None
+                location = None
+
+                try:
+                    # Get the parent LI element (the card)
+                    card = link.locator("xpath=ancestor::li[1]")
+                    if await card.count() > 0:
+                        # Get all text from the card and try to extract headline
+                        card_text = await card.text_content()
+                        if card_text:
+                            lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                            # Headline is usually after the name
+                            for j, line in enumerate(lines):
+                                if name in line and j + 1 < len(lines):
+                                    potential_headline = lines[j + 1]
+                                    # Skip if it's a button text
+                                    if potential_headline.lower() not in ("connect", "follow", "message", "pending"):
+                                        headline = potential_headline[:100]
+                                        break
+                except Exception:
+                    pass
+
+                result = SearchResult(
+                    name=name,
+                    url=url,
+                    headline=headline,
+                    location=location,
+                )
+                results.append(result)
+                logger.debug(f"Extracted: {name} - {url}")
+
+            except Exception as e:
+                logger.debug(f"Failed to extract link {i}: {e}")
+                continue
+
+        logger.info(f"Extracted {len(results)} unique results")
         return results[:limit]
 
     async def _extract_person_card(self, card: Any) -> SearchResult | None:
         """Extract data from a single person result card."""
         try:
-            # Get profile link
-            link = card.locator(SearchSelectors.PERSON_PROFILE_LINK).first
-            url = await link.get_attribute("href")
+            # Try multiple selectors for profile link
+            link_selectors = [
+                SearchSelectors.PERSON_PROFILE_LINK,
+                "a[href*='/in/']",
+                "a.app-aware-link",
+                "a.entity-result__title-link",
+            ]
+
+            url = None
+            for selector in link_selectors:
+                try:
+                    link = card.locator(selector).first
+                    url = await link.get_attribute("href")
+                    if url and "/in/" in url:
+                        break
+                except Exception:
+                    continue
+
             if not url:
                 return None
 
@@ -206,32 +294,63 @@ class PeopleSearchAutomation(BaseAutomation):
             if not url.startswith("https://"):
                 url = f"https://www.linkedin.com{url}"
 
-            # Get name
-            name_elem = card.locator(SearchSelectors.PERSON_NAME).first
-            name = await name_elem.text_content()
+            # Try multiple selectors for name
+            name_selectors = [
+                SearchSelectors.PERSON_NAME,
+                "span[aria-hidden='true']",
+                "span.entity-result__title-text",
+                "a[href*='/in/'] span",
+            ]
+
+            name = None
+            for selector in name_selectors:
+                try:
+                    name_elem = card.locator(selector).first
+                    name = await name_elem.text_content()
+                    if name and name.strip():
+                        name = name.strip()
+                        # Skip if it looks like "View profile" or similar
+                        if len(name) > 2 and not name.startswith("View"):
+                            break
+                        name = None
+                except Exception:
+                    continue
+
             if not name:
                 return None
-            name = name.strip()
 
             # Get headline (optional)
             headline = None
-            try:
-                headline_elem = card.locator(SearchSelectors.PERSON_HEADLINE).first
-                headline = await headline_elem.text_content()
-                if headline:
-                    headline = headline.strip()
-            except Exception:
-                pass
+            headline_selectors = [
+                SearchSelectors.PERSON_HEADLINE,
+                "div.entity-result__primary-subtitle",
+                "p.entity-result__summary",
+            ]
+            for selector in headline_selectors:
+                try:
+                    headline_elem = card.locator(selector).first
+                    headline = await headline_elem.text_content()
+                    if headline:
+                        headline = headline.strip()
+                        break
+                except Exception:
+                    continue
 
             # Get location (optional)
             location = None
-            try:
-                location_elem = card.locator(SearchSelectors.PERSON_LOCATION).first
-                location = await location_elem.text_content()
-                if location:
-                    location = location.strip()
-            except Exception:
-                pass
+            location_selectors = [
+                SearchSelectors.PERSON_LOCATION,
+                "div.entity-result__secondary-subtitle",
+            ]
+            for selector in location_selectors:
+                try:
+                    location_elem = card.locator(selector).first
+                    location = await location_elem.text_content()
+                    if location:
+                        location = location.strip()
+                        break
+                except Exception:
+                    continue
 
             return SearchResult(
                 name=name,
@@ -302,7 +421,7 @@ class CompanySearchAutomation(BaseAutomation):
         )
 
         logger.info(f"Searching companies: {url}")
-        await self.navigate(url)
+        await self.navigate(url, wait_for="load")
 
         # Check for rate limiting
         if await self._check_rate_limit():

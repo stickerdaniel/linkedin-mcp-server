@@ -27,11 +27,14 @@ class SearchSelectors:
 
     # Search results - People
     PEOPLE_RESULTS = "ul.reusable-search__entity-result-list"
-    PERSON_CARD = "li.reusable-search__result-container"
-    PERSON_NAME = "span.entity-result__title-text a span[aria-hidden='true']"
+    PERSON_CARD = "li.reusable-search__result-container, li:has(a[href*='/in/'])"
+    PERSON_NAME = "span[aria-hidden='true']"
     PERSON_HEADLINE = "div.entity-result__primary-subtitle"
     PERSON_LOCATION = "div.entity-result__secondary-subtitle"
-    PERSON_PROFILE_LINK = "a.app-aware-link[href*='/in/']"
+    PERSON_PROFILE_LINK = "a[href*='/in/']"
+
+    # Connect buttons in search results (different from profile page)
+    SEARCH_CONNECT_BUTTON = "div:has(> span:text-is('Connect')), a:has(> span:text-is('Connect'))"
 
     # Search results - Companies
     COMPANY_RESULTS = "ul.reusable-search__entity-result-list"
@@ -60,8 +63,11 @@ class ProfileSelectors:
     PROFILE_ABOUT = "section.artdeco-card div.display-flex span[aria-hidden='true']"
 
     # Connection button states
-    CONNECT_BUTTON = "button:has-text('Connect')"
-    CONNECT_BUTTON_ALT = "div.pvs-profile-actions button:has-text('Connect')"
+    # NOTE: LinkedIn uses div/a elements styled as buttons, not actual <button> elements
+    # The Connect "button" is a clickable element containing <span>Connect</span>
+    CONNECT_BUTTON = "div:has(> span:text-is('Connect')), a:has(> span:text-is('Connect'))"
+    CONNECT_BUTTON_ALT = "button:has-text('Connect')"
+    CONNECT_BUTTON_ROLE = "[role='button']:has-text('Connect')"
     MORE_BUTTON = "button[aria-label='More actions']"
     CONNECT_IN_DROPDOWN = "div[aria-label='Connect'] span"
     PENDING_BUTTON = "button:has-text('Pending')"
@@ -70,10 +76,10 @@ class ProfileSelectors:
     FOLLOWING_BUTTON = "button:has-text('Following')"
 
     # Connection modal
-    ADD_NOTE_BUTTON = "button[aria-label='Add a note']"
-    NOTE_TEXTAREA = "textarea[name='message']"
-    SEND_BUTTON = "button[aria-label='Send invitation']"
-    SEND_BUTTON_ALT = "button[aria-label='Send now']"
+    ADD_NOTE_BUTTON = "button:has-text('Add a note')"
+    NOTE_TEXTAREA = "textarea[name='message'], textarea#custom-message, textarea"
+    SEND_BUTTON = "button[aria-label='Send invitation'], button[aria-label='Send now']"
+    SEND_BUTTON_ALT = "button:has-text('Send'):not(:has-text('Send a message'))"
     CLOSE_MODAL = "button[aria-label='Dismiss']"
 
     # Profile sections

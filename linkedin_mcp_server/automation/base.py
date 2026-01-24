@@ -63,13 +63,16 @@ class BaseAutomation(ABC):
             self._page = browser.page
         return self._page
 
-    async def navigate(self, url: str, wait_for: str = "networkidle") -> None:
+    async def navigate(
+        self, url: str, wait_for: str = "load", timeout: int = 30000
+    ) -> None:
         """
         Navigate to a URL with wait conditions.
 
         Args:
             url: The URL to navigate to
             wait_for: Wait condition (load, domcontentloaded, networkidle)
+            timeout: Navigation timeout in milliseconds (default: 30000)
 
         Raises:
             NavigationError: If navigation fails
@@ -77,7 +80,7 @@ class BaseAutomation(ABC):
         page = await self.get_page()
         try:
             logger.debug(f"Navigating to {url}")
-            await page.goto(url, wait_until=wait_for)
+            await page.goto(url, wait_until=wait_for, timeout=timeout)
             await self.random_delay(0.5, 1.5)
         except PlaywrightTimeout as e:
             raise NavigationError(f"Timeout navigating to {url}: {e}")

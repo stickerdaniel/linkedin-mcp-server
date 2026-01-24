@@ -15,7 +15,6 @@ from linkedin_mcp_server.automation import (
     CompanyFollowAutomation,
     ConnectionRequestAutomation,
 )
-from linkedin_mcp_server.drivers.browser import ensure_authenticated
 from linkedin_mcp_server.error_handler import handle_tool_error
 from linkedin_mcp_server.safety import (
     OutreachPausedError,
@@ -73,8 +72,7 @@ def register_outreach_tools(mcp: FastMCP) -> None:
             - message: Description of the result
         """
         try:
-            await ctx.report_progress(0, 100, "Validating session...")
-            await ensure_authenticated()
+            # Skip pre-validation to avoid session interference
 
             # Check rate limits
             rate_limiter = get_rate_limiter()
@@ -178,9 +176,7 @@ def register_outreach_tools(mcp: FastMCP) -> None:
             - results: List of individual results
         """
         try:
-            await ctx.report_progress(0, 100, "Validating session...")
-            await ensure_authenticated()
-
+            # Skip pre-validation to avoid session interference
             rate_limiter = get_rate_limiter()
             action_repo = ActionRepository()
 
@@ -339,9 +335,7 @@ def register_outreach_tools(mcp: FastMCP) -> None:
             - message: Description of the result
         """
         try:
-            await ctx.report_progress(0, 100, "Validating session...")
-            await ensure_authenticated()
-
+            # Skip pre-validation to avoid session interference
             rate_limiter = get_rate_limiter()
             await ctx.report_progress(10, 100, "Checking rate limits...")
 
@@ -439,9 +433,7 @@ def register_outreach_tools(mcp: FastMCP) -> None:
             - results: List of individual results
         """
         try:
-            await ctx.report_progress(0, 100, "Validating session...")
-            await ensure_authenticated()
-
+            # Skip pre-validation to avoid session interference
             rate_limiter = get_rate_limiter()
             action_repo = ActionRepository()
 

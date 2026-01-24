@@ -69,8 +69,8 @@ def register_search_tools(mcp: FastMCP) -> None:
             - count: Number of results returned
         """
         try:
-            await ctx.report_progress(0, 100, "Validating session...")
-            await ensure_authenticated()
+            # Skip pre-validation to avoid session interference
+            # Errors will be caught naturally if session is invalid
 
             # Clamp limit
             limit = min(max(1, limit), 100)
@@ -150,8 +150,7 @@ def register_search_tools(mcp: FastMCP) -> None:
             - count: Number of results returned
         """
         try:
-            await ctx.report_progress(0, 100, "Validating session...")
-            await ensure_authenticated()
+            # Skip pre-validation to avoid session interference
 
             # Clamp limit
             limit = min(max(1, limit), 100)
