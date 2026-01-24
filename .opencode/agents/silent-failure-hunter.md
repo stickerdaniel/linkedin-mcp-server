@@ -2,8 +2,9 @@
 name: silent-failure-hunter
 mode: subagent
 # https://models.dev/
-# model: 'openai/gpt-5.2-codex'
-model: 'github-copilot/gpt-5.2-codex'
+model: 'openai/gpt-5.2-codex'
+variant: 'xhigh'
+# model: 'github-copilot/gpt-5.2-codex'
 color: '#eab308'
 description: |
   Use this agent when reviewing code changes in a pull request to identify silent failures, inadequate error handling, and inappropriate fallback behavior. This agent should be invoked proactively after completing a logical chunk of work that involves error handling, catch blocks, fallback logic, or any code that could potentially suppress errors. Examples:
