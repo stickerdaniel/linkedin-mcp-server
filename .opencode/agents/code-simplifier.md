@@ -2,8 +2,9 @@
 name: code-simplifier
 mode: subagent
 # https://models.dev/
-# model: 'openai/gpt-5.2-codex'
-model: 'github-copilot/gpt-5.2-codex'
+model: 'openai/gpt-5.2-codex'
+variant: 'xhigh'
+# model: 'github-copilot/gpt-5.2-codex'
 color: '#3b82f6'
 description: |
   Use this agent when code has been written or modified and needs to be simplified for clarity, consistency, and maintainability while preserving all functionality. This agent should be triggered automatically after completing a coding task or writing a logical chunk of code. It simplifies code by following project best practices while retaining all functionality. The agent focuses only on recently modified code unless instructed otherwise.
