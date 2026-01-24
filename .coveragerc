@@ -1,0 +1,8 @@
+[run]
+source = linkedin_mcp_server
+branch = true
+omit = linkedin_mcp_server/__main__.py
+
+[report]
+fail_under = 45
+show_missing = true
