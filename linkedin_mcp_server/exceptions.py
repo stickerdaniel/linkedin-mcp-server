@@ -43,3 +43,91 @@ class CookieAuthenticationError(LinkedInMCPError):
             "  - From a different account"
         )
         super().__init__(message or default_msg)
+
+
+# Outreach-related exceptions
+
+
+class OutreachError(LinkedInMCPError):
+    """Base exception for outreach operations."""
+
+    pass
+
+
+class RateLimitExceededError(OutreachError):
+    """Daily rate limit has been exceeded."""
+
+    def __init__(
+        self,
+        action_type: str,
+        current: int,
+        limit: int,
+        message: str | None = None,
+    ):
+        self.action_type = action_type
+        self.current = current
+        self.limit = limit
+        default_msg = (
+            f"Daily {action_type} limit exceeded: {current}/{limit}. "
+            f"Try again tomorrow."
+        )
+        super().__init__(message or default_msg)
+
+
+class OutreachPausedError(OutreachError):
+    """Outreach automation has been paused."""
+
+    def __init__(self, message: str | None = None):
+        default_msg = "Outreach is currently paused. Use resume_outreach to continue."
+        super().__init__(message or default_msg)
+
+
+class ConnectionRequestError(OutreachError):
+    """Failed to send connection request."""
+
+    pass
+
+
+class CompanyFollowError(OutreachError):
+    """Failed to follow company."""
+
+    pass
+
+
+class AlreadyConnectedError(ConnectionRequestError):
+    """Already connected to this person."""
+
+    pass
+
+
+class PendingConnectionError(ConnectionRequestError):
+    """Connection request already pending."""
+
+    pass
+
+
+class AlreadyFollowingError(CompanyFollowError):
+    """Already following this company."""
+
+    pass
+
+
+# Automation-related exceptions
+
+
+class AutomationError(LinkedInMCPError):
+    """Base exception for browser automation errors."""
+
+    pass
+
+
+class ElementNotFoundError(AutomationError):
+    """Could not find expected element on page."""
+
+    pass
+
+
+class NavigationError(AutomationError):
+    """Failed to navigate to a page."""
+
+    pass

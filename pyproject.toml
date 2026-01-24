@@ -5,6 +5,7 @@ description = "MCP server for LinkedIn profile, company, and job scraping with C
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aiosqlite>=0.19.0",
     "fastmcp>=2.14.0",
     "inquirer>=3.4.0",
     "linkedin-scraper>=3.1.0",

@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 from linkedin_scraper.core.exceptions import (
     AuthenticationError,
-    ElementNotFoundError,
+    ElementNotFoundError as ScraperElementNotFoundError,
     LinkedInScraperException,
     NetworkError,
     ProfileNotFoundError,
@@ -19,9 +19,19 @@ from linkedin_scraper.core.exceptions import (
 )
 
 from linkedin_mcp_server.exceptions import (
+    AlreadyConnectedError,
+    AlreadyFollowingError,
+    AutomationError,
+    ConnectionRequestError,
     CookieAuthenticationError,
     CredentialsNotFoundError,
+    ElementNotFoundError as MCPElementNotFoundError,
     LinkedInMCPError,
+    NavigationError,
+    OutreachError,
+    OutreachPausedError,
+    PendingConnectionError,
+    RateLimitExceededError as MCPRateLimitExceededError,
     SessionExpiredError,
 )
 
@@ -99,7 +109,7 @@ def convert_exception_to_response(
             "resolution": "Check the profile URL is correct and the profile exists.",
         }
 
-    elif isinstance(exception, ElementNotFoundError):
+    elif isinstance(exception, ScraperElementNotFoundError):
         return {
             "error": "element_not_found",
             "message": str(exception),
@@ -123,6 +133,74 @@ def convert_exception_to_response(
     elif isinstance(exception, LinkedInScraperException):
         return {
             "error": "linkedin_scraper_error",
+            "message": str(exception),
+        }
+
+    elif isinstance(exception, MCPRateLimitExceededError):
+        return {
+            "error": "rate_limit_exceeded",
+            "message": str(exception),
+            "action_type": exception.action_type,
+            "current": exception.current,
+            "limit": exception.limit,
+            "resolution": "Wait until tomorrow for limits to reset, or adjust DAILY_*_LIMIT settings.",
+        }
+
+    elif isinstance(exception, OutreachPausedError):
+        return {
+            "error": "outreach_paused",
+            "message": str(exception),
+            "resolution": "Use the resume_outreach tool to continue.",
+        }
+
+    elif isinstance(exception, AlreadyConnectedError):
+        return {
+            "error": "already_connected",
+            "message": str(exception),
+        }
+
+    elif isinstance(exception, PendingConnectionError):
+        return {
+            "error": "pending_connection",
+            "message": str(exception),
+        }
+
+    elif isinstance(exception, AlreadyFollowingError):
+        return {
+            "error": "already_following",
+            "message": str(exception),
+        }
+
+    elif isinstance(exception, ConnectionRequestError):
+        return {
+            "error": "connection_request_failed",
+            "message": str(exception),
+            "resolution": "Check the profile URL and try again.",
+        }
+
+    elif isinstance(exception, NavigationError):
+        return {
+            "error": "navigation_error",
+            "message": str(exception),
+            "resolution": "Page may have changed or network issue. Try again.",
+        }
+
+    elif isinstance(exception, MCPElementNotFoundError):
+        return {
+            "error": "element_not_found",
+            "message": str(exception),
+            "resolution": "LinkedIn UI may have changed. Please report this issue.",
+        }
+
+    elif isinstance(exception, AutomationError):
+        return {
+            "error": "automation_error",
+            "message": str(exception),
+        }
+
+    elif isinstance(exception, OutreachError):
+        return {
+            "error": "outreach_error",
             "message": str(exception),
         }
 

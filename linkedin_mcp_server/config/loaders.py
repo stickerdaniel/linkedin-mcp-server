@@ -45,6 +45,13 @@ class EnvironmentKeys:
     HTTP_PATH = "HTTP_PATH"
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
+    # Outreach configuration
+    DAILY_CONNECTION_LIMIT = "DAILY_CONNECTION_LIMIT"
+    DAILY_FOLLOW_LIMIT = "DAILY_FOLLOW_LIMIT"
+    DAILY_MESSAGE_LIMIT = "DAILY_MESSAGE_LIMIT"
+    MIN_ACTION_DELAY = "MIN_ACTION_DELAY"
+    MAX_ACTION_DELAY = "MAX_ACTION_DELAY"
+    OUTREACH_BATCH_SIZE = "OUTREACH_BATCH_SIZE"
 
 
 def is_interactive_environment() -> bool:
@@ -137,6 +144,55 @@ def load_from_env(config: AppConfig) -> AppConfig:
         except ValueError:
             raise ConfigurationError(
                 f"Invalid VIEWPORT: '{viewport_env}'. Must be in format WxH (e.g., 1280x720)."
+            )
+
+    # Outreach configuration
+    if conn_limit := os.environ.get(EnvironmentKeys.DAILY_CONNECTION_LIMIT):
+        try:
+            config.outreach.daily_connection_limit = int(conn_limit)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid DAILY_CONNECTION_LIMIT: '{conn_limit}'. Must be an integer."
+            )
+
+    if follow_limit := os.environ.get(EnvironmentKeys.DAILY_FOLLOW_LIMIT):
+        try:
+            config.outreach.daily_follow_limit = int(follow_limit)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid DAILY_FOLLOW_LIMIT: '{follow_limit}'. Must be an integer."
+            )
+
+    if msg_limit := os.environ.get(EnvironmentKeys.DAILY_MESSAGE_LIMIT):
+        try:
+            config.outreach.daily_message_limit = int(msg_limit)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid DAILY_MESSAGE_LIMIT: '{msg_limit}'. Must be an integer."
+            )
+
+    if min_delay := os.environ.get(EnvironmentKeys.MIN_ACTION_DELAY):
+        try:
+            config.outreach.min_action_delay = int(min_delay)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid MIN_ACTION_DELAY: '{min_delay}'. Must be an integer."
+            )
+
+    if max_delay := os.environ.get(EnvironmentKeys.MAX_ACTION_DELAY):
+        try:
+            config.outreach.max_action_delay = int(max_delay)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid MAX_ACTION_DELAY: '{max_delay}'. Must be an integer."
+            )
+
+    if batch_size := os.environ.get(EnvironmentKeys.OUTREACH_BATCH_SIZE):
+        try:
+            config.outreach.batch_size = int(batch_size)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid OUTREACH_BATCH_SIZE: '{batch_size}'. Must be an integer."
             )
 
     return config

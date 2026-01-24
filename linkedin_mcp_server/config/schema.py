@@ -62,16 +62,61 @@ class ServerConfig:
 
 
 @dataclass
+class OutreachConfig:
+    """Configuration for outreach automation and rate limiting."""
+
+    # Daily action limits
+    daily_connection_limit: int = 30
+    daily_follow_limit: int = 50
+    daily_message_limit: int = 50
+
+    # Delay configuration (in seconds)
+    min_action_delay: int = 30
+    max_action_delay: int = 120
+
+    # Batch configuration
+    batch_size: int = 10
+    min_batch_pause: int = 300  # 5 minutes
+    max_batch_pause: int = 900  # 15 minutes
+
+    def validate(self) -> None:
+        """Validate outreach configuration values."""
+        if self.daily_connection_limit < 0:
+            raise ConfigurationError(
+                f"daily_connection_limit must be non-negative, got {self.daily_connection_limit}"
+            )
+        if self.daily_follow_limit < 0:
+            raise ConfigurationError(
+                f"daily_follow_limit must be non-negative, got {self.daily_follow_limit}"
+            )
+        if self.min_action_delay < 0:
+            raise ConfigurationError(
+                f"min_action_delay must be non-negative, got {self.min_action_delay}"
+            )
+        if self.max_action_delay < self.min_action_delay:
+            raise ConfigurationError(
+                f"max_action_delay ({self.max_action_delay}) must be >= "
+                f"min_action_delay ({self.min_action_delay})"
+            )
+        if self.batch_size <= 0:
+            raise ConfigurationError(
+                f"batch_size must be positive, got {self.batch_size}"
+            )
+
+
+@dataclass
 class AppConfig:
     """Main application configuration."""
 
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    outreach: OutreachConfig = field(default_factory=OutreachConfig)
     is_interactive: bool = field(default=False)
 
     def validate(self) -> None:
         """Validate all configuration values. Call after modifying config."""
         self.browser.validate()
+        self.outreach.validate()
         if self.server.transport == "streamable-http":
             self._validate_transport_config()
             self._validate_path_format()
