@@ -29,3 +29,21 @@ jobs:
 
       - name: Optimize uv cache for CI
         run: uv cache prune --ci
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+
+      - uses: astral-sh/setup-uv@61cb8a9741eeb8a550a1b8544337180c0fc8476b # v7
+        with:
+          enable-cache: true
+
+      - run: uv python install 3.14
+
+      - run: uv sync --group dev
+
+      - name: Run tests
+        run: uv run pytest --cov --cov-report=term-missing -n auto -v -s
+
+      - run: uv cache prune --ci
