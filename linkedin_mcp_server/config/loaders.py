@@ -45,6 +45,7 @@ class EnvironmentKeys:
     HTTP_PATH = "HTTP_PATH"
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
+    CHROME_PATH = "CHROME_PATH"
 
 
 def is_interactive_environment() -> bool:
@@ -139,6 +140,10 @@ def load_from_env(config: AppConfig) -> AppConfig:
                 f"Invalid VIEWPORT: '{viewport_env}'. Must be in format WxH (e.g., 1280x720)."
             )
 
+    # Custom Chrome/Chromium executable path
+    if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
+        config.browser.chrome_path = chrome_path_env
+
     return config
 
 
@@ -220,6 +225,14 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Browser timeout for page operations in milliseconds (default: 5000)",
     )
 
+    parser.add_argument(
+        "--chrome-path",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path to Chrome/Chromium executable (for custom browser installations)",
+    )
+
     # Session management
     parser.add_argument(
         "--get-session",
@@ -291,6 +304,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.timeout is not None:
         config.browser.default_timeout = args.timeout
+
+    if args.chrome_path:
+        config.browser.chrome_path = args.chrome_path
 
     # Session management
     if args.get_session is not None:
