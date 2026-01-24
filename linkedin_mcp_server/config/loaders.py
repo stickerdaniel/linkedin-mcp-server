@@ -8,6 +8,7 @@ import argparse
 import logging
 import os
 import sys
+from typing import Literal, cast
 
 from dotenv import load_dotenv
 
@@ -68,7 +69,9 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if log_level_env := os.environ.get(EnvironmentKeys.LOG_LEVEL):
         log_level_upper = log_level_env.upper()
         if log_level_upper in ("DEBUG", "INFO", "WARNING", "ERROR"):
-            config.server.log_level = log_level_upper
+            config.server.log_level = cast(
+                Literal["DEBUG", "INFO", "WARNING", "ERROR"], log_level_upper
+            )
 
     # Headless mode
     if os.environ.get(EnvironmentKeys.HEADLESS) in FALSY_VALUES:
