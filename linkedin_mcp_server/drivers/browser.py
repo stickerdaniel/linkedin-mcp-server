@@ -263,7 +263,7 @@ async def migrate_from_legacy_session() -> bool:
         await persistent.start()
 
         # Copy cookies from old session to new persistent context
-        storage_state = await temp_browser.context.storage_state()
+        storage_state = await temp_browser.page.context.storage_state()
         # Type ignore: storage_state cookies are compatible with add_cookies
         await persistent.context.add_cookies(storage_state["cookies"])  # type: ignore[arg-type]
 
