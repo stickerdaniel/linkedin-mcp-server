@@ -27,6 +27,7 @@ class BrowserConfig:
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
+    user_data_dir: str = "~/.linkedin-mcp/browser-profile"  # Browser profile directory
 
     def validate(self) -> None:
         """Validate browser configuration values."""
@@ -51,6 +52,15 @@ class BrowserConfig:
             if not chrome_path.is_file():
                 raise ConfigurationError(
                     f"chrome_path '{self.chrome_path}' is not a file"
+                )
+        if self.user_data_dir:
+            expanded_path = Path(self.user_data_dir).expanduser()
+            # Create parent directory if it doesn't exist
+            try:
+                expanded_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                raise ConfigurationError(
+                    f"Cannot create parent directory for user_data_dir: {expanded_path.parent} - {e}"
                 )
 
 

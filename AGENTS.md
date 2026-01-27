@@ -60,7 +60,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 **Authentication Flow:**
 
-- Uses session files stored at `~/.linkedin-mcp/session.json`
+- Uses persistent browser profiles stored at `~/.linkedin-mcp/browser-profile/`
 - Run with `--get-session` to create a session via browser login
 
 **Transport Modes:**
@@ -85,7 +85,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 **Configuration:**
 
 - CLI arguments with comprehensive help (`--help`)
-- Session stored at `~/.linkedin-mcp/session.json`
+- Session stored in `~/.linkedin-mcp/browser-profile/`
 
 **Commit Message Format:**
 

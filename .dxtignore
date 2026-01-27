@@ -1,0 +1,67 @@
+# IDE and editor settings
+.claude/
+.gemini/
+.vscode/
+.idea/
+.cursor/
+.opencode/
+
+# CI/CD and GitHub
+.github/
+
+# Build artifacts and caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+
+# Test and coverage
+.coverage
+.coveragerc
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+cover/
+
+# Docker
+.docker/
+.dockerignore
+
+# Environment and secrets
+.env
+.env.*
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Lock files (not needed for DXT)
+uv.lock
+poetry.lock
+Pipfile.lock
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Pre-commit
+.pre-commit-config.yaml
+
+# Documentation
+*.md
+*.svg

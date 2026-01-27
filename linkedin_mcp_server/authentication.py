@@ -10,15 +10,15 @@ from pathlib import Path
 from typing import Literal
 
 from linkedin_mcp_server.drivers.browser import (
-    DEFAULT_SESSION_PATH,
-    session_exists,
+    DEFAULT_USER_DATA_DIR,
+    profile_exists,
 )
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 from linkedin_mcp_server.utils import get_linkedin_cookie
 
 logger = logging.getLogger(__name__)
 
-AuthSource = Literal["session", "cookie"]
+AuthSource = Literal["profile", "cookie"]
 
 
 def get_authentication_source() -> AuthSource:
@@ -26,19 +26,19 @@ def get_authentication_source() -> AuthSource:
     Check available authentication methods in priority order.
 
     Priority:
-    1. Session file (most reliable)
+    1. Persistent browser profile (most reliable)
     2. LINKEDIN_COOKIE env var (Docker headless)
 
     Returns:
-        String indicating auth source: "session" or "cookie"
+        String indicating auth source: "profile" or "cookie"
 
     Raises:
         CredentialsNotFoundError: If no authentication method available
     """
-    # Priority 1: Session file
-    if session_exists():
-        logger.info(f"Using session from {DEFAULT_SESSION_PATH}")
-        return "session"
+    # Priority 1: Browser profile
+    if profile_exists():
+        logger.info(f"Using browser profile from {DEFAULT_USER_DATA_DIR}")
+        return "profile"
 
     # Priority 2: Cookie from environment
     if get_linkedin_cookie():
@@ -48,35 +48,40 @@ def get_authentication_source() -> AuthSource:
     raise CredentialsNotFoundError(
         "No LinkedIn authentication found.\n\n"
         "Options:\n"
-        "  1. Run with --get-session to create a session file (recommended)\n"
+        "  1. Run with --get-session to create a browser profile (recommended)\n"
         "  2. Set LINKEDIN_COOKIE environment variable with your li_at cookie\n"
         "  3. Run with --no-headless to login interactively\n\n"
         "For Docker users:\n"
-        "  Create session on host first: uvx linkedin-mcp-server --get-session\n"
+        "  Create profile on host first: uvx linkedin-mcp-server --get-session\n"
         "  Then mount into Docker: -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp\n"
         "  Or set LINKEDIN_COOKIE environment variable: -e LINKEDIN_COOKIE=your_li_at"
     )
 
 
-def clear_session(session_path: Path | None = None) -> bool:
+def clear_session(user_data_dir: Path | None = None) -> bool:
     """
-    Clear stored session file.
+    Clear browser profile directory.
 
     Args:
-        session_path: Path to session file
+        user_data_dir: Browser profile directory
 
     Returns:
         True if clearing was successful
     """
-    if session_path is None:
-        session_path = DEFAULT_SESSION_PATH
+    if user_data_dir is None:
+        from linkedin_mcp_server.config import get_config
 
-    if session_path.exists():
+        config = get_config()
+        user_data_dir = Path(config.browser.user_data_dir).expanduser()
+
+    if user_data_dir.exists():
         try:
-            session_path.unlink()
-            logger.info(f"Session cleared from {session_path}")
+            import shutil
+
+            shutil.rmtree(user_data_dir)
+            logger.info(f"Browser profile cleared from {user_data_dir}")
             return True
         except OSError as e:
-            logger.warning(f"Could not clear session: {e}")
+            logger.warning(f"Could not clear browser profile: {e}")
             return False
     return True

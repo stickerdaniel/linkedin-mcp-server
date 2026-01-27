@@ -24,10 +24,12 @@ from linkedin_mcp_server.authentication import (
 from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.drivers.browser import (
-    DEFAULT_SESSION_PATH,
+    DEFAULT_USER_DATA_DIR,
     close_browser,
     get_or_create_browser,
-    session_exists,
+    migrate_from_legacy_session,
+    needs_migration,
+    profile_exists,
     set_headless,
 )
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
@@ -62,7 +64,7 @@ def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
 
 
 def clear_session_and_exit() -> None:
-    """Clear LinkedIn session and exit."""
+    """Clear LinkedIn browser profile and exit."""
     config = get_config()
 
     configure_logging(
@@ -73,16 +75,16 @@ def clear_session_and_exit() -> None:
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Session Clear mode")
 
-    if not session_exists():
-        print("ℹ️  No session file found")
+    if not profile_exists():
+        print("ℹ️  No browser profile found")
         print("Nothing to clear.")
         sys.exit(0)
 
-    print(f"🔑 Clear LinkedIn session from {DEFAULT_SESSION_PATH}?")
+    print(f"🔑 Clear LinkedIn browser profile from {DEFAULT_USER_DATA_DIR}?")
 
     try:
         confirmation = (
-            input("Are you sure you want to clear the session? (y/N): ").strip().lower()
+            input("Are you sure you want to clear the profile? (y/N): ").strip().lower()
         )
         if confirmation not in ("y", "yes"):
             print("❌ Operation cancelled")
@@ -92,9 +94,9 @@ def clear_session_and_exit() -> None:
         sys.exit(0)
 
     if clear_session():
-        print("✅ LinkedIn session cleared successfully!")
+        print("✅ LinkedIn browser profile cleared successfully!")
     else:
-        print("❌ Failed to clear session")
+        print("❌ Failed to clear browser profile")
         sys.exit(1)
 
     sys.exit(0)
@@ -130,10 +132,10 @@ def session_info_and_exit() -> None:
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Session Info mode")
 
-    # Check if session file exists first
-    if not session_exists():
-        print(f"❌ No session file found at {DEFAULT_SESSION_PATH}")
-        print("   Run with --get-session to create a session")
+    # Check if browser profile exists first
+    if not profile_exists():
+        print(f"❌ No browser profile found at {DEFAULT_USER_DATA_DIR}")
+        print("   Run with --get-session to create a profile")
         sys.exit(1)
 
     # Check if session is valid by testing login status
@@ -151,10 +153,10 @@ def session_info_and_exit() -> None:
     valid = asyncio.run(check_session())
 
     if valid:
-        print(f"✅ Session is valid: {DEFAULT_SESSION_PATH}")
+        print(f"✅ Session is valid: {DEFAULT_USER_DATA_DIR}")
         sys.exit(0)
     else:
-        print(f"❌ Session expired or invalid: {DEFAULT_SESSION_PATH}")
+        print(f"❌ Session expired or invalid: {DEFAULT_USER_DATA_DIR}")
         print("   Run with --get-session to re-authenticate")
         sys.exit(1)
 
@@ -163,13 +165,32 @@ def ensure_authentication_ready() -> None:
     """
     Phase 1: Ensure authentication is ready.
 
-    Checks for existing session file.
+    Checks for existing browser profile or attempts migration from legacy session.json.
     If not found, runs interactive setup in interactive mode.
 
     Raises:
         CredentialsNotFoundError: If authentication setup fails
     """
     config = get_config()
+
+    # Check for migration need
+    if needs_migration():
+        if config.is_interactive:
+            print(
+                "📦 Legacy session.json detected. Migrating to new persistent profile..."
+            )
+            success = asyncio.run(migrate_from_legacy_session())
+            if success:
+                print("✅ Migration successful!")
+                return
+            else:
+                print(
+                    "⚠️  Migration failed. Please run --get-session to re-authenticate."
+                )
+        else:
+            logger.warning(
+                "Legacy session.json found. Run interactively or use --get-session to upgrade."
+            )
 
     # Check for existing session
     try:
