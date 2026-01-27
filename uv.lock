@@ -1038,7 +1038,7 @@ dev = [
 requires-dist = [
     { name = "fastmcp", specifier = ">=2.14.0" },
     { name = "inquirer", specifier = ">=3.4.0" },
-    { name = "linkedin-scraper", specifier = ">=3.1.0" },
+    { name = "linkedin-scraper", specifier = ">=3.1.1" },
     { name = "playwright", specifier = ">=1.40.0" },
     { name = "pyperclip", specifier = ">=1.9.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
@@ -1058,7 +1058,7 @@ dev = [
 
 [[package]]
 name = "linkedin-scraper"
-version = "3.1.0"
+version = "3.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -1068,9 +1068,9 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d2/30/967d78a67bc974e65491582e23993ca078d47c7b634842af13c8422162b9/linkedin_scraper-3.1.0.tar.gz", hash = "sha256:830bd3a4c16aeb667f5a00c0eed7528c80e0b360016f4c8eecd9cebad0d8728e", size = 46636, upload-time = "2026-01-18T23:55:47.77Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/e0/389404ecd6d0efec2cc5be0d1c456d6b8f723865b03e0b6567945c713594/linkedin_scraper-3.1.1.tar.gz", hash = "sha256:3232a16a72053f8969464dc7386a7a0b2c262f9fe7c53f41734857ea9c908588", size = 47349, upload-time = "2026-01-27T06:05:53.871Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3f/a7/ce6de57a4bd75bfadaa23fb8f3eaa0b86de779335c13be08f8bbf3846438/linkedin_scraper-3.1.0-py3-none-any.whl", hash = "sha256:1e3ad52cd858d25034cab5f82261bfe35451941faec6003714aff2e745939212", size = 52372, upload-time = "2026-01-18T23:55:45.745Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/f6/a17d0be0cf6c9a85709e287f137c9f1227c44e208e737ef371f83dc5829b/linkedin_scraper-3.1.1-py3-none-any.whl", hash = "sha256:5977a28dcaa2b1d14caa0e3ea28f6d7c16e393f1140088b22588200a8498657c", size = 53017, upload-time = "2026-01-27T06:05:52.48Z" },
 ]
 
 [[package]]
