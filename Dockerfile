@@ -15,15 +15,13 @@ RUN chown pwuser:pwuser /app
 # Copy project files with correct ownership
 COPY --chown=pwuser:pwuser . /app
 
-# Set paths for Playwright browsers and uv Python installs to shared locations
+# Set Playwright browser install location
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-ENV UV_PYTHON_INSTALL_DIR=/opt/python
-
 # Install dependencies and Playwright with ONLY Chromium (not Firefox/WebKit)
 # --with-deps installs required system dependencies (fonts, libraries) via apt (needs root)
 RUN uv sync --frozen && \
     uv run playwright install --with-deps chromium && \
-    chmod -R 755 /opt/playwright /opt/python
+    chmod -R 755 /opt/playwright
 
 # Fix ownership of app directory (venv created by uv)
 RUN chown -R pwuser:pwuser /app
