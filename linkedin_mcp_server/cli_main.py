@@ -110,7 +110,11 @@ def get_session_and_exit() -> None:
     )
 
     version = get_version()
+    print(f"🔗 LinkedIn MCP Server v{version} 🔗")
+    print("=" * 40)
     logger.info(f"LinkedIn MCP Server v{version} - Session Creation mode")
+    logger.info(f"Log level: {config.server.log_level}")
+    logger.info(f"Interactive mode: {config.is_interactive}")
 
     output_path = config.server.session_output_path
     success = run_session_creation(output_path)
