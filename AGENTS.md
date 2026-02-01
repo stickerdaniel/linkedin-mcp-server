@@ -8,8 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Use `uv` for dependency management: `uv sync` (installs all dependencies)
 - Development dependencies: `uv sync --group dev`
-- Bump version: `uv version --bump minor` (or `major`, `patch`) - git tag is created automatically by release workflow. Once Docker image is published, manually file a PR in the MCP registry to update the version.
+- Bump version: `uv version --bump minor` (or `major`, `patch`) - git tag is created automatically by release workflow. Once Docker image and PyPI package are published, manually file a PR in the MCP registry to update the version.
 - Run server locally: `uv run -m linkedin_mcp_server --no-headless`
+- Run via uvx (PyPI): `uvx linkedin-scraper-mcp`
 - Run in Docker: `docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp stickerdaniel/linkedin-mcp-server:latest`
 
 **Code Quality:**
@@ -23,7 +24,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Docker Commands:**
 
 - Build: `docker build -t linkedin-mcp-server .`
-- Get session: Use uvx locally first: `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session`
+- Get session: Use uvx locally first: `uvx linkedin-scraper-mcp --get-session`
 
 ## Architecture Overview
 
