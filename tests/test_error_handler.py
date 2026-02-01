@@ -28,7 +28,7 @@ def test_handles_generic_exception():
 def test_handles_rate_limit_with_suggested_wait():
     """Test RateLimitError with custom suggested_wait_time attribute."""
     error = RateLimitError("Rate limited")
-    error.suggested_wait_time = 600  # type: ignore[attr-defined]
+    error.suggested_wait_time = 600
     result = handle_tool_error(error, "test_tool")
     assert result["error"] == "rate_limit"
     assert result["suggested_wait_seconds"] == 600

@@ -236,14 +236,22 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Path to Chrome/Chromium executable (for custom browser installations)",
     )
 
+    parser.add_argument(
+        "--user-data-dir",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Browser profile directory for persistent session (default: ~/.linkedin-mcp/browser-profile)",
+    )
+
     # Session management
     parser.add_argument(
         "--get-session",
         nargs="?",
-        const="~/.linkedin-mcp/session.json",
+        const="~/.linkedin-mcp/browser-profile",
         default=None,
         metavar="PATH",
-        help="Login interactively and save session (default: ~/.linkedin-mcp/session.json)",
+        help="Login interactively and save session (default: ~/.linkedin-mcp/browser-profile)",
     )
 
     parser.add_argument(
@@ -310,6 +318,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path
+
+    if args.user_data_dir:
+        config.browser.user_data_dir = args.user_data_dir
 
     # Session management
     if args.get_session is not None:

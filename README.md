@@ -47,7 +47,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `close_session` | Close browser session and clean up resources | Working |
 
 > [!WARNING]
-> The session file at `~/.linkedin-mcp/session.json` contains sensitive authentication data. Keep it secure and do not share it.
+> The browser profile at `~/.linkedin-mcp/browser-profile/` contains sensitive authentication data. Keep it secure and do not share it.
 
 <br/>
 <br/>
@@ -64,7 +64,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
 ```
 
-This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
+This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/browser-profile/`.
 
 **Step 2: Run the server**
 
@@ -104,7 +104,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 
 **CLI Options:**
 
-- `--get-session [PATH]` - Open browser to log in and save session (default: ~/.linkedin-mcp/session.json)
+- `--get-session [PATH]` - Open browser to log in and save session (default: ~/.linkedin-mcp/browser-profile)
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Set transport mode
@@ -153,7 +153,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 
 **Session issues:**
 
-- Session is stored at `~/.linkedin-mcp/session.json`
+- Session is stored in `~/.linkedin-mcp/browser-profile/`
 - Make sure you have only one active LinkedIn session at a time
 
 **Login issues:**
@@ -219,7 +219,7 @@ Create a session file locally, then mount it into Docker.
 uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
 ```
 
-This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
+This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/browser-profile/`.
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -409,7 +409,7 @@ uv run -m linkedin_mcp_server
 
 **CLI Options:**
 
-- `--get-session [PATH]` - Open browser to log in and save session (default: ~/.linkedin-mcp/session.json)
+- `--get-session [PATH]` - Open browser to log in and save session (default: ~/.linkedin-mcp/browser-profile)
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Set transport mode
@@ -465,7 +465,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 **Session issues:**
 
-- Session is stored in `~/.linkedin-mcp/session.json`
+- Session is stored in `~/.linkedin-mcp/browser-profile/`
 - Use `--clear-session` to clear the session and start fresh
 
 **Python/Playwright issues:**
