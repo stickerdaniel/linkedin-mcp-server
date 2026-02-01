@@ -1,6 +1,7 @@
 # LinkedIn MCP Server
 
 <p align="left">
+  <a href="https://pypi.org/project/linkedin-scraper-mcp/" target="_blank"><img src="https://img.shields.io/pypi/v/linkedin-scraper-mcp?color=blue" alt="PyPI"></a>
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/actions/workflows/ci.yml" target="_blank"><img src="https://github.com/stickerdaniel/linkedin-mcp-server/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI Status"></a>
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/actions/workflows/release.yml" target="_blank"><img src="https://github.com/stickerdaniel/linkedin-mcp-server/actions/workflows/release.yml/badge.svg?branch=main" alt="Release"></a>
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/badge/License-Apache%202.0-brightgreen?labelColor=32383f" alt="License"></a>
@@ -61,7 +62,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 **Step 1: Create a session (first time only)**
 
 ```bash
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
+uvx linkedin-scraper-mcp --get-session
 ```
 
 This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
@@ -69,11 +70,11 @@ This opens a browser for you to log in manually (5 minute timeout for 2FA, captc
 **Step 2: Run the server**
 
 ```bash
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server
+uvx linkedin-scraper-mcp
 ```
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --get-session` again.
 
 ### uvx Setup Help
 
@@ -87,11 +88,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
   "mcpServers": {
     "linkedin": {
       "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/stickerdaniel/linkedin-mcp-server",
-        "linkedin-mcp-server"
-      ]
+      "args": ["linkedin-scraper-mcp"]
     }
   }
 }
@@ -119,17 +116,16 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 
 ```bash
 # Create a session interactively
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
+uvx linkedin-scraper-mcp --get-session
 
 # Run with debug logging
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --log-level DEBUG
+uvx linkedin-scraper-mcp --log-level DEBUG
 ```
 
 **HTTP Mode Example (for web-based MCP clients):**
 
 ```bash
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server \
-  --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
+uvx linkedin-scraper-mcp --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
 **Test with mcp inspector:**
@@ -159,7 +155,7 @@ uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp
 **Login issues:**
 
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in frequently. Run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` which opens a browser where you can solve it manually.
+- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --get-session` which opens a browser where you can solve it manually.
 
 **Timeout issues:**
 
@@ -216,7 +212,7 @@ Create a session file locally, then mount it into Docker.
 **Step 1: Create session using uvx (one-time setup)**
 
 ```bash
-uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session
+uvx linkedin-scraper-mcp --get-session
 ```
 
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
@@ -239,7 +235,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again locally, or use a fresh `li_at` cookie.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --get-session` again locally, or use a fresh `li_at` cookie.
 
 > [!NOTE]
 > **Why can't I run `--get-session` in Docker?** Docker containers don't have a display server. You have two options:
@@ -303,7 +299,7 @@ docker run -it --rm \
 
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in frequently. Run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
+- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --get-session` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 
 **Timeout issues:**
 
@@ -329,10 +325,10 @@ docker run -it --rm \
 
 1. Download the [DXT extension](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
 2. Double-click to install into Claude Desktop
-3. Create a session: `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session`
+3. Create a session: `uvx linkedin-scraper-mcp --get-session`
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` again.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --get-session` again.
 
 ### DXT Extension Setup Help
 
@@ -358,7 +354,7 @@ docker run -it --rm \
 
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in frequently. Run `uvx --from git+https://github.com/stickerdaniel/linkedin-mcp-server linkedin-mcp-server --get-session` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
+- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --get-session` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 
 **Timeout issues:**
 
