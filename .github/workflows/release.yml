@@ -54,6 +54,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write  # Required for PyPI Trusted Publishing
 
     steps:
       - name: Checkout code
@@ -161,8 +162,21 @@ jobs:
           name: "LinkedIn MCP Server v${{ env.VERSION }}"
           body_path: RELEASE_NOTES.md
 
+      - name: Build package distributions
+        run: |
+          uv build
+          echo "Built package distributions:"
+          ls -lh dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true
+          verbose: true
+
       - name: Summary
         run: |
           echo "Successfully released v$VERSION!"
           echo "Docker: stickerdaniel/linkedin-mcp-server:$VERSION"
+          echo "PyPI: https://pypi.org/project/linkedin-scraper-mcp/$VERSION/"
           echo "GitHub: https://github.com/${{ github.repository }}/releases/tag/v$VERSION"

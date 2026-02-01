@@ -1,9 +1,36 @@
 [project]
-name = "linkedin-mcp-server"
+name = "linkedin-scraper-mcp"
 version = "2.3.2"
 description = "MCP server for LinkedIn profile, company, and job scraping with Claude AI integration. Supports direct profile/company/job URL scraping with secure credential storage."
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [
+    { name = "Daniel Sticker", email = "daniel@sticker.name" }
+]
+license = "Apache-2.0"
+keywords = [
+    "linkedin",
+    "mcp",
+    "model-context-protocol",
+    "scraper",
+    "ai",
+    "automation",
+    "llm",
+    "anthropic",
+    "claude",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "fastmcp>=2.14.0",
     "inquirer>=3.4.0",
@@ -12,6 +39,13 @@ dependencies = [
     "pyperclip>=1.9.0",
     "python-dotenv>=1.1.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/stickerdaniel/linkedin-mcp-server"
+Documentation = "https://github.com/stickerdaniel/linkedin-mcp-server#readme"
+Repository = "https://github.com/stickerdaniel/linkedin-mcp-server"
+Issues = "https://github.com/stickerdaniel/linkedin-mcp-server/issues"
+Changelog = "https://github.com/stickerdaniel/linkedin-mcp-server/releases"
 
 [project.scripts]
 linkedin-mcp-server = "linkedin_mcp_server.cli_main:main"
