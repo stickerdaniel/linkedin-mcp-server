@@ -1,6 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:best-practices", "group:allNonMajor"],
+  "schedule": ["before 6am on Monday"],
   "vulnerabilityAlerts": {
     "enabled": true,
     "labels": ["security"],
@@ -8,20 +9,27 @@
   },
   "packageRules": [
     {
+      "description": "Managed by release workflow, not Renovate",
       "matchPackageNames": ["stickerdaniel/linkedin-mcp-server"],
       "matchManagers": ["docker-compose"],
-      "enabled": false,
-      "description": "Managed by release workflow, not Renovate"
+      "enabled": false
     },
     {
+      "description": "Group all CI dependencies (GitHub Actions + Docker)",
+      "matchManagers": ["github-actions", "dockerfile", "docker-compose"],
+      "matchPackageNames": ["!stickerdaniel/linkedin-mcp-server"],
+      "groupName": "CI dependencies"
+    },
+    {
+      "description": "Group all major updates together",
+      "matchUpdateTypes": ["major"],
+      "groupName": "all major dependencies"
+    },
+    {
+      "description": "Group MCP ecosystem packages",
       "matchPackageNames": ["fastmcp", "mcp"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "MCP ecosystem"
-    },
-    {
-      "matchPackageNames": ["pytest**", "ruff", "pre-commit", "ty"],
-      "matchUpdateTypes": ["minor", "patch"],
-      "automerge": true
     }
   ]
 }
