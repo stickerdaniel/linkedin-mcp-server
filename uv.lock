@@ -1028,7 +1028,7 @@ wheels = [
 
 [[package]]
 name = "linkedin-scraper-mcp"
-version = "2.3.3"
+version = "2.3.5"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
