@@ -1012,7 +1012,7 @@ wheels = [
 [[package]]
 name = "linkedin-scraper"
 version = "3.1.1"
-source = { git = "https://github.com/stickerdaniel/linkedin_scraper.git?rev=feat%2Fpatchright-persistent-context#5505ad45bf772fa33a945f651ceed8c3675517db" }
+source = { git = "https://github.com/stickerdaniel/linkedin_scraper.git?rev=feat%2Fpatchright-persistent-context#6df8f338cf68a1b7afd52f752b0666c5d03c1cb5" }
 dependencies = [
     { name = "aiofiles" },
     { name = "lxml" },
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "linkedin-scraper-mcp"
-version = "2.3.7"
+version = "3.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
