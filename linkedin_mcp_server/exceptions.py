@@ -26,20 +26,6 @@ class SessionExpiredError(LinkedInMCPError):
         default_msg = (
             "LinkedIn session has expired.\n\n"
             "To fix this:\n"
-            "  1. Run with --get-session to create a new session\n"
-            "  2. Or set a fresh LINKEDIN_COOKIE environment variable"
-        )
-        super().__init__(message or default_msg)
-
-
-class CookieAuthenticationError(LinkedInMCPError):
-    """Cookie-based authentication failed."""
-
-    def __init__(self, message: str | None = None):
-        default_msg = (
-            "Cookie authentication failed. The cookie may be:\n"
-            "  - Expired (cookies typically last 1-7 days)\n"
-            "  - Invalid (check the format)\n"
-            "  - From a different account"
+            "  Run with --get-session to create a new session"
         )
         super().__init__(message or default_msg)

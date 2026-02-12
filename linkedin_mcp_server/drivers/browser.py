@@ -1,9 +1,9 @@
 """
-Playwright browser management for LinkedIn scraping.
+Patchright browser management for LinkedIn scraping.
 
 This module provides async browser lifecycle management using linkedin_scraper v3's
-BrowserManager. Implements a singleton pattern for browser reuse across tool calls
-with session persistence via JSON files.
+BrowserManager with persistent context. Implements a singleton pattern for browser
+reuse across tool calls with automatic profile persistence.
 """
 
 import logging
@@ -13,18 +13,16 @@ from linkedin_scraper import (
     AuthenticationError,
     BrowserManager,
     is_logged_in,
-    login_with_cookie,
 )
 from linkedin_scraper.core import detect_rate_limit
 
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.utils import get_linkedin_cookie
 
 logger = logging.getLogger(__name__)
 
 
-# Default session file location
-DEFAULT_SESSION_PATH = Path.home() / ".linkedin-mcp" / "session.json"
+# Default persistent profile directory
+DEFAULT_PROFILE_DIR = Path.home() / ".linkedin-mcp" / "profile"
 
 # Global browser instance (singleton)
 _browser: BrowserManager | None = None
@@ -39,33 +37,32 @@ def _apply_browser_settings(browser: BrowserManager) -> None:
 
 async def get_or_create_browser(
     headless: bool | None = None,
-    session_path: Path | None = None,
 ) -> BrowserManager:
     """
     Get existing browser or create and initialize a new one.
 
     Uses a singleton pattern to reuse the browser across tool calls.
-    Loads session from file if available.
+    Uses persistent context for automatic profile persistence.
 
     Args:
         headless: Run browser in headless mode. Defaults to config value.
-        session_path: Path to session file. Defaults to ~/.linkedin-mcp/session.json
 
     Returns:
         Initialized BrowserManager instance
+
+    Raises:
+        AuthenticationError: If no valid authentication found
     """
     global _browser, _headless
 
     if headless is not None:
         _headless = headless
 
-    if session_path is None:
-        session_path = DEFAULT_SESSION_PATH
-
     if _browser is not None:
         return _browser
 
     config = get_config()
+    user_data_dir = Path(config.browser.user_data_dir).expanduser()
     viewport = {
         "width": config.browser.viewport_width,
         "height": config.browser.viewport_height,
@@ -78,50 +75,34 @@ async def get_or_create_browser(
         logger.info("Using custom Chrome path: %s", config.browser.chrome_path)
 
     logger.info(
-        "Creating new browser (headless=%s, slow_mo=%sms, viewport=%sx%s)",
+        "Creating new browser (headless=%s, slow_mo=%sms, viewport=%sx%s, profile=%s)",
         _headless,
         config.browser.slow_mo,
         viewport["width"],
         viewport["height"],
+        user_data_dir,
     )
-    _browser = BrowserManager(
+    browser = BrowserManager(
+        user_data_dir=user_data_dir,
         headless=_headless,
         slow_mo=config.browser.slow_mo,
         user_agent=config.browser.user_agent,
         viewport=viewport,
         **launch_options,
     )
-    await _browser.start()
+    await browser.start()
 
-    # Priority 1: Load session file if available
-    if session_path.exists():
-        try:
-            await _browser.load_session(str(session_path))
-            logger.info(f"Loaded session from {session_path}")
-            # Navigate to LinkedIn to validate session
-            await _browser.page.goto("https://www.linkedin.com/feed/")
-            if await is_logged_in(_browser.page):
-                _apply_browser_settings(_browser)
-                return _browser
-            logger.warning(
-                "Session loaded but expired, trying to create session from cookie"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to load session: {e}")
+    # Navigate to LinkedIn to check authentication
+    await browser.page.goto("https://www.linkedin.com/feed/")
+    if await is_logged_in(browser.page):
+        _apply_browser_settings(browser)
+        _browser = browser  # Assign only after auth succeeds
+        return _browser
 
-    # Priority 2: Use cookie from environment
-    if cookie := get_linkedin_cookie():
-        try:
-            await login_with_cookie(_browser.page, cookie)
-            logger.info("Authenticated using LINKEDIN_COOKIE")
-            _apply_browser_settings(_browser)
-            return _browser
-        except Exception as e:
-            logger.warning(f"Cookie authentication failed: {e}")
-
-    # No auth available - fail fast with clear error
+    # Auth failed — clean up and fail fast
+    await browser.close()
     raise AuthenticationError(
-        "No authentication found. Run with --get-session to create a session."
+        "No authentication found. Run with --get-session to create a profile."
     )
 
 
@@ -136,11 +117,17 @@ async def close_browser() -> None:
         logger.info("Browser closed")
 
 
-def session_exists(session_path: Path | None = None) -> bool:
-    """Check if a session file exists."""
-    if session_path is None:
-        session_path = DEFAULT_SESSION_PATH
-    return session_path.exists()
+def get_profile_dir() -> Path:
+    """Get the resolved profile directory from config."""
+    config = get_config()
+    return Path(config.browser.user_data_dir).expanduser()
+
+
+def profile_exists(profile_dir: Path | None = None) -> bool:
+    """Check if a persistent browser profile exists and is non-empty."""
+    if profile_dir is None:
+        profile_dir = get_profile_dir()
+    return profile_dir.is_dir() and any(profile_dir.iterdir())
 
 
 def set_headless(headless: bool) -> None:
