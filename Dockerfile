@@ -18,13 +18,13 @@ COPY --chown=pwuser:pwuser . /app
 # Install git (needed for git-based dependencies in pyproject.toml)
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
-# Set Playwright browser install location
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-# Install dependencies and Playwright with ONLY Chromium (not Firefox/WebKit)
-# --with-deps installs required system dependencies (fonts, libraries) via apt (needs root)
+# Set browser install location (Patchright reads PLAYWRIGHT_BROWSERS_PATH internally)
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright
+# Install dependencies, system libs for Chromium, and patched Chromium binary
 RUN uv sync --frozen && \
-    uv run playwright install --with-deps chromium && \
-    chmod -R 755 /opt/playwright
+    uv run patchright install-deps chromium && \
+    uv run patchright install chromium && \
+    chmod -R 755 /opt/patchright
 
 # Fix ownership of app directory (venv created by uv)
 RUN chown -R pwuser:pwuser /app

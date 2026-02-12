@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 
@@ -17,9 +15,11 @@ def reset_singletons():
 
 
 @pytest.fixture(autouse=True)
-def isolate_session_path(tmp_path, monkeypatch):
-    """Redirect DEFAULT_SESSION_PATH to tmp_path."""
-    fake_session = tmp_path / "session.json"
+def isolate_profile_dir(tmp_path, monkeypatch):
+    """Redirect profile directory to tmp_path via config and DEFAULT_PROFILE_DIR."""
+    fake_profile = tmp_path / "profile"
+
+    # Patch DEFAULT_PROFILE_DIR for any code still referencing the constant
     for module in [
         "linkedin_mcp_server.drivers.browser",
         "linkedin_mcp_server.authentication",
@@ -27,22 +27,35 @@ def isolate_session_path(tmp_path, monkeypatch):
         "linkedin_mcp_server.setup",
     ]:
         try:
-            monkeypatch.setattr(f"{module}.DEFAULT_SESSION_PATH", fake_session)
+            monkeypatch.setattr(f"{module}.DEFAULT_PROFILE_DIR", fake_profile)
         except AttributeError:
             pass  # Module may not be imported yet
-    return fake_session
+
+    # Patch get_profile_dir() in all modules that import it
+    for gp_module in [
+        "linkedin_mcp_server.drivers.browser",
+        "linkedin_mcp_server.authentication",
+        "linkedin_mcp_server.cli_main",
+        "linkedin_mcp_server.setup",
+    ]:
+        try:
+            monkeypatch.setattr(f"{gp_module}.get_profile_dir", lambda: fake_profile)
+        except AttributeError:
+            pass
+
+    return fake_profile
 
 
 @pytest.fixture
-def session_file(isolate_session_path):
-    """Create valid session file."""
-    isolate_session_path.parent.mkdir(parents=True, exist_ok=True)
-    isolate_session_path.write_text(
-        json.dumps(
-            {"cookies": [{"name": "li_at", "value": "test", "domain": ".linkedin.com"}]}
-        )
+def profile_dir(isolate_profile_dir):
+    """Create a non-empty profile directory."""
+    isolate_profile_dir.mkdir(parents=True, exist_ok=True)
+    # Create a marker file so profile_exists() returns True
+    (isolate_profile_dir / "Default" / "Cookies").parent.mkdir(
+        parents=True, exist_ok=True
     )
-    return isolate_session_path
+    (isolate_profile_dir / "Default" / "Cookies").write_text("placeholder")
+    return isolate_profile_dir
 
 
 @pytest.fixture

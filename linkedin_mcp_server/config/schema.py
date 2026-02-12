@@ -13,8 +13,6 @@ from typing import Literal
 class ConfigurationError(Exception):
     """Raised when configuration validation fails."""
 
-    pass
-
 
 @dataclass
 class BrowserConfig:
@@ -27,6 +25,7 @@ class BrowserConfig:
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
+    user_data_dir: str = "~/.linkedin-mcp/profile"  # Persistent browser profile
 
     def validate(self) -> None:
         """Validate browser configuration values."""
@@ -62,15 +61,12 @@ class ServerConfig:
     transport_explicitly_set: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "WARNING"
     get_session: bool = False
-    session_output_path: str | None = None
     session_info: bool = False  # Check session validity and exit
     clear_session: bool = False
     # HTTP transport configuration
     host: str = "127.0.0.1"
     port: int = 8000
     path: str = "/mcp"
-    # Cookie authentication
-    linkedin_cookie: str | None = None
 
 
 @dataclass

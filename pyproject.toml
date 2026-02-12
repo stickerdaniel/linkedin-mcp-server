@@ -35,7 +35,7 @@ dependencies = [
     "fastmcp>=2.14.0",
     "inquirer>=3.4.0",
     "linkedin-scraper",
-    "playwright>=1.40.0",
+    "patchright>=1.40.0",
     "pyperclip>=1.9.0",
     "python-dotenv>=1.1.1",
 ]
@@ -63,7 +63,7 @@ exclude = ["assets*", "docs*", "tests*"]
 linkedin_mcp_server = ["py.typed"]
 
 [tool.uv.sources]
-linkedin-scraper = { git = "https://github.com/stickerdaniel/linkedin_scraper.git", rev = "fix/rate-limit-false-positive" }
+linkedin-scraper = { git = "https://github.com/stickerdaniel/linkedin_scraper.git", rev = "feat/patchright-persistent-context" }
 
 [dependency-groups]
 dev = [

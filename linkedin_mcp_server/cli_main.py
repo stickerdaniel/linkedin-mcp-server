@@ -2,7 +2,7 @@
 LinkedIn MCP Server - Main CLI application entry point.
 
 Implements a simplified two-phase startup:
-1. Authentication Check - Verify session file is available
+1. Authentication Check - Verify browser profile is available
 2. Server Runtime - MCP server startup with transport selection
 """
 
@@ -18,24 +18,22 @@ from linkedin_scraper import is_logged_in
 from linkedin_scraper.core.exceptions import AuthenticationError, RateLimitError
 
 from linkedin_mcp_server.authentication import (
-    clear_session,
+    clear_profile,
     get_authentication_source,
 )
 from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.drivers.browser import (
-    DEFAULT_SESSION_PATH,
     close_browser,
     get_or_create_browser,
-    session_exists,
+    get_profile_dir,
+    profile_exists,
     set_headless,
 )
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 from linkedin_mcp_server.logging_config import configure_logging
 from linkedin_mcp_server.server import create_mcp_server
-from linkedin_mcp_server.setup import run_interactive_setup, run_session_creation
-
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+from linkedin_mcp_server.setup import run_interactive_setup, run_profile_creation
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +59,8 @@ def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
     return answers["transport"]
 
 
-def clear_session_and_exit() -> None:
-    """Clear LinkedIn session and exit."""
+def clear_profile_and_exit() -> None:
+    """Clear LinkedIn browser profile and exit."""
     config = get_config()
 
     configure_logging(
@@ -71,18 +69,20 @@ def clear_session_and_exit() -> None:
     )
 
     version = get_version()
-    logger.info(f"LinkedIn MCP Server v{version} - Session Clear mode")
+    logger.info(f"LinkedIn MCP Server v{version} - Profile Clear mode")
 
-    if not session_exists():
-        print("ℹ️  No session file found")
+    profile_dir = get_profile_dir()
+
+    if not profile_exists(profile_dir):
+        print("ℹ️  No browser profile found")
         print("Nothing to clear.")
         sys.exit(0)
 
-    print(f"🔑 Clear LinkedIn session from {DEFAULT_SESSION_PATH}?")
+    print(f"🔑 Clear LinkedIn browser profile from {profile_dir}?")
 
     try:
         confirmation = (
-            input("Are you sure you want to clear the session? (y/N): ").strip().lower()
+            input("Are you sure you want to clear the profile? (y/N): ").strip().lower()
         )
         if confirmation not in ("y", "yes"):
             print("❌ Operation cancelled")
@@ -91,17 +91,17 @@ def clear_session_and_exit() -> None:
         print("\n❌ Operation cancelled")
         sys.exit(0)
 
-    if clear_session():
-        print("✅ LinkedIn session cleared successfully!")
+    if clear_profile(profile_dir):
+        print("✅ LinkedIn browser profile cleared successfully!")
     else:
-        print("❌ Failed to clear session")
+        print("❌ Failed to clear profile")
         sys.exit(1)
 
     sys.exit(0)
 
 
-def get_session_and_exit() -> None:
-    """Create session interactively and exit."""
+def get_profile_and_exit() -> None:
+    """Create profile interactively and exit."""
     config = get_config()
 
     configure_logging(
@@ -112,14 +112,14 @@ def get_session_and_exit() -> None:
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Session Creation mode")
 
-    output_path = config.server.session_output_path
-    success = run_session_creation(output_path)
+    user_data_dir = config.browser.user_data_dir
+    success = run_profile_creation(user_data_dir)
 
     sys.exit(0 if success else 1)
 
 
-def session_info_and_exit() -> None:
-    """Check session validity and display info, then exit."""
+def profile_info_and_exit() -> None:
+    """Check profile validity and display info, then exit."""
     config = get_config()
 
     configure_logging(
@@ -130,10 +130,11 @@ def session_info_and_exit() -> None:
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Session Info mode")
 
-    # Check if session file exists first
-    if not session_exists():
-        print(f"❌ No session file found at {DEFAULT_SESSION_PATH}")
-        print("   Run with --get-session to create a session")
+    # Check if profile directory exists first
+    profile_dir = get_profile_dir()
+    if not profile_exists(profile_dir):
+        print(f"❌ No browser profile found at {profile_dir}")
+        print("   Run with --get-session to create a profile")
         sys.exit(1)
 
     # Check if session is valid by testing login status
@@ -142,19 +143,27 @@ def session_info_and_exit() -> None:
             set_headless(True)  # Always check headless
             browser = await get_or_create_browser()
             valid = await is_logged_in(browser.page)
-            await close_browser()
             return valid
-        except Exception as e:
-            logger.error(f"Error checking session: {e}")
+        except AuthenticationError:
             return False
+        except Exception as e:
+            logger.exception(f"Unexpected error checking session: {e}")
+            raise
+        finally:
+            await close_browser()
 
-    valid = asyncio.run(check_session())
+    try:
+        valid = asyncio.run(check_session())
+    except Exception as e:
+        print(f"❌ Could not validate session: {e}")
+        print("   Check logs and browser configuration.")
+        sys.exit(1)
 
     if valid:
-        print(f"✅ Session is valid: {DEFAULT_SESSION_PATH}")
+        print(f"✅ Session is valid (profile: {profile_dir})")
         sys.exit(0)
     else:
-        print(f"❌ Session expired or invalid: {DEFAULT_SESSION_PATH}")
+        print(f"❌ Session expired or invalid (profile: {profile_dir})")
         print("   Run with --get-session to re-authenticate")
         sys.exit(1)
 
@@ -163,7 +172,7 @@ def ensure_authentication_ready() -> None:
     """
     Phase 1: Ensure authentication is ready.
 
-    Checks for existing session file.
+    Checks for existing browser profile.
     If not found, runs interactive setup in interactive mode.
 
     Raises:
@@ -171,7 +180,7 @@ def ensure_authentication_ready() -> None:
     """
     config = get_config()
 
-    # Check for existing session
+    # Check for existing profile
     try:
         get_authentication_source()
         return
@@ -182,9 +191,9 @@ def ensure_authentication_ready() -> None:
     # No authentication found - try interactive setup if possible
     if not config.is_interactive:
         raise CredentialsNotFoundError(
-            "No LinkedIn session found.\n"
+            "No LinkedIn profile found.\n"
             "Options:\n"
-            "  1. Run with --get-session to create a session\n"
+            "  1. Run with --get-session to create a profile\n"
             "  2. Run with --no-headless to login interactively"
         )
 
@@ -214,6 +223,8 @@ def get_version() -> str:
 
 def main() -> None:
     """Main application entry point."""
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+
     config = get_config()
 
     # Configure logging
@@ -236,15 +247,15 @@ def main() -> None:
 
     # Handle --clear-session flag
     if config.server.clear_session:
-        clear_session_and_exit()
+        clear_profile_and_exit()
 
     # Handle --get-session flag
     if config.server.get_session:
-        get_session_and_exit()
+        get_profile_and_exit()
 
     # Handle --session-info flag
     if config.server.session_info:
-        session_info_and_exit()
+        profile_info_and_exit()
 
     logger.debug(f"Server configuration: {config}")
 
