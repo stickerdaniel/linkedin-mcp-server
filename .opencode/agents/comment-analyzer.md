@@ -2,9 +2,9 @@
 name: comment-analyzer
 mode: subagent
 # https://models.dev/
-model: 'openai/gpt-5.2-codex'
-variant: 'xhigh'
-# model: 'github-copilot/gpt-5.2-codex'
+model: 'openai/gpt-5.3-codex'
+variant: 'high'
+# model: 'github-copilot/gpt-5.3-codex'
 color: '#10b981'
 description: |
   Use this agent when you need to analyze code comments for accuracy, completeness, and long-term maintainability. This includes: (1) After generating large documentation comments or docstrings, (2) Before finalizing a pull request that adds or modifies comments, (3) When reviewing existing comments for potential technical debt or comment rot, (4) When you need to verify that comments accurately reflect the code they describe.

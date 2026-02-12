@@ -1012,7 +1012,7 @@ wheels = [
 [[package]]
 name = "linkedin-scraper"
 version = "3.1.1"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/stickerdaniel/linkedin_scraper.git?rev=fix%2Frate-limit-false-positive#092aef732a1a276b61052e5cefccfcfea0c3695d" }
 dependencies = [
     { name = "aiofiles" },
     { name = "lxml" },
@@ -1021,14 +1021,10 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/59/e0/389404ecd6d0efec2cc5be0d1c456d6b8f723865b03e0b6567945c713594/linkedin_scraper-3.1.1.tar.gz", hash = "sha256:3232a16a72053f8969464dc7386a7a0b2c262f9fe7c53f41734857ea9c908588", size = 47349, upload-time = "2026-01-27T06:05:53.871Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/f6/a17d0be0cf6c9a85709e287f137c9f1227c44e208e737ef371f83dc5829b/linkedin_scraper-3.1.1-py3-none-any.whl", hash = "sha256:5977a28dcaa2b1d14caa0e3ea28f6d7c16e393f1140088b22588200a8498657c", size = 53017, upload-time = "2026-01-27T06:05:52.48Z" },
-]
 
 [[package]]
 name = "linkedin-scraper-mcp"
-version = "2.3.5"
+version = "2.3.6"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -1055,7 +1051,7 @@ dev = [
 requires-dist = [
     { name = "fastmcp", specifier = ">=2.14.0" },
     { name = "inquirer", specifier = ">=3.4.0" },
-    { name = "linkedin-scraper", specifier = ">=3.1.1" },
+    { name = "linkedin-scraper", git = "https://github.com/stickerdaniel/linkedin_scraper.git?rev=fix%2Frate-limit-false-positive" },
     { name = "playwright", specifier = ">=1.40.0" },
     { name = "pyperclip", specifier = ">=1.9.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
