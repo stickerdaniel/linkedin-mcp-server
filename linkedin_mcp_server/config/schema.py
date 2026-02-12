@@ -13,8 +13,6 @@ from typing import Literal
 class ConfigurationError(Exception):
     """Raised when configuration validation fails."""
 
-    pass
-
 
 @dataclass
 class BrowserConfig:
