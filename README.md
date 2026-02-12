@@ -48,14 +48,17 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `close_session` | Close browser session and clean up resources | Working |
 
 > [!WARNING]
-> The session file at `~/.linkedin-mcp/session.json` contains sensitive authentication data. Keep it secure and do not share it.
+> The browser profile at `~/.linkedin-mcp/profile/` contains sensitive authentication data. Keep it secure and do not share it.
+
+> [!IMPORTANT]
+> **Breaking change in v3.0:** This version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--get-session` again to create a new profile.
 
 <br/>
 <br/>
 
 ## 🚀 uvx Setup (Recommended - Universal)
 
-**Prerequisites:** Make sure you have [uv](https://docs.astral.sh/uv/) and Playwright `uvx playwright install chromium` installed.
+**Prerequisites:** Make sure you have [uv](https://docs.astral.sh/uv/) and Patchright `uvx patchright install chromium` installed.
 
 ### Installation
 
@@ -65,7 +68,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 uvx linkedin-scraper-mcp --get-session
 ```
 
-This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
+This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile is saved to `~/.linkedin-mcp/profile/`.
 
 **Step 2: Run the server**
 
@@ -101,15 +104,16 @@ uvx linkedin-scraper-mcp
 
 **CLI Options:**
 
-- `--get-session [PATH]` - Open browser to log in and save session (default: ~/.linkedin-mcp/session.json)
+- `--get-session` - Open browser to log in and save persistent profile
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--clear-session` - Clear stored LinkedIn session file
+- `--clear-session` - Clear stored LinkedIn browser profile
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
+- `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
 
 **Basic Usage Examples:**
@@ -149,7 +153,7 @@ uvx linkedin-scraper-mcp --transport streamable-http --host 127.0.0.1 --port 808
 
 **Session issues:**
 
-- Session is stored at `~/.linkedin-mcp/session.json`
+- Browser profile is stored at `~/.linkedin-mcp/profile/`
 - Make sure you have only one active LinkedIn session at a time
 
 **Login issues:**
@@ -177,45 +181,17 @@ uvx linkedin-scraper-mcp --transport streamable-http --host 127.0.0.1 --port 808
 
 **Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running.
 
-### Authentication Options
+### Authentication
 
-Docker runs headless (no browser window), so you need to authenticate using one of these methods:
+Docker runs headless (no browser window), so you need to create a browser profile locally first and mount it into Docker.
 
-#### Option 1: Cookie Authentication (Simplest)
-
-Get your LinkedIn `li_at` cookie and pass it to Docker:
-
-```json
-{
-  "mcpServers": {
-    "linkedin": {
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "LINKEDIN_COOKIE", "stickerdaniel/linkedin-mcp-server"],
-      "env": {
-        "LINKEDIN_COOKIE": "your_li_at_cookie_value"
-      }
-    }
-  }
-}
-```
-
-**To get your `li_at` cookie:**
-
-1. Open LinkedIn in your browser in an **incognito** tab and log in
-2. Open DevTools (F12) → Application → Cookies → linkedin.com
-3. Copy the `li_at` cookie value
-
-#### Option 2: Session File (More Reliable)
-
-Create a session file locally, then mount it into Docker.
-
-**Step 1: Create session using uvx (one-time setup)**
+**Step 1: Create profile using uvx (one-time setup)**
 
 ```bash
 uvx linkedin-scraper-mcp --get-session
 ```
 
-This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The session is saved to `~/.linkedin-mcp/session.json`.
+This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile is saved to `~/.linkedin-mcp/profile/`.
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -235,12 +211,10 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --get-session` again locally, or use a fresh `li_at` cookie.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --get-session` again locally.
 
 > [!NOTE]
-> **Why can't I run `--get-session` in Docker?** Docker containers don't have a display server. You have two options:
-> 1. Create a session on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker
-> 2. Pass your `li_at` cookie via `LINKEDIN_COOKIE` (if you encounter auth challenges, use option 1 instead)
+> **Why can't I run `--get-session` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
 
 ### Docker Setup Help
 
@@ -259,12 +233,13 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--clear-session` - Clear stored LinkedIn session file
+- `--clear-session` - Clear stored LinkedIn browser profile
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
+- `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (rarely needed in Docker)
 
 > [!NOTE]
-> `--get-session` and `--no-headless` are not available in Docker (no display server). Use the [uvx setup](#-uvx-setup-recommended---universal) to create sessions.
+> `--get-session` and `--no-headless` are not available in Docker (no display server). Use the [uvx setup](#-uvx-setup-recommended---universal) to create profiles.
 
 **HTTP Mode Example (for web-based MCP clients):**
 
@@ -385,8 +360,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 uv sync --group dev
 
-# 4. Install Playwright browser
-uv run playwright install chromium
+# 4. Install Patchright browser
+uv run patchright install chromium
 
 # 5. Install pre-commit hooks
 uv run pre-commit install
@@ -405,17 +380,17 @@ uv run -m linkedin_mcp_server
 
 **CLI Options:**
 
-- `--get-session [PATH]` - Open browser to log in and save session (default: ~/.linkedin-mcp/session.json)
+- `--get-session` - Open browser to log in and save persistent profile
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--clear-session` - Clear stored LinkedIn session file
+- `--clear-session` - Clear stored LinkedIn browser profile
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--session-info` - Check if current session is valid and exit
-- `--linkedin-cookie COOKIE` - LinkedIn session cookie (li_at) for authentication
+- `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--slow-mo MS` - Delay between browser actions in milliseconds (default: 0, useful for debugging)
 - `--user-agent STRING` - Custom browser user agent
 - `--viewport WxH` - Browser viewport size (default: 1280x720)
@@ -461,13 +436,13 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 **Session issues:**
 
-- Session is stored in `~/.linkedin-mcp/session.json`
-- Use `--clear-session` to clear the session and start fresh
+- Browser profile is stored at `~/.linkedin-mcp/profile/`
+- Use `--clear-session` to clear the profile and start fresh
 
-**Python/Playwright issues:**
+**Python/Patchright issues:**
 
 - Check Python version: `python --version` (should be 3.12+)
-- Reinstall Playwright: `uv run playwright install chromium`
+- Reinstall Patchright: `uv run patchright install chromium`
 - Reinstall dependencies: `uv sync --reinstall`
 
 **Timeout issues:**
