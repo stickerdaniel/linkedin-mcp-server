@@ -24,16 +24,16 @@ from linkedin_mcp_server.authentication import (
 from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.drivers.browser import (
-    DEFAULT_PROFILE_DIR,
     close_browser,
     get_or_create_browser,
+    get_profile_dir,
     profile_exists,
     set_headless,
 )
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 from linkedin_mcp_server.logging_config import configure_logging
 from linkedin_mcp_server.server import create_mcp_server
-from linkedin_mcp_server.setup import run_interactive_setup, run_session_creation
+from linkedin_mcp_server.setup import run_interactive_setup, run_profile_creation
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ def choose_transport_interactive() -> Literal["stdio", "streamable-http"]:
     return answers["transport"]
 
 
-def clear_session_and_exit() -> None:
+def clear_profile_and_exit() -> None:
     """Clear LinkedIn browser profile and exit."""
     config = get_config()
 
@@ -71,12 +71,14 @@ def clear_session_and_exit() -> None:
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Profile Clear mode")
 
-    if not profile_exists():
+    profile_dir = get_profile_dir()
+
+    if not profile_exists(profile_dir):
         print("ℹ️  No browser profile found")
         print("Nothing to clear.")
         sys.exit(0)
 
-    print(f"🔑 Clear LinkedIn browser profile from {DEFAULT_PROFILE_DIR}?")
+    print(f"🔑 Clear LinkedIn browser profile from {profile_dir}?")
 
     try:
         confirmation = (
@@ -89,7 +91,7 @@ def clear_session_and_exit() -> None:
         print("\n❌ Operation cancelled")
         sys.exit(0)
 
-    if clear_profile():
+    if clear_profile(profile_dir):
         print("✅ LinkedIn browser profile cleared successfully!")
     else:
         print("❌ Failed to clear profile")
@@ -98,8 +100,8 @@ def clear_session_and_exit() -> None:
     sys.exit(0)
 
 
-def get_session_and_exit() -> None:
-    """Create session interactively and exit."""
+def get_profile_and_exit() -> None:
+    """Create profile interactively and exit."""
     config = get_config()
 
     configure_logging(
@@ -111,13 +113,13 @@ def get_session_and_exit() -> None:
     logger.info(f"LinkedIn MCP Server v{version} - Session Creation mode")
 
     user_data_dir = config.browser.user_data_dir
-    success = run_session_creation(user_data_dir)
+    success = run_profile_creation(user_data_dir)
 
     sys.exit(0 if success else 1)
 
 
-def session_info_and_exit() -> None:
-    """Check session validity and display info, then exit."""
+def profile_info_and_exit() -> None:
+    """Check profile validity and display info, then exit."""
     config = get_config()
 
     configure_logging(
@@ -129,8 +131,9 @@ def session_info_and_exit() -> None:
     logger.info(f"LinkedIn MCP Server v{version} - Session Info mode")
 
     # Check if profile directory exists first
-    if not profile_exists():
-        print(f"❌ No browser profile found at {DEFAULT_PROFILE_DIR}")
+    profile_dir = get_profile_dir()
+    if not profile_exists(profile_dir):
+        print(f"❌ No browser profile found at {profile_dir}")
         print("   Run with --get-session to create a profile")
         sys.exit(1)
 
@@ -140,19 +143,27 @@ def session_info_and_exit() -> None:
             set_headless(True)  # Always check headless
             browser = await get_or_create_browser()
             valid = await is_logged_in(browser.page)
-            await close_browser()
             return valid
-        except Exception as e:
-            logger.error(f"Error checking session: {e}")
+        except AuthenticationError:
             return False
+        except Exception as e:
+            logger.exception(f"Unexpected error checking session: {e}")
+            raise
+        finally:
+            await close_browser()
 
-    valid = asyncio.run(check_session())
+    try:
+        valid = asyncio.run(check_session())
+    except Exception as e:
+        print(f"❌ Could not validate session: {e}")
+        print("   Check logs and browser configuration.")
+        sys.exit(1)
 
     if valid:
-        print(f"✅ Session is valid (profile: {DEFAULT_PROFILE_DIR})")
+        print(f"✅ Session is valid (profile: {profile_dir})")
         sys.exit(0)
     else:
-        print(f"❌ Session expired or invalid (profile: {DEFAULT_PROFILE_DIR})")
+        print(f"❌ Session expired or invalid (profile: {profile_dir})")
         print("   Run with --get-session to re-authenticate")
         sys.exit(1)
 
@@ -236,15 +247,15 @@ def main() -> None:
 
     # Handle --clear-session flag
     if config.server.clear_session:
-        clear_session_and_exit()
+        clear_profile_and_exit()
 
     # Handle --get-session flag
     if config.server.get_session:
-        get_session_and_exit()
+        get_profile_and_exit()
 
     # Handle --session-info flag
     if config.server.session_info:
-        session_info_and_exit()
+        profile_info_and_exit()
 
     logger.debug(f"Server configuration: {config}")
 

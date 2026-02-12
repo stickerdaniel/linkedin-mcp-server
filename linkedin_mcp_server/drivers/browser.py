@@ -82,7 +82,7 @@ async def get_or_create_browser(
         viewport["height"],
         user_data_dir,
     )
-    _browser = BrowserManager(
+    browser = BrowserManager(
         user_data_dir=user_data_dir,
         headless=_headless,
         slow_mo=config.browser.slow_mo,
@@ -90,17 +90,19 @@ async def get_or_create_browser(
         viewport=viewport,
         **launch_options,
     )
-    await _browser.start()
+    await browser.start()
 
     # Navigate to LinkedIn to check authentication
-    await _browser.page.goto("https://www.linkedin.com/feed/")
-    if await is_logged_in(_browser.page):
-        _apply_browser_settings(_browser)
+    await browser.page.goto("https://www.linkedin.com/feed/")
+    if await is_logged_in(browser.page):
+        _apply_browser_settings(browser)
+        _browser = browser  # Assign only after auth succeeds
         return _browser
 
-    # No auth available - fail fast with clear error
+    # Auth failed — clean up and fail fast
+    await browser.close()
     raise AuthenticationError(
-        "No authentication found. Run with --get-session to create a session."
+        "No authentication found. Run with --get-session to create a profile."
     )
 
 
@@ -115,11 +117,17 @@ async def close_browser() -> None:
         logger.info("Browser closed")
 
 
+def get_profile_dir() -> Path:
+    """Get the resolved profile directory from config."""
+    config = get_config()
+    return Path(config.browser.user_data_dir).expanduser()
+
+
 def profile_exists(profile_dir: Path | None = None) -> bool:
     """Check if a persistent browser profile exists and is non-empty."""
     if profile_dir is None:
-        profile_dir = DEFAULT_PROFILE_DIR
-    return profile_dir.exists() and any(profile_dir.iterdir())
+        profile_dir = get_profile_dir()
+    return profile_dir.is_dir() and any(profile_dir.iterdir())
 
 
 def set_headless(headless: bool) -> None:

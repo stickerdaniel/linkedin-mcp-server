@@ -58,14 +58,14 @@ def convert_exception_to_response(
         return {
             "error": "authentication_not_found",
             "message": str(exception),
-            "resolution": "Run with --get-session to create a session file",
+            "resolution": "Run with --get-session to create a browser profile.",
         }
 
     elif isinstance(exception, SessionExpiredError):
         return {
             "error": "session_expired",
             "message": str(exception),
-            "resolution": "Run with --get-session to create a new session",
+            "resolution": "Run with --get-session to create a new browser profile.",
         }
 
     elif isinstance(exception, AuthenticationError):

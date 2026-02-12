@@ -16,8 +16,10 @@ def reset_singletons():
 
 @pytest.fixture(autouse=True)
 def isolate_profile_dir(tmp_path, monkeypatch):
-    """Redirect DEFAULT_PROFILE_DIR to tmp_path."""
+    """Redirect profile directory to tmp_path via config and DEFAULT_PROFILE_DIR."""
     fake_profile = tmp_path / "profile"
+
+    # Patch DEFAULT_PROFILE_DIR for any code still referencing the constant
     for module in [
         "linkedin_mcp_server.drivers.browser",
         "linkedin_mcp_server.authentication",
@@ -28,6 +30,19 @@ def isolate_profile_dir(tmp_path, monkeypatch):
             monkeypatch.setattr(f"{module}.DEFAULT_PROFILE_DIR", fake_profile)
         except AttributeError:
             pass  # Module may not be imported yet
+
+    # Patch get_profile_dir() in all modules that import it
+    for gp_module in [
+        "linkedin_mcp_server.drivers.browser",
+        "linkedin_mcp_server.authentication",
+        "linkedin_mcp_server.cli_main",
+        "linkedin_mcp_server.setup",
+    ]:
+        try:
+            monkeypatch.setattr(f"{gp_module}.get_profile_dir", lambda: fake_profile)
+        except AttributeError:
+            pass
+
     return fake_profile
 
 
