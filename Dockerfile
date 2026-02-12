@@ -15,6 +15,9 @@ RUN chown pwuser:pwuser /app
 # Copy project files with correct ownership
 COPY --chown=pwuser:pwuser . /app
 
+# Install git (needed for git-based dependencies in pyproject.toml)
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
 # Set Playwright browser install location
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 # Install dependencies and Playwright with ONLY Chromium (not Firefox/WebKit)
