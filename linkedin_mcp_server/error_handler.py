@@ -19,7 +19,6 @@ from linkedin_scraper.core.exceptions import (
 )
 
 from linkedin_mcp_server.exceptions import (
-    CookieAuthenticationError,
     CredentialsNotFoundError,
     LinkedInMCPError,
     SessionExpiredError,
@@ -59,28 +58,21 @@ def convert_exception_to_response(
         return {
             "error": "authentication_not_found",
             "message": str(exception),
-            "resolution": "Run with --get-session to create a session file",
+            "resolution": "Run with --get-session to create a browser profile.",
         }
 
     elif isinstance(exception, SessionExpiredError):
         return {
             "error": "session_expired",
             "message": str(exception),
-            "resolution": "Run with --get-session to create a new session",
-        }
-
-    elif isinstance(exception, CookieAuthenticationError):
-        return {
-            "error": "cookie_auth_failed",
-            "message": str(exception),
-            "resolution": "Check your LINKEDIN_COOKIE value or create a session file",
+            "resolution": "Run with --get-session to create a new browser profile.",
         }
 
     elif isinstance(exception, AuthenticationError):
         return {
             "error": "authentication_failed",
             "message": str(exception),
-            "resolution": "Run with --get-session to re-authenticate (opens visible browser, not available in Docker), or set LINKEDIN_COOKIE environment variable.",
+            "resolution": "Run with --get-session to re-authenticate.",
         }
 
     elif isinstance(exception, RateLimitError):
