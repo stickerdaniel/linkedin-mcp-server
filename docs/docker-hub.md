@@ -12,29 +12,15 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-### Option 1: Cookie Authentication (Simplest)
+Create a browser profile locally, then mount it into Docker.
 
-Pass your LinkedIn `li_at` cookie - session will be created and stored automatically.
+**Step 1: Create profile using uvx (one-time setup)**
 
-> **Note:** If you encounter authentication challenges, use Option 2 instead.
-
-```json
-{
-  "mcpServers": {
-    "linkedin": {
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "LINKEDIN_COOKIE", "stickerdaniel/linkedin-mcp-server"],
-      "env": {
-        "LINKEDIN_COOKIE": "your_li_at_cookie_value"
-      }
-    }
-  }
-}
+```bash
+uvx linkedin-scraper-mcp --get-session
 ```
 
-### Option 2: Browser Login via uvx
-
-Create a session using the [uvx setup](https://github.com/stickerdaniel/linkedin-mcp-server#-uvx-setup-recommended---universal), then mount it:
+**Step 2: Configure Claude Desktop with Docker**
 
 ```json
 {
@@ -51,13 +37,13 @@ Create a session using the [uvx setup](https://github.com/stickerdaniel/linkedin
 }
 ```
 
-> **Note:** Docker containers don't have a display server, so you can't use the `--get-session` command in Docker.
+> **Note:** Docker containers don't have a display server, so you can't use the `--get-session` command in Docker. Create a profile on your host first.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LINKEDIN_COOKIE` | - | LinkedIn `li_at` session cookie (required if no session file) |
+| `USER_DATA_DIR` | `~/.linkedin-mcp/profile` | Path to persistent browser profile directory |
 | `LOG_LEVEL` | `WARNING` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
 | `USER_AGENT` | - | Custom browser user agent |
@@ -76,10 +62,12 @@ Create a session using the [uvx setup](https://github.com/stickerdaniel/linkedin
   "mcpServers": {
     "linkedin": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "LINKEDIN_COOKIE", "-e", "TIMEOUT=10000", "stickerdaniel/linkedin-mcp-server"],
-      "env": {
-        "LINKEDIN_COOKIE": "your_li_at_cookie_value"
-      }
+      "args": [
+        "run", "-i", "--rm",
+        "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-e", "TIMEOUT=10000",
+        "stickerdaniel/linkedin-mcp-server"
+      ]
     }
   }
 }
