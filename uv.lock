@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "linkedin-scraper-mcp"
-version = "2.3.6"
+version = "2.3.7"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
