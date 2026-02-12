@@ -38,7 +38,6 @@ class EnvironmentKeys:
     HEADLESS = "HEADLESS"
     LOG_LEVEL = "LOG_LEVEL"
     TRANSPORT = "TRANSPORT"
-    LINKEDIN_COOKIE = "LINKEDIN_COOKIE"
     TIMEOUT = "TIMEOUT"
     USER_AGENT = "USER_AGENT"
     HOST = "HOST"
@@ -47,6 +46,7 @@ class EnvironmentKeys:
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
+    USER_DATA_DIR = "USER_DATA_DIR"
 
 
 def is_interactive_environment() -> bool:
@@ -91,9 +91,9 @@ def load_from_env(config: AppConfig) -> AppConfig:
                 f"Invalid TRANSPORT: '{transport_env}'. Must be 'stdio' or 'streamable-http'."
             )
 
-    # LinkedIn cookie for headless auth
-    if cookie := os.environ.get(EnvironmentKeys.LINKEDIN_COOKIE):
-        config.server.linkedin_cookie = cookie
+    # Persistent browser profile directory
+    if user_data_dir := os.environ.get(EnvironmentKeys.USER_DATA_DIR):
+        config.browser.user_data_dir = user_data_dir
 
     # Timeout for page operations (semantic validation in BrowserConfig.__post_init__)
     if timeout_env := os.environ.get(EnvironmentKeys.TIMEOUT):
@@ -239,11 +239,8 @@ def load_from_args(config: AppConfig) -> AppConfig:
     # Session management
     parser.add_argument(
         "--get-session",
-        nargs="?",
-        const="~/.linkedin-mcp/session.json",
-        default=None,
-        metavar="PATH",
-        help="Login interactively and save session (default: ~/.linkedin-mcp/session.json)",
+        action="store_true",
+        help="Login interactively via browser and save persistent profile",
     )
 
     parser.add_argument(
@@ -255,14 +252,15 @@ def load_from_args(config: AppConfig) -> AppConfig:
     parser.add_argument(
         "--clear-session",
         action="store_true",
-        help="Clear stored LinkedIn session file",
+        help="Clear stored LinkedIn browser profile",
     )
 
     parser.add_argument(
-        "--linkedin-cookie",
+        "--user-data-dir",
         type=str,
         default=None,
-        help="LinkedIn session cookie (li_at) for authentication",
+        metavar="PATH",
+        help="Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)",
     )
 
     args = parser.parse_args()
@@ -312,9 +310,8 @@ def load_from_args(config: AppConfig) -> AppConfig:
         config.browser.chrome_path = args.chrome_path
 
     # Session management
-    if args.get_session is not None:
+    if args.get_session:
         config.server.get_session = True
-        config.server.session_output_path = args.get_session
 
     if args.session_info:
         config.server.session_info = True
@@ -322,8 +319,8 @@ def load_from_args(config: AppConfig) -> AppConfig:
     if args.clear_session:
         config.server.clear_session = True
 
-    if args.linkedin_cookie:
-        config.server.linkedin_cookie = args.linkedin_cookie
+    if args.user_data_dir:
+        config.browser.user_data_dir = args.user_data_dir
 
     return config
 
