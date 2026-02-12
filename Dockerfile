@@ -18,11 +18,11 @@ COPY --chown=pwuser:pwuser . /app
 # Install git (needed for git-based dependencies in pyproject.toml)
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
-# Set Patchright browser install location
-ENV PATCHRIGHT_BROWSERS_PATH=/opt/patchright
+# Set browser install location (Patchright reads PLAYWRIGHT_BROWSERS_PATH internally)
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright
 # Install dependencies, system libs for Chromium, and patched Chromium binary
 RUN uv sync --frozen && \
-    uv run playwright install-deps chromium && \
+    uv run patchright install-deps chromium && \
     uv run patchright install chromium && \
     chmod -R 755 /opt/patchright
 
