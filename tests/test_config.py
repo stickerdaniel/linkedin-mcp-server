@@ -13,6 +13,7 @@ class TestBrowserConfig:
         config = BrowserConfig()
         assert config.headless is True
         assert config.default_timeout == 5000
+        assert config.user_data_dir == "~/.linkedin-mcp/profile"
 
     def test_validate_passes(self):
         BrowserConfig().validate()  # No error
@@ -149,9 +150,9 @@ class TestLoaders:
         with pytest.raises(ConfigurationError, match="Invalid VIEWPORT"):
             load_from_env(AppConfig())
 
-    def test_load_from_env_linkedin_cookie(self, monkeypatch):
-        monkeypatch.setenv("LINKEDIN_COOKIE", "test_cookie_value")
+    def test_load_from_env_user_data_dir(self, monkeypatch):
+        monkeypatch.setenv("USER_DATA_DIR", "/custom/profile")
         from linkedin_mcp_server.config.loaders import load_from_env
 
         config = load_from_env(AppConfig())
-        assert config.server.linkedin_cookie == "test_cookie_value"
+        assert config.browser.user_data_dir == "/custom/profile"
