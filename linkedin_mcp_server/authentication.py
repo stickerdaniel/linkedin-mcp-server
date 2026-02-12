@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 
 from linkedin_mcp_server.drivers.browser import (
-    DEFAULT_PROFILE_DIR,
+    get_profile_dir,
     profile_exists,
 )
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
@@ -27,8 +27,9 @@ def get_authentication_source() -> bool:
     Raises:
         CredentialsNotFoundError: If no authentication method available
     """
-    if profile_exists():
-        logger.info(f"Using persistent profile from {DEFAULT_PROFILE_DIR}")
+    profile_dir = get_profile_dir()
+    if profile_exists(profile_dir):
+        logger.info(f"Using persistent profile from {profile_dir}")
         return True
 
     raise CredentialsNotFoundError(
@@ -53,7 +54,7 @@ def clear_profile(profile_dir: Path | None = None) -> bool:
         True if clearing was successful
     """
     if profile_dir is None:
-        profile_dir = DEFAULT_PROFILE_DIR
+        profile_dir = get_profile_dir()
 
     if profile_dir.exists():
         try:

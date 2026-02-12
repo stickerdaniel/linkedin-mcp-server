@@ -6,15 +6,12 @@ with persistent context. Profile state auto-persists to user_data_dir.
 """
 
 import asyncio
-import logging
 from pathlib import Path
 
 from linkedin_scraper import BrowserManager, wait_for_manual_login
 from linkedin_scraper.core import warm_up_browser
 
-from linkedin_mcp_server.drivers.browser import DEFAULT_PROFILE_DIR
-
-logger = logging.getLogger(__name__)
+from linkedin_mcp_server.drivers.browser import get_profile_dir
 
 
 async def interactive_login(
@@ -28,7 +25,7 @@ async def interactive_login(
     Profile state auto-persists to user_data_dir.
 
     Args:
-        user_data_dir: Path to browser profile. Defaults to ~/.linkedin-mcp/profile
+        user_data_dir: Path to browser profile. Defaults to config's user_data_dir.
         warm_up: Visit normal sites first to appear more human-like (default: True)
 
     Returns:
@@ -38,7 +35,7 @@ async def interactive_login(
         Exception: If login fails or times out
     """
     if user_data_dir is None:
-        user_data_dir = DEFAULT_PROFILE_DIR
+        user_data_dir = get_profile_dir()
 
     print("Opening browser for LinkedIn login...")
     print("   Please log in manually. You have 5 minutes to complete authentication.")
@@ -61,29 +58,29 @@ async def interactive_login(
         return True
 
 
-def run_session_creation(user_data_dir: str | None = None) -> bool:
+def run_profile_creation(user_data_dir: str | None = None) -> bool:
     """
-    Create session via interactive login with persistent profile.
+    Create profile via interactive login with persistent context.
 
     Args:
-        user_data_dir: Path to profile directory. Defaults to ~/.linkedin-mcp/profile
+        user_data_dir: Path to profile directory. Defaults to config's user_data_dir.
 
     Returns:
-        True if session was created successfully
+        True if profile was created successfully
     """
     if user_data_dir:
         profile_dir = Path(user_data_dir).expanduser()
     else:
-        profile_dir = DEFAULT_PROFILE_DIR
+        profile_dir = get_profile_dir()
 
-    print("LinkedIn MCP Server - Session Creation")
+    print("LinkedIn MCP Server - Profile Creation")
     print(f"   Profile will be saved to: {profile_dir}")
 
     try:
         success = asyncio.run(interactive_login(profile_dir))
         return success
     except Exception as e:
-        print(f"Session creation failed: {e}")
+        print(f"Profile creation failed: {e}")
         return False
 
 
