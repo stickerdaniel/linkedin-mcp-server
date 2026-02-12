@@ -1,44 +1,31 @@
 import pytest
 
-from linkedin_mcp_server.authentication import clear_session, get_authentication_source
+from linkedin_mcp_server.authentication import clear_profile, get_authentication_source
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 
 
-def test_get_auth_source_session(session_file, monkeypatch):
+def test_get_auth_source_profile(profile_dir, monkeypatch):
     monkeypatch.setattr(
-        "linkedin_mcp_server.authentication.session_exists", lambda: True
+        "linkedin_mcp_server.authentication.profile_exists", lambda: True
     )
-    assert get_authentication_source() == "session"
-
-
-def test_get_auth_source_cookie(monkeypatch):
-    monkeypatch.setattr(
-        "linkedin_mcp_server.authentication.session_exists", lambda: False
-    )
-    monkeypatch.setattr(
-        "linkedin_mcp_server.authentication.get_linkedin_cookie", lambda: "cookie"
-    )
-    assert get_authentication_source() == "cookie"
+    assert get_authentication_source() is True
 
 
 def test_get_auth_source_none_raises(monkeypatch):
     monkeypatch.setattr(
-        "linkedin_mcp_server.authentication.session_exists", lambda: False
-    )
-    monkeypatch.setattr(
-        "linkedin_mcp_server.authentication.get_linkedin_cookie", lambda: None
+        "linkedin_mcp_server.authentication.profile_exists", lambda: False
     )
     with pytest.raises(CredentialsNotFoundError):
         get_authentication_source()
 
 
-def test_clear_session_removes_file(session_file):
-    assert session_file.exists()
-    result = clear_session(session_file)
+def test_clear_profile_removes_dir(profile_dir):
+    assert profile_dir.exists()
+    result = clear_profile(profile_dir)
     assert result is True
-    assert not session_file.exists()
+    assert not profile_dir.exists()
 
 
-def test_clear_session_no_file(isolate_session_path):
-    result = clear_session(isolate_session_path)
-    assert result is True  # No error even if file doesn't exist
+def test_clear_profile_no_dir(isolate_profile_dir):
+    result = clear_profile(isolate_profile_dir)
+    assert result is True  # No error even if dir doesn't exist

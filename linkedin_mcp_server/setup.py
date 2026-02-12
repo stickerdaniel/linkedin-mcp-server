@@ -1,8 +1,8 @@
 """
 Interactive setup flows for LinkedIn MCP Server authentication.
 
-Handles session creation through interactive browser login using Playwright.
-Uses linkedin_scraper v3's wait_for_manual_login for authentication.
+Handles session creation through interactive browser login using Patchright
+with persistent context. Profile state auto-persists to user_data_dir.
 """
 
 import asyncio
@@ -12,38 +12,39 @@ from pathlib import Path
 from linkedin_scraper import BrowserManager, wait_for_manual_login
 from linkedin_scraper.core import warm_up_browser
 
-from linkedin_mcp_server.drivers.browser import DEFAULT_SESSION_PATH
+from linkedin_mcp_server.drivers.browser import DEFAULT_PROFILE_DIR
 
 logger = logging.getLogger(__name__)
 
 
-async def interactive_login_and_save(
-    session_path: Path | None = None, warm_up: bool = True
+async def interactive_login(
+    user_data_dir: Path | None = None, warm_up: bool = True
 ) -> bool:
     """
-    Open browser for manual LinkedIn login and save session.
+    Open browser for manual LinkedIn login with persistent profile.
 
     Opens a non-headless browser, navigates to LinkedIn login page,
     and waits for user to complete authentication (including 2FA, captcha, etc.).
+    Profile state auto-persists to user_data_dir.
 
     Args:
-        session_path: Path to save session. Defaults to ~/.linkedin-mcp/session.json
+        user_data_dir: Path to browser profile. Defaults to ~/.linkedin-mcp/profile
         warm_up: Visit normal sites first to appear more human-like (default: True)
 
     Returns:
-        True if login was successful and session was saved
+        True if login was successful
 
     Raises:
         Exception: If login fails or times out
     """
-    if session_path is None:
-        session_path = DEFAULT_SESSION_PATH
+    if user_data_dir is None:
+        user_data_dir = DEFAULT_PROFILE_DIR
 
     print("Opening browser for LinkedIn login...")
     print("   Please log in manually. You have 5 minutes to complete authentication.")
     print("   (This handles 2FA, captcha, and any security challenges)")
 
-    async with BrowserManager(headless=False) as browser:
+    async with BrowserManager(user_data_dir=user_data_dir, headless=False) as browser:
         # Warm up browser to appear more human-like and avoid security checkpoints
         if warm_up:
             print("   Warming up browser (visiting normal sites first)...")
@@ -56,35 +57,30 @@ async def interactive_login_and_save(
         # 5 minute timeout (300000ms) allows time for 2FA, captcha, security challenges
         await wait_for_manual_login(browser.page, timeout=300000)
 
-        # Save session for future use
-        session_path.parent.mkdir(parents=True, exist_ok=True)
-        await browser.save_session(str(session_path))
-
-        print(f"Session saved to {session_path}")
+        print(f"Profile saved to {user_data_dir}")
         return True
 
 
-def run_session_creation(output_path: str | None = None) -> bool:
+def run_session_creation(user_data_dir: str | None = None) -> bool:
     """
-    Create session via interactive login and save to file.
+    Create session via interactive login with persistent profile.
 
     Args:
-        output_path: Path to save session file. Defaults to ~/.linkedin-mcp/session.json
+        user_data_dir: Path to profile directory. Defaults to ~/.linkedin-mcp/profile
 
     Returns:
         True if session was created successfully
     """
-    # Expand ~ in path
-    if output_path:
-        session_path = Path(output_path).expanduser()
+    if user_data_dir:
+        profile_dir = Path(user_data_dir).expanduser()
     else:
-        session_path = DEFAULT_SESSION_PATH
+        profile_dir = DEFAULT_PROFILE_DIR
 
     print("LinkedIn MCP Server - Session Creation")
-    print(f"   Session will be saved to: {session_path}")
+    print(f"   Profile will be saved to: {profile_dir}")
 
     try:
-        success = asyncio.run(interactive_login_and_save(session_path))
+        success = asyncio.run(interactive_login(profile_dir))
         return success
     except Exception as e:
         print(f"Session creation failed: {e}")
@@ -102,7 +98,7 @@ def run_interactive_setup() -> bool:
     print("   Opening browser for manual login...")
 
     try:
-        return asyncio.run(interactive_login_and_save())
+        return asyncio.run(interactive_login())
     except Exception as e:
         print(f"Login failed: {e}")
         return False
