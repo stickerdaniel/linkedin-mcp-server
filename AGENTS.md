@@ -9,6 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Use `uv` for dependency management: `uv sync` (installs all dependencies)
 - Development dependencies: `uv sync --group dev`
 - Bump version: `uv version --bump minor` (or `major`, `patch`) - this is the **only manual step** for a release. The GitHub Actions release workflow (`.github/workflows/release.yml`) automatically handles: manifest.json/docker-compose.yml version updates, git tag, Docker build & push, DXT extension, GitHub release, and PyPI publish. After the workflow completes, manually file a PR in the MCP registry to update the version.
+- Install browser: `uv run patchright install chromium`
 - Run server locally: `uv run -m linkedin_mcp_server --no-headless`
 - Run via uvx (PyPI): `uvx linkedin-scraper-mcp`
 - Run in Docker: `docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp stickerdaniel/linkedin-mcp-server:latest`
@@ -30,7 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assistants to interact with LinkedIn through web scraping. The codebase follows a two-phase startup pattern:
 
-1. **Authentication Phase** (`authentication.py`) - Validates LinkedIn session file exists
+1. **Authentication Phase** (`authentication.py`) - Validates LinkedIn browser profile exists
 2. **Server Runtime Phase** (`server.py`) - Runs FastMCP server with tool registration
 
 **Core Components:**
@@ -38,9 +39,9 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 - `cli_main.py` - Entry point with CLI argument parsing and orchestration
 - `server.py` - FastMCP server setup and tool registration
 - `tools/` - LinkedIn scraping tools (person, company, job profiles)
-- `drivers/browser.py` - Playwright browser management with session handling
+- `drivers/browser.py` - Patchright browser management with persistent profile
 - `config/` - Configuration management (schema, loaders)
-- `authentication.py` - LinkedIn session management
+- `authentication.py` - LinkedIn profile-based authentication
 
 **Tool Categories:**
 
@@ -61,8 +62,8 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 **Authentication Flow:**
 
-- Uses session files stored at `~/.linkedin-mcp/session.json`
-- Run with `--get-session` to create a session via browser login
+- Uses persistent browser profile at `~/.linkedin-mcp/profile/`
+- Run with `--get-session` to create a profile via browser login
 
 **Transport Modes:**
 
@@ -73,20 +74,20 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 - **Python Version:** Requires Python 3.12+
 - **Package Manager:** Uses `uv` for fast dependency resolution
-- **Browser:** Uses Playwright with Chromium for browser automation
+- **Browser:** Uses Patchright (anti-detection Playwright fork) with Chromium
 - **Logging:** Configurable levels, JSON format for non-interactive mode
 - **Error Handling:** Comprehensive exception handling for LinkedIn rate limits, captchas, etc.
 
 **Key Dependencies:**
 
 - `fastmcp` - MCP server framework
-- `linkedin_scraper` - LinkedIn web scraping (v3 with Playwright)
-- `playwright` - Browser automation
+- `linkedin_scraper` - LinkedIn web scraping (v3 with Patchright)
+- `patchright` - Anti-detection browser automation (Playwright fork)
 
 **Configuration:**
 
 - CLI arguments with comprehensive help (`--help`)
-- Session stored at `~/.linkedin-mcp/session.json`
+- Browser profile stored at `~/.linkedin-mcp/profile/`
 
 **Commit Message Format:**
 
@@ -122,7 +123,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 When you need up-to-date information about technologies used in this project, use btca to query source repositories directly.
 
-**Available resources**: fastmcp, linkedinScraper, playwright, pytest, ruff, ty, uv, inquirer, pythonDotenv, pyperclip, preCommit
+**Available resources**: fastmcp, linkedinScraper, patchright, pytest, ruff, ty, uv, inquirer, pythonDotenv, pyperclip, preCommit
 
 ### Usage
 
@@ -133,5 +134,5 @@ btca ask -r <resource> -q "<question>"
 Use multiple `-r` flags to query multiple resources at once:
 
 ```bash
-btca ask -r fastmcp -r playwright -q "How do I set up browser context with FastMCP tools?"
+btca ask -r fastmcp -r patchright -q "How do I set up browser context with FastMCP tools?"
 ```
