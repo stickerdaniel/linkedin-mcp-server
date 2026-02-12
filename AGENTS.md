@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Use `uv` for dependency management: `uv sync` (installs all dependencies)
 - Development dependencies: `uv sync --group dev`
-- Bump version: `uv version --bump minor` (or `major`, `patch`) - git tag is created automatically by release workflow. Once Docker image and PyPI package are published, manually file a PR in the MCP registry to update the version.
+- Bump version: `uv version --bump minor` (or `major`, `patch`) - this is the **only manual step** for a release. The GitHub Actions release workflow (`.github/workflows/release.yml`) automatically handles: manifest.json/docker-compose.yml version updates, git tag, Docker build & push, DXT extension, GitHub release, and PyPI publish. After the workflow completes, manually file a PR in the MCP registry to update the version.
 - Run server locally: `uv run -m linkedin_mcp_server --no-headless`
 - Run via uvx (PyPI): `uvx linkedin-scraper-mcp`
 - Run in Docker: `docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp stickerdaniel/linkedin-mcp-server:latest`
