@@ -63,7 +63,7 @@ exclude = ["assets*", "docs*", "tests*"]
 linkedin_mcp_server = ["py.typed"]
 
 [tool.uv.sources]
-linkedin-scraper = { git = "https://github.com/stickerdaniel/linkedin_scraper.git", rev = "feat/patchright-persistent-context" }
+linkedin-scraper = { git = "https://github.com/stickerdaniel/linkedin_scraper.git", rev = "02-13-fix_person_quick_fix_for_person_scraper_further_testing_required" }
 
 [dependency-groups]
 dev = [

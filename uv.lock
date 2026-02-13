@@ -1012,7 +1012,7 @@ wheels = [
 [[package]]
 name = "linkedin-scraper"
 version = "3.1.1"
-source = { git = "https://github.com/stickerdaniel/linkedin_scraper.git?rev=feat%2Fpatchright-persistent-context#6df8f338cf68a1b7afd52f752b0666c5d03c1cb5" }
+source = { git = "https://github.com/stickerdaniel/linkedin_scraper.git?rev=02-13-fix_person_quick_fix_for_person_scraper_further_testing_required#69550fdead51ee6edd148b76bc728bdcabb792cf" }
 dependencies = [
     { name = "aiofiles" },
     { name = "lxml" },
@@ -1051,7 +1051,7 @@ dev = [
 requires-dist = [
     { name = "fastmcp", specifier = ">=2.14.0" },
     { name = "inquirer", specifier = ">=3.4.0" },
-    { name = "linkedin-scraper", git = "https://github.com/stickerdaniel/linkedin_scraper.git?rev=feat%2Fpatchright-persistent-context" },
+    { name = "linkedin-scraper", git = "https://github.com/stickerdaniel/linkedin_scraper.git?rev=02-13-fix_person_quick_fix_for_person_scraper_further_testing_required" },
     { name = "patchright", specifier = ">=1.40.0" },
     { name = "pyperclip", specifier = ">=1.9.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
