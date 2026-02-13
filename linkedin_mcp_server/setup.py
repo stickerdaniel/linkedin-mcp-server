@@ -54,6 +54,21 @@ async def interactive_login(
         # 5 minute timeout (300000ms) allows time for 2FA, captcha, security challenges
         await wait_for_manual_login(browser.page, timeout=300000)
 
+        # Wait for persistent context to flush cookies to disk
+        await asyncio.sleep(2)
+
+        # Verify session cookie was persisted
+        cookies = await browser.context.cookies()
+        li_at = [c for c in cookies if c["name"] == "li_at"]
+        if not li_at:
+            print("   Warning: Session cookie not found. Login may not have persisted.")
+            print("   Waiting longer for cookie propagation...")
+            await asyncio.sleep(5)
+
+        # Export cookies for cross-platform portability (macOS -> Docker)
+        if await browser.export_cookies():
+            print("   Cookies exported for Docker portability")
+
         print(f"Profile saved to {user_data_dir}")
         return True
 
