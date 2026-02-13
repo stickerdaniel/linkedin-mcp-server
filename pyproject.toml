@@ -1,6 +1,6 @@
 [project]
 name = "linkedin-scraper-mcp"
-version = "3.0.1"
+version = "3.0.2"
 description = "MCP server for LinkedIn profile, company, and job scraping with Claude AI integration. Supports direct profile/company/job URL scraping with secure credential storage."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -34,7 +34,7 @@ classifiers = [
 dependencies = [
     "fastmcp>=2.14.0",
     "inquirer>=3.4.0",
-    "linkedin-scraper",
+    "linkedin-scraper-patchright>=3.1.1",
     "patchright>=1.40.0",
     "pyperclip>=1.9.0",
     "python-dotenv>=1.1.1",
@@ -61,9 +61,6 @@ exclude = ["assets*", "docs*", "tests*"]
 
 [tool.setuptools.package-data]
 linkedin_mcp_server = ["py.typed"]
-
-[tool.uv.sources]
-linkedin-scraper = { git = "https://github.com/stickerdaniel/linkedin_scraper.git", rev = "02-13-fix_person_quick_fix_for_person_scraper_further_testing_required" }
 
 [dependency-groups]
 dev = [
