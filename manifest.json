@@ -2,9 +2,9 @@
   "dxt_version": "0.1",
   "name": "linkedin-mcp-server",
   "display_name": "LinkedIn MCP Server",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "description": "Connect Claude to LinkedIn for profiles, companies, and job details",
-  "long_description": "# LinkedIn MCP Server\n\nConnect Claude to your LinkedIn account. Access profiles, companies, and job postings through a Docker container on your machine.\n\n## Features\n- **Profile Access**: Get detailed LinkedIn profile information including work history, education, and skills\n- **Company Profiles**: Extract comprehensive company information and details\n- **Job Details**: Retrieve job posting information from LinkedIn URLs\n- **Job Search**: Search for jobs with keywords and location filters\n\n## First-Time Setup\n\n### 1. Pre-pull Docker Image (Required)\nRun this command first to avoid connection timeouts:\n```\ndocker pull stickerdaniel/linkedin-mcp-server:3.0.2",
+  "long_description": "# LinkedIn MCP Server\n\nConnect Claude to your LinkedIn account. Access profiles, companies, and job postings through a Docker container on your machine.\n\n## Features\n- **Profile Access**: Get detailed LinkedIn profile information including work history, education, and skills\n- **Company Profiles**: Extract comprehensive company information and details\n- **Job Details**: Retrieve job posting information from LinkedIn URLs\n- **Job Search**: Search for jobs with keywords and location filters\n\n## First-Time Setup\n\n### 1. Pre-pull Docker Image (Required)\nRun this command first to avoid connection timeouts:\n```\ndocker pull stickerdaniel/linkedin-mcp-server:3.0.3",
   "author": {
     "name": "Daniel Sticker",
     "email": "daniel@sticker.name",
@@ -26,7 +26,7 @@
         "run", "--rm", "-i",
         "-v", "${HOME}/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "-e", "LOG_LEVEL=DEBUG",
-        "stickerdaniel/linkedin-mcp-server:3.0.2"
+        "stickerdaniel/linkedin-mcp-server:3.0.3"
       ]
     }
   },
