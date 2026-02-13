@@ -99,6 +99,16 @@ async def get_or_create_browser(
         _browser = browser  # Assign only after auth succeeds
         return _browser
 
+    # Auth failed — try importing portable cookies (cross-platform support)
+    logger.info("Native auth failed, attempting portable cookie import...")
+    if await browser.import_cookies():
+        await browser.page.goto("https://www.linkedin.com/feed/")
+        if await is_logged_in(browser.page):
+            logger.info("Authentication recovered via portable cookies")
+            _apply_browser_settings(browser)
+            _browser = browser
+            return _browser
+
     # Auth failed — clean up and fail fast
     await browser.close()
     raise AuthenticationError(
@@ -112,6 +122,11 @@ async def close_browser() -> None:
 
     if _browser is not None:
         logger.info("Closing browser...")
+        # Export cookies before closing to keep portable file fresh
+        try:
+            await _browser.export_cookies()
+        except Exception:
+            logger.debug("Cookie export on close skipped", exc_info=True)
         await _browser.close()
         _browser = None
         logger.info("Browser closed")
