@@ -37,6 +37,8 @@ def _make_mock_browser(*, logged_in: bool = True) -> MagicMock:
     browser.page = MagicMock()
     browser.page.goto = AsyncMock()
     browser.page.set_default_timeout = MagicMock()
+    browser.import_cookies = AsyncMock(return_value=False)
+    browser.export_cookies = AsyncMock(return_value=False)
     return browser
 
 
