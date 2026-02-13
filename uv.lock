@@ -1010,26 +1010,13 @@ wheels = [
 ]
 
 [[package]]
-name = "linkedin-scraper"
-version = "3.1.1"
-source = { git = "https://github.com/stickerdaniel/linkedin_scraper.git?rev=02-13-fix_person_quick_fix_for_person_scraper_further_testing_required#69550fdead51ee6edd148b76bc728bdcabb792cf" }
-dependencies = [
-    { name = "aiofiles" },
-    { name = "lxml" },
-    { name = "patchright" },
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "requests" },
-]
-
-[[package]]
 name = "linkedin-scraper-mcp"
-version = "3.0.1"
+version = "3.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
     { name = "inquirer" },
-    { name = "linkedin-scraper" },
+    { name = "linkedin-scraper-patchright" },
     { name = "patchright" },
     { name = "pyperclip" },
     { name = "python-dotenv" },
@@ -1051,7 +1038,7 @@ dev = [
 requires-dist = [
     { name = "fastmcp", specifier = ">=2.14.0" },
     { name = "inquirer", specifier = ">=3.4.0" },
-    { name = "linkedin-scraper", git = "https://github.com/stickerdaniel/linkedin_scraper.git?rev=02-13-fix_person_quick_fix_for_person_scraper_further_testing_required" },
+    { name = "linkedin-scraper-patchright", specifier = ">=3.1.1" },
     { name = "patchright", specifier = ">=1.40.0" },
     { name = "pyperclip", specifier = ">=1.9.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
@@ -1067,6 +1054,23 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff", specifier = ">=0.11.11" },
     { name = "ty", specifier = ">=0.0.1a12" },
+]
+
+[[package]]
+name = "linkedin-scraper-patchright"
+version = "3.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiofiles" },
+    { name = "lxml" },
+    { name = "patchright" },
+    { name = "pydantic" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d8/fe/35b02ca3ef02140c39b79e2effe7d27679311106c16640e8bc0b17056f06/linkedin_scraper_patchright-3.1.1.tar.gz", hash = "sha256:5919678907a2ea262adabff342a9b3f6b0b173af44a3dc6b6cbadaa430ac60d6", size = 47996, upload-time = "2026-02-13T13:12:09.405Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/08/0009c54e3cc6504cd5eb40af7dad20826331aef6e1993d575c12b1a6e316/linkedin_scraper_patchright-3.1.1-py3-none-any.whl", hash = "sha256:a9ae51bae3d39e633848def98e6bffd7bb13a8f1c650b1f5ec3cef98182b3b3e", size = 54616, upload-time = "2026-02-13T13:12:07.024Z" },
 ]
 
 [[package]]
