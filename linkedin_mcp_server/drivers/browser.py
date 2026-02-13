@@ -7,6 +7,8 @@ reuse across tool calls with automatic profile persistence.
 """
 
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 
 from linkedin_scraper import (
@@ -99,15 +101,45 @@ async def get_or_create_browser(
         _browser = browser  # Assign only after auth succeeds
         return _browser
 
-    # Auth failed — try importing portable cookies (cross-platform support)
-    logger.info("Native auth failed, attempting portable cookie import...")
-    if await browser.import_cookies():
+    # Native auth failed — try the cross-platform cookie bridge.
+    # On macOS→Linux, Chromium can't decrypt macOS-encrypted cookies in the
+    # persistent profile. We copy the profile to a temp dir (so the original
+    # isn't corrupted by Linux Chromium writing back), remove the undecryptable
+    # Cookies DB, and inject auth cookies from the portable JSON file.
+    cookie_path = user_data_dir.parent / "cookies.json"
+    if cookie_path.exists():
+        logger.info("Native auth failed, attempting cross-platform cookie bridge...")
+        await browser.close()
+
+        # Copy profile to temp dir — protects the macOS original
+        temp_dir = Path(tempfile.mkdtemp(prefix="linkedin-mcp-"))
+        temp_profile = temp_dir / "profile"
+        shutil.copytree(user_data_dir, temp_profile)
+
+        # Remove encrypted Cookies DB (can't be decrypted cross-platform)
+        (temp_profile / "Default" / "Cookies").unlink(missing_ok=True)
+        (temp_profile / "Default" / "Cookies-journal").unlink(missing_ok=True)
+
+        browser = BrowserManager(
+            user_data_dir=temp_profile,
+            headless=_headless,
+            slow_mo=config.browser.slow_mo,
+            user_agent=config.browser.user_agent,
+            viewport=viewport,
+            **launch_options,
+        )
+        await browser.start()
+
+        # First nav establishes session cookies (bcookie, JSESSIONID, etc.)
         await browser.page.goto("https://www.linkedin.com/feed/")
-        if await is_logged_in(browser.page):
-            logger.info("Authentication recovered via portable cookies")
-            _apply_browser_settings(browser)
-            _browser = browser
-            return _browser
+        # Import auth cookies (li_at, li_rm) from the portable file
+        if await browser.import_cookies(cookie_path):
+            await browser.page.goto("https://www.linkedin.com/feed/")
+            if await is_logged_in(browser.page):
+                logger.info("Authentication recovered via portable cookies")
+                _apply_browser_settings(browser)
+                _browser = browser
+                return _browser
 
     # Auth failed — clean up and fail fast
     await browser.close()
