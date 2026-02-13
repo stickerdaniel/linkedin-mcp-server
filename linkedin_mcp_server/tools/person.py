@@ -44,7 +44,9 @@ class PersonSearchScraper(BaseScraper):
         Returns:
             List of dicts with name and profile_url
         """
-        logger.info(f"Starting person search: keywords='{keywords}', only_first_degree={only_first_degree}")
+        logger.info(
+            f"Starting person search: keywords='{keywords}', only_first_degree={only_first_degree}"
+        )
 
         search_url = self._build_search_url(keywords, only_first_degree)
         await self.callback.on_start("PersonSearch", search_url)
@@ -54,7 +56,9 @@ class PersonSearchScraper(BaseScraper):
 
         try:
             # Wait for search results to appear
-            await self.page.wait_for_selector(".reusable-search__result-container", timeout=10000)
+            await self.page.wait_for_selector(
+                ".reusable-search__result-container", timeout=10000
+            )
         except Exception:
             logger.warning("No search results found on page")
             return []
@@ -72,7 +76,9 @@ class PersonSearchScraper(BaseScraper):
         logger.info(f"Person search complete: found {len(people)} people")
         return people
 
-    def _build_search_url(self, keywords: Optional[str] = None, only_first_degree: bool = False) -> str:
+    def _build_search_url(
+        self, keywords: Optional[str] = None, only_first_degree: bool = False
+    ) -> str:
         """Build LinkedIn person search URL."""
         base_url = "https://www.linkedin.com/search/results/people/"
         params = {"origin": "GLOBAL_SEARCH_HEADER"}
@@ -88,7 +94,9 @@ class PersonSearchScraper(BaseScraper):
         """Extract person details from search results."""
         people = []
         try:
-            containers = await self.page.locator(".reusable-search__result-container").all()
+            containers = await self.page.locator(
+                ".reusable-search__result-container"
+            ).all()
             for container in containers:
                 if len(people) >= limit:
                     break
@@ -210,7 +218,9 @@ def register_person_tools(mcp: FastMCP) -> None:
             # Validate session before scraping
             await ensure_authenticated()
 
-            logger.info(f"Searching people: keywords='{keywords}', only_first_degree={only_first_degree}")
+            logger.info(
+                f"Searching people: keywords='{keywords}', only_first_degree={only_first_degree}"
+            )
 
             browser = await get_or_create_browser()
             scraper = PersonSearchScraper(
