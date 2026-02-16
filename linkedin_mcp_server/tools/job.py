@@ -5,7 +5,7 @@ Uses innerText extraction for resilient job data capture.
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
 from fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
@@ -31,7 +31,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         )
     )
-    async def get_job_details(job_id: str, ctx: Context) -> Dict[str, Any]:
+    async def get_job_details(job_id: str, ctx: Context) -> dict[str, Any]:
         """
         Get job details for a specific job posting on LinkedIn.
 
@@ -76,7 +76,7 @@ def register_job_tools(mcp: FastMCP) -> None:
         keywords: str,
         ctx: Context,
         location: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
 

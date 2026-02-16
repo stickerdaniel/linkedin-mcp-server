@@ -6,7 +6,7 @@ with configurable section selection.
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
 from fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
@@ -36,7 +36,7 @@ def register_person_tools(mcp: FastMCP) -> None:
         linkedin_username: str,
         ctx: Context,
         sections: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get a specific person's LinkedIn profile.
 
@@ -45,12 +45,13 @@ def register_person_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The main profile page is always included.
-                Available sections: experience, education, interests, accomplishments, contacts
-                Examples: "experience,education", "contacts", "experience,contacts"
+                Available sections: experience, education, interests, honors, languages, contact_info
+                Examples: "experience,education", "contact_info", "honors,languages"
                 Default (None) scrapes only the main profile page.
 
         Returns:
             Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            Sections may be absent if extraction yielded no content for that page.
             The LLM should parse the raw text in each section.
         """
         try:
