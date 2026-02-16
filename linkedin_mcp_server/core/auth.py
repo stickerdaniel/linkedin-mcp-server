@@ -79,8 +79,8 @@ async def is_logged_in(page: Page) -> bool:
     except PlaywrightTimeoutError:
         return False
     except Exception:
-        logger.warning("Unexpected error checking login status", exc_info=True)
-        return False
+        logger.error("Unexpected error checking login status", exc_info=True)
+        raise
 
 
 async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:

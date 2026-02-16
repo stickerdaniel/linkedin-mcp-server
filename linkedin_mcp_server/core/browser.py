@@ -16,7 +16,7 @@ from .exceptions import NetworkError
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_USER_DATA_DIR = Path.home() / ".linkedin_scraper" / "browser_data"
+_DEFAULT_USER_DATA_DIR = Path.home() / ".linkedin-mcp" / "profile"
 
 
 class BrowserManager:
@@ -59,6 +59,8 @@ class BrowserManager:
 
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
+        if self._context is not None:
+            raise RuntimeError("Browser already started. Call close() first.")
         try:
             self._playwright = await async_playwright().start()
 
@@ -94,7 +96,7 @@ class BrowserManager:
 
         except Exception as e:
             await self.close()
-            raise NetworkError(f"Failed to start browser: {e}")
+            raise NetworkError(f"Failed to start browser: {e}") from e
 
     async def close(self) -> None:
         """Close persistent context and cleanup resources."""
