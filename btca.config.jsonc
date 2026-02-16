@@ -9,13 +9,6 @@
 			"specialNotes": "FastMCP server framework. Primary MCP library used in this project."
 		},
 		{
-			"name": "linkedinScraper",
-			"type": "git",
-			"url": "https://github.com/joeyism/linkedin_scraper",
-			"branch": "master",
-			"specialNotes": "LinkedIn scraping library with Playwright support."
-		},
-		{
 			"name": "playwright",
 			"type": "git",
 			"url": "https://github.com/microsoft/playwright-python",

@@ -1,34 +1,27 @@
 """
 LinkedIn job scraping tools with search and detail extraction.
 
-Provides MCP tools for job posting details and job searches
-with comprehensive filtering and structured data extraction.
+Uses innerText extraction for resilient job data capture.
 """
 
 import logging
 from typing import Any, Dict
 
 from fastmcp import Context, FastMCP
-from linkedin_scraper import JobScraper, JobSearchScraper
 from mcp.types import ToolAnnotations
 
-from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.drivers.browser import (
     ensure_authenticated,
     get_or_create_browser,
 )
 from linkedin_mcp_server.error_handler import handle_tool_error
+from linkedin_mcp_server.scraping import LinkedInExtractor
 
 logger = logging.getLogger(__name__)
 
 
 def register_job_tools(mcp: FastMCP) -> None:
-    """
-    Register all job-related tools with the MCP server.
-
-    Args:
-        mcp: The MCP server instance
-    """
+    """Register all job-related tools with the MCP server."""
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -47,23 +40,26 @@ def register_job_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
 
         Returns:
-            Structured job data including title, company, location,
-            posting date, and job description.
+            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            The LLM should parse the raw text to extract job details.
         """
         try:
-            # Validate session before scraping
             await ensure_authenticated()
 
-            # Construct LinkedIn URL from job ID
-            job_url = f"https://www.linkedin.com/jobs/view/{job_id}/"
-
-            logger.info(f"Scraping job: {job_url}")
+            logger.info("Scraping job: %s", job_id)
 
             browser = await get_or_create_browser()
-            scraper = JobScraper(browser.page, callback=MCPContextProgressCallback(ctx))
-            job = await scraper.scrape(job_url)
+            extractor = LinkedInExtractor(browser.page)
 
-            return job.to_dict()
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting job scrape"
+            )
+
+            result = await extractor.scrape_job(job_id)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
 
         except Exception as e:
             return handle_tool_error(e, "get_job_details")
@@ -80,7 +76,6 @@ def register_job_tools(mcp: FastMCP) -> None:
         keywords: str,
         ctx: Context,
         location: str | None = None,
-        limit: int = 25,
     ) -> Dict[str, Any]:
         """
         Search for jobs on LinkedIn.
@@ -89,29 +84,32 @@ def register_job_tools(mcp: FastMCP) -> None:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
             ctx: FastMCP context for progress reporting
             location: Optional location filter (e.g., "San Francisco", "Remote")
-            limit: Maximum number of job URLs to return (default: 25)
 
         Returns:
-            Dict with job_urls list and count. Use get_job_details to get
-            full details for specific jobs.
+            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            The LLM should parse the raw text to extract job listings.
         """
         try:
-            # Validate session before scraping
             await ensure_authenticated()
 
-            logger.info(f"Searching jobs: keywords='{keywords}', location='{location}'")
+            logger.info(
+                "Searching jobs: keywords='%s', location='%s'",
+                keywords,
+                location,
+            )
 
             browser = await get_or_create_browser()
-            scraper = JobSearchScraper(
-                browser.page, callback=MCPContextProgressCallback(ctx)
-            )
-            job_urls = await scraper.search(
-                keywords=keywords,
-                location=location,
-                limit=limit,
+            extractor = LinkedInExtractor(browser.page)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting job search"
             )
 
-            return {"job_urls": job_urls, "count": len(job_urls)}
+            result = await extractor.search_jobs(keywords, location)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
 
         except Exception as e:
             return handle_tool_error(e, "search_jobs")
