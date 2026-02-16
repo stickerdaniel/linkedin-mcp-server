@@ -53,7 +53,7 @@ async def main():
 
         for username, sections_str in PERSON_TARGETS:
             print(f"\n--- Scraping person: {username} (sections: {sections_str}) ---")
-            fields = parse_person_sections(sections_str)
+            fields, _ = parse_person_sections(sections_str)
             result = await extractor.scrape_person(username, fields)
 
             dump_path = run_dir / f"person_{username}.json"
@@ -66,7 +66,7 @@ async def main():
 
         for company, sections_str in COMPANY_TARGETS:
             print(f"\n--- Scraping company: {company} (sections: {sections_str}) ---")
-            fields = parse_company_sections(sections_str)
+            fields, _ = parse_company_sections(sections_str)
             result = await extractor.scrape_company(company, fields)
 
             dump_path = run_dir / f"company_{company}.json"

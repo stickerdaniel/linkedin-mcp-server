@@ -187,7 +187,12 @@ class BrowserManager:
     _AUTH_COOKIE_NAMES = frozenset({"li_at", "li_rm"})
 
     async def import_cookies(self, cookie_path: str | Path | None = None) -> bool:
-        """Import auth cookies (li_at, li_rm) from a portable JSON file."""
+        """Import auth cookies (li_at, li_rm) from a portable JSON file.
+
+        Clears all existing browser cookies before importing to avoid
+        undecryptable cookie conflicts in the persistent store.
+        Only li_at and li_rm cookies are imported; others are ignored.
+        """
         if not self._context:
             logger.warning("Cannot import cookies: no browser context")
             return False

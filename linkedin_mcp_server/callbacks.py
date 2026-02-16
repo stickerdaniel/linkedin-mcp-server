@@ -45,3 +45,7 @@ class MCPContextProgressCallback(ProgressCallback):
     async def on_complete(self, scraper_type: str, result: Any) -> None:
         """Report completion to MCP client."""
         await self.ctx.report_progress(progress=100, total=100, message="Complete")
+
+    async def on_error(self, error: Exception) -> None:
+        """Report error to MCP client."""
+        await self.ctx.report_progress(progress=0, total=100, message=f"Error: {error}")

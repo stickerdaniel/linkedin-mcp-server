@@ -170,6 +170,31 @@ class TestExtractPage:
 class TestScrapePersonUrls:
     """Test that scrape_person visits the correct URLs per field combination."""
 
+    async def test_baseline_always_included(self, mock_page):
+        """Passing EXPERIENCE without BASIC_INFO still visits main profile."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value="text",
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+        ):
+            result = await extractor.scrape_person(
+                "testuser", PersonScrapingFields.EXPERIENCE
+            )
+
+        urls = result["pages_visited"]
+        assert any("/in/testuser/" in u for u in urls), "main profile should be visited"
+        assert any("/details/experience/" in u for u in urls)
+
     async def test_basic_info_only_visits_main_profile(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -308,6 +333,23 @@ class TestScrapePersonUrls:
 
 
 class TestScrapeCompany:
+    async def test_company_baseline_always_included(self, mock_page):
+        """Passing POSTS without ABOUT still visits about page."""
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value="text",
+        ):
+            result = await extractor.scrape_company(
+                "testcorp", CompanyScrapingFields.POSTS
+            )
+
+        urls = result["pages_visited"]
+        assert any("/about/" in u for u in urls), "about page should be visited"
+        assert any("/posts/" in u for u in urls)
+
     async def test_about_only_visits_about(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with patch.object(
