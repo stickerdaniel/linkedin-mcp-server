@@ -56,7 +56,7 @@ def register_company_tools(mcp: FastMCP) -> None:
         try:
             await ensure_authenticated()
 
-            fields = parse_company_sections(sections)
+            fields, unknown = parse_company_sections(sections)
 
             logger.info(
                 "Scraping company: %s (sections=%s)",
@@ -72,6 +72,9 @@ def register_company_tools(mcp: FastMCP) -> None:
             )
 
             result = await extractor.scrape_company(company_name, fields)
+
+            if unknown:
+                result["unknown_sections"] = unknown
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
