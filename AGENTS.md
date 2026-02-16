@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Docker Commands:**
 
 - Build: `docker build -t linkedin-mcp-server .`
-- Get session: Use uvx locally first: `uvx linkedin-scraper-mcp --get-session`
+- Login: Use uvx locally first: `uvx linkedin-scraper-mcp --login`
 
 ## Architecture Overview
 
@@ -81,7 +81,7 @@ All scraping tools return: `{url, sections: {name: raw_text}, pages_visited, sec
 **Authentication Flow:**
 
 - Uses persistent browser profile at `~/.linkedin-mcp/profile/`
-- Run with `--get-session` to create a profile via browser login
+- Run with `--login` to create a profile via browser login
 
 **Transport Modes:**
 

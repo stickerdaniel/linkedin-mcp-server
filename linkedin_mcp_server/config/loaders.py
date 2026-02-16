@@ -238,19 +238,19 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     # Session management
     parser.add_argument(
-        "--get-session",
+        "--login",
         action="store_true",
         help="Login interactively via browser and save persistent profile",
     )
 
     parser.add_argument(
-        "--session-info",
+        "--status",
         action="store_true",
         help="Check if current session is valid and exit",
     )
 
     parser.add_argument(
-        "--clear-session",
+        "--logout",
         action="store_true",
         help="Clear stored LinkedIn browser profile",
     )
@@ -310,14 +310,14 @@ def load_from_args(config: AppConfig) -> AppConfig:
         config.browser.chrome_path = args.chrome_path
 
     # Session management
-    if args.get_session:
-        config.server.get_session = True
+    if args.login:
+        config.server.login = True
 
-    if args.session_info:
-        config.server.session_info = True
+    if args.status:
+        config.server.status = True
 
-    if args.clear_session:
-        config.server.clear_session = True
+    if args.logout:
+        config.server.logout = True
 
     if args.user_data_dir:
         config.browser.user_data_dir = args.user_data_dir

@@ -144,7 +144,7 @@ async def get_or_create_browser(
     # Auth failed — clean up and fail fast
     await browser.close()
     raise AuthenticationError(
-        "No authentication found. Run with --get-session to create a profile."
+        "No authentication found. Run with --login to create a profile."
     )
 
 
