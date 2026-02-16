@@ -6,7 +6,7 @@ with configurable section selection.
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
 from fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
@@ -36,7 +36,7 @@ def register_company_tools(mcp: FastMCP) -> None:
         company_name: str,
         ctx: Context,
         sections: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get a specific company's LinkedIn profile.
 
@@ -91,7 +91,7 @@ def register_company_tools(mcp: FastMCP) -> None:
     async def get_company_posts(
         company_name: str,
         ctx: Context,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get recent posts from a company's LinkedIn feed.
 

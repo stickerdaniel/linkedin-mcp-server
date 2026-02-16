@@ -1,8 +1,8 @@
 """
 Progress callbacks for MCP tools.
 
-Provides callback implementations that log progress for LinkedIn scraping operations
-and report progress to MCP clients via FastMCP Context.
+Provides callback implementations that report progress for LinkedIn scraping
+operations to MCP clients via FastMCP Context.
 """
 
 from typing import Any

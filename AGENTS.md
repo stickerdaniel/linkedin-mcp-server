@@ -55,7 +55,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Get profile with explicit `sections` selection (experience, education, interests, accomplishments, contacts) |
+| `get_person_profile` | Get profile with explicit `sections` selection (experience, education, interests, honors, languages, contact_info) |
 | `get_company_profile` | Get company info with explicit `sections` selection (posts, jobs) |
 | `get_company_posts` | Get recent posts from company feed |
 | `get_job_details` | Get job posting details |
@@ -70,6 +70,7 @@ All scraping tools return: `{url, sections: {name: raw_text}, pages_visited, sec
 
 - `fields.py` - `PersonScrapingFields` and `CompanyScrapingFields` Flag enums
 - `extractor.py` - `LinkedInExtractor` class using navigate-scroll-innerText pattern
+- **One flag = one navigation.** Each `PersonScrapingFields` / `CompanyScrapingFields` flag must map to exactly one page navigation. Never combine multiple URLs behind a single flag.
 
 **Core Subpackage (`core/`):**
 

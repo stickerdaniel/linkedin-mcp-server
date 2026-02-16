@@ -80,14 +80,14 @@ class TestPersonTool:
             "sections": {
                 "main_profile": "John Doe",
                 "experience": "Work history",
-                "contacts": "Email: test@test.com",
+                "contact_info": "Email: test@test.com",
             },
             "pages_visited": [
                 "https://www.linkedin.com/in/test-user/",
                 "https://www.linkedin.com/in/test-user/details/experience/",
                 "https://www.linkedin.com/in/test-user/overlay/contact-info/",
             ],
-            "sections_requested": ["main_profile", "experience", "contacts"],
+            "sections_requested": ["main_profile", "experience", "contact_info"],
         }
         mock_extractor = _make_mock_extractor(expected)
         monkeypatch.setattr(
@@ -102,12 +102,12 @@ class TestPersonTool:
 
         tool_fn = await get_tool_fn(mcp, "get_person_profile")
         result = await tool_fn(
-            "test-user", mock_context, sections="experience,contacts"
+            "test-user", mock_context, sections="experience,contact_info"
         )
         assert result["sections_requested"] == [
             "main_profile",
             "experience",
-            "contacts",
+            "contact_info",
         ]
         mock_extractor.scrape_person.assert_awaited_once()
 

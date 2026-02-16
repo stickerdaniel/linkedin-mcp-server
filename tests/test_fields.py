@@ -15,17 +15,18 @@ class TestPersonScrapingFields:
             PersonScrapingFields.EXPERIENCE,
             PersonScrapingFields.EDUCATION,
             PersonScrapingFields.INTERESTS,
-            PersonScrapingFields.ACCOMPLISHMENTS,
-            PersonScrapingFields.CONTACTS,
+            PersonScrapingFields.HONORS,
+            PersonScrapingFields.LANGUAGES,
+            PersonScrapingFields.CONTACT_INFO,
         ]
         for i, a in enumerate(flags):
             for b in flags[i + 1 :]:
                 assert a & b == PersonScrapingFields(0)
 
     def test_flag_bitwise_or(self):
-        combined = PersonScrapingFields.BASIC_INFO | PersonScrapingFields.CONTACTS
+        combined = PersonScrapingFields.BASIC_INFO | PersonScrapingFields.CONTACT_INFO
         assert PersonScrapingFields.BASIC_INFO in combined
-        assert PersonScrapingFields.CONTACTS in combined
+        assert PersonScrapingFields.CONTACT_INFO in combined
         assert PersonScrapingFields.EXPERIENCE not in combined
 
 
@@ -49,8 +50,11 @@ class TestParsePersonSections:
         assert parse_person_sections("") == PersonScrapingFields.BASIC_INFO
 
     def test_single_section(self):
-        result = parse_person_sections("contacts")
-        assert result == PersonScrapingFields.BASIC_INFO | PersonScrapingFields.CONTACTS
+        result = parse_person_sections("contact_info")
+        assert (
+            result
+            == PersonScrapingFields.BASIC_INFO | PersonScrapingFields.CONTACT_INFO
+        )
 
     def test_multiple_sections(self):
         result = parse_person_sections("experience,education")
@@ -81,15 +85,16 @@ class TestParsePersonSections:
 
     def test_all_sections(self):
         result = parse_person_sections(
-            "experience,education,interests,accomplishments,contacts"
+            "experience,education,interests,honors,languages,contact_info"
         )
         expected = (
             PersonScrapingFields.BASIC_INFO
             | PersonScrapingFields.EXPERIENCE
             | PersonScrapingFields.EDUCATION
             | PersonScrapingFields.INTERESTS
-            | PersonScrapingFields.ACCOMPLISHMENTS
-            | PersonScrapingFields.CONTACTS
+            | PersonScrapingFields.HONORS
+            | PersonScrapingFields.LANGUAGES
+            | PersonScrapingFields.CONTACT_INFO
         )
         assert result == expected
 

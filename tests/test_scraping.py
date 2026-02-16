@@ -4,7 +4,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+from linkedin_mcp_server.scraping.extractor import (
+    LinkedInExtractor,
+    _RATE_LIMITED_MSG,
+    strip_linkedin_noise,
+)
 from linkedin_mcp_server.scraping.fields import (
     CompanyScrapingFields,
     PersonScrapingFields,
@@ -75,16 +79,92 @@ class TestExtractPage:
         from linkedin_mcp_server.core.exceptions import RateLimitError
 
         extractor = LinkedInExtractor(mock_page)
-        with patch(
-            "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
-            new_callable=AsyncMock,
-            side_effect=RateLimitError("Rate limited", suggested_wait_time=3600),
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+                side_effect=RateLimitError("Rate limited", suggested_wait_time=3600),
+            ),
+            pytest.raises(RateLimitError),
         ):
-            # extract_page catches all exceptions and returns ""
+            await extractor.extract_page("https://www.linkedin.com/in/testuser/")
+
+    async def test_returns_rate_limited_msg_after_retry(self, mock_page):
+        """When both attempts return only noise, surface rate limit message."""
+        noise_only = (
+            "More profiles for you\n\n"
+            "You've approached your profile search limit\n\n"
+            "About\nAccessibility\nTalent Solutions"
+        )
+        mock_page.evaluate = AsyncMock(return_value=noise_only)
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
             result = await extractor.extract_page(
-                "https://www.linkedin.com/in/testuser/"
+                "https://www.linkedin.com/in/testuser/details/experience/"
             )
-            assert result == ""
+
+        assert result == _RATE_LIMITED_MSG
+        # goto called twice (initial + retry)
+        assert mock_page.goto.await_count == 2
+
+    async def test_retry_succeeds_after_rate_limit(self, mock_page):
+        """When first attempt is rate-limited but retry succeeds, return content."""
+        noise_only = "More profiles for you\n\nAbout\nAccessibility\nTalent Solutions"
+        call_count = 0
+
+        async def evaluate_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # First two calls are from first attempt (goto triggers evaluate via
+            # _extract_page_once), return noise. Third+ calls return real content.
+            if call_count <= 1:
+                return noise_only
+            return "Education\nHarvard University\n1973 – 1975"
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/details/education/"
+            )
+
+        assert result == "Education\nHarvard University\n1973 – 1975"
 
 
 class TestScrapePersonUrls:
@@ -155,8 +235,9 @@ class TestScrapePersonUrls:
             | PersonScrapingFields.EXPERIENCE
             | PersonScrapingFields.EDUCATION
             | PersonScrapingFields.INTERESTS
-            | PersonScrapingFields.ACCOMPLISHMENTS
-            | PersonScrapingFields.CONTACTS
+            | PersonScrapingFields.HONORS
+            | PersonScrapingFields.LANGUAGES
+            | PersonScrapingFields.CONTACT_INFO
         )
         with (
             patch.object(
@@ -175,15 +256,16 @@ class TestScrapePersonUrls:
             result = await extractor.scrape_person("testuser", fields)
 
         urls = result["pages_visited"]
-        # main_profile, experience, education, interests, honors, languages, contacts
+        # main_profile, experience, education, interests, honors, languages, contact_info
         assert len(urls) == 7
         assert result["sections_requested"] == [
             "main_profile",
             "experience",
             "education",
             "interests",
-            "accomplishments",
-            "contacts",
+            "honors",
+            "languages",
+            "contact_info",
         ]
 
     async def test_error_isolation(self, mock_page):
@@ -290,3 +372,48 @@ class TestScrapeJob:
         assert "location=Remote" in result["url"]
         assert "search_results" in result["sections"]
         assert result["sections_requested"] == ["search_results"]
+
+
+class TestStripLinkedInNoise:
+    def test_strips_footer(self):
+        text = "Bill Gates\nChair, Gates Foundation\n\nAbout\nAccessibility\nTalent Solutions\nCareers"
+        assert strip_linkedin_noise(text) == "Bill Gates\nChair, Gates Foundation"
+
+    def test_strips_footer_with_talent_solutions_variant(self):
+        text = "Profile content here\n\nAbout\nTalent Solutions\nMore footer"
+        assert strip_linkedin_noise(text) == "Profile content here"
+
+    def test_strips_sidebar_recommendations(self):
+        text = "Experience\nCo-chair\nGates Foundation\n\nMore profiles for you\nSundar Pichai\nCEO at Google"
+        assert strip_linkedin_noise(text) == "Experience\nCo-chair\nGates Foundation"
+
+    def test_strips_premium_upsell(self):
+        text = "Education\nHarvard University\n\nExplore premium profiles\nRandom Person\nSoftware Engineer"
+        assert strip_linkedin_noise(text) == "Education\nHarvard University"
+
+    def test_picks_earliest_marker(self):
+        text = "Content\n\nExplore premium profiles\nStuff\n\nMore profiles for you\nMore stuff\n\nAbout\nAccessibility"
+        assert strip_linkedin_noise(text) == "Content"
+
+    def test_no_noise_returns_unchanged(self):
+        text = "Clean content with no LinkedIn chrome"
+        assert strip_linkedin_noise(text) == "Clean content with no LinkedIn chrome"
+
+    def test_empty_string(self):
+        assert strip_linkedin_noise("") == ""
+
+    def test_about_in_profile_content_not_stripped(self):
+        """'About' followed by actual content (not 'Accessibility') should be preserved."""
+        text = "About\nChair of the Gates Foundation.\n\nFeatured\nPost"
+        assert (
+            strip_linkedin_noise(text)
+            == "About\nChair of the Gates Foundation.\n\nFeatured\nPost"
+        )
+
+    def test_real_footer_with_languages(self):
+        text = (
+            "Company info\n\n"
+            "About\nAccessibility\nTalent Solutions\nCareers\n"
+            "Select language\nEnglish (English)\nDeutsch (German)"
+        )
+        assert strip_linkedin_noise(text) == "Company info"
