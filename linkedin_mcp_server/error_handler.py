@@ -58,21 +58,21 @@ def convert_exception_to_response(
         return {
             "error": "authentication_not_found",
             "message": str(exception),
-            "resolution": "Run with --get-session to create a browser profile.",
+            "resolution": "Run with --login to create a browser profile.",
         }
 
     elif isinstance(exception, SessionExpiredError):
         return {
             "error": "session_expired",
             "message": str(exception),
-            "resolution": "Run with --get-session to create a new browser profile.",
+            "resolution": "Run with --login to create a new browser profile.",
         }
 
     elif isinstance(exception, AuthenticationError):
         return {
             "error": "authentication_failed",
             "message": str(exception),
-            "resolution": "Run with --get-session to re-authenticate.",
+            "resolution": "Run with --login to re-authenticate.",
         }
 
     elif isinstance(exception, RateLimitError):
