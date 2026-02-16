@@ -33,7 +33,7 @@ Suggest improvements for my CV to target this job posting https://www.linkedin.c
 ```
 
 ```
-What has Anthropic been posting about recently? https://www.linkedin.com/company/anthropic/
+What has Anthropic been posting about recently? https://www.linkedin.com/company/anthropicresearch/
 ```
 
 ## Features & Tool Status
