@@ -33,17 +33,31 @@ def patch_tool_deps(monkeypatch):
     return mock_browser
 
 
+def _make_mock_extractor(scrape_result: dict) -> MagicMock:
+    """Create a mock LinkedInExtractor that returns the given result."""
+    mock = MagicMock()
+    mock.scrape_person = AsyncMock(return_value=scrape_result)
+    mock.scrape_company = AsyncMock(return_value=scrape_result)
+    mock.scrape_job = AsyncMock(return_value=scrape_result)
+    mock.search_jobs = AsyncMock(return_value=scrape_result)
+    mock.extract_page = AsyncMock(return_value="some text")
+    return mock
+
+
 class TestPersonTool:
     async def test_get_person_profile_success(
         self, mock_context, patch_tool_deps, monkeypatch
     ):
-        mock_person = MagicMock()
-        mock_person.to_dict.return_value = {"full_name": "Test User"}
-        mock_scraper = MagicMock()
-        mock_scraper.scrape = AsyncMock(return_value=mock_person)
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "sections": {"main_profile": "John Doe\nSoftware Engineer"},
+            "pages_visited": ["https://www.linkedin.com/in/test-user/"],
+            "sections_requested": ["main_profile"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
         monkeypatch.setattr(
-            "linkedin_mcp_server.tools.person.PersonScraper",
-            lambda *a, **kw: mock_scraper,
+            "linkedin_mcp_server.tools.person.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
         )
 
         from linkedin_mcp_server.tools.person import register_person_tools
@@ -53,7 +67,49 @@ class TestPersonTool:
 
         tool_fn = await get_tool_fn(mcp, "get_person_profile")
         result = await tool_fn("test-user", mock_context)
-        assert result["full_name"] == "Test User"
+        assert result["url"] == "https://www.linkedin.com/in/test-user/"
+        assert "main_profile" in result["sections"]
+        assert result["sections_requested"] == ["main_profile"]
+
+    async def test_get_person_profile_with_sections(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        """Verify sections parameter is passed through."""
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "sections": {
+                "main_profile": "John Doe",
+                "experience": "Work history",
+                "contact_info": "Email: test@test.com",
+            },
+            "pages_visited": [
+                "https://www.linkedin.com/in/test-user/",
+                "https://www.linkedin.com/in/test-user/details/experience/",
+                "https://www.linkedin.com/in/test-user/overlay/contact-info/",
+            ],
+            "sections_requested": ["main_profile", "experience", "contact_info"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.person.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
+        )
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_person_profile")
+        result = await tool_fn(
+            "test-user", mock_context, sections="experience,contact_info"
+        )
+        assert result["sections_requested"] == [
+            "main_profile",
+            "experience",
+            "contact_info",
+        ]
+        mock_extractor.scrape_person.assert_awaited_once()
 
     async def test_get_person_profile_error(self, mock_context, monkeypatch):
         from linkedin_mcp_server.exceptions import SessionExpiredError
@@ -77,13 +133,16 @@ class TestCompanyTools:
     async def test_get_company_profile(
         self, mock_context, patch_tool_deps, monkeypatch
     ):
-        mock_company = MagicMock()
-        mock_company.to_dict.return_value = {"name": "Test Corp"}
-        mock_scraper = MagicMock()
-        mock_scraper.scrape = AsyncMock(return_value=mock_company)
+        expected = {
+            "url": "https://www.linkedin.com/company/testcorp/",
+            "sections": {"about": "TestCorp\nWe build things"},
+            "pages_visited": ["https://www.linkedin.com/company/testcorp/about/"],
+            "sections_requested": ["about"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
         monkeypatch.setattr(
-            "linkedin_mcp_server.tools.company.CompanyScraper",
-            lambda *a, **kw: mock_scraper,
+            "linkedin_mcp_server.tools.company.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
         )
 
         from linkedin_mcp_server.tools.company import register_company_tools
@@ -93,16 +152,14 @@ class TestCompanyTools:
 
         tool_fn = await get_tool_fn(mcp, "get_company_profile")
         result = await tool_fn("testcorp", mock_context)
-        assert result["name"] == "Test Corp"
+        assert "about" in result["sections"]
 
     async def test_get_company_posts(self, mock_context, patch_tool_deps, monkeypatch):
-        mock_post = MagicMock()
-        mock_post.to_dict.return_value = {"text": "Hello world"}
-        mock_scraper = MagicMock()
-        mock_scraper.scrape = AsyncMock(return_value=[mock_post])
+        mock_extractor = MagicMock()
+        mock_extractor.extract_page = AsyncMock(return_value="Post 1\nPost 2")
         monkeypatch.setattr(
-            "linkedin_mcp_server.tools.company.CompanyPostsScraper",
-            lambda *a, **kw: mock_scraper,
+            "linkedin_mcp_server.tools.company.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
         )
 
         from linkedin_mcp_server.tools.company import register_company_tools
@@ -111,19 +168,24 @@ class TestCompanyTools:
         register_company_tools(mcp)
 
         tool_fn = await get_tool_fn(mcp, "get_company_posts")
-        result = await tool_fn("testcorp", mock_context, limit=5)
-        assert result["count"] == 1
-        assert result["posts"][0]["text"] == "Hello world"
+        result = await tool_fn("testcorp", mock_context)
+        assert "posts" in result["sections"]
+        assert result["sections"]["posts"] == "Post 1\nPost 2"
+        assert result["sections_requested"] == ["posts"]
 
 
 class TestJobTools:
     async def test_get_job_details(self, mock_context, patch_tool_deps, monkeypatch):
-        mock_job = MagicMock()
-        mock_job.to_dict.return_value = {"title": "Engineer"}
-        mock_scraper = MagicMock()
-        mock_scraper.scrape = AsyncMock(return_value=mock_job)
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "sections": {"job_posting": "Software Engineer\nGreat opportunity"},
+            "pages_visited": ["https://www.linkedin.com/jobs/view/12345/"],
+            "sections_requested": ["job_posting"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
         monkeypatch.setattr(
-            "linkedin_mcp_server.tools.job.JobScraper", lambda *a, **kw: mock_scraper
+            "linkedin_mcp_server.tools.job.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
         )
 
         from linkedin_mcp_server.tools.job import register_job_tools
@@ -133,14 +195,19 @@ class TestJobTools:
 
         tool_fn = await get_tool_fn(mcp, "get_job_details")
         result = await tool_fn("12345", mock_context)
-        assert result["title"] == "Engineer"
+        assert "job_posting" in result["sections"]
 
     async def test_search_jobs(self, mock_context, patch_tool_deps, monkeypatch):
-        mock_scraper = MagicMock()
-        mock_scraper.search = AsyncMock(return_value=["url1", "url2"])
+        expected = {
+            "url": "https://www.linkedin.com/jobs/search/?keywords=python",
+            "sections": {"search_results": "Job 1\nJob 2"},
+            "pages_visited": ["https://www.linkedin.com/jobs/search/?keywords=python"],
+            "sections_requested": ["search_results"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
         monkeypatch.setattr(
-            "linkedin_mcp_server.tools.job.JobSearchScraper",
-            lambda *a, **kw: mock_scraper,
+            "linkedin_mcp_server.tools.job.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
         )
 
         from linkedin_mcp_server.tools.job import register_job_tools
@@ -149,6 +216,5 @@ class TestJobTools:
         register_job_tools(mcp)
 
         tool_fn = await get_tool_fn(mcp, "search_jobs")
-        result = await tool_fn("python", mock_context, location="Remote", limit=10)
-        assert result["count"] == 2
-        assert "url1" in result["job_urls"]
+        result = await tool_fn("python", mock_context, location="Remote")
+        assert "search_results" in result["sections"]
