@@ -26,6 +26,6 @@ class SessionExpiredError(LinkedInMCPError):
         default_msg = (
             "LinkedIn session has expired.\n\n"
             "To fix this:\n"
-            "  Run with --get-session to create a new session"
+            "  Run with --login to create a new session"
         )
         super().__init__(message or default_msg)
