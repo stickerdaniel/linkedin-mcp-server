@@ -55,7 +55,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 ## 🚀 uvx Setup (Recommended - Universal)
 
-**Prerequisites:** Make sure you have [uv](https://docs.astral.sh/uv/) and Patchright `uvx patchright install chromium` installed.
+**Prerequisites:** Install uv and run `uvx patchright install chromium` to set up the browser.
 
 ### Installation
 
@@ -79,6 +79,7 @@ This opens a browser for you to log in manually (5 minute timeout for 2FA, captc
   }
 }
 ```
+
 > [!NOTE]
 > Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again
 
@@ -86,7 +87,7 @@ This opens a browser for you to log in manually (5 minute timeout for 2FA, captc
 
 <details>
 <summary><b>🔧 Configuration</b></summary>
-  
+
 **Transport Modes:**
 
 - **Default (stdio)**: Standard communication for local MCP servers
@@ -173,7 +174,7 @@ uvx linkedin-scraper-mcp --transport streamable-http --host 127.0.0.1 --port 808
 
 ### Authentication
 
-Docker runs headless (no browser window), so you need to create a browser profile locally first and mount it into Docker.
+Docker runs headless (no browser window), so you need to create a browser profile locally first and mount it into the container.
 
 **Step 1: Create profile using uvx (one-time setup)**
 
