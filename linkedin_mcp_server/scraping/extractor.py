@@ -134,50 +134,67 @@ class LinkedInExtractor:
 
         LinkedIn renders contact info as a native <dialog> element.
         Falls back to `<main>` if no dialog is found.
+
+        Retries once after a backoff when the overlay returns only LinkedIn
+        chrome (noise), mirroring `extract_page` behavior.
         """
         try:
-            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await detect_rate_limit(self._page)
+            result = await self._extract_overlay_once(url)
+            if result != _RATE_LIMITED_MSG:
+                return result
 
-            # Wait for the dialog/modal to render (LinkedIn uses native <dialog>)
-            try:
-                await self._page.wait_for_selector(
-                    "dialog[open], .artdeco-modal__content", timeout=5000
-                )
-            except PlaywrightTimeoutError:
-                logger.debug("No modal overlay found on %s, falling back to main", url)
-
-            # NOTE: Do NOT call handle_modal_close() here — the contact-info
-            # overlay *is* a dialog/modal. Dismissing it would destroy the
-            # content before the JS evaluation below can read it.
-
-            raw = await self._page.evaluate(
-                """() => {
-                    const dialog = document.querySelector('dialog[open]');
-                    if (dialog) return dialog.innerText.trim();
-                    const modal = document.querySelector('.artdeco-modal__content');
-                    if (modal) return modal.innerText.trim();
-                    const main = document.querySelector('main');
-                    return main ? main.innerText.trim() : document.body.innerText.trim();
-                }"""
+            logger.info(
+                "Retrying overlay %s after %.0fs backoff",
+                url,
+                _RATE_LIMIT_RETRY_DELAY,
             )
-
-            if not raw:
-                return ""
-            cleaned = strip_linkedin_noise(raw)
-            if not cleaned and raw.strip():
-                logger.warning(
-                    "Overlay %s returned only LinkedIn chrome (likely rate-limited)",
-                    url,
-                )
-                return _RATE_LIMITED_MSG
-            return cleaned
+            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            return await self._extract_overlay_once(url)
 
         except LinkedInScraperException:
             raise
         except Exception as e:
             logger.warning("Failed to extract overlay %s: %s", url, e)
             return ""
+
+    async def _extract_overlay_once(self, url: str) -> str:
+        """Single attempt to extract content from an overlay/modal page."""
+        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await detect_rate_limit(self._page)
+
+        # Wait for the dialog/modal to render (LinkedIn uses native <dialog>)
+        try:
+            await self._page.wait_for_selector(
+                "dialog[open], .artdeco-modal__content", timeout=5000
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("No modal overlay found on %s, falling back to main", url)
+
+        # NOTE: Do NOT call handle_modal_close() here — the contact-info
+        # overlay *is* a dialog/modal. Dismissing it would destroy the
+        # content before the JS evaluation below can read it.
+
+        raw = await self._page.evaluate(
+            """() => {
+                const dialog = document.querySelector('dialog[open]');
+                if (dialog) return dialog.innerText.trim();
+                const modal = document.querySelector('.artdeco-modal__content');
+                if (modal) return modal.innerText.trim();
+                const main = document.querySelector('main');
+                return main ? main.innerText.trim() : document.body.innerText.trim();
+            }"""
+        )
+
+        if not raw:
+            return ""
+        cleaned = strip_linkedin_noise(raw)
+        if not cleaned and raw.strip():
+            logger.warning(
+                "Overlay %s returned only LinkedIn chrome (likely rate-limited)",
+                url,
+            )
+            return _RATE_LIMITED_MSG
+        return cleaned
 
     async def scrape_person(
         self, username: str, fields: PersonScrapingFields
