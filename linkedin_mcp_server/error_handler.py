@@ -8,7 +8,7 @@ format, specific LinkedIn error categorization, and proper logging integration.
 import logging
 from typing import Any, Dict
 
-from linkedin_scraper.core.exceptions import (
+from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     ElementNotFoundError,
     LinkedInScraperException,

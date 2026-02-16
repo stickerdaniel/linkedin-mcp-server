@@ -40,8 +40,8 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 | Tool | Description | Status |
 |------|-------------|--------|
-| `get_person_profile` | Get detailed profile info including work history, education, contacts, interests | Working |
-| `get_company_profile` | Extract company information including employees, affiliated companies | Issues |
+| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, accomplishments, contacts) | Working |
+| `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | Working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | Working |
 | `search_jobs` | Search for jobs with keywords and location filters | Working |
 | `get_job_details` | Get detailed information about a specific job posting | Working |
@@ -315,9 +315,11 @@ docker run -it --rm \
 - Claude Desktop has a ~60 second connection timeout
 - If the Docker image isn't cached, the pull may exceed this timeout
 - **Fix:** Pre-pull the image before first use:
+
   ```bash
   docker pull stickerdaniel/linkedin-mcp-server:2.3.0
   ```
+
 - Then restart Claude Desktop
 
 **Docker issues:**
@@ -465,7 +467,7 @@ Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-serve
 
 ## Acknowledgements
 
-Built with [LinkedIn Scraper](https://github.com/joeyism/linkedin_scraper) by [@joeyism](https://github.com/joeyism) and [FastMCP](https://gofastmcp.com/).
+Built with [FastMCP](https://gofastmcp.com/) and [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python).
 
 ⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
 

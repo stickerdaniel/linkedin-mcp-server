@@ -14,8 +14,7 @@ from typing import Literal
 
 import inquirer
 
-from linkedin_scraper import is_logged_in
-from linkedin_scraper.core.exceptions import AuthenticationError, RateLimitError
+from linkedin_mcp_server.core import AuthenticationError, RateLimitError, is_logged_in
 
 from linkedin_mcp_server.authentication import (
     clear_profile,

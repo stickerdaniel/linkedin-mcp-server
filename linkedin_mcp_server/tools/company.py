@@ -1,34 +1,28 @@
 """
 LinkedIn company profile scraping tools.
 
-Provides MCP tools for extracting company information from LinkedIn
-with comprehensive error handling.
+Uses innerText extraction for resilient company data capture
+with configurable section selection.
 """
 
 import logging
 from typing import Any, Dict
 
 from fastmcp import Context, FastMCP
-from linkedin_scraper import CompanyPostsScraper, CompanyScraper
 from mcp.types import ToolAnnotations
 
-from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.drivers.browser import (
     ensure_authenticated,
     get_or_create_browser,
 )
 from linkedin_mcp_server.error_handler import handle_tool_error
+from linkedin_mcp_server.scraping import LinkedInExtractor, parse_company_sections
 
 logger = logging.getLogger(__name__)
 
 
 def register_company_tools(mcp: FastMCP) -> None:
-    """
-    Register all company-related tools with the MCP server.
-
-    Args:
-        mcp: The MCP server instance
-    """
+    """Register all company-related tools with the MCP server."""
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -38,39 +32,50 @@ def register_company_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         )
     )
-    async def get_company_profile(company_name: str, ctx: Context) -> Dict[str, Any]:
+    async def get_company_profile(
+        company_name: str,
+        ctx: Context,
+        sections: str | None = None,
+    ) -> Dict[str, Any]:
         """
         Get a specific company's LinkedIn profile.
 
         Args:
             company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
             ctx: FastMCP context for progress reporting
+            sections: Comma-separated list of extra sections to scrape.
+                The about page is always included.
+                Available sections: posts, jobs
+                Examples: "posts", "posts,jobs"
+                Default (None) scrapes only the about page.
 
         Returns:
-            Structured data from the company's profile including:
-            - linkedin_url, name, about_us, website, phone
-            - headquarters, founded, industry, company_type, company_size
-            - specialties, headcount
-            - showcase_pages: List of showcase pages (linkedin_url, name, followers)
-            - affiliated_companies: List of affiliated companies
-            - employees: List of employees (name, designation, linkedin_url)
+            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            The LLM should parse the raw text in each section.
         """
         try:
-            # Validate session before scraping
             await ensure_authenticated()
 
-            # Construct LinkedIn URL from company name
-            linkedin_url = f"https://www.linkedin.com/company/{company_name}/"
+            fields = parse_company_sections(sections)
 
-            logger.info(f"Scraping company: {linkedin_url}")
+            logger.info(
+                "Scraping company: %s (sections=%s)",
+                company_name,
+                sections,
+            )
 
             browser = await get_or_create_browser()
-            scraper = CompanyScraper(
-                browser.page, callback=MCPContextProgressCallback(ctx)
-            )
-            company = await scraper.scrape(linkedin_url)
+            extractor = LinkedInExtractor(browser.page)
 
-            return company.to_dict()
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting company profile scrape"
+            )
+
+            result = await extractor.scrape_company(company_name, fields)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
 
         except Exception as e:
             return handle_tool_error(e, "get_company_profile")
@@ -84,7 +89,8 @@ def register_company_tools(mcp: FastMCP) -> None:
         )
     )
     async def get_company_posts(
-        company_name: str, ctx: Context, limit: int = 10
+        company_name: str,
+        ctx: Context,
     ) -> Dict[str, Any]:
         """
         Get recent posts from a company's LinkedIn feed.
@@ -92,34 +98,38 @@ def register_company_tools(mcp: FastMCP) -> None:
         Args:
             company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft")
             ctx: FastMCP context for progress reporting
-            limit: Maximum number of posts to return (default: 10)
 
         Returns:
-            Dict containing:
-            - count: Number of posts returned
-            - posts: List of post dicts with:
-              - linkedin_url, urn, text, posted_date
-              - reactions_count, comments_count, reposts_count
-              - image_urls: List of image URLs
-              - video_url: Video URL if present
-              - article_url: Article URL if present
+            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            The LLM should parse the raw text to extract individual posts.
         """
         try:
-            # Validate session before scraping
             await ensure_authenticated()
 
-            # Construct LinkedIn URL from company name
-            linkedin_url = f"https://www.linkedin.com/company/{company_name}/"
-
-            logger.info(f"Scraping company posts: {linkedin_url} (limit: {limit})")
+            logger.info("Scraping company posts: %s", company_name)
 
             browser = await get_or_create_browser()
-            scraper = CompanyPostsScraper(
-                browser.page, callback=MCPContextProgressCallback(ctx)
-            )
-            posts = await scraper.scrape(linkedin_url, limit=limit)
+            extractor = LinkedInExtractor(browser.page)
 
-            return {"posts": [post.to_dict() for post in posts], "count": len(posts)}
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting company posts scrape"
+            )
+
+            url = f"https://www.linkedin.com/company/{company_name}/posts/"
+            text = await extractor.extract_page(url)
+
+            sections: dict[str, str] = {}
+            if text:
+                sections["posts"] = text
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return {
+                "url": url,
+                "sections": sections,
+                "pages_visited": [url],
+                "sections_requested": ["posts"],
+            }
 
         except Exception as e:
             return handle_tool_error(e, "get_company_posts")
