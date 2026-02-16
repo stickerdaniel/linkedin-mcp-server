@@ -20,16 +20,21 @@ async def warm_up_browser(page: Page) -> None:
 
     logger.info("Warming up browser by visiting normal sites...")
 
+    failures = 0
     for site in sites:
         try:
             await page.goto(site, wait_until="domcontentloaded", timeout=10000)
             await asyncio.sleep(1)
             logger.debug("Visited %s", site)
         except Exception as e:
+            failures += 1
             logger.debug("Could not visit %s: %s", site, e)
             continue
 
-    logger.info("Browser warm-up complete")
+    if failures == len(sites):
+        logger.warning("Browser warm-up failed: none of %d sites reachable", len(sites))
+    else:
+        logger.info("Browser warm-up complete")
 
 
 async def is_logged_in(page: Page) -> bool:
@@ -77,6 +82,10 @@ async def is_logged_in(page: Page) -> bool:
 
         return has_nav_elements or is_authenticated_page
     except PlaywrightTimeoutError:
+        logger.warning(
+            "Timeout checking login status on %s — treating as not logged in",
+            page.url,
+        )
         return False
     except Exception:
         logger.error("Unexpected error checking login status", exc_info=True)

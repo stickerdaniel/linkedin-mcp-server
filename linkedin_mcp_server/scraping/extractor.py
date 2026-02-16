@@ -74,7 +74,9 @@ class LinkedInExtractor:
         (sidebar/footer noise with no actual content), which indicates a soft
         rate limit.
 
-        Returns empty string on failure (error isolation per section).
+        Raises LinkedInScraperException subclasses (rate limit, auth, etc.).
+        Returns _RATE_LIMITED_MSG sentinel when soft-rate-limited after retry.
+        Returns empty string for unexpected non-domain failures (error isolation).
         """
         try:
             result = await self._extract_page_once(url)
@@ -185,6 +187,7 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {name: text}, pages_visited, sections_requested}
         """
+        fields |= PersonScrapingFields.BASIC_INFO
         base_url = f"https://www.linkedin.com/in/{username}"
         sections: dict[str, str] = {}
         pages_visited: list[str] = []
@@ -275,6 +278,7 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {name: text}, pages_visited, sections_requested}
         """
+        fields |= CompanyScrapingFields.ABOUT
         base_url = f"https://www.linkedin.com/company/{company_name}"
         sections: dict[str, str] = {}
         pages_visited: list[str] = []
