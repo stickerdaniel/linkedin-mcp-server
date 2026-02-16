@@ -68,7 +68,7 @@ async def test_get_or_create_browser_auth_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_or_create_browser_auth_failure_cleans_up(monkeypatch):
     """Failed auth closes browser and does NOT assign singleton."""
-    from linkedin_scraper import AuthenticationError
+    from linkedin_mcp_server.core import AuthenticationError
 
     mock_browser = _make_mock_browser()
 

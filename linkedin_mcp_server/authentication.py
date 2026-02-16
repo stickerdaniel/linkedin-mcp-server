@@ -35,10 +35,10 @@ def get_authentication_source() -> bool:
     raise CredentialsNotFoundError(
         "No LinkedIn authentication found.\n\n"
         "Options:\n"
-        "  1. Run with --get-session to create a browser profile (recommended)\n"
+        "  1. Run with --login to create a browser profile (recommended)\n"
         "  2. Run with --no-headless to login interactively\n\n"
         "For Docker users:\n"
-        "  Create profile on host first: uvx linkedin-scraper-mcp --get-session\n"
+        "  Create profile on host first: uvx linkedin-scraper-mcp --login\n"
         "  Then mount into Docker: -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp"
     )
 
