@@ -8,8 +8,11 @@ with persistent context. Profile state auto-persists to user_data_dir.
 import asyncio
 from pathlib import Path
 
-from linkedin_scraper import BrowserManager, wait_for_manual_login
-from linkedin_scraper.core import warm_up_browser
+from linkedin_mcp_server.core import (
+    BrowserManager,
+    wait_for_manual_login,
+    warm_up_browser,
+)
 
 from linkedin_mcp_server.drivers.browser import get_profile_dir
 
