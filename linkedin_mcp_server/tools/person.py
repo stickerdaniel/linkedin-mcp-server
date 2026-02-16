@@ -57,7 +57,7 @@ def register_person_tools(mcp: FastMCP) -> None:
         try:
             await ensure_authenticated()
 
-            fields = parse_person_sections(sections)
+            fields, unknown = parse_person_sections(sections)
 
             logger.info(
                 "Scraping profile: %s (sections=%s)",
@@ -73,6 +73,9 @@ def register_person_tools(mcp: FastMCP) -> None:
             )
 
             result = await extractor.scrape_person(linkedin_username, fields)
+
+            if unknown:
+                result["unknown_sections"] = unknown
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

@@ -11,10 +11,20 @@ logger = logging.getLogger(__name__)
 
 
 async def detect_rate_limit(page: Page) -> None:
-    """Detect if LinkedIn has rate limited the session.
+    """Detect if LinkedIn has rate-limited or security-challenged the session.
+
+    Checks (in order):
+    1. URL contains /checkpoint or /authwall (security challenge)
+    2. Page contains CAPTCHA iframe (bot detection)
+    3. Body text contains rate-limit phrases on error-shaped pages (throttling)
+
+    The body-text heuristic only runs on pages without a ``<main>`` element
+    and with short body text (<2000 chars), since real rate-limit pages are
+    minimal error pages.  This avoids false positives from profile content
+    that happens to contain phrases like "slow down" or "try again later".
 
     Raises:
-        RateLimitError: If rate limiting is detected
+        RateLimitError: If any rate-limiting or security challenge is detected
     """
     # Check URL for security challenges
     current_url = page.url
@@ -42,10 +52,17 @@ async def detect_rate_limit(page: Page) -> None:
     except Exception as e:
         logger.debug("Error checking for CAPTCHA: %s", e)
 
-    # Check for rate limit messages
+    # Check for rate limit messages — only on error-shaped pages.
+    # Real rate-limit pages have no <main> element and short body text.
+    # Normal LinkedIn pages (profiles, jobs) have <main> and long content
+    # that may incidentally contain phrases like "slow down".
     try:
+        has_main = await page.locator("main").count() > 0
+        if has_main:
+            return  # Normal page with content, skip body text heuristic
+
         body_text = await page.locator("body").inner_text(timeout=1000)
-        if body_text:
+        if body_text and len(body_text) < 2000:
             body_lower = body_text.lower()
             if any(
                 phrase in body_lower
