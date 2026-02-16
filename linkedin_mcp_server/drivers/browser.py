@@ -1,9 +1,9 @@
 """
 Patchright browser management for LinkedIn scraping.
 
-This module provides async browser lifecycle management using linkedin_scraper v3's
-BrowserManager with persistent context. Implements a singleton pattern for browser
-reuse across tool calls with automatic profile persistence.
+Provides async browser lifecycle management using BrowserManager with persistent
+context. Implements a singleton pattern for browser reuse across tool calls with
+automatic profile persistence.
 """
 
 import logging
@@ -11,12 +11,12 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from linkedin_scraper import (
+from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    detect_rate_limit,
     is_logged_in,
 )
-from linkedin_scraper.core import detect_rate_limit
 
 from linkedin_mcp_server.config import get_config
 
