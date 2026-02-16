@@ -2,11 +2,13 @@
 
 import asyncio
 import logging
+import re
 from typing import Any
 from urllib.parse import quote_plus
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
@@ -23,7 +25,40 @@ from .fields import (
 logger = logging.getLogger(__name__)
 
 # Delay between page navigations to avoid rate limiting
-_NAV_DELAY = 1.0
+_NAV_DELAY = 2.0
+
+# Backoff before retrying a rate-limited page
+_RATE_LIMIT_RETRY_DELAY = 5.0
+
+# Returned as section text when LinkedIn rate-limits the page
+_RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
+
+# Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
+# Everything from the earliest match onwards is stripped.
+_NOISE_MARKERS: list[re.Pattern[str]] = [
+    # Footer nav links: "About" immediately followed by "Accessibility" or "Talent Solutions"
+    re.compile(r"^About\n+(?:Accessibility|Talent Solutions)", re.MULTILINE),
+    # Sidebar profile recommendations
+    re.compile(r"^More profiles for you$", re.MULTILINE),
+    # Sidebar premium upsell
+    re.compile(r"^Explore premium profiles$", re.MULTILINE),
+    # InMail upsell in contact info overlay
+    re.compile(r"^Get up to .+ replies when you message with InMail$", re.MULTILINE),
+]
+
+
+def strip_linkedin_noise(text: str) -> str:
+    """Remove LinkedIn page chrome (footer, sidebar recommendations) from innerText.
+
+    Finds the earliest occurrence of any known noise marker and truncates there.
+    """
+    earliest = len(text)
+    for pattern in _NOISE_MARKERS:
+        match = pattern.search(text)
+        if match and match.start() < earliest:
+            earliest = match.start()
+
+    return text[:earliest].strip()
 
 
 class LinkedInExtractor:
@@ -35,69 +70,109 @@ class LinkedInExtractor:
     async def extract_page(self, url: str) -> str:
         """Navigate to a URL, scroll to load lazy content, and extract innerText.
 
+        Retries once after a backoff when the page returns only LinkedIn chrome
+        (sidebar/footer noise with no actual content), which indicates a soft
+        rate limit.
+
         Returns empty string on failure (error isolation per section).
         """
         try:
-            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await detect_rate_limit(self._page)
+            result = await self._extract_page_once(url)
+            if result != _RATE_LIMITED_MSG:
+                return result
 
-            # Wait for main content to render
-            try:
-                await self._page.wait_for_selector("main", timeout=5000)
-            except PlaywrightTimeoutError:
-                logger.debug("No <main> element found on %s", url)
+            # Retry once after backoff
+            logger.info("Retrying %s after %.0fs backoff", url, _RATE_LIMIT_RETRY_DELAY)
+            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            return await self._extract_page_once(url)
 
-            # Dismiss any modals blocking content
-            await handle_modal_close(self._page)
-
-            # Scroll to trigger lazy loading
-            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
-
-            # Extract text from main content area
-            text = await self._page.evaluate(
-                """() => {
-                    const main = document.querySelector('main');
-                    return main ? main.innerText : document.body.innerText;
-                }"""
-            )
-
-            return text.strip() if text else ""
-
+        except LinkedInScraperException:
+            raise
         except Exception as e:
             logger.warning("Failed to extract page %s: %s", url, e)
             return ""
 
+    async def _extract_page_once(self, url: str) -> str:
+        """Single attempt to navigate, scroll, and extract innerText."""
+        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await detect_rate_limit(self._page)
+
+        # Wait for main content to render
+        try:
+            await self._page.wait_for_selector("main", timeout=5000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s", url)
+
+        # Dismiss any modals blocking content
+        await handle_modal_close(self._page)
+
+        # Scroll to trigger lazy loading
+        await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+
+        # Extract text from main content area
+        raw = await self._page.evaluate(
+            """() => {
+                const main = document.querySelector('main');
+                return main ? main.innerText : document.body.innerText;
+            }"""
+        )
+
+        if not raw:
+            return ""
+        cleaned = strip_linkedin_noise(raw)
+        if not cleaned and raw.strip():
+            logger.warning(
+                "Page %s returned only LinkedIn chrome (likely rate-limited)", url
+            )
+            return _RATE_LIMITED_MSG
+        return cleaned
+
     async def _extract_overlay(self, url: str) -> str:
         """Extract content from an overlay/modal page (e.g. contact info).
 
-        Falls back to `.artdeco-modal__content` if `<main>` is empty.
+        LinkedIn renders contact info as a native <dialog> element.
+        Falls back to `<main>` if no dialog is found.
         """
         try:
             await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await detect_rate_limit(self._page)
 
-            # Wait for modal content
+            # Wait for the dialog/modal to render (LinkedIn uses native <dialog>)
             try:
                 await self._page.wait_for_selector(
-                    "main, .artdeco-modal__content", timeout=5000
+                    "dialog[open], .artdeco-modal__content", timeout=5000
                 )
             except PlaywrightTimeoutError:
-                logger.debug("No overlay content found on %s", url)
+                logger.debug("No modal overlay found on %s, falling back to main", url)
 
-            await handle_modal_close(self._page)
+            # NOTE: Do NOT call handle_modal_close() here — the contact-info
+            # overlay *is* a dialog/modal. Dismissing it would destroy the
+            # content before the JS evaluation below can read it.
 
-            text = await self._page.evaluate(
+            raw = await self._page.evaluate(
                 """() => {
-                    const main = document.querySelector('main');
-                    const mainText = main ? main.innerText.trim() : '';
-                    if (mainText) return mainText;
+                    const dialog = document.querySelector('dialog[open]');
+                    if (dialog) return dialog.innerText.trim();
                     const modal = document.querySelector('.artdeco-modal__content');
-                    return modal ? modal.innerText.trim() : document.body.innerText.trim();
+                    if (modal) return modal.innerText.trim();
+                    const main = document.querySelector('main');
+                    return main ? main.innerText.trim() : document.body.innerText.trim();
                 }"""
             )
 
-            return text.strip() if text else ""
+            if not raw:
+                return ""
+            cleaned = strip_linkedin_noise(raw)
+            if not cleaned and raw.strip():
+                logger.warning(
+                    "Overlay %s returned only LinkedIn chrome (likely rate-limited)",
+                    url,
+                )
+                return _RATE_LIMITED_MSG
+            return cleaned
 
+        except LinkedInScraperException:
+            raise
         except Exception as e:
             logger.warning("Failed to extract overlay %s: %s", url, e)
             return ""
@@ -136,20 +211,20 @@ class LinkedInExtractor:
                 False,
             ),
             (
-                PersonScrapingFields.ACCOMPLISHMENTS,
+                PersonScrapingFields.HONORS,
                 "honors",
                 "/details/honors/",
                 False,
             ),
             (
-                PersonScrapingFields.ACCOMPLISHMENTS,
+                PersonScrapingFields.LANGUAGES,
                 "languages",
                 "/details/languages/",
                 False,
             ),
             (
-                PersonScrapingFields.CONTACTS,
-                "contacts",
+                PersonScrapingFields.CONTACT_INFO,
+                "contact_info",
                 "/overlay/contact-info/",
                 True,
             ),
@@ -169,6 +244,8 @@ class LinkedInExtractor:
                 if text:
                     sections[section_name] = text
                 pages_visited.append(url)
+            except LinkedInScraperException:
+                raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
                 pages_visited.append(url)
@@ -218,6 +295,8 @@ class LinkedInExtractor:
                 if text:
                     sections[section_name] = text
                 pages_visited.append(url)
+            except LinkedInScraperException:
+                raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
                 pages_visited.append(url)
