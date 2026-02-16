@@ -67,21 +67,7 @@ uvx linkedin-scraper-mcp --login
 
 This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile is saved to `~/.linkedin-mcp/profile/`.
 
-**Step 2: Run the server**
-
-```bash
-uvx linkedin-scraper-mcp
-```
-
-> [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again.
-
-### uvx Setup Help
-
-<details>
-<summary><b>🔧 Configuration</b></summary>
-
-**Client Configuration:**
+**Step 2: Client Configuration:**
 
 ```json
 {
@@ -93,7 +79,14 @@ uvx linkedin-scraper-mcp
   }
 }
 ```
+> [!NOTE]
+> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again
 
+### uvx Setup Help
+
+<details>
+<summary><b>🔧 Configuration</b></summary>
+  
 **Transport Modes:**
 
 - **Default (stdio)**: Standard communication for local MCP servers
