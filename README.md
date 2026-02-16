@@ -47,11 +47,8 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `get_job_details` | Get detailed information about a specific job posting | Working |
 | `close_session` | Close browser session and clean up resources | Working |
 
-> [!WARNING]
-> The browser profile at `~/.linkedin-mcp/profile/` contains sensitive authentication data. Keep it secure and do not share it.
-
 > [!IMPORTANT]
-> **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--get-session` again to create a new profile + cookie file that can be mounted in docker. 02/2026
+> **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
 
 <br/>
 <br/>
@@ -65,7 +62,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 **Step 1: Create a session (first time only)**
 
 ```bash
-uvx linkedin-scraper-mcp --get-session
+uvx linkedin-scraper-mcp --login
 ```
 
 This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile is saved to `~/.linkedin-mcp/profile/`.
@@ -77,7 +74,7 @@ uvx linkedin-scraper-mcp
 ```
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --get-session` again.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again.
 
 ### uvx Setup Help
 
@@ -104,14 +101,14 @@ uvx linkedin-scraper-mcp
 
 **CLI Options:**
 
-- `--get-session` - Open browser to log in and save persistent profile
+- `--login` - Open browser to log in and save persistent profile
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--clear-session` - Clear stored LinkedIn browser profile
+- `--logout` - Clear stored LinkedIn browser profile
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
@@ -120,7 +117,7 @@ uvx linkedin-scraper-mcp
 
 ```bash
 # Create a session interactively
-uvx linkedin-scraper-mcp --get-session
+uvx linkedin-scraper-mcp --login
 
 # Run with debug logging
 uvx linkedin-scraper-mcp --log-level DEBUG
@@ -158,8 +155,8 @@ uvx linkedin-scraper-mcp --transport streamable-http --host 127.0.0.1 --port 808
 
 **Login issues:**
 
-- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --get-session` which opens a browser where you can solve it manually.
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
+- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve it manually.
 
 **Timeout issues:**
 
@@ -188,7 +185,7 @@ Docker runs headless (no browser window), so you need to create a browser profil
 **Step 1: Create profile using uvx (one-time setup)**
 
 ```bash
-uvx linkedin-scraper-mcp --get-session
+uvx linkedin-scraper-mcp --login
 ```
 
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile is saved to `~/.linkedin-mcp/profile/`.
@@ -211,10 +208,10 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --get-session` again locally.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again locally.
 
 > [!NOTE]
-> **Why can't I run `--get-session` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
+> **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
 
 ### Docker Setup Help
 
@@ -233,13 +230,13 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--clear-session` - Clear stored LinkedIn browser profile
+- `--logout` - Clear stored LinkedIn browser profile
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (rarely needed in Docker)
 
 > [!NOTE]
-> `--get-session` and `--no-headless` are not available in Docker (no display server). Use the [uvx setup](#-uvx-setup-recommended---universal) to create profiles.
+> `--login` and `--no-headless` are not available in Docker (no display server). Use the [uvx setup](#-uvx-setup-recommended---universal) to create profiles.
 
 **HTTP Mode Example (for web-based MCP clients):**
 
@@ -273,8 +270,8 @@ docker run -it --rm \
 **Login issues:**
 
 - Make sure you have only one active LinkedIn session at a time
-- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --get-session` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
+- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 
 **Timeout issues:**
 
@@ -300,10 +297,10 @@ docker run -it --rm \
 
 1. Download the [DXT extension](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
 2. Double-click to install into Claude Desktop
-3. Create a session: `uvx linkedin-scraper-mcp --get-session`
+3. Create a session: `uvx linkedin-scraper-mcp --login`
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --get-session` again.
+> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again.
 
 ### DXT Extension Setup Help
 
@@ -330,8 +327,8 @@ docker run -it --rm \
 **Login issues:**
 
 - Make sure you have only one active LinkedIn session at a time
-- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --get-session` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
+- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 
 **Timeout issues:**
 
@@ -369,7 +366,7 @@ uv run patchright install chromium
 uv run pre-commit install
 
 # 6. Create a session (first time only)
-uv run -m linkedin_mcp_server --get-session
+uv run -m linkedin_mcp_server --login
 
 # 7. Start the server
 uv run -m linkedin_mcp_server
@@ -382,16 +379,16 @@ uv run -m linkedin_mcp_server
 
 **CLI Options:**
 
-- `--get-session` - Open browser to log in and save persistent profile
+- `--login` - Open browser to log in and save persistent profile
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Set transport mode
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--clear-session` - Clear stored LinkedIn browser profile
+- `--logout` - Clear stored LinkedIn browser profile
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
-- `--session-info` - Check if current session is valid and exit
+- `--status` - Check if current session is valid and exit
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--slow-mo MS` - Delay between browser actions in milliseconds (default: 0, useful for debugging)
 - `--user-agent STRING` - Custom browser user agent
@@ -428,8 +425,8 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 **Login issues:**
 
 - Make sure you have only one active LinkedIn session at a time
-- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--get-session`
-- You might get a captcha challenge if you logged in frequently. The `--get-session` command opens a browser where you can solve it manually.
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
+- You might get a captcha challenge if you logged in frequently. The `--login` command opens a browser where you can solve it manually.
 
 **Scraping issues:**
 
@@ -439,7 +436,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 **Session issues:**
 
 - Browser profile is stored at `~/.linkedin-mcp/profile/`
-- Use `--clear-session` to clear the profile and start fresh
+- Use `--logout` to clear the profile and start fresh
 
 **Python/Patchright issues:**
 

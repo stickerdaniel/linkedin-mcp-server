@@ -133,7 +133,7 @@ def profile_info_and_exit() -> None:
     profile_dir = get_profile_dir()
     if not profile_exists(profile_dir):
         print(f"❌ No browser profile found at {profile_dir}")
-        print("   Run with --get-session to create a profile")
+        print("   Run with --login to create a profile")
         sys.exit(1)
 
     # Check if session is valid by testing login status
@@ -163,7 +163,7 @@ def profile_info_and_exit() -> None:
         sys.exit(0)
     else:
         print(f"❌ Session expired or invalid (profile: {profile_dir})")
-        print("   Run with --get-session to re-authenticate")
+        print("   Run with --login to re-authenticate")
         sys.exit(1)
 
 
@@ -192,7 +192,7 @@ def ensure_authentication_ready() -> None:
         raise CredentialsNotFoundError(
             "No LinkedIn profile found.\n"
             "Options:\n"
-            "  1. Run with --get-session to create a profile\n"
+            "  1. Run with --login to create a profile\n"
             "  2. Run with --no-headless to login interactively"
         )
 
@@ -244,16 +244,16 @@ def main() -> None:
     # Set headless mode from config
     set_headless(config.browser.headless)
 
-    # Handle --clear-session flag
-    if config.server.clear_session:
+    # Handle --logout flag
+    if config.server.logout:
         clear_profile_and_exit()
 
-    # Handle --get-session flag
-    if config.server.get_session:
+    # Handle --login flag
+    if config.server.login:
         get_profile_and_exit()
 
-    # Handle --session-info flag
-    if config.server.session_info:
+    # Handle --status flag
+    if config.server.status:
         profile_info_and_exit()
 
     logger.debug(f"Server configuration: {config}")
