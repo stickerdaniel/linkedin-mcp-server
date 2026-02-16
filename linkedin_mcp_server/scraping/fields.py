@@ -42,15 +42,21 @@ COMPANY_SECTION_MAP: dict[str, CompanyScrapingFields] = {
 }
 
 
-def parse_person_sections(sections: str | None) -> PersonScrapingFields:
+def parse_person_sections(
+    sections: str | None,
+) -> tuple[PersonScrapingFields, list[str]]:
     """Parse comma-separated section names into PersonScrapingFields.
 
     BASIC_INFO is always included. Empty/None returns BASIC_INFO only.
-    Unknown section names are logged as warnings.
+    Unknown section names are logged as warnings and returned.
+
+    Returns:
+        Tuple of (flags, unknown_section_names).
     """
     flags = PersonScrapingFields.BASIC_INFO
+    unknown: list[str] = []
     if not sections:
-        return flags
+        return flags, unknown
     for name in sections.split(","):
         name = name.strip().lower()
         if not name:
@@ -58,23 +64,30 @@ def parse_person_sections(sections: str | None) -> PersonScrapingFields:
         if name in PERSON_SECTION_MAP:
             flags |= PERSON_SECTION_MAP[name]
         else:
+            unknown.append(name)
             logger.warning(
                 "Unknown person section %r ignored. Valid: %s",
                 name,
                 ", ".join(sorted(PERSON_SECTION_MAP)),
             )
-    return flags
+    return flags, unknown
 
 
-def parse_company_sections(sections: str | None) -> CompanyScrapingFields:
+def parse_company_sections(
+    sections: str | None,
+) -> tuple[CompanyScrapingFields, list[str]]:
     """Parse comma-separated section names into CompanyScrapingFields.
 
     ABOUT is always included. Empty/None returns ABOUT only.
-    Unknown section names are logged as warnings.
+    Unknown section names are logged as warnings and returned.
+
+    Returns:
+        Tuple of (flags, unknown_section_names).
     """
     flags = CompanyScrapingFields.ABOUT
+    unknown: list[str] = []
     if not sections:
-        return flags
+        return flags, unknown
     for name in sections.split(","):
         name = name.strip().lower()
         if not name:
@@ -82,9 +95,10 @@ def parse_company_sections(sections: str | None) -> CompanyScrapingFields:
         if name in COMPANY_SECTION_MAP:
             flags |= COMPANY_SECTION_MAP[name]
         else:
+            unknown.append(name)
             logger.warning(
                 "Unknown company section %r ignored. Valid: %s",
                 name,
                 ", ".join(sorted(COMPANY_SECTION_MAP)),
             )
-    return flags
+    return flags, unknown
