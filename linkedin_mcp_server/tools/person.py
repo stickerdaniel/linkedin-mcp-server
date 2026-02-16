@@ -1,34 +1,28 @@
 """
 LinkedIn person profile scraping tools.
 
-Provides MCP tools for extracting comprehensive LinkedIn profile information including
-experience, education, interests, accomplishments, and contact details.
+Uses innerText extraction for resilient profile data capture
+with configurable section selection.
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
 from fastmcp import Context, FastMCP
-from linkedin_scraper import PersonScraper
 from mcp.types import ToolAnnotations
 
-from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.drivers.browser import (
     ensure_authenticated,
     get_or_create_browser,
 )
 from linkedin_mcp_server.error_handler import handle_tool_error
+from linkedin_mcp_server.scraping import LinkedInExtractor, parse_person_sections
 
 logger = logging.getLogger(__name__)
 
 
 def register_person_tools(mcp: FastMCP) -> None:
-    """
-    Register all person-related tools with the MCP server.
-
-    Args:
-        mcp: The MCP server instance
-    """
+    """Register all person-related tools with the MCP server."""
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -39,44 +33,53 @@ def register_person_tools(mcp: FastMCP) -> None:
         )
     )
     async def get_person_profile(
-        linkedin_username: str, ctx: Context
-    ) -> Dict[str, Any]:
+        linkedin_username: str,
+        ctx: Context,
+        sections: str | None = None,
+    ) -> dict[str, Any]:
         """
         Get a specific person's LinkedIn profile.
 
         Args:
             linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates")
             ctx: FastMCP context for progress reporting
+            sections: Comma-separated list of extra sections to scrape.
+                The main profile page is always included.
+                Available sections: experience, education, interests, honors, languages, contact_info
+                Examples: "experience,education", "contact_info", "honors,languages"
+                Default (None) scrapes only the main profile page.
 
         Returns:
-            Structured data from the person's profile including:
-            - linkedin_url, name, location, about, open_to_work
-            - experiences: List of work history (position_title, institution_name,
-              linkedin_url, from_date, to_date, duration, location, description)
-            - educations: List of education (institution_name, degree, linkedin_url,
-              from_date, to_date, description)
-            - interests: List of interests with category (company, group, school,
-              newsletter, influencer) and linkedin_url
-            - accomplishments: List of accomplishments (category, title)
-            - contacts: List of contact info (type: email/phone/website/linkedin/
-              twitter/birthday/address, value, label)
+            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            Sections may be absent if extraction yielded no content for that page.
+            The LLM should parse the raw text in each section.
         """
         try:
-            # Validate session before scraping
             await ensure_authenticated()
 
-            # Construct LinkedIn URL from username
-            linkedin_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+            fields, unknown = parse_person_sections(sections)
 
-            logger.info(f"Scraping profile: {linkedin_url}")
+            logger.info(
+                "Scraping profile: %s (sections=%s)",
+                linkedin_username,
+                sections,
+            )
 
             browser = await get_or_create_browser()
-            scraper = PersonScraper(
-                browser.page, callback=MCPContextProgressCallback(ctx)
-            )
-            person = await scraper.scrape(linkedin_url)
+            extractor = LinkedInExtractor(browser.page)
 
-            return person.to_dict()
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting person profile scrape"
+            )
+
+            result = await extractor.scrape_person(linkedin_username, fields)
+
+            if unknown:
+                result["unknown_sections"] = unknown
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
 
         except Exception as e:
             return handle_tool_error(e, "get_person_profile")
