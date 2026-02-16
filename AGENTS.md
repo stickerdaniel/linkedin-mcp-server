@@ -39,13 +39,15 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 - `cli_main.py` - Entry point with CLI argument parsing and orchestration
 - `server.py` - FastMCP server setup and tool registration
 - `tools/` - LinkedIn scraping tools (person, company, job profiles)
-- `drivers/browser.py` - Patchright browser management with persistent profile
+- `drivers/browser.py` - Patchright browser management with persistent profile (singleton)
+- `core/` - Inlined browser, auth, and utility code (replaces `linkedin_scraper` dependency)
+- `scraping/` - innerText extraction engine with Flag-based section selection
 - `config/` - Configuration management (schema, loaders)
 - `authentication.py` - LinkedIn profile-based authentication
 
 **Tool Categories:**
 
-- **Person Tools** (`tools/person.py`) - Profile scraping with contacts, interests, experiences, education
+- **Person Tools** (`tools/person.py`) - Profile scraping with explicit section selection
 - **Company Tools** (`tools/company.py`) - Company profile and posts extraction
 - **Job Tools** (`tools/job.py`) - Job posting details and search functionality
 
@@ -53,12 +55,28 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Get profile with contacts (email/phone/social), interests, experiences, education |
-| `get_company_profile` | Get company info with employees, affiliated companies, showcase pages |
-| `get_company_posts` | Get recent posts from company feed with reactions/comments/images |
-| `get_job_details` | Get job posting details including description and benefits |
+| `get_person_profile` | Get profile with explicit `sections` selection (experience, education, interests, accomplishments, contacts) |
+| `get_company_profile` | Get company info with explicit `sections` selection (posts, jobs) |
+| `get_company_posts` | Get recent posts from company feed |
+| `get_job_details` | Get job posting details |
 | `search_jobs` | Search jobs by keywords and location |
 | `close_session` | Close browser session and clean up resources |
+
+**Tool Return Format:**
+
+All scraping tools return: `{url, sections: {name: raw_text}, pages_visited, sections_requested}`
+
+**Scraping Architecture (`scraping/`):**
+
+- `fields.py` - `PersonScrapingFields` and `CompanyScrapingFields` Flag enums
+- `extractor.py` - `LinkedInExtractor` class using navigate-scroll-innerText pattern
+
+**Core Subpackage (`core/`):**
+
+- `exceptions.py` - Exception hierarchy (AuthenticationError, RateLimitError, etc.)
+- `browser.py` - `BrowserManager` with persistent context and cookie import/export
+- `auth.py` - `is_logged_in()`, `wait_for_manual_login()`, `warm_up_browser()`
+- `utils.py` - `detect_rate_limit()`, `scroll_to_bottom()`, `handle_modal_close()`
 
 **Authentication Flow:**
 
@@ -81,7 +99,6 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 **Key Dependencies:**
 
 - `fastmcp` - MCP server framework
-- `linkedin_scraper` - LinkedIn web scraping (v3 with Patchright)
 - `patchright` - Anti-detection browser automation (Playwright fork)
 
 **Configuration:**
@@ -123,7 +140,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 When you need up-to-date information about technologies used in this project, use btca to query source repositories directly.
 
-**Available resources**: fastmcp, linkedinScraper, patchright, pytest, ruff, ty, uv, inquirer, pythonDotenv, pyperclip, preCommit
+**Available resources**: fastmcp, patchright, pytest, ruff, ty, uv, inquirer, pythonDotenv, pyperclip, preCommit
 
 ### Usage
 
