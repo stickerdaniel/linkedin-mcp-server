@@ -17,7 +17,7 @@ Create a browser profile locally, then mount it into Docker.
 **Step 1: Create profile using uvx (one-time setup)**
 
 ```bash
-uvx linkedin-scraper-mcp --get-session
+uvx linkedin-scraper-mcp --login
 ```
 
 **Step 2: Configure Claude Desktop with Docker**
@@ -37,7 +37,7 @@ uvx linkedin-scraper-mcp --get-session
 }
 ```
 
-> **Note:** Docker containers don't have a display server, so you can't use the `--get-session` command in Docker. Create a profile on your host first.
+> **Note:** Docker containers don't have a display server, so you can't use the `--login` command in Docker. Create a profile on your host first.
 
 ## Environment Variables
 
