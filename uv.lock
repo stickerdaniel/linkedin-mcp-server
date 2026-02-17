@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 
 [[package]]
@@ -1037,7 +1037,6 @@ dependencies = [
     { name = "fastmcp" },
     { name = "inquirer" },
     { name = "patchright" },
-    { name = "pyperclip" },
     { name = "python-dotenv" },
 ]
 
@@ -1058,7 +1057,6 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=2.14.0" },
     { name = "inquirer", specifier = ">=3.4.0" },
     { name = "patchright", specifier = ">=1.40.0" },
-    { name = "pyperclip", specifier = ">=1.9.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
 ]
 
