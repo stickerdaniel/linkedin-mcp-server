@@ -7,7 +7,6 @@ Implements a simplified two-phase startup:
 """
 
 import asyncio
-import io
 import logging
 import sys
 from typing import Literal
@@ -20,7 +19,6 @@ from linkedin_mcp_server.authentication import (
     clear_profile,
     get_authentication_source,
 )
-from linkedin_mcp_server.cli import print_claude_config
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.drivers.browser import (
     close_browser,
@@ -205,7 +203,18 @@ def ensure_authentication_ready() -> None:
 
 
 def get_version() -> str:
-    """Get version from pyproject.toml."""
+    """Get version from installed metadata with a source fallback."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        for package_name in ("linkedin-scraper-mcp", "linkedin-mcp-server"):
+            try:
+                return version(package_name)
+            except PackageNotFoundError:
+                continue
+    except Exception:
+        pass
+
     try:
         import os
         import tomllib
@@ -222,8 +231,6 @@ def get_version() -> str:
 
 def main() -> None:
     """Main application entry point."""
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-
     config = get_config()
 
     # Configure logging
@@ -261,7 +268,8 @@ def main() -> None:
     # Phase 1: Ensure Authentication is Ready
     try:
         ensure_authentication_ready()
-        print("✅ Authentication ready")
+        if config.is_interactive:
+            print("✅ Authentication ready")
         logger.info("Authentication ready")
 
     except CredentialsNotFoundError as e:
@@ -269,22 +277,23 @@ def main() -> None:
         if config.is_interactive:
             print("\n❌ Authentication required")
             print(str(e))
-        else:
-            print("\n❌ Authentication required for non-interactive mode")
         sys.exit(1)
 
     except KeyboardInterrupt:
-        print("\n\n👋 Setup cancelled by user")
+        if config.is_interactive:
+            print("\n\n👋 Setup cancelled by user")
         sys.exit(0)
 
     except (AuthenticationError, RateLimitError) as e:
         logger.error(f"LinkedIn error during setup: {e}")
-        print(f"\n❌ {str(e)}")
+        if config.is_interactive:
+            print(f"\n❌ {str(e)}")
         sys.exit(1)
 
     except Exception as e:
-        logger.error(f"Unexpected error during authentication setup: {e}")
-        print(f"\n❌ Setup failed: {e}")
+        logger.exception(f"Unexpected error during authentication setup: {e}")
+        if config.is_interactive:
+            print(f"\n❌ Setup failed: {e}")
         sys.exit(1)
 
     # Phase 2: Server Runtime
@@ -296,18 +305,10 @@ def main() -> None:
             print("\n🚀 Server ready! Choose transport mode:")
             transport = choose_transport_interactive()
 
-        # Print Claude config in interactive stdio mode
-        if config.is_interactive and transport == "stdio":
-            print_claude_config()
-
         # Create and run the MCP server
         mcp = create_mcp_server()
 
-        print(f"\n🚀 Running LinkedIn MCP server ({transport.upper()} mode)...")
         if transport == "streamable-http":
-            print(
-                f"📡 HTTP server at http://{config.server.host}:{config.server.port}{config.server.path}"
-            )
             mcp.run(
                 transport=transport,
                 host=config.server.host,
@@ -318,18 +319,17 @@ def main() -> None:
             mcp.run(transport=transport)
 
     except KeyboardInterrupt:
-        print("\n⏹️  Server stopped by user")
         exit_gracefully(0)
 
     except Exception as e:
-        logger.error(f"Server runtime error: {e}")
-        print(f"\n❌ Server error: {e}")
+        logger.exception(f"Server runtime error: {e}")
+        if config.is_interactive:
+            print(f"\n❌ Server error: {e}")
         exit_gracefully(1)
 
 
 def exit_gracefully(exit_code: int = 0) -> None:
     """Exit the application gracefully with browser cleanup."""
-    print("👋 Shutting down LinkedIn MCP server...")
     try:
         asyncio.run(close_browser())
     except Exception:
@@ -343,9 +343,8 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         exit_gracefully(0)
     except Exception as e:
-        logger.error(
+        logger.exception(
             f"Error running MCP server: {e}",
             extra={"exception_type": type(e).__name__, "exception_message": str(e)},
         )
-        print(f"❌ Error running MCP server: {e}")
         exit_gracefully(1)
