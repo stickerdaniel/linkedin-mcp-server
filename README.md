@@ -81,10 +81,6 @@ This opens a browser for you to log in manually (5 minute timeout for 2FA, captc
 ```
 
 > [!NOTE]
-> `stdio` is the default transport, so no `--transport` flag is required in MCP client configs.
-> If you run the command directly in an interactive terminal and no transport is set, you'll be prompted to choose one.
-
-> [!NOTE]
 > Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again
 
 ### uvx Setup Help
