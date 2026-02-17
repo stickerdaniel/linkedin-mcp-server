@@ -92,13 +92,15 @@ This opens a browser for you to log in manually (5 minute timeout for 2FA, captc
 
 - **Default (stdio)**: Standard communication for local MCP servers
 - **Streamable HTTP**: For web-based MCP server
+- If no transport is specified, the server defaults to `stdio`
+- An interactive terminal without explicit transport shows a chooser prompt
 
 **CLI Options:**
 
 - `--login` - Open browser to log in and save persistent profile
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--transport {stdio,streamable-http}` - Set transport mode
+- `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
@@ -122,6 +124,8 @@ uvx linkedin-scraper-mcp --log-level DEBUG
 ```bash
 uvx linkedin-scraper-mcp --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
+
+Runtime server logs are emitted by FastMCP/Uvicorn.
 
 **Test with mcp inspector:**
 
@@ -216,11 +220,13 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 
 - **Default (stdio)**: Standard communication for local MCP servers
 - **Streamable HTTP**: For a web-based MCP server
+- If no transport is specified, the server defaults to `stdio`
+- An interactive terminal without explicit transport shows a chooser prompt
 
 **CLI Options:**
 
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--transport {stdio,streamable-http}` - Set transport mode
+- `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
@@ -241,6 +247,8 @@ docker run -it --rm \
   stickerdaniel/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
+
+Runtime server logs are emitted by FastMCP/Uvicorn.
 
 **Test with mcp inspector:**
 
@@ -376,7 +384,7 @@ uv run -m linkedin_mcp_server
 - `--login` - Open browser to log in and save persistent profile
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--transport {stdio,streamable-http}` - Set transport mode
+- `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
@@ -410,6 +418,8 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
   }
 }
 ```
+
+`stdio` is used by default for this config.
 
 </details>
 
