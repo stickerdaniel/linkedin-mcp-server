@@ -97,7 +97,7 @@ This opens a browser for you to log in manually (5 minute timeout for 2FA, captc
 - **Default (stdio)**: Standard communication for local MCP servers
 - **Streamable HTTP**: For web-based MCP server
 - If no transport is specified, the server defaults to `stdio`
-- Interactive terminal runs without explicit transport show a chooser prompt
+- An interactive terminal without explicit transport shows a chooser prompt
 
 **CLI Options:**
 
@@ -225,7 +225,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - **Default (stdio)**: Standard communication for local MCP servers
 - **Streamable HTTP**: For a web-based MCP server
 - If no transport is specified, the server defaults to `stdio`
-- Interactive terminal runs without explicit transport show a chooser prompt
+- An interactive terminal without explicit transport shows a chooser prompt
 
 **CLI Options:**
 
