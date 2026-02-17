@@ -38,6 +38,8 @@ uvx linkedin-scraper-mcp --login
 ```
 
 > **Note:** Docker containers don't have a display server, so you can't use the `--login` command in Docker. Create a profile on your host first.
+>
+> **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 
 ## Environment Variables
 
