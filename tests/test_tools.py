@@ -40,6 +40,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_company = AsyncMock(return_value=scrape_result)
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
+    mock.search_people = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(return_value="some text")
     return mock
 
@@ -128,6 +129,32 @@ class TestPersonTool:
         result = await tool_fn("test-user", mock_context)
         assert result["error"] == "session_expired"
 
+    async def test_search_people(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        expected = {
+            "url": "https://www.linkedin.com/search/results/people/?keywords=AI+engineer&location=New+York",
+            "sections": {"search_results": "Jane Doe\nAI Engineer at Acme\nNew York"},
+            "pages_visited": [
+                "https://www.linkedin.com/search/results/people/?keywords=AI+engineer&location=New+York"
+            ],
+            "sections_requested": ["search_results"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.person.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
+        )
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_people")
+        result = await tool_fn("AI engineer", mock_context, location="New York")
+        assert "search_results" in result["sections"]
+        mock_extractor.search_people.assert_awaited_once_with("AI engineer", "New York")
 
 class TestCompanyTools:
     async def test_get_company_profile(
