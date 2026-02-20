@@ -61,6 +61,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 | `get_job_details` | Get job posting details |
 | `search_jobs` | Search jobs by keywords and location |
 | `close_session` | Close browser session and clean up resources |
+| `search_people` | Search for people by keywords and location |
 
 **Tool Return Format:**
 

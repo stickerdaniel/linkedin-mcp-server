@@ -44,6 +44,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | Working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | Working |
 | `search_jobs` | Search for jobs with keywords and location filters | Working |
+| `search_people` | Search for people by keywords and location | Working |
 | `get_job_details` | Get detailed information about a specific job posting | Working |
 | `close_session` | Close browser session and clean up resources | Working |
 
