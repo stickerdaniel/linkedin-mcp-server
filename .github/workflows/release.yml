@@ -114,8 +114,12 @@ jobs:
                 {"context": "test", "app_id": 15368}
               ]
             },
-            "enforce_admins": false,
-            "required_pull_request_reviews": null,
+            "enforce_admins": true,
+            "required_pull_request_reviews": {
+              "dismiss_stale_reviews": false,
+              "require_code_owner_reviews": false,
+              "required_approving_review_count": 0
+            },
             "restrictions": null
           }
           EOF
