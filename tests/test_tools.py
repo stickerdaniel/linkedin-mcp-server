@@ -129,9 +129,7 @@ class TestPersonTool:
         result = await tool_fn("test-user", mock_context)
         assert result["error"] == "session_expired"
 
-    async def test_search_people(
-        self, mock_context, patch_tool_deps, monkeypatch
-    ):
+    async def test_search_people(self, mock_context, patch_tool_deps, monkeypatch):
         expected = {
             "url": "https://www.linkedin.com/search/results/people/?keywords=AI+engineer&location=New+York",
             "sections": {"search_results": "Jane Doe\nAI Engineer at Acme\nNew York"},
@@ -155,6 +153,7 @@ class TestPersonTool:
         result = await tool_fn("AI engineer", mock_context, location="New York")
         assert "search_results" in result["sections"]
         mock_extractor.search_people.assert_awaited_once_with("AI engineer", "New York")
+
 
 class TestCompanyTools:
     async def test_get_company_profile(
