@@ -83,3 +83,53 @@ def register_person_tools(mcp: FastMCP) -> None:
 
         except Exception as e:
             return handle_tool_error(e, "get_person_profile")
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Search People",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
+    async def search_people(
+        keywords: str,
+        ctx: Context,
+        location: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Search for people on LinkedIn.
+
+        Args:
+            keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
+            ctx: FastMCP context for progress reporting
+            location: Optional location filter (e.g., "New York", "Remote")
+
+        Returns:
+            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            The LLM should parse the raw text to extract individual people and their profiles.
+        """
+        try:
+            await ensure_authenticated()
+
+            logger.info(
+                "Searching people: keywords='%s', location='%s'",
+                keywords,
+                location,
+            )
+
+            browser = await get_or_create_browser()
+            extractor = LinkedInExtractor(browser.page)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting people search"
+            )
+
+            result = await extractor.search_people(keywords, location)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except Exception as e:
+            return handle_tool_error(e, "search_people")
