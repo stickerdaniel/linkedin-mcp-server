@@ -55,7 +55,6 @@ jobs:
       contents: write
       packages: write
       id-token: write  # Required for PyPI Trusted Publishing
-      administration: write  # needed to temporarily lift branch protection
 
     steps:
       - name: Checkout code
@@ -84,7 +83,7 @@ jobs:
           gh api repos/${{ github.repository }}/branches/main/protection \
             --method DELETE
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
 
       - name: Commit version updates
         run: |
@@ -103,7 +102,7 @@ jobs:
       - name: Restore branch protection
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
           PAYLOAD: >-
             {
               "required_status_checks": {
