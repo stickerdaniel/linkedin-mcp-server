@@ -102,29 +102,29 @@ jobs:
 
       - name: Restore branch protection
         if: always()
-        run: |
-          gh api repos/${{ github.repository }}/branches/main/protection \
-            --method PUT \
-            --input - <<'EOF'
-          {
-            "required_status_checks": {
-              "strict": true,
-              "checks": [
-                {"context": "lint-and-check", "app_id": 15368},
-                {"context": "test", "app_id": 15368}
-              ]
-            },
-            "enforce_admins": true,
-            "required_pull_request_reviews": {
-              "dismiss_stale_reviews": false,
-              "require_code_owner_reviews": false,
-              "required_approving_review_count": 0
-            },
-            "restrictions": null
-          }
-          EOF
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAYLOAD: >-
+            {
+              "required_status_checks": {
+                "strict": true,
+                "checks": [
+                  {"context": "lint-and-check", "app_id": 15368},
+                  {"context": "test", "app_id": 15368}
+                ]
+              },
+              "enforce_admins": true,
+              "required_pull_request_reviews": {
+                "dismiss_stale_reviews": false,
+                "require_code_owner_reviews": false,
+                "required_approving_review_count": 0
+              },
+              "restrictions": null
+            }
+        run: |
+          echo "$PAYLOAD" | gh api repos/${{ github.repository }}/branches/main/protection \
+            --method PUT \
+            --input -
 
       - name: Create release tag
         run: |
