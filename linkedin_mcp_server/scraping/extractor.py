@@ -383,3 +383,31 @@ class LinkedInExtractor:
             "pages_visited": [url],
             "sections_requested": ["search_results"],
         }
+
+    async def search_people(
+        self,
+        keywords: str,
+        location: str | None = None,
+    ) -> dict[str, Any]:
+        """Search for people and extract the results page.
+
+        Returns:
+            {url, sections: {name: text}, pages_visited, sections_requested}
+        """
+        params = f"keywords={quote_plus(keywords)}"
+        if location:
+            params += f"&location={quote_plus(location)}"
+
+        url = f"https://www.linkedin.com/search/results/people/?{params}"
+        text = await self.extract_page(url)
+
+        sections: dict[str, str] = {}
+        if text:
+            sections["search_results"] = text
+
+        return {
+            "url": url,
+            "sections": sections,
+            "pages_visited": [url],
+            "sections_requested": ["search_results"],
+        }
