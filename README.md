@@ -346,6 +346,8 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 
 ## 🐍 Local Setup (Develop & Contribute)
 
+Contributions are welcome! Please [open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) first to discuss the feature or bug fix before submitting a PR. This helps align on the approach before any code is written.
+
 **Prerequisites:** [Git](https://git-scm.com/downloads) and [uv](https://docs.astral.sh/uv/) installed
 
 ### Installation
@@ -462,7 +464,6 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 </details>
 
-Feel free to open an [issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) or [PR](https://github.com/stickerdaniel/linkedin-mcp-server/pulls)!
 
 <br/>
 <br/>
