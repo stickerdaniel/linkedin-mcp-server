@@ -41,6 +41,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
+    mock.scrape_saved_jobs = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(return_value="some text")
     return mock
 
@@ -222,6 +223,30 @@ class TestJobTools:
         tool_fn = await get_tool_fn(mcp, "get_job_details")
         result = await tool_fn("12345", mock_context)
         assert "job_posting" in result["sections"]
+
+    async def test_get_saved_jobs(self, mock_context, patch_tool_deps, monkeypatch):
+        expected = {
+            "url": "https://www.linkedin.com/jobs-tracker/",
+            "sections": {"saved_jobs": "Saved Job 1\nSaved Job 2"},
+            "pages_visited": ["https://www.linkedin.com/jobs-tracker/"],
+            "sections_requested": ["saved_jobs"],
+            "job_ids": ["111", "222"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.job.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
+        )
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_saved_jobs")
+        result = await tool_fn(mock_context)
+        assert "saved_jobs" in result["sections"]
+        assert result["url"] == "https://www.linkedin.com/jobs-tracker/"
 
     async def test_search_jobs(self, mock_context, patch_tool_deps, monkeypatch):
         expected = {
