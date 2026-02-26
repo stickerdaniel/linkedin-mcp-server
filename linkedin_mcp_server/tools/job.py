@@ -72,9 +72,12 @@ def register_job_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         )
     )
-    async def get_saved_jobs(ctx: Context) -> dict[str, Any]:
+    async def get_saved_jobs(ctx: Context, max_pages: int = 10) -> dict[str, Any]:
         """
         Get the user's saved/bookmarked jobs from LinkedIn's job tracker.
+
+        Args:
+            max_pages: Maximum number of pages to scrape (default 10, ~10 jobs/page).
 
         Returns:
             Dict with url, sections (name -> raw text), pages_visited, sections_requested,
@@ -84,7 +87,7 @@ def register_job_tools(mcp: FastMCP) -> None:
         try:
             await ensure_authenticated()
 
-            logger.info("Scraping saved jobs")
+            logger.info("Scraping saved jobs (max_pages=%d)", max_pages)
 
             browser = await get_or_create_browser()
             extractor = LinkedInExtractor(browser.page)
@@ -97,7 +100,9 @@ def register_job_tools(mcp: FastMCP) -> None:
                 pct = min(int(page / max(total, 1) * 100), 99)
                 await ctx.report_progress(progress=pct, total=100, message=msg)
 
-            result = await extractor.scrape_saved_jobs(on_progress=_report)
+            result = await extractor.scrape_saved_jobs(
+                max_pages=max_pages, on_progress=_report
+            )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
