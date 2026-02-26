@@ -431,8 +431,13 @@ class LinkedInExtractor:
         all_job_ids.extend(page_ids)
         logger.info("Page 1: found %d job IDs", len(page_ids))
 
+        # Determine total pages from pagination buttons (10 jobs per page).
+        page_buttons = self._page.locator('button[aria-label^="Page "]')
+        total_pages = max(await page_buttons.count(), 1)
+        logger.info("Total pages detected: %d", total_pages)
+
         if on_progress:
-            await on_progress(1, max_pages, "Fetched saved jobs page 1")
+            await on_progress(1, total_pages, "Fetched saved jobs page 1")
 
         # Paginate through remaining pages using numbered page buttons.
         for page_num in range(2, max_pages + 1):
@@ -485,7 +490,7 @@ class LinkedInExtractor:
 
             if on_progress:
                 await on_progress(
-                    page_num, max_pages, f"Fetched saved jobs page {page_num}"
+                    page_num, total_pages, f"Fetched saved jobs page {page_num}"
                 )
 
         # Append a summary of job IDs so they are always visible in the text.
