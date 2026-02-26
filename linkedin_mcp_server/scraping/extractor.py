@@ -406,12 +406,14 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Scrape the user's saved/bookmarked jobs from the jobs tracker page.
 
-        Automatically paginates through all pages by clicking the "Next" button.
+        Automatically paginates through all pages using numbered page buttons.
         Extracts job IDs from link hrefs (``/jobs/view/<id>/``) since they are
         not present in the page's innerText.
 
         Args:
             max_pages: Safety cap on pages to scrape (default 10).
+            on_progress: Optional async callback ``(page, total, message)``
+                invoked after each page is scraped.
 
         Returns:
             {url, sections: {name: text}, pages_visited, sections_requested,
@@ -433,7 +435,7 @@ class LinkedInExtractor:
 
         # Determine total pages from pagination buttons (10 jobs per page).
         page_buttons = self._page.locator('button[aria-label^="Page "]')
-        total_pages = max(await page_buttons.count(), 1)
+        total_pages = min(max(await page_buttons.count(), 1), max_pages)
         logger.info("Total pages detected: %d", total_pages)
 
         if on_progress:
@@ -454,15 +456,17 @@ class LinkedInExtractor:
             prev_ids = set(all_job_ids)
             await page_btn.scroll_into_view_if_needed()
             await page_btn.click()
+            await asyncio.sleep(_NAV_DELAY)
 
-            # Wait for the DOM to reflect new job links (no sleep needed).
+            # Wait for the DOM to reflect new job links.
             try:
                 await self._page.wait_for_function(
                     """(prevIds) => {
+                        const prev = new Set(prevIds);
                         const links = document.querySelectorAll('a[href*="/jobs/view/"]');
                         for (const a of links) {
-                            const m = a.href.match(/\\/jobs\\/view\\/(\\d+)/);
-                            if (m && !prevIds.includes(m[1])) return true;
+                            const match = a.href.match(/\\/jobs\\/view\\/(\\d+)/);
+                            if (match && !prev.has(match[1])) return true;
                         }
                         return false;
                     }""",

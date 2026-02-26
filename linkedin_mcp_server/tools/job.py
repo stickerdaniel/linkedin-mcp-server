@@ -94,7 +94,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             )
 
             async def _report(page: int, total: int, msg: str) -> None:
-                pct = min(int(page / total * 100), 99)
+                pct = min(int(page / max(total, 1) * 100), 99)
                 await ctx.report_progress(progress=pct, total=100, message=msg)
 
             result = await extractor.scrape_saved_jobs(on_progress=_report)

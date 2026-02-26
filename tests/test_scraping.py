@@ -418,11 +418,12 @@ class TestScrapeJob:
 
 class TestScrapeSavedJobs:
     async def test_scrape_saved_jobs_single_page(self, mock_page):
-        """Single page of results — no Next button."""
+        """Single page of results — no Next button. Progress callback fires."""
         mock_page.evaluate = AsyncMock(return_value=["111", "222"])
         mock_next = MagicMock()
         mock_next.count = AsyncMock(return_value=0)
         mock_page.locator = MagicMock(return_value=mock_next)
+        on_progress = AsyncMock()
         extractor = LinkedInExtractor(mock_page)
         with patch.object(
             extractor,
@@ -430,7 +431,7 @@ class TestScrapeSavedJobs:
             new_callable=AsyncMock,
             return_value="Saved Job 1\nSaved Job 2",
         ):
-            result = await extractor.scrape_saved_jobs()
+            result = await extractor.scrape_saved_jobs(on_progress=on_progress)
 
         assert result["url"] == "https://www.linkedin.com/jobs-tracker/"
         assert "saved_jobs" in result["sections"]
@@ -438,10 +439,11 @@ class TestScrapeSavedJobs:
         assert result["job_ids"] == ["111", "222"]
         assert "Job ID: 111" in result["sections"]["saved_jobs"]
         assert "Job ID: 222" in result["sections"]["saved_jobs"]
+        on_progress.assert_awaited_once_with(1, 1, "Fetched saved jobs page 1")
 
     async def test_scrape_saved_jobs_paginates(self, mock_page):
-        """Clicks Next and collects job IDs from page 2."""
-        # Page 1 returns IDs 111, 222; page 2 returns 111, 222, 333, 444
+        """Clicks page buttons, collects IDs, fires progress, caps total_pages."""
+        # Page 1 returns IDs 111, 222; page 2 returns 333, 444
         call_count = 0
 
         async def evaluate_side_effect(js, *args):
@@ -475,6 +477,7 @@ class TestScrapeSavedJobs:
         mock_page_btn.click = AsyncMock(side_effect=page_btn_click)
         mock_page.locator = MagicMock(return_value=mock_page_btn)
         mock_page.wait_for_function = AsyncMock()
+        on_progress = AsyncMock()
 
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -488,14 +491,78 @@ class TestScrapeSavedJobs:
                 "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
                 new_callable=AsyncMock,
             ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
-            result = await extractor.scrape_saved_jobs()
+            result = await extractor.scrape_saved_jobs(on_progress=on_progress)
 
         assert result["job_ids"] == ["111", "222", "333", "444"]
         assert "Page 1 jobs" in result["sections"]["saved_jobs"]
         assert "Page 2 jobs" in result["sections"]["saved_jobs"]
         for jid in ["111", "222", "333", "444"]:
             assert f"Job ID: {jid}" in result["sections"]["saved_jobs"]
+        # Progress was reported for both pages
+        assert on_progress.await_count == 2
+
+    async def test_scrape_saved_jobs_timeout_stops_gracefully(self, mock_page):
+        """PlaywrightTimeoutError on page 2 returns page 1 results only."""
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        mock_page.evaluate = AsyncMock(return_value=["111", "222"])
+
+        mock_page_btn = MagicMock()
+        mock_page_btn.count = AsyncMock(return_value=1)
+        mock_page_btn.scroll_into_view_if_needed = AsyncMock()
+        mock_page_btn.click = AsyncMock()
+        mock_page.locator = MagicMock(return_value=mock_page_btn)
+        mock_page.wait_for_function = AsyncMock(
+            side_effect=PlaywrightTimeoutError("Timeout")
+        )
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value="Page 1 jobs",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_saved_jobs()
+
+        assert result["job_ids"] == ["111", "222"]
+        assert "Job ID: 111" in result["sections"]["saved_jobs"]
+        assert "Job ID: 222" in result["sections"]["saved_jobs"]
+
+    async def test_scrape_saved_jobs_stops_at_max_pages_despite_more_buttons(
+        self, mock_page
+    ):
+        """max_pages=1 stops after page 1 even if more buttons exist."""
+        mock_page.evaluate = AsyncMock(return_value=["111", "222"])
+
+        # Simulate page buttons existing (count=3) but max_pages=1
+        mock_page_btn = MagicMock()
+        mock_page_btn.count = AsyncMock(return_value=3)
+        mock_page.locator = MagicMock(return_value=mock_page_btn)
+
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value="Page 1 jobs",
+        ):
+            result = await extractor.scrape_saved_jobs(max_pages=1)
+
+        assert result["job_ids"] == ["111", "222"]
+        # click should never have been called (loop range(2, 2) is empty)
+        mock_page_btn.click.assert_not_called()
 
     async def test_scrape_saved_jobs_empty(self, mock_page):
         mock_page.evaluate = AsyncMock(return_value=[])

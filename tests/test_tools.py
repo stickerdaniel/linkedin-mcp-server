@@ -248,6 +248,23 @@ class TestJobTools:
         assert "saved_jobs" in result["sections"]
         assert result["url"] == "https://www.linkedin.com/jobs-tracker/"
 
+    async def test_get_saved_jobs_error(self, mock_context, monkeypatch):
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.job.ensure_authenticated",
+            AsyncMock(side_effect=SessionExpiredError()),
+        )
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_saved_jobs")
+        result = await tool_fn(mock_context)
+        assert result["error"] == "session_expired"
+
     async def test_search_jobs(self, mock_context, patch_tool_deps, monkeypatch):
         expected = {
             "url": "https://www.linkedin.com/jobs/search/?keywords=python",
