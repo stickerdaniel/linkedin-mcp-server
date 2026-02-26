@@ -248,6 +248,12 @@ class LinkedInExtractor:
                 "/overlay/contact-info/",
                 True,
             ),
+            (
+                PersonScrapingFields.POSTS,
+                "posts",
+                "/recent-activity/all/",
+                False,
+            ),
         ]
 
         for flag, section_name, suffix, is_overlay in page_map:
