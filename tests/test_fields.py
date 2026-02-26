@@ -101,7 +101,7 @@ class TestParsePersonSections:
 
     def test_all_sections(self):
         flags, unknown = parse_person_sections(
-            "experience,education,interests,honors,languages,contact_info"
+            "experience,education,interests,honors,languages,contact_info,posts"
         )
         expected = (
             PersonScrapingFields.BASIC_INFO
@@ -111,6 +111,7 @@ class TestParsePersonSections:
             | PersonScrapingFields.HONORS
             | PersonScrapingFields.LANGUAGES
             | PersonScrapingFields.CONTACT_INFO
+            | PersonScrapingFields.POSTS
         )
         assert flags == expected
         assert unknown == []
