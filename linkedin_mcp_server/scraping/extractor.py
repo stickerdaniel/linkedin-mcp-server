@@ -2213,10 +2213,11 @@ class LinkedInExtractor:
         }
 
     _EXTRACT_JOB_IDS_JS = """() => {
+        const seen = new Set();
         const ids = [];
         document.querySelectorAll('a[href*="/jobs/view/"]').forEach(a => {
             const match = a.href.match(/\\/jobs\\/view\\/(\\d+)/);
-            if (match && !ids.includes(match[1])) ids.push(match[1]);
+            if (match && !seen.has(match[1])) { seen.add(match[1]); ids.push(match[1]); }
         });
         return ids;
     }"""
