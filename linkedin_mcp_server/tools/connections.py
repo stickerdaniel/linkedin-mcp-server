@@ -89,7 +89,7 @@ def register_connections_tools(mcp: FastMCP) -> None:
         usernames: str,
         ctx: Context,
         chunk_size: int = 5,
-        chunk_delay: int = 30,
+        chunk_delay: float = 30.0,
     ) -> dict[str, Any]:
         """
         Enrich LinkedIn profiles with contact details (email, phone, etc.) in chunked batches.
@@ -146,11 +146,14 @@ def register_connections_tools(mcp: FastMCP) -> None:
             result = await extractor.scrape_contact_batch(
                 usernames=username_list,
                 chunk_size=chunk_size,
-                chunk_delay=float(chunk_delay),
+                chunk_delay=chunk_delay,
                 progress_cb=on_progress,
             )
 
-            await ctx.report_progress(progress=total, total=total, message="Complete")
+            completed = result["total"]
+            await ctx.report_progress(
+                progress=completed, total=total, message="Complete"
+            )
 
             return result
 
