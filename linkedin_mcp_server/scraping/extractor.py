@@ -1282,6 +1282,20 @@ class LinkedInExtractor:
         # Deep scroll to load all connections (infinite scroll)
         await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=max_scrolls)
 
+        # Wait for page to stabilize after scrolling (LinkedIn may trigger
+        # lazy navigations that destroy the execution context)
+        await asyncio.sleep(1.0)
+
+        # Ensure we're still on the connections page; re-navigate if needed
+        current_url = self._page.url
+        if "/connections" not in current_url:
+            logger.warning(
+                "Page navigated away to %s during scroll, re-navigating",
+                current_url,
+            )
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2.0)
+
         # Extract connection data from profile link elements
         raw_connections: list[dict[str, str]] = await self._page.evaluate(
             """() => {
