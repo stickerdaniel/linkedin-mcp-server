@@ -1352,7 +1352,9 @@ class LinkedInExtractor:
             progress_cb: Optional async callback(completed, total) for progress.
 
         Returns:
-            {contacts: [{username, name, headline, email, phone, location, ...}],
+            {contacts: [{username, first_name, last_name, email, phone,
+             headline, location, company, website, birthday,
+             profile_raw, contact_info_raw}],
              total, failed, rate_limited, pages_visited}
         """
         contacts: list[dict[str, Any]] = []
