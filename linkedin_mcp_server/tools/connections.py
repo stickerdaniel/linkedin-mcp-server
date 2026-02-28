@@ -162,9 +162,12 @@ def register_connections_tools(
             )
 
             completed = result["total"]
-            await ctx.report_progress(
-                progress=completed, total=total, message="Complete"
+            msg = (
+                "Complete"
+                if not result.get("rate_limited")
+                else f"Stopped early due to rate limit ({completed}/{total} processed)"
             )
+            await ctx.report_progress(progress=completed, total=total, message=msg)
 
             return result
 
