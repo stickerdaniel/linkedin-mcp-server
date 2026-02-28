@@ -1269,7 +1269,17 @@ class LinkedInExtractor:
         """
         url = "https://www.linkedin.com/mynetwork/invite-connect/connections/"
 
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        # Navigate — handle ERR_ABORTED (page already loaded / redirect race)
+        try:
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as nav_err:
+            if "ERR_ABORTED" in str(nav_err):
+                logger.info("Navigation aborted (page may already be loaded), retrying")
+                await asyncio.sleep(2.0)
+                await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            else:
+                raise
+
         await detect_rate_limit(self._page)
 
         try:
@@ -1282,8 +1292,7 @@ class LinkedInExtractor:
         # Deep scroll to load all connections (infinite scroll)
         await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=max_scrolls)
 
-        # Wait for page to stabilize after scrolling (LinkedIn may trigger
-        # lazy navigations that destroy the execution context)
+        # Stabilize — LinkedIn may trigger lazy navigations during scroll
         await asyncio.sleep(1.0)
 
         # Ensure we're still on the connections page; re-navigate if needed
