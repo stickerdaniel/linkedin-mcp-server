@@ -8,7 +8,7 @@ from urllib.parse import quote_plus
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import LinkedInScraperException, RateLimitError
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
@@ -539,7 +539,9 @@ class LinkedInExtractor:
 
             for username in chunk:
                 profile_url = f"https://www.linkedin.com/in/{username}/"
-                contact_url = f"https://www.linkedin.com/in/{username}/overlay/contact-info/"
+                contact_url = (
+                    f"https://www.linkedin.com/in/{username}/overlay/contact-info/"
+                )
 
                 try:
                     # Scrape main profile page
@@ -550,11 +552,13 @@ class LinkedInExtractor:
                     contact_text = await self._extract_overlay(contact_url)
                     pages_visited.append(contact_url)
 
-                    contacts.append({
-                        "username": username,
-                        "profile": profile_text,
-                        "contact_info": contact_text,
-                    })
+                    contacts.append(
+                        {
+                            "username": username,
+                            "profile": profile_text,
+                            "contact_info": contact_text,
+                        }
+                    )
 
                 except RateLimitError:
                     logger.warning("Rate limited during contact batch at %s", username)

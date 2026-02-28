@@ -55,7 +55,9 @@ def register_connections_tools(mcp: FastMCP) -> None:
         try:
             await ensure_authenticated()
 
-            logger.info("Collecting connections (limit=%d, max_scrolls=%d)", limit, max_scrolls)
+            logger.info(
+                "Collecting connections (limit=%d, max_scrolls=%d)", limit, max_scrolls
+            )
 
             browser = await get_or_create_browser()
             extractor = LinkedInExtractor(browser.page)
@@ -129,7 +131,9 @@ def register_connections_tools(mcp: FastMCP) -> None:
             total = len(username_list)
 
             await ctx.report_progress(
-                progress=0, total=total, message=f"Starting enrichment of {total} profiles"
+                progress=0,
+                total=total,
+                message=f"Starting enrichment of {total} profiles",
             )
 
             async def on_progress(completed: int, total: int) -> None:
@@ -146,9 +150,7 @@ def register_connections_tools(mcp: FastMCP) -> None:
                 progress_cb=on_progress,
             )
 
-            await ctx.report_progress(
-                progress=total, total=total, message="Complete"
-            )
+            await ctx.report_progress(progress=total, total=total, message="Complete")
 
             return result
 
