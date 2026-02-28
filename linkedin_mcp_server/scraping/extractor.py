@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import re
-from typing import Any
+from typing import Any, Callable, Awaitable
 from urllib.parse import quote_plus
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
@@ -410,4 +410,185 @@ class LinkedInExtractor:
             "sections": sections,
             "pages_visited": [url],
             "sections_requested": ["search_results"],
+        }
+
+    # ------------------------------------------------------------------
+    # Connections bulk export
+    # ------------------------------------------------------------------
+
+    async def scrape_connections_list(
+        self,
+        limit: int = 0,
+        max_scrolls: int = 50,
+    ) -> dict[str, Any]:
+        """Scrape the authenticated user's connections list via infinite scroll.
+
+        Args:
+            limit: Maximum connections to return (0 = unlimited).
+            max_scrolls: Maximum scroll iterations (~1s pause each).
+
+        Returns:
+            {connections: [{username, name, headline}, ...], total, url, pages_visited}
+        """
+        url = "https://www.linkedin.com/mynetwork/invite-connect/connections/"
+
+        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element on connections page")
+
+        await handle_modal_close(self._page)
+
+        # Deep scroll to load all connections (infinite scroll)
+        await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=max_scrolls)
+
+        # Extract connection data from profile link elements
+        raw_connections: list[dict[str, str]] = await self._page.evaluate(
+            """() => {
+                const results = [];
+                const seen = new Set();
+                const links = document.querySelectorAll('main a[href*="/in/"]');
+                for (const a of links) {
+                    const href = a.getAttribute('href') || '';
+                    const match = href.match(/\\/in\\/([^/?#]+)/);
+                    if (!match) continue;
+                    const username = match[1];
+                    if (seen.has(username)) continue;
+                    seen.add(username);
+
+                    // Walk up to the connection card container
+                    const card = a.closest('li') || a.parentElement;
+
+                    // Name: try known selectors, then the link's own visible text
+                    let name = '';
+                    if (card) {
+                        const nameEl = card.querySelector(
+                            '.mn-connection-card__name, .entity-result__title-text, span[dir="ltr"], span.t-bold'
+                        );
+                        if (nameEl) name = nameEl.innerText.trim();
+                    }
+                    if (!name) {
+                        // The profile link itself often contains the person's name
+                        const linkText = a.innerText.trim();
+                        if (linkText && linkText.length < 80) name = linkText;
+                    }
+
+                    // Headline: try known selectors, then parse card text
+                    let headline = '';
+                    if (card) {
+                        const headlineEl = card.querySelector(
+                            '.mn-connection-card__occupation, .entity-result__primary-subtitle, span.t-normal'
+                        );
+                        if (headlineEl) headline = headlineEl.innerText.trim();
+                    }
+                    if (!headline && card) {
+                        // Fallback: split card text by newlines, second non-empty line is usually headline
+                        const lines = card.innerText.split('\\n').map(l => l.trim()).filter(Boolean);
+                        if (lines.length >= 2) headline = lines[1];
+                    }
+
+                    results.push({ username, name, headline });
+                }
+                return results;
+            }"""
+        )
+
+        # Apply limit
+        if limit > 0:
+            raw_connections = raw_connections[:limit]
+
+        return {
+            "connections": raw_connections,
+            "total": len(raw_connections),
+            "url": url,
+            "pages_visited": [url],
+        }
+
+    async def scrape_contact_batch(
+        self,
+        usernames: list[str],
+        chunk_size: int = 5,
+        chunk_delay: float = 30.0,
+        progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        """Enrich a list of profiles with contact details in chunked batches.
+
+        For each username: scrapes main profile + contact_info overlay.
+
+        Args:
+            usernames: List of LinkedIn usernames to enrich.
+            chunk_size: Profiles per chunk before a long pause.
+            chunk_delay: Seconds to pause between chunks.
+            progress_cb: Optional async callback(completed, total) for progress.
+
+        Returns:
+            {contacts: [{username, name, headline, email, phone, location, ...}],
+             total, failed, rate_limited, pages_visited}
+        """
+        contacts: list[dict[str, Any]] = []
+        failed: list[str] = []
+        pages_visited: list[str] = []
+        total = len(usernames)
+        rate_limited = False
+
+        for chunk_idx in range(0, total, chunk_size):
+            chunk = usernames[chunk_idx : chunk_idx + chunk_size]
+
+            for username in chunk:
+                profile_url = f"https://www.linkedin.com/in/{username}/"
+                contact_url = f"https://www.linkedin.com/in/{username}/overlay/contact-info/"
+
+                try:
+                    # Scrape main profile page
+                    profile_text = await self.extract_page(profile_url)
+                    pages_visited.append(profile_url)
+
+                    # Scrape contact info overlay
+                    contact_text = await self._extract_overlay(contact_url)
+                    pages_visited.append(contact_url)
+
+                    contacts.append({
+                        "username": username,
+                        "profile": profile_text,
+                        "contact_info": contact_text,
+                    })
+
+                except RateLimitError:
+                    logger.warning("Rate limited during contact batch at %s", username)
+                    rate_limited = True
+                    break
+                except Exception as e:
+                    logger.warning("Failed to scrape %s: %s", username, e)
+                    failed.append(username)
+
+                # Brief delay between individual profiles
+                await asyncio.sleep(_NAV_DELAY)
+
+            if rate_limited:
+                break
+
+            # Report progress after each chunk
+            completed = min(chunk_idx + len(chunk), total)
+            if progress_cb:
+                await progress_cb(completed, total)
+
+            # Pause between chunks (skip after last chunk)
+            if chunk_idx + chunk_size < total:
+                logger.info(
+                    "Chunk complete (%d/%d). Pausing %.0fs...",
+                    completed,
+                    total,
+                    chunk_delay,
+                )
+                await asyncio.sleep(chunk_delay)
+
+        return {
+            "contacts": contacts,
+            "total": len(contacts),
+            "failed": failed,
+            "rate_limited": rate_limited,
+            "pages_visited": pages_visited,
         }
