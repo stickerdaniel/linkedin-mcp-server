@@ -96,10 +96,10 @@ def _parse_contact_record(
             result["first_name"] = parts[0] if parts else full_name
             result["last_name"] = parts[1] if len(parts) > 1 else None
 
-        # Find connection degree marker (· 1st, · 2nd, · 3rd)
+        # Find connection degree marker (· 1st, · 2nd, · 3rd, · 3rd+)
         degree_idx: int | None = None
         for i, ln in enumerate(non_empty):
-            if re.match(r"^·\s*\d+(st|nd|rd)$", ln):
+            if re.match(r"^·\s*\d+(st|nd|rd|th)\+?$", ln):
                 degree_idx = i
                 break
 
@@ -611,6 +611,9 @@ class LinkedInExtractor:
              profile_raw, contact_info_raw}],
              total, failed, rate_limited, pages_visited}
         """
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be a positive integer, got {chunk_size}")
+
         contacts: list[dict[str, Any]] = []
         failed: list[str] = []
         pages_visited: list[str] = []
@@ -631,9 +634,22 @@ class LinkedInExtractor:
                     profile_text = await self.extract_page(profile_url)
                     pages_visited.append(profile_url)
 
+                    if profile_text == _RATE_LIMITED_MSG:
+                        logger.warning(
+                            "Soft rate limit on profile %s, skipping", username
+                        )
+                        failed.append(username)
+                        await asyncio.sleep(_NAV_DELAY)
+                        continue
+
                     # Scrape contact info overlay
                     contact_text = await self._extract_overlay(contact_url)
                     pages_visited.append(contact_url)
+
+                    if contact_text == _RATE_LIMITED_MSG:
+                        contact_text = (
+                            ""  # fall back to empty; parsed fields will be None
+                        )
 
                     parsed = _parse_contact_record(profile_text, contact_text)
                     contacts.append(
@@ -647,6 +663,7 @@ class LinkedInExtractor:
 
                 except RateLimitError:
                     logger.warning("Rate limited during contact batch at %s", username)
+                    failed.append(username)
                     rate_limited = True
                     break
                 except Exception as e:
