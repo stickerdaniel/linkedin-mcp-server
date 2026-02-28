@@ -104,8 +104,14 @@ def register_connections_tools(mcp: FastMCP) -> None:
             chunk_delay: Seconds to pause between chunks (default 30)
 
         Returns:
-            Dict with contacts (list of {username, profile, contact_info}),
-            total enriched, failed usernames, rate_limited flag, and pages_visited.
+            Dict with contacts (list of structured records), total enriched,
+            failed usernames, rate_limited flag, and pages_visited.
+
+            Each contact record contains:
+            - username, first_name, last_name: Identity fields
+            - email, phone, website, birthday: From the contact info overlay
+            - headline, location, company: From the main profile page
+            - profile_raw, contact_info_raw: Original innerText as fallback
         """
         try:
             await ensure_authenticated()

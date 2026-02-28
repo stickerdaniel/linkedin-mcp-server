@@ -156,6 +156,87 @@ def _truncate_linkedin_noise(text: str) -> str:
     return text[:earliest].strip()
 
 
+def _parse_contact_record(
+    profile_text: str, contact_text: str
+) -> dict[str, str | None]:
+    """Parse raw innerText blobs into structured contact fields.
+
+    Profile text layout (first lines):
+        Name\\n\\n· 1st\\n\\nHeadline\\n\\nLocation\\n\\n·\\n\\nContact info\\n\\nCompany
+
+    Contact info overlay layout:
+        Email\\n\\nuser@example.com\\n\\nPhone\\n\\n+123...\\n\\n...
+    """
+    result: dict[str, str | None] = {
+        "first_name": None,
+        "last_name": None,
+        "headline": None,
+        "location": None,
+        "company": None,
+        "email": None,
+        "phone": None,
+        "website": None,
+        "birthday": None,
+    }
+
+    # --- Parse profile text ---
+    if profile_text:
+        lines = [ln.strip() for ln in profile_text.split("\n")]
+        non_empty = [ln for ln in lines if ln]
+
+        if non_empty:
+            # Line 1 → full name
+            full_name = non_empty[0]
+            parts = full_name.split(None, 1)
+            result["first_name"] = parts[0] if parts else full_name
+            result["last_name"] = parts[1] if len(parts) > 1 else None
+
+        # Find connection degree marker (· 1st, · 2nd, · 3rd)
+        degree_idx: int | None = None
+        for i, ln in enumerate(non_empty):
+            if re.match(r"^·\s*\d+(st|nd|rd)$", ln):
+                degree_idx = i
+                break
+
+        if degree_idx is not None and degree_idx + 1 < len(non_empty):
+            result["headline"] = non_empty[degree_idx + 1]
+
+            # Location is the next non-empty line after headline
+            if degree_idx + 2 < len(non_empty):
+                candidate = non_empty[degree_idx + 2]
+                # Skip if it's just the "·" separator or "Contact info"
+                if candidate not in ("·", "Contact info"):
+                    result["location"] = candidate
+
+        # Company: line after "Contact info"
+        for i, ln in enumerate(non_empty):
+            if ln == "Contact info" and i + 1 < len(non_empty):
+                result["company"] = non_empty[i + 1]
+                break
+
+    # --- Parse contact info overlay ---
+    if contact_text:
+        # Extract labeled fields: "Label\n\nvalue"
+        for field, label in [
+            ("email", "Email"),
+            ("phone", "Phone"),
+            ("birthday", "Birthday"),
+        ]:
+            match = re.search(
+                rf"(?:^|\n){re.escape(label)}\s*\n\s*\n\s*(.+)",
+                contact_text,
+            )
+            if match:
+                result[field] = match.group(1).strip()
+
+        # Website may include a type annotation like "(Blog)" or "(Portfolio)"
+        match = re.search(r"(?:^|\n)Website\s*\n\s*\n\s*(.+)", contact_text)
+        if match:
+            result["website"] = match.group(1).strip()
+
+    return result
+
+
 class LinkedInExtractor:
     """Extracts LinkedIn page content via navigate-scroll-innerText pattern."""
 
@@ -1298,11 +1379,13 @@ class LinkedInExtractor:
                     contact_text = await self._extract_overlay(contact_url)
                     pages_visited.append(contact_url)
 
+                    parsed = _parse_contact_record(profile_text, contact_text)
                     contacts.append(
                         {
                             "username": username,
-                            "profile": profile_text,
-                            "contact_info": contact_text,
+                            **parsed,
+                            "profile_raw": profile_text,
+                            "contact_info_raw": contact_text,
                         }
                     )
 
