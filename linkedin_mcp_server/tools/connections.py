@@ -125,7 +125,7 @@ def register_connections_tools(mcp: FastMCP) -> None:
                 }
 
             logger.info(
-                "Enriching %d profiles (chunk_size=%d, chunk_delay=%ds)",
+                "Enriching %d profiles (chunk_size=%d, chunk_delay=%.0fs)",
                 len(username_list),
                 chunk_size,
                 chunk_delay,
