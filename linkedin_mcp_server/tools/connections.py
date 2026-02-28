@@ -121,7 +121,9 @@ def register_connections_tools(
         try:
             await ensure_authenticated()
 
-            username_list = [u.strip() for u in usernames.split(",") if u.strip()]
+            username_list = list(
+                dict.fromkeys(u.strip() for u in usernames.split(",") if u.strip())
+            )
 
             if not username_list:
                 return {
