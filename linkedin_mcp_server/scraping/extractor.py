@@ -469,8 +469,15 @@ class LinkedInExtractor:
         self,
         keywords: str,
         location: str | None = None,
+        network: str | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results page.
+
+        Args:
+            keywords: Search keywords.
+            location: Optional location filter.
+            network: Optional connection degree filter.
+                "F" = 1st degree, "S" = 2nd degree, "O" = 3rd+.
 
         Returns:
             {url, sections: {name: text}, pages_visited, sections_requested}
@@ -478,6 +485,9 @@ class LinkedInExtractor:
         params = f"keywords={quote_plus(keywords)}"
         if location:
             params += f"&location={quote_plus(location)}"
+        if network:
+            # LinkedIn expects network=%5B%22F%22%5D (URL-encoded ["F"])
+            params += f"&network=%5B%22{quote_plus(network)}%22%5D"
 
         url = f"https://www.linkedin.com/search/results/people/?{params}"
         text = await self.extract_page(url)

@@ -96,6 +96,7 @@ def register_person_tools(mcp: FastMCP) -> None:
         keywords: str,
         ctx: Context,
         location: str | None = None,
+        network: str | None = None,
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
@@ -104,6 +105,8 @@ def register_person_tools(mcp: FastMCP) -> None:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
             ctx: FastMCP context for progress reporting
             location: Optional location filter (e.g., "New York", "Remote")
+            network: Optional connection degree filter.
+                "F" = 1st degree, "S" = 2nd degree, "O" = 3rd+.
 
         Returns:
             Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
@@ -113,9 +116,10 @@ def register_person_tools(mcp: FastMCP) -> None:
             await ensure_authenticated()
 
             logger.info(
-                "Searching people: keywords='%s', location='%s'",
+                "Searching people: keywords='%s', location='%s', network='%s'",
                 keywords,
                 location,
+                network,
             )
 
             browser = await get_or_create_browser()
@@ -125,7 +129,7 @@ def register_person_tools(mcp: FastMCP) -> None:
                 progress=0, total=100, message="Starting people search"
             )
 
-            result = await extractor.search_people(keywords, location)
+            result = await extractor.search_people(keywords, location, network)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
