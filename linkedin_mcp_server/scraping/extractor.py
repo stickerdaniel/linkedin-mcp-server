@@ -358,29 +358,298 @@ class LinkedInExtractor:
             "sections_requested": ["job_posting"],
         }
 
-    async def search_jobs(
-        self, keywords: str, location: str | None = None
-    ) -> dict[str, Any]:
-        """Search for jobs and extract the results page.
+    async def _extract_job_listings(self) -> list[dict[str, str]]:
+        """Extract structured job details from each card on the search results page.
+
+        Walks up the DOM from each job link to its card container and parses
+        the card text for metadata (company, location, pay, etc.).
 
         Returns:
-            {url, sections: {name: text}, pages_visited, sections_requested}
+            [{job_id, title, company, location, work_type, pay, benefits,
+              easy_apply, status}]
         """
-        params = f"keywords={quote_plus(keywords)}"
-        if location:
-            params += f"&location={quote_plus(location)}"
+        return await self._page.evaluate("""() => {
+            const links = document.querySelectorAll('a[href*="/jobs/view/"]');
+            const seen = new Set();
+            const results = [];
 
-        url = f"https://www.linkedin.com/jobs/search/?{params}"
-        text = await self.extract_page(url)
+            for (const link of links) {
+                const match = link.href.match(/\\/jobs\\/view\\/(\\d+)/);
+                if (!match || seen.has(match[1])) continue;
+                seen.add(match[1]);
+
+                const title = link.innerText.trim().split('\\n')[0];
+                if (!title) continue;
+
+                // Walk up to find the job card container (the <li> or card div)
+                let card = link;
+                for (let i = 0; i < 8; i++) {
+                    if (!card.parentElement) break;
+                    card = card.parentElement;
+                    // Stop at list item or a large enough container
+                    if (card.tagName === 'LI' || card.getAttribute('data-occludable-job-id'))
+                        break;
+                }
+
+                const cardText = card.innerText || '';
+                const lines = cardText.split('\\n').map(l => l.trim()).filter(l => l);
+
+                let company = '';
+                let location = '';
+                let work_type = '';
+                let pay = '';
+                let benefits = '';
+                let easy_apply = '';
+                let status = '';
+
+                const workTypes = ['On-site', 'Hybrid', 'Remote'];
+                const statusPhrases = [
+                    'Actively reviewing applicants',
+                    'Be an early applicant',
+                ];
+
+                for (const line of lines) {
+                    // Pay: starts with $ or contains /hr or /yr
+                    if (!pay && (line.match(/^\\$[\\d,.]+/) || line.match(/\\$[\\d,.]+\\/[yh]r/))) {
+                        // Split pay from benefits on the · separator
+                        const parts = line.split('·').map(p => p.trim());
+                        pay = parts[0] || '';
+                        if (parts[1]) benefits = parts[1];
+                        continue;
+                    }
+                    // Benefits without pay (e.g. "401(k), +1 benefit")
+                    if (!benefits && !pay && line.match(/^(\\d+ benefits|401|Medical|Vision|Dental)/i)) {
+                        benefits = line;
+                        continue;
+                    }
+                    // Location: "City, ST" pattern with optional (Work Type)
+                    if (!location && line.match(/,\\s*[A-Z]{2}/) && !line.includes('alumni')) {
+                        const locMatch = line.match(/^(.+?)\\s*\\(([^)]+)\\)\\s*$/);
+                        if (locMatch) {
+                            location = locMatch[1].trim();
+                            if (workTypes.includes(locMatch[2])) work_type = locMatch[2];
+                        } else {
+                            location = line;
+                        }
+                        continue;
+                    }
+                    // Also match "United States (Remote)" style
+                    if (!location && line.match(/United States/i)) {
+                        const locMatch = line.match(/^(.+?)\\s*\\(([^)]+)\\)\\s*$/);
+                        if (locMatch) {
+                            location = locMatch[1].trim();
+                            if (workTypes.includes(locMatch[2])) work_type = locMatch[2];
+                        } else {
+                            location = line;
+                        }
+                        continue;
+                    }
+                    // Easy Apply
+                    if (line === 'Easy Apply') { easy_apply = 'true'; continue; }
+                    // Status
+                    if (statusPhrases.includes(line)) { status = line; continue; }
+                }
+
+                // Company is typically the first non-title, non-duplicate line
+                // Skip title duplicates and "with verification" lines
+                for (const line of lines) {
+                    if (line === title) continue;
+                    if (line.includes('with verification')) continue;
+                    if (line === 'Promoted' || line === 'Viewed') continue;
+                    if (line === 'Easy Apply') continue;
+                    if (line.match(/^\\$/) || line.match(/\\/[yh]r/)) continue;
+                    if (line.match(/alumni|school/)) continue;
+                    if (line.match(/,\\s*[A-Z]{2}/) || line.match(/United States/i)) continue;
+                    if (statusPhrases.includes(line)) continue;
+                    if (line.match(/^(\\d+ benefits|401|Medical|Vision|Dental)/i)) continue;
+                    // This should be the company name
+                    company = line;
+                    break;
+                }
+
+                results.push({
+                    job_id: match[1],
+                    title: title,
+                    company: company,
+                    location: location,
+                    work_type: work_type,
+                    pay: pay,
+                    benefits: benefits,
+                    easy_apply: easy_apply,
+                    status: status,
+                });
+            }
+            return results;
+        }""")
+
+    async def _scroll_job_list(
+        self, pause_time: float = 0.8, max_scrolls: int = 25
+    ) -> None:
+        """Scroll the job list sidebar to load all lazy-rendered cards.
+
+        Finds the scrollable ancestor of the first job link and scrolls it,
+        rather than relying on specific CSS class names.  Also scrolls the
+        window as a fallback for layouts that use page-level scroll.
+
+        Args:
+            pause_time: Time to pause between scrolls (seconds)
+            max_scrolls: Maximum number of scroll attempts
+        """
+        for i in range(max_scrolls):
+            prev_count = await self._page.evaluate(
+                """() => document.querySelectorAll('a[href*="/jobs/view/"]').length"""
+            )
+
+            # Scroll every scrollable ancestor of the job list
+            await self._page.evaluate("""() => {
+                const jobLink = document.querySelector('a[href*="/jobs/view/"]');
+                if (!jobLink) return;
+
+                let el = jobLink.parentElement;
+                while (el && el !== document.body) {
+                    // 10px buffer to ignore minor rounding/border differences
+                    if (el.scrollHeight > el.clientHeight + 10) {
+                        el.scrollTop = el.scrollHeight;
+                    }
+                    el = el.parentElement;
+                }
+
+                window.scrollTo(0, document.body.scrollHeight);
+            }""")
+
+            await asyncio.sleep(pause_time)
+
+            new_count = await self._page.evaluate(
+                """() => document.querySelectorAll('a[href*="/jobs/view/"]').length"""
+            )
+            logger.debug("Scroll %d: job links %d -> %d", i + 1, prev_count, new_count)
+
+            if new_count == prev_count:
+                # Extra pause on first scroll in case of slow loading
+                if i == 0:
+                    await asyncio.sleep(pause_time * 2)
+                    continue
+                logger.debug("No new jobs after scroll %d, stopping", i + 1)
+                break
+
+    async def _extract_job_page(self, url: str) -> tuple[str, list[dict[str, str]]]:
+        """Load a single job search results page, extract text and listings."""
+        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=5000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s", url)
+
+        await handle_modal_close(self._page)
+
+        # Scroll the job list sidebar to load all lazy-rendered cards
+        await self._scroll_job_list(pause_time=0.8, max_scrolls=20)
+
+        # Extract text
+        raw = await self._page.evaluate(
+            """() => {
+                const main = document.querySelector('main');
+                return main ? main.innerText : document.body.innerText;
+            }"""
+        )
+        text = strip_linkedin_noise(raw) if raw else ""
+
+        # Extract structured job listings
+        try:
+            listings = await self._extract_job_listings()
+        except Exception as e:
+            logger.warning("Failed to extract job listings from %s: %s", url, e)
+            listings = []
+
+        return text, listings
+
+    async def search_jobs(
+        self,
+        keywords: str,
+        location: str | None = None,
+        max_pages: int = 3,
+    ) -> dict[str, Any]:
+        """Search for jobs and extract results across multiple pages.
+
+        Args:
+            keywords: Search keywords.
+            location: Optional location filter.
+            max_pages: Number of search result pages to scrape (1-100, default 3).
+                       Each page has ~10 results. Higher values take longer and
+                       increase the risk of rate limiting.
+
+        Returns:
+            {url, sections: {name: text}, job_listings: [{job_id, title, company,
+             location, work_type, pay, benefits, easy_apply, status}],
+             pages_visited, sections_requested}
+        """
+        max_pages = max(1, min(max_pages, 100))
+
+        base_params = f"keywords={quote_plus(keywords)}"
+        if location:
+            base_params += f"&location={quote_plus(location)}"
+
+        all_listings: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        all_text_parts: list[str] = []
+        pages_visited: list[str] = []
+
+        for page_num in range(max_pages):
+            start = page_num * 25
+            params = base_params if start == 0 else f"{base_params}&start={start}"
+            url = f"https://www.linkedin.com/jobs/search/?{params}"
+
+            try:
+                text, listings = await self._extract_job_page(url)
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Failed to load job search page %d: %s", page_num + 1, e)
+                break
+
+            pages_visited.append(url)
+            if text:
+                all_text_parts.append(text)
+
+            # Deduplicate across pages
+            new_on_page = 0
+            for listing in listings:
+                if listing["job_id"] not in seen_ids:
+                    seen_ids.add(listing["job_id"])
+                    all_listings.append(listing)
+                    new_on_page += 1
+
+            logger.info(
+                "Page %d: found %d listings (%d new, %d total)",
+                page_num + 1,
+                len(listings),
+                new_on_page,
+                len(all_listings),
+            )
+
+            # Stop early if this page returned nothing new
+            if new_on_page == 0:
+                logger.info(
+                    "No new listings on page %d, stopping pagination", page_num + 1
+                )
+                break
+
+            # Delay between pages to avoid rate limiting
+            if page_num < max_pages - 1:
+                await asyncio.sleep(_NAV_DELAY)
 
         sections: dict[str, str] = {}
-        if text:
-            sections["search_results"] = text
+        if all_text_parts:
+            sections["search_results"] = "\n\n---\n\n".join(all_text_parts)
 
+        first_url = f"https://www.linkedin.com/jobs/search/?{base_params}"
         return {
-            "url": url,
+            "url": first_url,
             "sections": sections,
-            "pages_visited": [url],
+            "job_listings": all_listings,
+            "pages_visited": pages_visited,
             "sections_requested": ["search_results"],
         }
 
