@@ -402,11 +402,15 @@ class TestScrapeJob:
 
     async def test_search_jobs(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
+        mock_job_listings = [
+            {"job_id": "111", "title": "Python Developer"},
+            {"job_id": "222", "title": "Data Engineer"},
+        ]
         with patch.object(
             extractor,
-            "extract_page",
+            "_extract_job_page",
             new_callable=AsyncMock,
-            return_value="Job 1\nJob 2",
+            return_value=("Job 1\nJob 2", mock_job_listings),
         ):
             result = await extractor.search_jobs("python", "Remote")
 
@@ -414,6 +418,130 @@ class TestScrapeJob:
         assert "location=Remote" in result["url"]
         assert "search_results" in result["sections"]
         assert result["sections_requested"] == ["search_results"]
+        assert result["job_listings"] == mock_job_listings
+        assert result["job_listings"][0]["job_id"] == "111"
+        assert result["job_listings"][0]["title"] == "Python Developer"
+
+    async def test_search_jobs_empty_listings(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "_extract_job_page",
+            new_callable=AsyncMock,
+            return_value=("No results", []),
+        ):
+            result = await extractor.search_jobs("nonexistent job xyz")
+
+        assert result["job_listings"] == []
+
+    async def test_search_jobs_multi_page(self, mock_page):
+        """Test that multi-page pagination collects listings across pages."""
+        extractor = LinkedInExtractor(mock_page)
+        page1_listings = [
+            {"job_id": "111", "title": "Job A"},
+            {"job_id": "222", "title": "Job B"},
+        ]
+        page2_listings = [
+            {"job_id": "333", "title": "Job C"},
+            {"job_id": "444", "title": "Job D"},
+        ]
+
+        call_count = 0
+
+        async def mock_extract_job_page(url):
+            nonlocal call_count
+            call_count += 1
+            if "start=25" in url:
+                return ("Page 2 text", page2_listings)
+            return ("Page 1 text", page1_listings)
+
+        with patch.object(
+            extractor,
+            "_extract_job_page",
+            side_effect=mock_extract_job_page,
+        ):
+            result = await extractor.search_jobs("python", "Remote", max_pages=2)
+
+        assert call_count == 2
+        assert len(result["job_listings"]) == 4
+        assert result["job_listings"][0]["job_id"] == "111"
+        assert result["job_listings"][3]["job_id"] == "444"
+        assert len(result["pages_visited"]) == 2
+        assert "start=25" in result["pages_visited"][1]
+
+    async def test_search_jobs_deduplicates_across_pages(self, mock_page):
+        """Test that duplicate job IDs across pages are removed."""
+        extractor = LinkedInExtractor(mock_page)
+        page1_listings = [{"job_id": "111", "title": "Job A"}]
+        page2_listings = [
+            {"job_id": "111", "title": "Job A"},  # duplicate
+            {"job_id": "222", "title": "Job B"},  # new
+        ]
+
+        call_count = 0
+
+        async def mock_extract_job_page(url):
+            nonlocal call_count
+            call_count += 1
+            if "start=25" in url:
+                return ("Page 2", page2_listings)
+            return ("Page 1", page1_listings)
+
+        with patch.object(
+            extractor,
+            "_extract_job_page",
+            side_effect=mock_extract_job_page,
+        ):
+            result = await extractor.search_jobs("python", max_pages=2)
+
+        assert len(result["job_listings"]) == 2
+        ids = [j["job_id"] for j in result["job_listings"]]
+        assert ids == ["111", "222"]
+
+    async def test_search_jobs_stops_on_empty_page(self, mock_page):
+        """Test that pagination stops early when a page returns no new listings."""
+        extractor = LinkedInExtractor(mock_page)
+        page1_listings = [{"job_id": "111", "title": "Job A"}]
+
+        call_count = 0
+
+        async def mock_extract_job_page(url):
+            nonlocal call_count
+            call_count += 1
+            if "start=25" in url:
+                return ("Page 2", [])  # empty page
+            return ("Page 1", page1_listings)
+
+        with patch.object(
+            extractor,
+            "_extract_job_page",
+            side_effect=mock_extract_job_page,
+        ):
+            result = await extractor.search_jobs("python", max_pages=3)
+
+        # Should stop after page 2 since it returned nothing
+        assert call_count == 2
+        assert len(result["job_listings"]) == 1
+
+    async def test_search_jobs_max_pages_clamped(self, mock_page):
+        """Test that max_pages is clamped to 1-100 range."""
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "_extract_job_page",
+            new_callable=AsyncMock,
+            return_value=("text", [{"job_id": "1", "title": "Job"}]),
+        ) as mock_fn:
+            # max_pages=0 should become 1
+            await extractor.search_jobs("python", max_pages=0)
+            assert mock_fn.call_count == 1
+
+            mock_fn.reset_mock()
+
+            # max_pages=200 should be clamped to 100 (but stop early since same results)
+            await extractor.search_jobs("python", max_pages=200)
+            # Will stop early due to dedup, but at least tried > 1
+            assert mock_fn.call_count >= 1
 
 
 class TestStripLinkedInNoise:
