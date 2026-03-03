@@ -271,12 +271,13 @@ class TestPostsTools:
         result = await tool_fn(mock_context, limit=10)
         assert "posts" in result
         assert len(result["posts"]) == 1
-        assert result["posts"][0]["post_url"] == "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+        assert (
+            result["posts"][0]["post_url"]
+            == "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+        )
         assert result["posts"][0]["text_preview"] == "My post text"
 
-    async def test_get_post_comments(
-        self, mock_context, patch_tool_deps, monkeypatch
-    ):
+    async def test_get_post_comments(self, mock_context, patch_tool_deps, monkeypatch):
         from linkedin_mcp_server.tools.posts import register_posts_tools
 
         mock_comments = [
@@ -333,3 +334,79 @@ class TestPostsTools:
         assert len(result["unreplied_comments"]) == 1
         assert "comment_permalink" in result["unreplied_comments"][0]
         assert "Jane Doe" in str(result["unreplied_comments"][0]["author_name"])
+
+    async def test_get_my_recent_posts_calls_scraper_with_limit(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        from linkedin_mcp_server.tools.posts import register_posts_tools
+
+        mock_scraper = AsyncMock(return_value=[])
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.posts.scrape_get_my_recent_posts",
+            mock_scraper,
+        )
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_my_recent_posts")
+        await tool_fn(mock_context, limit=5)
+        mock_scraper.assert_awaited_once()
+        assert mock_scraper.await_args.kwargs.get("limit") == 5
+
+    async def test_get_post_comments_with_post_id(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        from linkedin_mcp_server.tools.posts import register_posts_tools
+
+        mock_comments = [
+            {
+                "comment_id": None,
+                "author_name": "X",
+                "author_url": "https://linkedin.com/in/x/",
+                "text": "Hi",
+                "created_at": None,
+                "comment_permalink": None,
+            }
+        ]
+        mock_scraper = AsyncMock(return_value=mock_comments)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.posts.scrape_get_post_comments",
+            mock_scraper,
+        )
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        result = await tool_fn("urn:li:activity:999", mock_context)
+        assert "comments" in result
+        assert len(result["comments"]) == 1
+        mock_scraper.assert_awaited_once()
+        assert "999" in str(mock_scraper.await_args[0][1])
+
+    async def test_find_unreplied_comments_returns_error_on_auth_failure(
+        self, mock_context, monkeypatch
+    ):
+        from linkedin_mcp_server.core.exceptions import AuthenticationError
+        from linkedin_mcp_server.tools.posts import register_posts_tools
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.posts.ensure_authenticated",
+            AsyncMock(side_effect=AuthenticationError("Not logged in")),
+        )
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "find_unreplied_comments")
+        result = await tool_fn(mock_context, since_days=7, max_posts=20)
+        assert "error" in result
+        assert result["error"] == "authentication_failed"
+
+    async def test_posts_tools_registered_in_server(self):
+        """All three posts tools are registered when creating the full MCP server."""
+        from linkedin_mcp_server.server import create_mcp_server
+
+        mcp = create_mcp_server()
+        for name in (
+            "get_my_recent_posts",
+            "get_post_comments",
+            "find_unreplied_comments",
+        ):
+            tool = await mcp.get_tool(name)
+            assert tool is not None, f"Tool {name} should be registered"
