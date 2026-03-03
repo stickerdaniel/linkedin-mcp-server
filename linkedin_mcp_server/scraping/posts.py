@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _NAV_DELAY = 2.0
 _FEED_URL = "https://www.linkedin.com/feed/"
+_MY_POSTS_URL = "https://www.linkedin.com/in/me/detail/recent-activity/shares/"
 _NOTIFICATIONS_URL = "https://www.linkedin.com/notifications/"
 _ACTIVITY_URN_PATTERN = re.compile(r"urn:li:activity:(\d+)")
 _BASE_POST_URL = "https://www.linkedin.com/feed/update/"
@@ -43,15 +44,37 @@ def _normalize_post_url(post_url_or_id: str) -> str:
 
 
 async def _get_current_user_name(page: Page) -> str | None:
-    """Try to get current user display name from nav (for reply detection)."""
+    """Try to get current user display name from nav (for reply detection).
+
+    Tries in order: avatar img alt, Me/Eu menu aria-label, nav profile link.
+    """
     try:
         name = await page.evaluate(
             """() => {
-            const sel = 'nav a[href*="/in/"]:not([href*="/in/me"])';
-            const a = document.querySelector(sel);
-            if (!a) return null;
-            const text = (a.getAttribute('aria-label') || a.textContent || '').trim();
-            return text || null;
+            const trim = (s) => (s || '').trim();
+            // 1) Avatar in nav often has alt="Member Name"
+            const navImg = document.querySelector('nav img[alt]');
+            if (navImg) {
+                const alt = trim(navImg.getAttribute('alt'));
+                if (alt && alt.length > 1 && !/^(photo|foto|image|imagem|profile|perfil)$/i.test(alt)) return alt;
+            }
+            // 2) Me / Eu menu button or link
+            const meSelectors = [
+                'button[aria-label*="Me"]', 'button[aria-label*="Eu"]',
+                'a[aria-label*="Me "]', 'a[aria-label*="Eu "]',
+                '[aria-label*="Profile"]', '[aria-label*="Perfil"]'
+            ];
+            for (const sel of meSelectors) {
+                const el = document.querySelector(sel);
+                if (el) {
+                    const label = trim(el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent);
+                    if (label && label.length > 1) return label;
+                }
+            }
+            // 3) Fallback: first nav link to /in/ that is not /in/me
+            const a = document.querySelector('nav a[href*="/in/"]:not([href*="/in/me"])');
+            if (a) return trim(a.getAttribute('aria-label') || a.textContent) || null;
+            return null;
         }"""
         )
         return name if isinstance(name, str) and name else None
@@ -60,61 +83,175 @@ async def _get_current_user_name(page: Page) -> str | None:
         return None
 
 
-async def get_my_recent_posts(page: Page, limit: int = 20) -> list[dict[str, Any]]:
-    """
-    Scrape recent posts from the logged-in user's feed (own posts best-effort).
+async def _expand_comments_section(page: Page, max_clicks: int = 5) -> int:
+    """Click 'Load more' / 'Ver mais' (comments/replies) to expand the discussion.
 
-    Navigates to feed, scrolls to load content, extracts post cards that link to
-    /feed/update/urn:li:activity:. Returns list of dicts with post_url, post_id,
-    text_preview, created_at (best-effort).
+    Returns the number of clicks performed.
+    """
+    from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    click_selectors = [
+        'button:has-text("Load more")',
+        'button:has-text("Ver mais")',
+        'button:has-text("View more")',
+        'span:has-text("Load more comments")',
+        'span:has-text("Ver mais comentários")',
+        'span:has-text("View more replies")',
+        'span:has-text("Ver mais respostas")',
+        '[aria-label*="more"]',
+        '[aria-label*="mais"]',
+    ]
+    clicks = 0
+    for _ in range(max_clicks):
+        clicked = False
+        for sel in click_selectors:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=500):
+                    await loc.click(timeout=2000)
+                    await asyncio.sleep(0.8)
+                    clicks += 1
+                    clicked = True
+                    break
+            except PlaywrightTimeoutError:
+                pass
+            except Exception:
+                pass
+        if not clicked:
+            break
+    if clicks:
+        logger.debug("Expanded comments section with %d click(s)", clicks)
+    return clicks
+
+
+async def get_my_recent_posts(
+    page: Page,
+    limit: int = 20,
+    since_days: int | None = None,
+    max_scrolls: int = 20,
+) -> list[dict[str, Any]]:
+    """
+    Scrape recent posts from the logged-in user's own activity (best-effort).
+
+    Why this exists:
+    - The main feed is not a reliable source of *your* full posting history.
+    - LinkedIn uses infinite scroll and can drop older DOM nodes.
+
+    Strategy:
+    - Prefer the user's own activity shares page (/in/me/detail/recent-activity/shares/)
+    - Incrementally scroll and collect unique activity URNs.
+
+    Returns list of dicts with post_url, post_id, text_preview, created_at (best-effort).
     """
     posts: list[dict[str, Any]] = []
+    seen_urns: set[str] = set()
+    prev_height: int | None = None
     try:
-        await page.goto(_FEED_URL, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(_MY_POSTS_URL, wait_until="domcontentloaded", timeout=30000)
         await detect_rate_limit(page)
         await handle_modal_close(page)
-        await scroll_to_bottom(page, pause_time=0.8, max_scrolls=5)
-        await asyncio.sleep(0.5)
 
-        raw = await page.evaluate(
-            """(limit) => {
-            const posts = [];
-            const seen = new Set();
-            const main = document.querySelector('main');
-            if (!main) return posts;
-            const links = main.querySelectorAll('a[href*="/feed/update/"]');
-            for (const a of links) {
-                const href = a.getAttribute('href') || '';
-                const m = href.match(/feed\\/update\\/(urn:li:activity:\\d+)/);
-                if (!m || seen.has(m[1])) continue;
-                seen.add(m[1]);
-                let text = '';
-                let card = a.closest('article') || a.closest('[data-urn]') || a.closest('div[class*="feed"]');
-                if (card) {
-                    const inner = card.querySelector('[dir="ltr"]') || card;
-                    text = (inner.innerText || '').trim().slice(0, 500);
+        # Incremental scroll + collect. Stop when no new items and scrollHeight stable.
+        for _ in range(max_scrolls):
+            await detect_rate_limit(page)
+            await handle_modal_close(page)
+
+            prev_count = len(posts)
+
+            raw = await page.evaluate(
+                """(limit) => {
+                const out = [];
+                const seen = new Set();
+
+                const root = document.querySelector('main') || document.body;
+                if (!root) return { items: out, scrollHeight: document.body.scrollHeight };
+
+                const cards = root.querySelectorAll('article, div[data-urn], div.feed-shared-update-v2');
+                for (const card of cards) {
+                    let urn = '';
+                    const dataUrn = (card.getAttribute('data-urn') || '').trim();
+                    const m1 = dataUrn.match(/urn:li:activity:\\d+/);
+                    if (m1) urn = m1[0];
+
+                    if (!urn) {
+                        const a = card.querySelector('a[href*="/feed/update/"]');
+                        const href = (a?.getAttribute('href') || '').trim();
+                        const m2 = href.match(/feed\\/update\\/(urn:li:activity:\\d+)/);
+                        if (m2) urn = m2[1];
+                    }
+
+                    if (!urn || seen.has(urn)) continue;
+                    seen.add(urn);
+
+                    let text = '';
+                    const textEl = card.querySelector('[dir="ltr"]') || card.querySelector('span[dir]') || card;
+                    text = (textEl?.innerText || '').trim();
+                    if (!text) {
+                        const any = card.querySelector('span') || card;
+                        text = (any?.innerText || '').trim();
+                    }
+                    text = (text || '').trim().slice(0, 500);
+
+                    let createdAt = null;
+                    const timeEl = card.querySelector('time');
+                    if (timeEl) {
+                        createdAt = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim() || null;
+                    }
+
+                    const idMatch = urn.match(/urn:li:activity:(\\d+)/);
+                    const id = idMatch ? idMatch[1] : null;
+                    const postUrl = id ? (`${"https://www.linkedin.com/feed/update/"}${urn}/`) : null;
+
+                    if (postUrl) {
+                        out.push({ post_url: postUrl, post_id: urn, text_preview: text, created_at: createdAt });
+                        if (out.length >= limit) break;
+                    }
                 }
-                if (!text) text = (a.innerText || '').trim().slice(0, 300);
-                const fullUrl = href.startsWith('http') ? href : 'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
-                posts.push({ post_url: fullUrl, post_id: m[1], text_preview: text, created_at: null });
-                if (posts.length >= limit) break;
-            }
-            return posts;
-        }""",
-            limit,
-        )
 
-        if isinstance(raw, list):
-            for p in raw:
-                if isinstance(p, dict) and p.get("post_url"):
-                    posts.append(
-                        {
-                            "post_url": p.get("post_url", ""),
-                            "post_id": p.get("post_id"),
-                            "text_preview": (p.get("text_preview") or "")[:500],
-                            "created_at": p.get("created_at"),
-                        }
-                    )
+                return { items: out, scrollHeight: document.body.scrollHeight };
+            }""",
+                limit,
+            )
+
+            if isinstance(raw, dict):
+                items = raw.get("items") if isinstance(raw.get("items"), list) else []
+                new_height = raw.get("scrollHeight") if isinstance(raw.get("scrollHeight"), (int, float)) else None
+            else:
+                items = raw if isinstance(raw, list) else []
+                new_height = None
+
+            for p in items if isinstance(items, list) else []:
+                if not isinstance(p, dict):
+                    continue
+                pid = p.get("post_id")
+                url = p.get("post_url")
+                if not url or not pid or pid in seen_urns:
+                    continue
+                seen_urns.add(pid)
+                posts.append(
+                    {
+                        "post_url": url,
+                        "post_id": pid,
+                        "text_preview": (p.get("text_preview") or "")[:500],
+                        "created_at": p.get("created_at"),
+                    }
+                )
+                if len(posts) >= limit:
+                    break
+
+            # Stop when no new items and scroll height stable (no more content loading)
+            if len(posts) >= limit:
+                break
+            if len(posts) == prev_count and new_height is not None and prev_height is not None and new_height == prev_height:
+                break
+            # Legacy single-shot evaluate (returns list): do not loop
+            if not isinstance(raw, dict):
+                break
+            prev_height = new_height
+
+            await scroll_to_bottom(page, pause_time=0.6, max_scrolls=1)
+            await asyncio.sleep(0.4)
+
     except LinkedInScraperException:
         raise
     except Exception as e:
@@ -206,14 +343,26 @@ async def get_post_comments(
         await scroll_to_bottom(page, pause_time=0.5, max_scrolls=3)
         await asyncio.sleep(1)
 
+        await _expand_comments_section(page, max_clicks=5)
+
         raw = await page.evaluate(
             """(postAuthorName) => {
             const comments = [];
             const main = document.querySelector('main');
             if (!main) return comments;
-            const commentBlocks = main.querySelectorAll('[class*="comment"], [data-id*="comment"], section');
             const nameToCheck = (postAuthorName || '').trim().toLowerCase();
-            for (const block of commentBlocks) {
+
+            // Prefer elements with data-urn containing urn:li:comment (top-level only).
+            const allCommentEls = main.querySelectorAll('[data-urn*="urn:li:comment"]');
+            const topLevel = [];
+            for (const el of allCommentEls) {
+                const parentWithUrn = el.closest('[data-urn*="urn:li:comment"]');
+                if (parentWithUrn && parentWithUrn !== el) continue;
+                topLevel.push(el);
+            }
+
+            for (const block of topLevel) {
+                const commentUrn = (block.getAttribute('data-urn') || '').trim();
                 const authorLink = block.querySelector('a[href*="/in/"]');
                 if (!authorLink) continue;
                 const authorUrl = (authorLink.getAttribute('href') || '').trim();
@@ -222,29 +371,69 @@ async def get_post_comments(
                 const textEl = block.querySelector('[dir="ltr"]') || block.querySelector('span');
                 const text = (textEl ? textEl.innerText : block.innerText) || '';
                 const cleanText = text.replace(authorName, '').trim().slice(0, 2000);
-                let commentId = null;
+
+                let permalink = null;
                 const permLink = block.querySelector('a[href*="commentUrn"]');
-                if (permLink) commentId = (permLink.getAttribute('href') || '').match(/commentUrn=([^&]+)/)?.[1] || null;
+                if (permLink) permalink = (permLink.getAttribute('href') || '').trim();
+                const commentId = commentUrn || (permalink ? (permalink.match(/commentUrn=([^&]+)/) || [])[1] : null);
+
                 let hasReplyFromAuthor = false;
                 if (nameToCheck) {
-                    const replyBlocks = block.querySelectorAll('[class*="reply"], [class*="comment"]');
-                    for (const r of replyBlocks) {
+                    const replyEls = block.querySelectorAll('[data-urn*="urn:li:comment"]');
+                    for (const r of replyEls) {
                         if (r === block) continue;
                         const replyLink = r.querySelector('a[href*="/in/"]');
                         if (!replyLink) continue;
                         const replyName = (replyLink.innerText || '').trim().toLowerCase();
-                        if (replyName && nameToCheck && replyName.indexOf(nameToCheck) !== -1) hasReplyFromAuthor = true;
+                        if (replyName && replyName.indexOf(nameToCheck) !== -1) { hasReplyFromAuthor = true; break; }
                     }
                 }
+
+                const fullAuthorUrl = authorUrl.startsWith('http') ? authorUrl : 'https://www.linkedin.com' + (authorUrl.startsWith('/') ? authorUrl : '/' + authorUrl);
                 comments.push({
                     comment_id: commentId,
                     author_name: authorName || null,
-                    author_url: authorUrl.startsWith('http') ? authorUrl : 'https://www.linkedin.com' + (authorUrl.startsWith('/') ? authorUrl : '/' + authorUrl),
+                    author_url: fullAuthorUrl,
                     text: cleanText,
                     created_at: null,
-                    comment_permalink: permLink ? (permLink.getAttribute('href') || '').trim() : null,
+                    comment_permalink: permalink,
                     has_reply_from_author: hasReplyFromAuthor
                 });
+            }
+
+            // Fallback: if no data-urn comments found, use class-based selectors
+            if (comments.length === 0) {
+                const blocks = main.querySelectorAll('[class*="comment"], [data-id*="comment"]');
+                for (const block of blocks) {
+                    const authorLink = block.querySelector('a[href*="/in/"]');
+                    if (!authorLink) continue;
+                    const authorUrl = (authorLink.getAttribute('href') || '').trim();
+                    if (authorUrl.includes('/in/me') || !authorUrl) continue;
+                    const authorName = (authorLink.innerText || authorLink.getAttribute('aria-label') || '').trim();
+                    const textEl = block.querySelector('[dir="ltr"]') || block.querySelector('span');
+                    const text = (textEl ? textEl.innerText : block.innerText) || '';
+                    const cleanText = text.replace(authorName, '').trim().slice(0, 2000);
+                    const permLink = block.querySelector('a[href*="commentUrn"]');
+                    const commentId = permLink ? ((permLink.getAttribute('href') || '').match(/commentUrn=([^&]+)/) || [])[1] : null;
+                    let hasReplyFromAuthor = false;
+                    if (nameToCheck) {
+                        const replyBlocks = block.querySelectorAll('[class*="reply"], [class*="comment"]');
+                        for (const r of replyBlocks) {
+                            if (r === block) continue;
+                            const replyLink = r.querySelector('a[href*="/in/"]');
+                            if (replyLink && (replyLink.innerText || '').trim().toLowerCase().indexOf(nameToCheck) !== -1) { hasReplyFromAuthor = true; break; }
+                        }
+                    }
+                    comments.push({
+                        comment_id: commentId,
+                        author_name: authorName || null,
+                        author_url: authorUrl.startsWith('http') ? authorUrl : 'https://www.linkedin.com' + (authorUrl.startsWith('/') ? authorUrl : '/' + authorUrl),
+                        text: cleanText,
+                        created_at: null,
+                        comment_permalink: permLink ? (permLink.getAttribute('href') || '').trim() : null,
+                        has_reply_from_author: hasReplyFromAuthor
+                    });
+                }
             }
             return comments;
         }""",
@@ -291,6 +480,7 @@ async def _unreplied_via_notifications(
             const items = [];
             const main = document.querySelector('main');
             if (!main) return items;
+            const commentTerms = ['comment', 'commented', 'comentário', 'comentou', 'comentários', 'comments', 'reply', 'replied', 'resposta', 'respondeu', 'respostas'];
             const links = main.querySelectorAll('a[href*="/feed/update/"], a[href*="commentUrn"]');
             const seen = new Set();
             for (const a of links) {
@@ -299,7 +489,9 @@ async def _unreplied_via_notifications(
                 if (seen.has(fullUrl)) continue;
                 seen.add(fullUrl);
                 const text = (a.closest('li') || a.closest('div')).innerText || '';
-                if (!text.toLowerCase().includes('comment') && !href.includes('comment')) continue;
+                const textLower = text.toLowerCase();
+                const isCommentNotif = commentTerms.some(t => textLower.includes(t)) || href.includes('comment');
+                if (!isCommentNotif) continue;
                 items.push({ link: fullUrl, snippet: text.slice(0, 200) });
                 if (items.length >= maxItems) break;
             }
@@ -361,7 +553,7 @@ async def find_unreplied_comments(
 
     # 2) Fallback: scan recent posts and collect comments without our reply
     logger.info("Fallback: scanning recent posts for unreplied comments")
-    posts = await get_my_recent_posts(page, limit=max_posts)
+    posts = await get_my_recent_posts(page, limit=max_posts, since_days=since_days, max_scrolls=max(10, max_posts))
     await asyncio.sleep(_NAV_DELAY)
 
     for i, post in enumerate(posts):

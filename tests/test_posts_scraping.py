@@ -292,7 +292,9 @@ class TestFindUnrepliedComments:
         ]
         result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
         mock_notif.assert_awaited_once()
-        mock_posts.assert_awaited_once_with(mock_page, limit=20)
+        mock_posts.assert_awaited_once_with(
+            mock_page, limit=20, since_days=7, max_scrolls=20
+        )
         assert len(result) == 1
         assert result[0]["author_name"] == "Commenter"
         assert result[0]["text"] == "Unreplied comment"
