@@ -43,6 +43,9 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, contact_info) | Working |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | Working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | Working |
+| `get_my_recent_posts` | List recent posts from the logged-in user's feed (post_url, post_id, text_preview, created_at) | Working |
+| `get_post_comments` | Get top-level comments for a post (by post_url or post_id) | Working |
+| `find_unreplied_comments` | Find comments on your posts that you have not replied to (uses notifications when possible) | Working |
 | `search_jobs` | Search for jobs with keywords and location filters | Working |
 | `search_people` | Search for people by keywords and location | Working |
 | `get_job_details` | Get detailed information about a specific job posting | Working |
@@ -50,6 +53,8 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
+
+**Testing posts and comments tools (Claude Desktop):** Run the server via Docker as usual (e.g. `docker run --rm -i -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp stickerdaniel/linkedin-mcp-server:latest`). Then ask Claude to: (1) call `get_my_recent_posts` and pick a `post_url`; (2) call `get_post_comments` with that URL; (3) call `find_unreplied_comments(since_days=7, max_posts=20)` and check that returned links open correctly.
 
 ## Architecture and flows
 

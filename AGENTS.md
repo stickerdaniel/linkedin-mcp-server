@@ -38,7 +38,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 - `cli_main.py` - Entry point with CLI argument parsing and orchestration
 - `server.py` - FastMCP server setup and tool registration
-- `tools/` - LinkedIn scraping tools (person, company, job profiles)
+- `tools/` - LinkedIn scraping tools (person, company, job, posts)
 - `drivers/browser.py` - Patchright browser management with persistent profile (singleton)
 - `core/` - Inlined browser, auth, and utility code (replaces `linkedin_scraper` dependency)
 - `scraping/` - innerText extraction engine with Flag-based section selection
@@ -50,6 +50,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 - **Person Tools** (`tools/person.py`) - Profile scraping with explicit section selection
 - **Company Tools** (`tools/company.py`) - Company profile and posts extraction
 - **Job Tools** (`tools/job.py`) - Job posting details and search functionality
+- **Posts Tools** (`tools/posts.py`) - My recent posts, post comments, unreplied comments
 
 **Available MCP Tools:**
 
@@ -58,6 +59,9 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 | `get_person_profile` | Get profile with explicit `sections` selection (experience, education, interests, honors, languages, contact_info) |
 | `get_company_profile` | Get company info with explicit `sections` selection (posts, jobs) |
 | `get_company_posts` | Get recent posts from company feed |
+| `get_my_recent_posts` | List recent posts from the logged-in user (post_url, post_id, text_preview, created_at) |
+| `get_post_comments` | Get top-level comments for a post (post_url or post_id) |
+| `find_unreplied_comments` | Find comments on your posts without your reply (since_days, max_posts) |
 | `get_job_details` | Get job posting details |
 | `search_jobs` | Search jobs by keywords and location |
 | `close_session` | Close browser session and clean up resources |

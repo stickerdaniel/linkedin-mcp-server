@@ -21,7 +21,7 @@ def patch_tool_deps(monkeypatch):
     mock_browser = MagicMock()
     mock_browser.page = MagicMock()
 
-    for module in ["person", "company", "job"]:
+    for module in ["person", "company", "job", "posts"]:
         monkeypatch.setattr(
             f"linkedin_mcp_server.tools.{module}.ensure_authenticated", AsyncMock()
         )
@@ -244,3 +244,92 @@ class TestJobTools:
         tool_fn = await get_tool_fn(mcp, "search_jobs")
         result = await tool_fn("python", mock_context, location="Remote")
         assert "search_results" in result["sections"]
+
+
+class TestPostsTools:
+    async def test_get_my_recent_posts(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        from linkedin_mcp_server.tools.posts import register_posts_tools
+
+        mock_posts = [
+            {
+                "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+                "post_id": "urn:li:activity:123",
+                "text_preview": "My post text",
+                "created_at": None,
+            }
+        ]
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.posts.scrape_get_my_recent_posts",
+            AsyncMock(return_value=mock_posts),
+        )
+
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_my_recent_posts")
+        result = await tool_fn(mock_context, limit=10)
+        assert "posts" in result
+        assert len(result["posts"]) == 1
+        assert result["posts"][0]["post_url"] == "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+        assert result["posts"][0]["text_preview"] == "My post text"
+
+    async def test_get_post_comments(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        from linkedin_mcp_server.tools.posts import register_posts_tools
+
+        mock_comments = [
+            {
+                "comment_id": None,
+                "author_name": "Jane Doe",
+                "author_url": "https://www.linkedin.com/in/janedoe/",
+                "text": "Great post!",
+                "created_at": None,
+                "comment_permalink": None,
+            }
+        ]
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.posts.scrape_get_post_comments",
+            AsyncMock(return_value=mock_comments),
+        )
+
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        result = await tool_fn(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            mock_context,
+        )
+        assert "comments" in result
+        assert len(result["comments"]) == 1
+        assert result["comments"][0]["author_name"] == "Jane Doe"
+        assert result["comments"][0]["text"] == "Great post!"
+
+    async def test_find_unreplied_comments(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        from linkedin_mcp_server.tools.posts import register_posts_tools
+
+        mock_unreplied = [
+            {
+                "comment_permalink": "https://www.linkedin.com/feed/update/urn:li:activity:123/?commentUrn=urn:li:comment:456",
+                "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+                "author_name": "Jane Doe",
+                "text": "Nice!",
+                "snippet": "Nice!",
+            }
+        ]
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.posts.scrape_find_unreplied_comments",
+            AsyncMock(return_value=mock_unreplied),
+        )
+
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "find_unreplied_comments")
+        result = await tool_fn(mock_context, since_days=7, max_posts=20)
+        assert "unreplied_comments" in result
+        assert len(result["unreplied_comments"]) == 1
+        assert "comment_permalink" in result["unreplied_comments"][0]
+        assert "Jane Doe" in str(result["unreplied_comments"][0]["author_name"])

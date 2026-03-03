@@ -10,6 +10,9 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Job Search**: Search for jobs with keywords and location filters
 - **People Search**: Search for people by keywords and location
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
+- **My Recent Posts**: List recent posts from the logged-in user's feed
+- **Post Comments**: Get top-level comments for any post (by URL or post ID)
+- **Unreplied Comments**: Find comments on your posts that you have not replied to (notifications or scan)
 
 ## Quick Start
 
