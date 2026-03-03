@@ -9,6 +9,7 @@ automatic profile persistence.
 import logging
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from linkedin_mcp_server.core import (
@@ -19,6 +20,7 @@ from linkedin_mcp_server.core import (
 )
 
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.scraping.cache import scraping_cache
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,10 @@ DEFAULT_PROFILE_DIR = Path.home() / ".linkedin-mcp" / "profile"
 # Global browser instance (singleton)
 _browser: BrowserManager | None = None
 _headless: bool = True
+
+# Auth check cache (avoid DOM queries on every tool call)
+_auth_valid_until: float = 0.0
+_AUTH_CACHE_TTL = 120.0  # seconds
 
 
 def _apply_browser_settings(browser: BrowserManager) -> None:
@@ -150,8 +156,10 @@ async def get_or_create_browser(
 
 async def close_browser() -> None:
     """Close the browser and cleanup resources."""
-    global _browser
+    global _browser, _auth_valid_until
 
+    _auth_valid_until = 0.0
+    scraping_cache.clear()
     if _browser is not None:
         logger.info("Closing browser...")
         # Export cookies before closing to keep portable file fresh
@@ -198,11 +206,20 @@ async def ensure_authenticated() -> None:
     """
     Validate session and raise if expired.
 
+    Caches the auth check result for _AUTH_CACHE_TTL seconds to avoid
+    redundant DOM queries on every tool call.
+
     Raises:
         AuthenticationError: If session is expired or invalid
     """
+    global _auth_valid_until
+    if time.monotonic() < _auth_valid_until:
+        return
+
     if not await validate_session():
         raise AuthenticationError("Session expired or invalid.")
+
+    _auth_valid_until = time.monotonic() + _AUTH_CACHE_TTL
 
 
 async def check_rate_limit() -> None:
@@ -220,6 +237,7 @@ async def check_rate_limit() -> None:
 
 def reset_browser_for_testing() -> None:
     """Reset global browser state for test isolation."""
-    global _browser, _headless
+    global _browser, _headless, _auth_valid_until
     _browser = None
     _headless = True
+    _auth_valid_until = 0.0

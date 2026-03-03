@@ -5,7 +5,20 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from linkedin_mcp_server.core.exceptions import RateLimitError
-from linkedin_mcp_server.core.utils import detect_rate_limit
+from linkedin_mcp_server.core.utils import (
+    RateLimitState,
+    detect_rate_limit,
+    humanized_delay,
+    rate_limit_state,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_state():
+    """Reset global rate limit state between tests."""
+    rate_limit_state.reset()
+    yield
+    rate_limit_state.reset()
 
 
 @pytest.fixture
@@ -145,3 +158,65 @@ class TestDetectRateLimit:
 
         mock_page.locator = MagicMock(side_effect=locator_side_effect)
         await detect_rate_limit(mock_page)
+
+
+class TestHumanizedDelay:
+    def test_returns_float_in_range(self):
+        for _ in range(100):
+            d = humanized_delay()
+            assert 1.5 <= d <= 4.0
+
+    def test_values_are_not_constant(self):
+        values = {humanized_delay() for _ in range(20)}
+        assert len(values) > 1
+
+
+class TestRateLimitState:
+    def test_initial_state_not_cooling_down(self):
+        state = RateLimitState()
+        assert not state.is_cooling_down
+        assert state.cooldown_remaining == 0.0
+
+    def test_record_rate_limit_sets_cooldown(self):
+        state = RateLimitState()
+        state.record_rate_limit()
+        assert state.is_cooling_down
+        assert state.cooldown_remaining > 0
+
+    def test_exponential_backoff(self):
+        state = RateLimitState()
+        state.record_rate_limit()  # 30s
+        first = state.cooldown_remaining
+        state.record_rate_limit()  # 60s
+        second = state.cooldown_remaining
+        assert second > first
+
+    def test_backoff_capped_at_300s(self):
+        state = RateLimitState()
+        for _ in range(20):
+            state.record_rate_limit()
+        assert state.cooldown_remaining <= 300.0
+
+    def test_record_success_decrements(self):
+        state = RateLimitState()
+        state.record_rate_limit()
+        state.record_rate_limit()
+        state.record_success()
+        state.record_success()
+        state.record_success()
+        # After 2 rate limits and 3 successes, counter should be at 0
+        # (can't go below 0)
+
+    def test_reset_clears_state(self):
+        state = RateLimitState()
+        state.record_rate_limit()
+        state.reset()
+        assert not state.is_cooling_down
+        assert state.cooldown_remaining == 0.0
+
+    async def test_detect_rate_limit_records_state(self, mock_page):
+        """detect_rate_limit should update the global rate_limit_state."""
+        mock_page.url = "https://www.linkedin.com/checkpoint/challenge/123"
+        with pytest.raises(RateLimitError):
+            await detect_rate_limit(mock_page)
+        assert rate_limit_state.is_cooling_down

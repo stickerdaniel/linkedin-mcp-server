@@ -2,12 +2,72 @@
 
 import asyncio
 import logging
+import random
+import time
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from .exceptions import RateLimitError
 
 logger = logging.getLogger(__name__)
+
+# Humanized delay range (seconds) between navigations
+_NAV_DELAY_MIN = 1.5
+_NAV_DELAY_MAX = 4.0
+
+
+def humanized_delay() -> float:
+    """Return a randomized delay to mimic human browsing patterns."""
+    return random.uniform(_NAV_DELAY_MIN, _NAV_DELAY_MAX)
+
+
+class RateLimitState:
+    """Tracks session-level rate limit state with exponential backoff."""
+
+    def __init__(self) -> None:
+        self._cooldown_until: float = 0.0
+        self._consecutive_limits: int = 0
+
+    def record_rate_limit(self) -> None:
+        """Called when a rate limit is detected. Applies exponential backoff."""
+        self._consecutive_limits += 1
+        wait = min(30 * (2 ** (self._consecutive_limits - 1)), 300)
+        self._cooldown_until = time.monotonic() + wait
+        logger.warning(
+            "Rate limit #%d detected, cooling down for %ds",
+            self._consecutive_limits,
+            wait,
+        )
+
+    def record_success(self) -> None:
+        """Called on successful navigation. Gradually resets counter."""
+        if self._consecutive_limits > 0:
+            self._consecutive_limits = max(0, self._consecutive_limits - 1)
+
+    @property
+    def cooldown_remaining(self) -> float:
+        """Seconds remaining in cooldown, or 0 if none."""
+        return max(0.0, self._cooldown_until - time.monotonic())
+
+    @property
+    def is_cooling_down(self) -> bool:
+        return self.cooldown_remaining > 0
+
+    def reset(self) -> None:
+        """Reset all state."""
+        self._cooldown_until = 0.0
+        self._consecutive_limits = 0
+
+
+rate_limit_state = RateLimitState()
+
+
+async def wait_for_cooldown() -> None:
+    """Wait if the session is in a rate limit cooldown period."""
+    remaining = rate_limit_state.cooldown_remaining
+    if remaining > 0:
+        logger.info("Rate limit cooldown: waiting %.1fs", remaining)
+        await asyncio.sleep(remaining)
 
 
 async def detect_rate_limit(page: Page) -> None:
@@ -29,6 +89,7 @@ async def detect_rate_limit(page: Page) -> None:
     # Check URL for security challenges
     current_url = page.url
     if "linkedin.com/checkpoint" in current_url or "authwall" in current_url:
+        rate_limit_state.record_rate_limit()
         raise RateLimitError(
             "LinkedIn security checkpoint detected. "
             "You may need to verify your identity or wait before continuing.",
@@ -41,6 +102,7 @@ async def detect_rate_limit(page: Page) -> None:
             'iframe[title*="captcha" i], iframe[src*="captcha" i]'
         ).count()
         if captcha > 0:
+            rate_limit_state.record_rate_limit()
             raise RateLimitError(
                 "CAPTCHA challenge detected. Manual intervention required.",
                 suggested_wait_time=3600,
@@ -73,6 +135,7 @@ async def detect_rate_limit(page: Page) -> None:
                     "try again later",
                 ]
             ):
+                rate_limit_state.record_rate_limit()
                 raise RateLimitError(
                     "Rate limit message detected on page.",
                     suggested_wait_time=1800,

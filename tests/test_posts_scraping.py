@@ -266,10 +266,23 @@ class TestFindUnrepliedComments:
         mock_posts.assert_not_awaited()
         mock_comments.assert_not_awaited()
 
-    async def test_fallback_to_posts_when_notifications_empty(
+    async def test_empty_notifications_returns_empty_without_fallback(
         self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
     ):
+        """When notifications loads successfully but finds nothing, return empty
+        without falling back to the expensive post-scanning path."""
         mock_notif.return_value = []
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        mock_notif.assert_awaited_once()
+        mock_posts.assert_not_awaited()
+        mock_comments.assert_not_awaited()
+        assert result == []
+
+    async def test_fallback_to_posts_when_notifications_fail(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """When notifications path fails (returns None), fall back to scanning posts."""
+        mock_notif.return_value = None
         mock_name.return_value = "Current User"
         mock_posts.return_value = [
             {
@@ -302,7 +315,7 @@ class TestFindUnrepliedComments:
     async def test_fallback_excludes_comments_with_reply(
         self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
     ):
-        mock_notif.return_value = []
+        mock_notif.return_value = None
         mock_name.return_value = "Me"
         mock_posts.return_value = [
             {
