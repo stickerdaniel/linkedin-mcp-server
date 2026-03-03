@@ -16,12 +16,14 @@ from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
+    humanized_delay,
+    rate_limit_state,
     scroll_to_bottom,
+    wait_for_cooldown,
 )
+from linkedin_mcp_server.scraping.cache import scraping_cache
 
 logger = logging.getLogger(__name__)
-
-_NAV_DELAY = 2.0
 _FEED_URL = "https://www.linkedin.com/feed/"
 _MY_POSTS_URL = "https://www.linkedin.com/in/me/detail/recent-activity/shares/"
 _NOTIFICATIONS_URL = "https://www.linkedin.com/notifications/"
@@ -147,8 +149,10 @@ async def get_my_recent_posts(
     seen_urns: set[str] = set()
     prev_height: int | None = None
     try:
+        await wait_for_cooldown()
         await page.goto(_MY_POSTS_URL, wait_until="domcontentloaded", timeout=30000)
         await detect_rate_limit(page)
+        rate_limit_state.record_success()
         await handle_modal_close(page)
 
         # Incremental scroll + collect. Stop when no new items and scrollHeight stable.
@@ -215,7 +219,11 @@ async def get_my_recent_posts(
 
             if isinstance(raw, dict):
                 items = raw.get("items") if isinstance(raw.get("items"), list) else []
-                new_height = raw.get("scrollHeight") if isinstance(raw.get("scrollHeight"), (int, float)) else None
+                new_height = (
+                    raw.get("scrollHeight")
+                    if isinstance(raw.get("scrollHeight"), (int, float))
+                    else None
+                )
             else:
                 items = raw if isinstance(raw, list) else []
                 new_height = None
@@ -242,7 +250,12 @@ async def get_my_recent_posts(
             # Stop when no new items and scroll height stable (no more content loading)
             if len(posts) >= limit:
                 break
-            if len(posts) == prev_count and new_height is not None and prev_height is not None and new_height == prev_height:
+            if (
+                len(posts) == prev_count
+                and new_height is not None
+                and prev_height is not None
+                and new_height == prev_height
+            ):
                 break
             # Legacy single-shot evaluate (returns list): do not loop
             if not isinstance(raw, dict):
@@ -271,8 +284,10 @@ async def get_profile_recent_posts(
     profile_url = f"https://www.linkedin.com/in/{username.strip().strip('/')}/"
     posts: list[dict[str, Any]] = []
     try:
+        await wait_for_cooldown()
         await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
         await detect_rate_limit(page)
+        rate_limit_state.record_success()
         await handle_modal_close(page)
         await scroll_to_bottom(page, pause_time=0.8, max_scrolls=5)
         await asyncio.sleep(0.5)
@@ -319,7 +334,9 @@ async def get_profile_recent_posts(
     except LinkedInScraperException:
         raise
     except Exception as e:
-        logger.warning("get_profile_recent_posts extraction failed for %s: %s", profile_url, e)
+        logger.warning(
+            "get_profile_recent_posts extraction failed for %s: %s", profile_url, e
+        )
     return posts
 
 
@@ -335,10 +352,17 @@ async def get_post_comments(
     created_at, comment_permalink, has_reply_from_author (if current_user_name given).
     """
     url = _normalize_post_url(post_url_or_id)
+    cache_key = f"comments:{url}"
+    cached = scraping_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     comments: list[dict[str, Any]] = []
     try:
+        await wait_for_cooldown()
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await detect_rate_limit(page)
+        rate_limit_state.record_success()
         await handle_modal_close(page)
         await scroll_to_bottom(page, pause_time=0.5, max_scrolls=3)
         await asyncio.sleep(1)
@@ -458,6 +482,8 @@ async def get_post_comments(
         raise
     except Exception as e:
         logger.warning("get_post_comments extraction failed for %s: %s", url, e)
+    if comments:
+        scraping_cache.put(cache_key, comments)
     return comments
 
 
@@ -469,17 +495,21 @@ async def _unreplied_via_notifications(
     Returns list of unreplied comment items or None if notifications path failed.
     """
     try:
-        await page.goto(_NOTIFICATIONS_URL, wait_until="domcontentloaded", timeout=30000)
+        await wait_for_cooldown()
+        await page.goto(
+            _NOTIFICATIONS_URL, wait_until="domcontentloaded", timeout=30000
+        )
         await detect_rate_limit(page)
+        rate_limit_state.record_success()
         await handle_modal_close(page)
-        await scroll_to_bottom(page, pause_time=0.5, max_scrolls=3)
+        await scroll_to_bottom(page, pause_time=0.5, max_scrolls=6)
         await asyncio.sleep(1)
 
         raw = await page.evaluate(
             """(maxItems) => {
             const items = [];
             const main = document.querySelector('main');
-            if (!main) return items;
+            if (!main) return { items: items, hasContent: false };
             const commentTerms = ['comment', 'commented', 'comentário', 'comentou', 'comentários', 'comments', 'reply', 'replied', 'resposta', 'respondeu', 'respostas'];
             const links = main.querySelectorAll('a[href*="/feed/update/"], a[href*="commentUrn"]');
             const seen = new Set();
@@ -495,21 +525,29 @@ async def _unreplied_via_notifications(
                 items.push({ link: fullUrl, snippet: text.slice(0, 200) });
                 if (items.length >= maxItems) break;
             }
-            return items;
+            return { items: items, hasContent: main.innerText.trim().length > 100 };
         }""",
             max_posts * 3,
         )
 
-        if isinstance(raw, list) and len(raw) > 0:
-            return [
-                {
-                    "comment_permalink": r.get("link"),
-                    "post_url": r.get("link").split("?")[0] if r.get("link") else None,
-                    "snippet": r.get("snippet"),
-                }
-                for r in raw
-                if isinstance(r, dict) and r.get("link")
-            ]
+        if isinstance(raw, dict):
+            items = raw.get("items", [])
+            has_content = raw.get("hasContent", False)
+            if isinstance(items, list) and len(items) > 0:
+                return [
+                    {
+                        "comment_permalink": r.get("link"),
+                        "post_url": r.get("link").split("?")[0]
+                        if r.get("link")
+                        else None,
+                        "snippet": r.get("snippet"),
+                    }
+                    for r in items
+                    if isinstance(r, dict) and r.get("link")
+                ]
+            # Page loaded successfully but no comment notifications found
+            if has_content:
+                return []
     except LinkedInScraperException:
         raise
     except Exception as e:
@@ -534,36 +572,59 @@ async def find_unreplied_comments(
     current_name = await _get_current_user_name(page)
 
     # 1) Try notifications first
-    from_notifications = await _unreplied_via_notifications(
-        page, since_days, max_posts
-    )
-    if from_notifications is not None and len(from_notifications) > 0:
-        logger.info("Using notifications for unreplied comments (%d items)", len(from_notifications))
-        for item in from_notifications:
-            unreplied.append(
-                {
-                    "comment_permalink": item.get("comment_permalink"),
-                    "post_url": item.get("post_url"),
-                    "snippet": item.get("snippet"),
-                    "author_name": None,
-                    "text": None,
-                }
+    from_notifications = await _unreplied_via_notifications(page, since_days, max_posts)
+    if from_notifications is not None:
+        if len(from_notifications) > 0:
+            logger.info(
+                "Using notifications for unreplied comments (%d items)",
+                len(from_notifications),
+            )
+            for item in from_notifications:
+                unreplied.append(
+                    {
+                        "comment_permalink": item.get("comment_permalink"),
+                        "post_url": item.get("post_url"),
+                        "snippet": item.get("snippet"),
+                        "author_name": None,
+                        "text": None,
+                    }
+                )
+        else:
+            logger.info(
+                "Notifications loaded successfully but no unreplied comments found"
             )
         return unreplied
 
-    # 2) Fallback: scan recent posts and collect comments without our reply
-    logger.info("Fallback: scanning recent posts for unreplied comments")
-    posts = await get_my_recent_posts(page, limit=max_posts, since_days=since_days, max_scrolls=max(10, max_posts))
-    await asyncio.sleep(_NAV_DELAY)
+    # 2) Fallback: scan recent posts and collect comments without our reply.
+    #    Cap navigations to avoid triggering rate limits.
+    _MAX_FALLBACK_NAVIGATIONS = 5
+    logger.info(
+        "Fallback: scanning recent posts for unreplied comments (max %d navigations)",
+        _MAX_FALLBACK_NAVIGATIONS,
+    )
+    posts = await get_my_recent_posts(
+        page, limit=max_posts, since_days=since_days, max_scrolls=max(10, max_posts)
+    )
+    await asyncio.sleep(humanized_delay())
 
+    nav_count = 0
     for i, post in enumerate(posts):
+        if nav_count >= _MAX_FALLBACK_NAVIGATIONS:
+            logger.info(
+                "Reached max fallback navigations (%d), stopping",
+                _MAX_FALLBACK_NAVIGATIONS,
+            )
+            break
         if i > 0:
-            await asyncio.sleep(_NAV_DELAY)
+            await asyncio.sleep(humanized_delay())
         post_url = post.get("post_url")
         if not post_url:
             continue
         try:
-            comments = await get_post_comments(page, post_url, current_user_name=current_name)
+            comments = await get_post_comments(
+                page, post_url, current_user_name=current_name
+            )
+            nav_count += 1
             for c in comments:
                 if c.get("has_reply_from_author"):
                     continue
