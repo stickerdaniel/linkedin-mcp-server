@@ -51,6 +51,48 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
 
+## Architecture and flows
+
+The server uses a **two-phase startup**: first it ensures a browser profile exists for authentication, then it starts the FastMCP server with the chosen transport. The browser is a **singleton**—created on first tool use—and all scraping tools share the same extractor (navigate → scroll → innerText → strip noise).
+
+### Startup flow
+
+```mermaid
+flowchart TD
+    main[main]
+    main --> hasLogout{--logout?}
+    hasLogout -->|yes| clearProfile[clear_profile_and_exit]
+    hasLogout -->|no| hasLogin{--login?}
+    hasLogin -->|yes| getProfile[get_profile_and_exit]
+    hasLogin -->|no| hasStatus{--status?}
+    hasStatus -->|yes| profileInfo[profile_info_and_exit]
+    hasStatus -->|no| ensureAuth[ensure_authentication_ready]
+    ensureAuth --> profileExists{Profile exists?}
+    profileExists -->|no, interactive| runSetup[run_interactive_setup]
+    profileExists -->|no, non-interactive| error[CredentialsNotFoundError]
+    profileExists -->|yes| phase2[Phase 2: Server runtime]
+    phase2 --> chooseTransport[Choose transport]
+    chooseTransport --> createServer[create_mcp_server]
+    createServer --> mcpRun[mcp.run]
+```
+
+### Tool execution flow
+
+When an MCP client calls a scraping tool (e.g. `get_person_profile`, `get_company_profile`, `get_job_details`):
+
+```mermaid
+flowchart LR
+    client[Client calls tool]
+    client --> ensureAuth[ensure_authenticated]
+    ensureAuth --> getBrowser[get_or_create_browser]
+    getBrowser --> extractor[LinkedInExtractor]
+    extractor --> scrape[Navigate, scroll, innerText]
+    scrape --> result[Return url, sections, pages_visited]
+```
+
+- **ensure_authenticated** uses the same singleton browser; on first use it launches Patchright, opens `linkedin.com/feed`, and checks login (or applies the cookie bridge from `cookies.json` when running in Docker).
+- **LinkedInExtractor** visits one URL per requested section (e.g. experience, education), scrolls to load lazy content, extracts innerText, strips sidebar/footer noise, and returns structured sections for the LLM to parse.
+
 <br/>
 <br/>
 
