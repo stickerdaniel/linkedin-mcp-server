@@ -122,6 +122,70 @@ async def get_my_recent_posts(page: Page, limit: int = 20) -> list[dict[str, Any
     return posts
 
 
+async def get_profile_recent_posts(
+    page: Page, username: str, limit: int = 20
+) -> list[dict[str, Any]]:
+    """
+    Scrape recent posts visible on a profile page (e.g. /in/andre-martins-fintech/).
+
+    Navigates to the profile URL, scrolls to load activity, extracts post cards
+    that link to /feed/update/urn:li:activity:. Requires being logged in.
+    """
+    profile_url = f"https://www.linkedin.com/in/{username.strip().strip('/')}/"
+    posts: list[dict[str, Any]] = []
+    try:
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
+        await detect_rate_limit(page)
+        await handle_modal_close(page)
+        await scroll_to_bottom(page, pause_time=0.8, max_scrolls=5)
+        await asyncio.sleep(0.5)
+
+        raw = await page.evaluate(
+            """(limit) => {
+            const posts = [];
+            const seen = new Set();
+            const main = document.querySelector('main');
+            if (!main) return posts;
+            const links = main.querySelectorAll('a[href*="/feed/update/"]');
+            for (const a of links) {
+                const href = a.getAttribute('href') || '';
+                const m = href.match(/feed\\/update\\/(urn:li:activity:\\d+)/);
+                if (!m || seen.has(m[1])) continue;
+                seen.add(m[1]);
+                let text = '';
+                let card = a.closest('article') || a.closest('[data-urn]') || a.closest('div[class*="feed"]');
+                if (card) {
+                    const inner = card.querySelector('[dir="ltr"]') || card;
+                    text = (inner.innerText || '').trim().slice(0, 500);
+                }
+                if (!text) text = (a.innerText || '').trim().slice(0, 300);
+                const fullUrl = href.startsWith('http') ? href : 'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
+                posts.push({ post_url: fullUrl, post_id: m[1], text_preview: text, created_at: null });
+                if (posts.length >= limit) break;
+            }
+            return posts;
+        }""",
+            limit,
+        )
+
+        if isinstance(raw, list):
+            for p in raw:
+                if isinstance(p, dict) and p.get("post_url"):
+                    posts.append(
+                        {
+                            "post_url": p.get("post_url", ""),
+                            "post_id": p.get("post_id"),
+                            "text_preview": (p.get("text_preview") or "")[:500],
+                            "created_at": p.get("created_at"),
+                        }
+                    )
+    except LinkedInScraperException:
+        raise
+    except Exception as e:
+        logger.warning("get_profile_recent_posts extraction failed for %s: %s", profile_url, e)
+    return posts
+
+
 async def get_post_comments(
     page: Page,
     post_url_or_id: str,
