@@ -282,7 +282,7 @@ class TestScrapePersonUrls:
             result = await extractor.scrape_person("testuser", fields)
 
         urls = result["pages_visited"]
-        # main_profile, experience, education, interests, honors, languages, contact_info
+        # main_profile, experience, education, interests, honors, languages, contact_info, posts
         assert len(urls) == 8
         assert result["sections_requested"] == [
             "main_profile",
