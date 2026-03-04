@@ -16,55 +16,46 @@ uv run patchright install chromium         # Install browser
 uv run pytest --cov                        # Run tests with coverage
 ```
 
-## Architecture: One Flag = One Navigation
+## Architecture: One Section = One Navigation
 
-The scraping engine is built around a **one-flag-one-navigation** design. Understanding this is key to contributing effectively.
+The scraping engine is built around a **one-section-one-navigation** design. Understanding this is key to contributing effectively.
 
 ### Why This Design?
 
-AI assistants (LLMs) call our MCP tools. Each LinkedIn page navigation takes time and risks rate limits. By mapping each `Flag` to exactly one URL, the LLM can request only the sections it needs — skipping unnecessary navigations while still capturing all available info from each visited page via `innerText` extraction.
+AI assistants (LLMs) call our MCP tools. Each LinkedIn page navigation takes time and risks rate limits. By mapping each section to exactly one URL, the LLM can request only the sections it needs — skipping unnecessary navigations while still capturing all available info from each visited page via `innerText` extraction.
 
 ### How It Works
 
-**Flag enums** (`scraping/fields.py`) define which pages exist:
+**Section config dicts** (`scraping/fields.py`) define which pages exist:
 
 ```python
-class PersonScrapingFields(Flag):
-    BASIC_INFO = auto()  # /in/{username}/
-    EXPERIENCE = auto()  # /in/{username}/details/experience/
-    CONTACT_INFO = auto()  # /in/{username}/overlay/contact-info/
-    LANGUAGES = auto()  # /in/{username}/details/languages/
-    # ...
-```
-
-**Section maps** connect user-facing names to flags:
-
-```python
-PERSON_SECTION_MAP = {
-    "experience": PersonScrapingFields.EXPERIENCE,
-    "contact_info": PersonScrapingFields.CONTACT_INFO,
+# Maps section name -> (url_suffix, is_overlay)
+PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
+    "main_profile": ("/", False),
+    "experience": ("/details/experience/", False),
+    "contact_info": ("/overlay/contact-info/", True),
+    "languages": ("/details/languages/", False),
     # ...
 }
 ```
 
-**Page maps** (`scraping/extractor.py`) wire flags to URLs:
+The `is_overlay` boolean distinguishes modal overlays (like contact info) from full page navigations — overlays use a different extraction method that reads from the `<dialog>` element.
+
+The extractor iterates the config dict directly, checking which sections the caller requested:
 
 ```python
-# (flag, section_name, url_suffix, is_overlay)
-page_map = [
-    (PersonScrapingFields.BASIC_INFO, "main_profile", "/", False),
-    (PersonScrapingFields.EXPERIENCE, "experience", "/details/experience/", False),
-    (PersonScrapingFields.CONTACT_INFO, "contact_info", "/overlay/contact-info/", True),
-    # ...
-]
+for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
+    if section_name not in requested:
+        continue
+    # navigate and extract...
 ```
-
-The `is_overlay` boolean distinguishes modal overlays (like contact info) from full page navigations — overlays use a different extraction method that reads from the `<dialog>` element.
 
 **Return format** — all scraping tools return:
 
 ```python
-{"url": str, "sections": {name: raw_text}, "pages_visited": list, "sections_requested": list}
+{"url": str, "sections": {name: raw_text}}
+# When unknown section names are provided:
+{"url": str, "sections": {name: raw_text}, "unknown_sections": [name, ...]}
 ```
 
 ## Checklist: Adding a New Section
@@ -73,16 +64,14 @@ When adding a section to an existing tool (e.g., adding "certifications" to `get
 
 ### Code
 
-- [ ] Add flag to `PersonScrapingFields` or `CompanyScrapingFields` with URL comment (`scraping/fields.py`)
-- [ ] Add entry to `PERSON_SECTION_MAP` or `COMPANY_SECTION_MAP` (`scraping/fields.py`)
-- [ ] Add tuple to `page_map` in `scrape_person()` or `scrape_company()` (`scraping/extractor.py`)
+- [ ] Add entry to `PERSON_SECTIONS` or `COMPANY_SECTIONS` with `(url_suffix, is_overlay)` (`scraping/fields.py`)
 - [ ] Update tool docstring with new section name (`tools/person.py` or `tools/company.py`)
 
 ### Tests
 
-- [ ] Add flag to `test_atomic_flags_are_distinct` (`tests/test_fields.py`)
+- [ ] Add to `test_expected_keys` (`tests/test_fields.py`)
 - [ ] Add to `test_all_sections` parse test (`tests/test_fields.py`)
-- [ ] Update `test_all_flags_visit_all_pages` — add flag, bump count, add to `sections_requested` list, update comment (`tests/test_scraping.py`)
+- [ ] Update `test_all_sections_visit_all_urls` — add section to set, update assertions (`tests/test_scraping.py`)
 - [ ] Add dedicated navigation test (e.g., `test_certifications_visits_details_page`) (`tests/test_scraping.py`)
 
 ### Docs

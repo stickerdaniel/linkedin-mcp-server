@@ -41,7 +41,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 - `tools/` - LinkedIn scraping tools (person, company, job profiles)
 - `drivers/browser.py` - Patchright browser management with persistent profile (singleton)
 - `core/` - Inlined browser, auth, and utility code (replaces `linkedin_scraper` dependency)
-- `scraping/` - innerText extraction engine with Flag-based section selection
+- `scraping/` - innerText extraction engine with explicit section selection
 - `config/` - Configuration management (schema, loaders)
 - `authentication.py` - LinkedIn profile-based authentication
 
@@ -65,13 +65,13 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 **Tool Return Format:**
 
-All scraping tools return: `{url, sections: {name: raw_text}, pages_visited, sections_requested}`
+All scraping tools return: `{url, sections: {name: raw_text}}`. When unknown section names are provided, an `unknown_sections: [name, ...]` key is also included.
 
 **Scraping Architecture (`scraping/`):**
 
-- `fields.py` - `PersonScrapingFields` and `CompanyScrapingFields` Flag enums
+- `fields.py` - `PERSON_SECTIONS` and `COMPANY_SECTIONS` config dicts mapping section name to `(url_suffix, is_overlay)`
 - `extractor.py` - `LinkedInExtractor` class using navigate-scroll-innerText pattern
-- **One flag = one navigation.** Each `PersonScrapingFields` / `CompanyScrapingFields` flag must map to exactly one page navigation. Never combine multiple URLs behind a single flag.
+- **One section = one navigation.** Each entry in `PERSON_SECTIONS` / `COMPANY_SECTIONS` maps to exactly one page navigation. Never combine multiple URLs behind a single section.
 
 **Core Subpackage (`core/`):**
 
@@ -137,6 +137,16 @@ All scraping tools return: `{url, sections: {name: raw_text}, pages_visited, sec
   7. First review the PR with ai agents.
   8. Manually review the PR and merge it if it's approved. Do not squash the commits.
   9. Delete the branch after the PR is merged.
+
+## PR Reviews
+
+Greptile posts initial reviews as PR review comments, but follow-ups as **issue comments**. Always check both. To trigger a re-review, comment `@greptileai review` on the PR.
+
+```bash
+gh api repos/{owner}/{repo}/pulls/{pr}/reviews    # initial reviews
+gh api repos/{owner}/{repo}/pulls/{pr}/comments   # inline comments
+gh api repos/{owner}/{repo}/issues/{pr}/comments   # follow-up reviews
+```
 
 ## btca
 
