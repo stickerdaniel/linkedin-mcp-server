@@ -14,7 +14,7 @@ from linkedin_mcp_server.drivers.browser import (
     ensure_authenticated,
     get_or_create_browser,
 )
-from linkedin_mcp_server.error_handler import handle_tool_error
+from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             return result
 
         except Exception as e:
-            return handle_tool_error(e, "get_job_details")
+            raise_tool_error(e)
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -112,4 +112,4 @@ def register_job_tools(mcp: FastMCP) -> None:
             return result
 
         except Exception as e:
-            return handle_tool_error(e, "search_jobs")
+            raise_tool_error(e)
