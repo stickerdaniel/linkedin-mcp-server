@@ -33,7 +33,7 @@ class PersonScrapingFields(Flag):
     BASIC_INFO = auto()  # /in/{username}/
     EXPERIENCE = auto()  # /in/{username}/details/experience/
     CONTACT_INFO = auto()  # /in/{username}/overlay/contact-info/
-    POSTS = auto()  # /in/{username}/recent-activity/all/
+    LANGUAGES = auto()  # /in/{username}/details/languages/
     # ...
 ```
 
@@ -83,7 +83,7 @@ When adding a section to an existing tool (e.g., adding "certifications" to `get
 - [ ] Add flag to `test_atomic_flags_are_distinct` (`tests/test_fields.py`)
 - [ ] Add to `test_all_sections` parse test (`tests/test_fields.py`)
 - [ ] Update `test_all_flags_visit_all_pages` — add flag, bump count, add to `sections_requested` list, update comment (`tests/test_scraping.py`)
-- [ ] Add dedicated navigation test (e.g., `test_posts_visits_recent_activity`) (`tests/test_scraping.py`)
+- [ ] Add dedicated navigation test (e.g., `test_certifications_visits_details_page`) (`tests/test_scraping.py`)
 
 ### Docs
 
