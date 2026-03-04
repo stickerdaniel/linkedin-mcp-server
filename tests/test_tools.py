@@ -108,6 +108,28 @@ class TestPersonTool:
         assert "experience" in call_args[0][1]
         assert "contact_info" in call_args[0][1]
 
+    async def test_get_person_profile_unknown_section(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "sections": {"main_profile": "John Doe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.person.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
+        )
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_person_profile")
+        result = await tool_fn("test-user", mock_context, sections="bogus_section")
+        assert result["unknown_sections"] == ["bogus_section"]
+
     async def test_get_person_profile_error(self, mock_context, monkeypatch):
         from linkedin_mcp_server.exceptions import SessionExpiredError
 
@@ -171,6 +193,28 @@ class TestCompanyTools:
         result = await tool_fn("testcorp", mock_context)
         assert "about" in result["sections"]
         assert "pages_visited" not in result
+
+    async def test_get_company_profile_unknown_section(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        expected = {
+            "url": "https://www.linkedin.com/company/testcorp/",
+            "sections": {"about": "TestCorp\nWe build things"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company.LinkedInExtractor",
+            lambda *a, **kw: mock_extractor,
+        )
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_company_profile")
+        result = await tool_fn("testcorp", mock_context, sections="bogus")
+        assert result["unknown_sections"] == ["bogus"]
 
     async def test_get_company_posts(self, mock_context, patch_tool_deps, monkeypatch):
         mock_extractor = MagicMock()
