@@ -101,7 +101,8 @@ class TestPersonTool:
         assert "main_profile" in result["sections"]
         assert "experience" in result["sections"]
         assert "contact_info" in result["sections"]
-        # Verify scrape_person was called with a set[str]
+        # Verify scrape_person was called exactly once with a set[str]
+        mock_extractor.scrape_person.assert_awaited_once()
         call_args = mock_extractor.scrape_person.call_args
         assert isinstance(call_args[0][1], set)
         assert "experience" in call_args[0][1]

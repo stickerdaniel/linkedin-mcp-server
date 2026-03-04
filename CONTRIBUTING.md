@@ -69,7 +69,7 @@ When adding a section to an existing tool (e.g., adding "certifications" to `get
 
 - [ ] Add to `test_expected_keys` (`tests/test_fields.py`)
 - [ ] Add to `test_all_sections` parse test (`tests/test_fields.py`)
-- [ ] Update `test_all_sections_visit_all_pages` — add section to set, update assertions (`tests/test_scraping.py`)
+- [ ] Update `test_all_sections_visit_all_urls` — add section to set, update assertions (`tests/test_scraping.py`)
 - [ ] Add dedicated navigation test (e.g., `test_certifications_visits_details_page`) (`tests/test_scraping.py`)
 
 ### Docs
