@@ -50,13 +50,13 @@ def register_company_tools(mcp: FastMCP) -> None:
                 Default (None) scrapes only the about page.
 
         Returns:
-            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            Dict with url and sections (name -> raw text).
             The LLM should parse the raw text in each section.
         """
         try:
             await ensure_authenticated()
 
-            fields, unknown = parse_company_sections(sections)
+            requested, unknown = parse_company_sections(sections)
 
             logger.info(
                 "Scraping company: %s (sections=%s)",
@@ -71,7 +71,7 @@ def register_company_tools(mcp: FastMCP) -> None:
                 progress=0, total=100, message="Starting company profile scrape"
             )
 
-            result = await extractor.scrape_company(company_name, fields)
+            result = await extractor.scrape_company(company_name, requested)
 
             if unknown:
                 result["unknown_sections"] = unknown
@@ -103,7 +103,7 @@ def register_company_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
 
         Returns:
-            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            Dict with url and sections (name -> raw text).
             The LLM should parse the raw text to extract individual posts.
         """
         try:
@@ -130,8 +130,6 @@ def register_company_tools(mcp: FastMCP) -> None:
             return {
                 "url": url,
                 "sections": sections,
-                "pages_visited": [url],
-                "sections_requested": ["posts"],
             }
 
         except Exception as e:
