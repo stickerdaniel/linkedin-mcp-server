@@ -177,6 +177,10 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
                 return_value="",
             ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             result = await extractor.scrape_person("testuser", {"experience"})
 
@@ -200,6 +204,10 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
                 return_value="",
             ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             result = await extractor.scrape_person("testuser", {"main_profile"})
 
@@ -219,6 +227,10 @@ class TestScrapePersonUrls:
                 "_extract_overlay",
                 new_callable=AsyncMock,
                 return_value="",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
             ),
         ):
             result = await extractor.scrape_person(
@@ -254,6 +266,10 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
                 return_value="contact text",
             ) as mock_overlay,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             result = await extractor.scrape_person("testuser", all_sections)
 
@@ -273,12 +289,18 @@ class TestScrapePersonUrls:
 
     async def test_posts_visits_recent_activity(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        with patch.object(
-            extractor,
-            "extract_page",
-            new_callable=AsyncMock,
-            return_value="Post 1\nPost 2",
-        ) as mock_extract:
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value="Post 1\nPost 2",
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
             result = await extractor.scrape_person("test-user", {"posts"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
@@ -306,6 +328,10 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
                 return_value="",
             ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             result = await extractor.scrape_person(
                 "testuser", {"main_profile", "experience", "education"}
@@ -321,9 +347,15 @@ class TestScrapeCompany:
     async def test_company_baseline_always_included(self, mock_page):
         """Passing only posts still visits about page."""
         extractor = LinkedInExtractor(mock_page)
-        with patch.object(
-            extractor, "extract_page", new_callable=AsyncMock, return_value="text"
-        ) as mock_extract:
+        with (
+            patch.object(
+                extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
             result = await extractor.scrape_company("testcorp", {"posts"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
@@ -334,12 +366,18 @@ class TestScrapeCompany:
 
     async def test_about_only_visits_about(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        with patch.object(
-            extractor,
-            "extract_page",
-            new_callable=AsyncMock,
-            return_value="about text",
-        ) as mock_extract:
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value="about text",
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
             result = await extractor.scrape_company("testcorp", {"about"})
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
@@ -349,9 +387,15 @@ class TestScrapeCompany:
 
     async def test_all_sections_visit_correct_urls(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        with patch.object(
-            extractor, "extract_page", new_callable=AsyncMock, return_value="text"
-        ) as mock_extract:
+        with (
+            patch.object(
+                extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
             result = await extractor.scrape_company(
                 "testcorp", {"about", "posts", "jobs"}
             )

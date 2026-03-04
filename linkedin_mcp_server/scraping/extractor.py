@@ -201,9 +201,14 @@ class LinkedInExtractor:
         base_url = f"https://www.linkedin.com/in/{username}"
         sections: dict[str, str] = {}
 
+        first = True
         for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
             if section_name not in requested:
                 continue
+
+            if not first:
+                await asyncio.sleep(_NAV_DELAY)
+            first = False
 
             url = base_url + suffix
             try:
@@ -218,9 +223,6 @@ class LinkedInExtractor:
                 raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
-
-            # Delay between navigations
-            await asyncio.sleep(_NAV_DELAY)
 
         return {
             "url": f"{base_url}/",
@@ -239,21 +241,28 @@ class LinkedInExtractor:
         base_url = f"https://www.linkedin.com/company/{company_name}"
         sections: dict[str, str] = {}
 
-        for section_name, (suffix, _is_overlay) in COMPANY_SECTIONS.items():
+        first = True
+        for section_name, (suffix, is_overlay) in COMPANY_SECTIONS.items():
             if section_name not in requested:
                 continue
 
+            if not first:
+                await asyncio.sleep(_NAV_DELAY)
+            first = False
+
             url = base_url + suffix
             try:
-                text = await self.extract_page(url)
+                if is_overlay:
+                    text = await self._extract_overlay(url)
+                else:
+                    text = await self.extract_page(url)
+
                 if text:
                     sections[section_name] = text
             except LinkedInScraperException:
                 raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
-
-            await asyncio.sleep(_NAV_DELAY)
 
         return {
             "url": f"{base_url}/",
