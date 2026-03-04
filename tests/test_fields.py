@@ -20,6 +20,7 @@ class TestPersonScrapingFields:
             PersonScrapingFields.HONORS,
             PersonScrapingFields.LANGUAGES,
             PersonScrapingFields.CONTACT_INFO,
+            PersonScrapingFields.POSTS,
         ]
         for i, a in enumerate(flags):
             for b in flags[i + 1 :]:
