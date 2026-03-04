@@ -119,6 +119,31 @@ class TestPersonTool:
         with pytest.raises(ToolError, match="Session expired"):
             await tool_fn("test-user", mock_context, extractor=mock_extractor)
 
+    async def test_get_person_profile_auth_error(self, monkeypatch):
+        """Auth failures in the DI layer produce proper ToolError responses."""
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.core.exceptions import AuthenticationError
+
+        mock_browser = MagicMock()
+        mock_browser.page = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_or_create_browser",
+            AsyncMock(return_value=mock_browser),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.ensure_authenticated",
+            AsyncMock(side_effect=AuthenticationError("Session expired or invalid.")),
+        )
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        with pytest.raises(ToolError, match="Authentication failed"):
+            await mcp.call_tool("get_person_profile", {"linkedin_username": "test"})
+
     async def test_search_people(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/search/results/people/?keywords=AI+engineer&location=New+York",
