@@ -276,6 +276,9 @@ class TestScrapePersonUrls:
         page_urls = [call.args[0] for call in mock_extract.call_args_list]
         overlay_urls = [call.args[0] for call in mock_overlay.call_args_list]
         all_urls = page_urls + overlay_urls
+        # 7 full-page sections + 1 overlay (contact_info)
+        assert len(page_urls) == 7
+        assert len(overlay_urls) == 1
         # Verify each expected suffix was navigated
         assert any(u.endswith("/in/testuser/") for u in all_urls)
         assert any("/details/experience/" in u for u in all_urls)
