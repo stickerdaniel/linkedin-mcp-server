@@ -15,7 +15,7 @@ from linkedin_mcp_server.drivers.browser import (
     ensure_authenticated,
     get_or_create_browser,
 )
-from linkedin_mcp_server.error_handler import handle_tool_error
+from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor, parse_person_sections
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ def register_person_tools(mcp: FastMCP) -> None:
             return result
 
         except Exception as e:
-            return handle_tool_error(e, "get_person_profile")
+            raise_tool_error(e, "get_person_profile")  # NoReturn
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -133,4 +133,4 @@ def register_person_tools(mcp: FastMCP) -> None:
             return result
 
         except Exception as e:
-            return handle_tool_error(e, "search_people")
+            raise_tool_error(e, "search_people")  # NoReturn
