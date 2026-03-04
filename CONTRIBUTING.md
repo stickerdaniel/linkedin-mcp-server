@@ -54,6 +54,8 @@ for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
 
 ```python
 {"url": str, "sections": {name: raw_text}}
+# When unknown section names are provided:
+{"url": str, "sections": {name: raw_text}, "unknown_sections": [name, ...]}
 ```
 
 ## Checklist: Adding a New Section
