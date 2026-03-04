@@ -22,10 +22,6 @@ COMPANY_SECTIONS: dict[str, tuple[str, bool]] = {
     "jobs": ("/jobs/", False),
 }
 
-# Optional sections (everything except baselines)
-_PERSON_OPTIONAL = set(PERSON_SECTIONS) - {"main_profile"}
-_COMPANY_OPTIONAL = set(COMPANY_SECTIONS) - {"about"}
-
 
 def parse_person_sections(
     sections: str | None,
@@ -46,14 +42,14 @@ def parse_person_sections(
         name = name.strip().lower()
         if not name:
             continue
-        if name in _PERSON_OPTIONAL:
+        if name in PERSON_SECTIONS:
             requested.add(name)
         else:
             unknown.append(name)
             logger.warning(
                 "Unknown person section %r ignored. Valid: %s",
                 name,
-                ", ".join(sorted(_PERSON_OPTIONAL)),
+                ", ".join(sorted(PERSON_SECTIONS)),
             )
     return requested, unknown
 
@@ -77,13 +73,13 @@ def parse_company_sections(
         name = name.strip().lower()
         if not name:
             continue
-        if name in _COMPANY_OPTIONAL:
+        if name in COMPANY_SECTIONS:
             requested.add(name)
         else:
             unknown.append(name)
             logger.warning(
                 "Unknown company section %r ignored. Valid: %s",
                 name,
-                ", ".join(sorted(_COMPANY_OPTIONAL)),
+                ", ".join(sorted(COMPANY_SECTIONS)),
             )
     return requested, unknown
