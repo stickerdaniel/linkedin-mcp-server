@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator, Dict
 from fastmcp import FastMCP
 
 from linkedin_mcp_server.drivers.browser import close_browser
+from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.person import register_person_tools
@@ -30,7 +31,7 @@ async def lifespan(app: FastMCP) -> AsyncIterator[None]:
 
 def create_mcp_server() -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools."""
-    mcp = FastMCP("linkedin_scraper", lifespan=lifespan)
+    mcp = FastMCP("linkedin_scraper", lifespan=lifespan, mask_error_details=True)
 
     # Register all tools
     register_person_tools(mcp)
@@ -48,9 +49,6 @@ def create_mcp_server() -> FastMCP:
                 "message": "Successfully closed the browser session and cleaned up resources",
             }
         except Exception as e:
-            return {
-                "status": "error",
-                "message": f"Error closing browser session: {str(e)}",
-            }
+            raise_tool_error(e, "close_session")  # NoReturn
 
     return mcp
