@@ -65,7 +65,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 **Tool Return Format:**
 
-All scraping tools return: `{url, sections: {name: raw_text}}`
+All scraping tools return: `{url, sections: {name: raw_text}}`. When unknown section names are provided, an `unknown_sections: [name, ...]` key is also included.
 
 **Scraping Architecture (`scraping/`):**
 
