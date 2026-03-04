@@ -41,7 +41,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 - `tools/` - LinkedIn scraping tools (person, company, job profiles)
 - `drivers/browser.py` - Patchright browser management with persistent profile (singleton)
 - `core/` - Inlined browser, auth, and utility code (replaces `linkedin_scraper` dependency)
-- `scraping/` - innerText extraction engine with Flag-based section selection
+- `scraping/` - innerText extraction engine with explicit section selection
 - `config/` - Configuration management (schema, loaders)
 - `authentication.py` - LinkedIn profile-based authentication
 
