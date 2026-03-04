@@ -76,6 +76,7 @@ def register_job_tools(mcp: FastMCP) -> None:
         keywords: str,
         ctx: Context,
         location: str | None = None,
+        max_pages: int = 3,
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
@@ -84,18 +85,23 @@ def register_job_tools(mcp: FastMCP) -> None:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
             ctx: FastMCP context for progress reporting
             location: Optional location filter (e.g., "San Francisco", "Remote")
+            max_pages: Number of result pages to scrape (1-100, default 3).
+                       Each page returns ~10 jobs. Higher values are slower
+                       and increase rate-limit risk.
 
         Returns:
-            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
-            The LLM should parse the raw text to extract job listings.
+            Dict with url, sections (name -> raw text), job_listings (list of
+            {job_id, title, company, location, work_type, pay, benefits,
+            easy_apply, status} dicts), pages_visited, and sections_requested.
         """
         try:
             await ensure_authenticated()
 
             logger.info(
-                "Searching jobs: keywords='%s', location='%s'",
+                "Searching jobs: keywords='%s', location='%s', max_pages=%d",
                 keywords,
                 location,
+                max_pages,
             )
 
             browser = await get_or_create_browser()
@@ -105,7 +111,7 @@ def register_job_tools(mcp: FastMCP) -> None:
                 progress=0, total=100, message="Starting job search"
             )
 
-            result = await extractor.search_jobs(keywords, location)
+            result = await extractor.search_jobs(keywords, location, max_pages)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
