@@ -1,106 +1,85 @@
-"""Flag enums controlling which LinkedIn pages are visited during scraping."""
+"""Section config dicts controlling which LinkedIn pages are visited during scraping."""
 
 import logging
-from enum import Flag, auto
 
 logger = logging.getLogger(__name__)
 
-
-class PersonScrapingFields(Flag):
-    """Controls which pages are visited when scraping a person profile."""
-
-    BASIC_INFO = auto()  # /in/{username}/
-    EXPERIENCE = auto()  # /in/{username}/details/experience/
-    EDUCATION = auto()  # /in/{username}/details/education/
-    INTERESTS = auto()  # /in/{username}/details/interests/
-    HONORS = auto()  # /in/{username}/details/honors/
-    LANGUAGES = auto()  # /in/{username}/details/languages/
-    CONTACT_INFO = auto()  # /in/{username}/overlay/contact-info/
-    POSTS = auto()  # /in/{username}/recent-activity/all/
-
-
-class CompanyScrapingFields(Flag):
-    """Controls which pages are visited when scraping a company."""
-
-    ABOUT = auto()  # /company/{name}/about/
-    POSTS = auto()  # /company/{name}/posts/
-    JOBS = auto()  # /company/{name}/jobs/
-
-
-# Section name -> flag mapping
-PERSON_SECTION_MAP: dict[str, PersonScrapingFields] = {
-    "experience": PersonScrapingFields.EXPERIENCE,
-    "education": PersonScrapingFields.EDUCATION,
-    "interests": PersonScrapingFields.INTERESTS,
-    "honors": PersonScrapingFields.HONORS,
-    "languages": PersonScrapingFields.LANGUAGES,
-    "contact_info": PersonScrapingFields.CONTACT_INFO,
-    "posts": PersonScrapingFields.POSTS,
+# Maps section name -> (url_suffix, is_overlay)
+PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
+    "main_profile": ("/", False),
+    "experience": ("/details/experience/", False),
+    "education": ("/details/education/", False),
+    "interests": ("/details/interests/", False),
+    "honors": ("/details/honors/", False),
+    "languages": ("/details/languages/", False),
+    "contact_info": ("/overlay/contact-info/", True),
+    "posts": ("/recent-activity/all/", False),
 }
 
-COMPANY_SECTION_MAP: dict[str, CompanyScrapingFields] = {
-    "posts": CompanyScrapingFields.POSTS,
-    "jobs": CompanyScrapingFields.JOBS,
+COMPANY_SECTIONS: dict[str, tuple[str, bool]] = {
+    "about": ("/about/", False),
+    "posts": ("/posts/", False),
+    "jobs": ("/jobs/", False),
 }
 
 
 def parse_person_sections(
     sections: str | None,
-) -> tuple[PersonScrapingFields, list[str]]:
-    """Parse comma-separated section names into PersonScrapingFields.
+) -> tuple[set[str], list[str]]:
+    """Parse comma-separated section names into a set of requested sections.
 
-    BASIC_INFO is always included. Empty/None returns BASIC_INFO only.
+    "main_profile" is always included. Empty/None returns {"main_profile"} only.
     Unknown section names are logged as warnings and returned.
 
     Returns:
-        Tuple of (flags, unknown_section_names).
+        Tuple of (requested_sections, unknown_section_names).
     """
-    flags = PersonScrapingFields.BASIC_INFO
+    requested: set[str] = {"main_profile"}
     unknown: list[str] = []
     if not sections:
-        return flags, unknown
+        return requested, unknown
     for name in sections.split(","):
         name = name.strip().lower()
         if not name:
             continue
-        if name in PERSON_SECTION_MAP:
-            flags |= PERSON_SECTION_MAP[name]
+        if name in PERSON_SECTIONS:
+            requested.add(name)
         else:
             unknown.append(name)
             logger.warning(
                 "Unknown person section %r ignored. Valid: %s",
                 name,
-                ", ".join(sorted(PERSON_SECTION_MAP)),
+                ", ".join(sorted(PERSON_SECTIONS)),
             )
-    return flags, unknown
+    return requested, unknown
 
 
 def parse_company_sections(
     sections: str | None,
-) -> tuple[CompanyScrapingFields, list[str]]:
-    """Parse comma-separated section names into CompanyScrapingFields.
+) -> tuple[set[str], list[str]]:
+    """Parse comma-separated section names into a set of requested sections.
 
-    ABOUT is always included. Empty/None returns ABOUT only.
+    "about" is always included. Empty/None returns {"about"} only.
     Unknown section names are logged as warnings and returned.
 
     Returns:
-        Tuple of (flags, unknown_section_names).
+        Tuple of (requested_sections, unknown_section_names).
     """
-    flags = CompanyScrapingFields.ABOUT
+    requested: set[str] = {"about"}
     unknown: list[str] = []
     if not sections:
-        return flags, unknown
+        return requested, unknown
     for name in sections.split(","):
         name = name.strip().lower()
         if not name:
             continue
-        if name in COMPANY_SECTION_MAP:
-            flags |= COMPANY_SECTION_MAP[name]
+        if name in COMPANY_SECTIONS:
+            requested.add(name)
         else:
             unknown.append(name)
             logger.warning(
                 "Unknown company section %r ignored. Valid: %s",
                 name,
-                ", ".join(sorted(COMPANY_SECTION_MAP)),
+                ", ".join(sorted(COMPANY_SECTIONS)),
             )
-    return flags, unknown
+    return requested, unknown
