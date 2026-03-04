@@ -62,7 +62,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             return result
 
         except Exception as e:
-            raise_tool_error(e)
+            raise_tool_error(e, "get_job_details")
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -112,4 +112,4 @@ def register_job_tools(mcp: FastMCP) -> None:
             return result
 
         except Exception as e:
-            raise_tool_error(e)
+            raise_tool_error(e, "search_jobs")
