@@ -49,6 +49,6 @@ def create_mcp_server() -> FastMCP:
                 "message": "Successfully closed the browser session and cleaned up resources",
             }
         except Exception as e:
-            raise_tool_error(e)
+            raise_tool_error(e, "close_session")
 
     return mcp

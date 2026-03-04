@@ -83,7 +83,7 @@ def register_person_tools(mcp: FastMCP) -> None:
             return result
 
         except Exception as e:
-            raise_tool_error(e)
+            raise_tool_error(e, "get_person_profile")
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -133,4 +133,4 @@ def register_person_tools(mcp: FastMCP) -> None:
             return result
 
         except Exception as e:
-            raise_tool_error(e)
+            raise_tool_error(e, "search_people")

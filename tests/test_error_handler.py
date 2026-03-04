@@ -53,6 +53,13 @@ def test_raises_tool_error_for_scraping_error():
         raise_tool_error(ScrapingError("bad html"))
 
 
+def test_raises_tool_error_for_base_scraper_exception():
+    from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+
+    with pytest.raises(ToolError, match="generic scraper error"):
+        raise_tool_error(LinkedInScraperException("generic scraper error"))
+
+
 def test_raises_tool_error_for_linkedin_mcp_error():
     with pytest.raises(ToolError, match="custom mcp error"):
         raise_tool_error(LinkedInMCPError("custom mcp error"))
