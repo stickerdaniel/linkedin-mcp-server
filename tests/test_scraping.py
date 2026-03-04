@@ -9,10 +9,6 @@ from linkedin_mcp_server.scraping.extractor import (
     _RATE_LIMITED_MSG,
     strip_linkedin_noise,
 )
-from linkedin_mcp_server.scraping.fields import (
-    CompanyScrapingFields,
-    PersonScrapingFields,
-)
 
 
 @pytest.fixture
@@ -133,8 +129,6 @@ class TestExtractPage:
         async def evaluate_side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            # First two calls are from first attempt (goto triggers evaluate via
-            # _extract_page_once), return noise. Third+ calls return real content.
             if call_count <= 1:
                 return noise_only
             return "Education\nHarvard University\n1973 – 1975"
@@ -168,18 +162,15 @@ class TestExtractPage:
 
 
 class TestScrapePersonUrls:
-    """Test that scrape_person visits the correct URLs per field combination."""
+    """Test that scrape_person visits the correct URLs per section set."""
 
     async def test_baseline_always_included(self, mock_page):
-        """Passing EXPERIENCE without BASIC_INFO still visits main profile."""
+        """Passing only experience still visits main profile."""
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor,
-                "extract_page",
-                new_callable=AsyncMock,
-                return_value="text",
-            ),
+                extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+            ) as mock_extract,
             patch.object(
                 extractor,
                 "_extract_overlay",
@@ -187,12 +178,11 @@ class TestScrapePersonUrls:
                 return_value="",
             ),
         ):
-            result = await extractor.scrape_person(
-                "testuser", PersonScrapingFields.EXPERIENCE
-            )
+            result = await extractor.scrape_person("testuser", {"experience"})
 
-        urls = result["pages_visited"]
-        assert any("/in/testuser/" in u for u in urls), "main profile should be visited"
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert "main_profile" in result["sections"]
+        assert any(u.endswith("/in/testuser/") for u in urls)
         assert any("/details/experience/" in u for u in urls)
 
     async def test_basic_info_only_visits_main_profile(self, mock_page):
@@ -203,7 +193,27 @@ class TestScrapePersonUrls:
                 "extract_page",
                 new_callable=AsyncMock,
                 return_value="profile text",
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value="",
             ),
+        ):
+            result = await extractor.scrape_person("testuser", {"main_profile"})
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert len(urls) == 1
+        assert urls[0].endswith("/in/testuser/")
+        assert set(result["sections"]) == {"main_profile"}
+
+    async def test_experience_education_visits_correct_urls(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+            ) as mock_extract,
             patch.object(
                 extractor,
                 "_extract_overlay",
@@ -212,79 +222,19 @@ class TestScrapePersonUrls:
             ),
         ):
             result = await extractor.scrape_person(
-                "testuser", PersonScrapingFields.BASIC_INFO
+                "testuser", {"main_profile", "experience", "education"}
             )
 
-        assert len(result["pages_visited"]) == 1
-        assert "https://www.linkedin.com/in/testuser/" in result["pages_visited"]
-        assert result["sections_requested"] == ["main_profile"]
-
-    async def test_experience_education_visits_three_pages(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
-        fields = (
-            PersonScrapingFields.BASIC_INFO
-            | PersonScrapingFields.EXPERIENCE
-            | PersonScrapingFields.EDUCATION
-        )
-        with (
-            patch.object(
-                extractor,
-                "extract_page",
-                new_callable=AsyncMock,
-                return_value="text",
-            ),
-            patch.object(
-                extractor,
-                "_extract_overlay",
-                new_callable=AsyncMock,
-                return_value="",
-            ),
-        ):
-            result = await extractor.scrape_person("testuser", fields)
-
-        urls = result["pages_visited"]
+        urls = [call.args[0] for call in mock_extract.call_args_list]
         assert len(urls) == 3
-        assert any("/in/testuser/" in u for u in urls)
+        assert any(u.endswith("/in/testuser/") for u in urls)
         assert any("/details/experience/" in u for u in urls)
         assert any("/details/education/" in u for u in urls)
-        assert result["sections_requested"] == [
-            "main_profile",
-            "experience",
-            "education",
-        ]
+        assert set(result["sections"]) == {"main_profile", "experience", "education"}
 
-    async def test_all_flags_visit_all_pages(self, mock_page):
+    async def test_all_sections_visit_all_urls(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        fields = (
-            PersonScrapingFields.BASIC_INFO
-            | PersonScrapingFields.EXPERIENCE
-            | PersonScrapingFields.EDUCATION
-            | PersonScrapingFields.INTERESTS
-            | PersonScrapingFields.HONORS
-            | PersonScrapingFields.LANGUAGES
-            | PersonScrapingFields.CONTACT_INFO
-            | PersonScrapingFields.POSTS
-        )
-        with (
-            patch.object(
-                extractor,
-                "extract_page",
-                new_callable=AsyncMock,
-                return_value="text",
-            ),
-            patch.object(
-                extractor,
-                "_extract_overlay",
-                new_callable=AsyncMock,
-                return_value="contact text",
-            ),
-        ):
-            result = await extractor.scrape_person("testuser", fields)
-
-        urls = result["pages_visited"]
-        # main_profile, experience, education, interests, honors, languages, contact_info, posts
-        assert len(urls) == 8
-        assert result["sections_requested"] == [
+        all_sections = {
             "main_profile",
             "experience",
             "education",
@@ -293,7 +243,33 @@ class TestScrapePersonUrls:
             "languages",
             "contact_info",
             "posts",
-        ]
+        }
+        with (
+            patch.object(
+                extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value="contact text",
+            ) as mock_overlay,
+        ):
+            result = await extractor.scrape_person("testuser", all_sections)
+
+        page_urls = [call.args[0] for call in mock_extract.call_args_list]
+        overlay_urls = [call.args[0] for call in mock_overlay.call_args_list]
+        all_urls = page_urls + overlay_urls
+        # Verify each expected suffix was navigated
+        assert any(u.endswith("/in/testuser/") for u in all_urls)
+        assert any("/details/experience/" in u for u in all_urls)
+        assert any("/details/education/" in u for u in all_urls)
+        assert any("/details/interests/" in u for u in all_urls)
+        assert any("/details/honors/" in u for u in all_urls)
+        assert any("/details/languages/" in u for u in all_urls)
+        assert any("/overlay/contact-info/" in u for u in overlay_urls)
+        assert any("/recent-activity/all/" in u for u in all_urls)
+        assert set(result["sections"]) == all_sections
 
     async def test_posts_visits_recent_activity(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -302,31 +278,22 @@ class TestScrapePersonUrls:
             "extract_page",
             new_callable=AsyncMock,
             return_value="Post 1\nPost 2",
-        ):
-            result = await extractor.scrape_person(
-                "test-user", PersonScrapingFields.POSTS
-            )
-        assert any("/recent-activity/all/" in url for url in result["pages_visited"])
+        ) as mock_extract:
+            result = await extractor.scrape_person("test-user", {"posts"})
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert any("/recent-activity/all/" in url for url in urls)
         assert "posts" in result["sections"]
-        assert result["sections_requested"] == ["main_profile", "posts"]
 
     async def test_error_isolation(self, mock_page):
         """One section failing doesn't block others."""
-        call_count = 0
 
         async def extract_with_failure(url):
-            nonlocal call_count
-            call_count += 1
             if "experience" in url:
                 raise Exception("Simulated failure")
             return f"text for {url}"
 
         extractor = LinkedInExtractor(mock_page)
-        fields = (
-            PersonScrapingFields.BASIC_INFO
-            | PersonScrapingFields.EXPERIENCE
-            | PersonScrapingFields.EDUCATION
-        )
         with (
             patch.object(
                 extractor,
@@ -340,32 +307,30 @@ class TestScrapePersonUrls:
                 return_value="",
             ),
         ):
-            result = await extractor.scrape_person("testuser", fields)
+            result = await extractor.scrape_person(
+                "testuser", {"main_profile", "experience", "education"}
+            )
 
-        # All 3 pages should be visited even though experience failed
-        assert len(result["pages_visited"]) == 3
         # main_profile and education should have sections, experience should not
         assert "main_profile" in result["sections"]
         assert "education" in result["sections"]
+        assert "experience" not in result["sections"]
 
 
 class TestScrapeCompany:
     async def test_company_baseline_always_included(self, mock_page):
-        """Passing POSTS without ABOUT still visits about page."""
+        """Passing only posts still visits about page."""
         extractor = LinkedInExtractor(mock_page)
         with patch.object(
-            extractor,
-            "extract_page",
-            new_callable=AsyncMock,
-            return_value="text",
-        ):
-            result = await extractor.scrape_company(
-                "testcorp", CompanyScrapingFields.POSTS
-            )
+            extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+        ) as mock_extract:
+            result = await extractor.scrape_company("testcorp", {"posts"})
 
-        urls = result["pages_visited"]
-        assert any("/about/" in u for u in urls), "about page should be visited"
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert any("/about/" in u for u in urls)
         assert any("/posts/" in u for u in urls)
+        assert "about" in result["sections"]
+        assert "posts" in result["sections"]
 
     async def test_about_only_visits_about(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -374,32 +339,29 @@ class TestScrapeCompany:
             "extract_page",
             new_callable=AsyncMock,
             return_value="about text",
-        ):
+        ) as mock_extract:
+            result = await extractor.scrape_company("testcorp", {"about"})
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert len(urls) == 1
+        assert "/about/" in urls[0]
+        assert set(result["sections"]) == {"about"}
+
+    async def test_all_sections_visit_correct_urls(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+        ) as mock_extract:
             result = await extractor.scrape_company(
-                "testcorp", CompanyScrapingFields.ABOUT
+                "testcorp", {"about", "posts", "jobs"}
             )
 
-        assert len(result["pages_visited"]) == 1
-        assert any("/about/" in u for u in result["pages_visited"])
-        assert result["sections_requested"] == ["about"]
-
-    async def test_all_flags_visit_about_posts_jobs(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
-        fields = (
-            CompanyScrapingFields.ABOUT
-            | CompanyScrapingFields.POSTS
-            | CompanyScrapingFields.JOBS
-        )
-        with patch.object(
-            extractor,
-            "extract_page",
-            new_callable=AsyncMock,
-            return_value="text",
-        ):
-            result = await extractor.scrape_company("testcorp", fields)
-
-        assert len(result["pages_visited"]) == 3
-        assert result["sections_requested"] == ["about", "posts", "jobs"]
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert len(urls) == 3
+        assert any("/about/" in u for u in urls)
+        assert any("/posts/" in u for u in urls)
+        assert any("/jobs/" in u for u in urls)
+        assert set(result["sections"]) == {"about", "posts", "jobs"}
 
 
 class TestScrapeJob:
@@ -415,7 +377,8 @@ class TestScrapeJob:
 
         assert result["url"] == "https://www.linkedin.com/jobs/view/12345/"
         assert "job_posting" in result["sections"]
-        assert result["sections_requested"] == ["job_posting"]
+        assert "pages_visited" not in result
+        assert "sections_requested" not in result
 
     async def test_search_jobs(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -430,7 +393,8 @@ class TestScrapeJob:
         assert "keywords=python" in result["url"]
         assert "location=Remote" in result["url"]
         assert "search_results" in result["sections"]
-        assert result["sections_requested"] == ["search_results"]
+        assert "pages_visited" not in result
+        assert "sections_requested" not in result
 
 
 class TestStripLinkedInNoise:
