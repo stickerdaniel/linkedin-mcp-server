@@ -14,7 +14,7 @@
   "documentation": "https://github.com/stickerdaniel/linkedin-mcp-server#readme",
   "support": "https://github.com/stickerdaniel/linkedin-mcp-server/issues",
   "license": "MIT",
-  "keywords": ["linkedin", "scraping", "mcp", "profiles", "companies", "jobs"],
+  "keywords": ["linkedin", "scraping", "mcp", "profiles", "companies", "jobs", "people", "search", "posts"],
   "icon": "assets/icons/linkedin.svg",
   "screenshots": ["assets/screenshots/screenshot.png"],
   "server": {
