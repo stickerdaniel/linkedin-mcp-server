@@ -1,44 +1,85 @@
-from linkedin_mcp_server.core.exceptions import RateLimitError
+import pytest
+from fastmcp.exceptions import ToolError
 
-from linkedin_mcp_server.error_handler import handle_tool_error
+from linkedin_mcp_server.core.exceptions import (
+    NetworkError,
+    ProfileNotFoundError,
+    RateLimitError,
+    ScrapingError,
+)
+from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
     CredentialsNotFoundError,
+    LinkedInMCPError,
     SessionExpiredError,
 )
 
 
-def test_handles_session_expired():
-    result = handle_tool_error(SessionExpiredError(), "test_tool")
-    assert result["error"] == "session_expired"
-    assert "message" in result
-    assert "resolution" in result
+def test_raises_tool_error_for_session_expired():
+    with pytest.raises(ToolError, match="Session expired"):
+        raise_tool_error(SessionExpiredError())
 
 
-def test_handles_credentials_not_found():
-    result = handle_tool_error(CredentialsNotFoundError("no creds"), "test_tool")
-    assert result["error"] == "authentication_not_found"
+def test_raises_tool_error_for_credentials_not_found():
+    with pytest.raises(ToolError, match="Authentication not found"):
+        raise_tool_error(CredentialsNotFoundError("no creds"))
 
 
-def test_handles_generic_exception():
-    result = handle_tool_error(ValueError("oops"), "test_tool")
-    assert result["error"] == "unknown_error"
-    assert "oops" in result["message"]
-
-
-def test_handles_rate_limit_with_suggested_wait():
-    """Test RateLimitError with custom suggested_wait_time attribute."""
+def test_raises_tool_error_for_rate_limit_with_custom_wait():
     error = RateLimitError("Rate limited")
     error.suggested_wait_time = 600
-    result = handle_tool_error(error, "test_tool")
-    assert result["error"] == "rate_limit"
-    assert result["suggested_wait_seconds"] == 600
-    assert "600" in result["resolution"]
+    with pytest.raises(ToolError, match="Wait 600 seconds"):
+        raise_tool_error(error)
 
 
-def test_handles_rate_limit_default_wait():
-    """Test RateLimitError without suggested_wait_time uses default 300."""
+def test_raises_tool_error_for_rate_limit_default_wait():
     error = RateLimitError("Rate limited")
-    result = handle_tool_error(error, "test_tool")
-    assert result["error"] == "rate_limit"
-    assert result["suggested_wait_seconds"] == 300
-    assert "300" in result["resolution"]
+    with pytest.raises(ToolError, match="Wait 300 seconds"):
+        raise_tool_error(error)
+
+
+def test_raises_tool_error_for_profile_not_found():
+    with pytest.raises(ToolError, match="Profile not found"):
+        raise_tool_error(ProfileNotFoundError("gone"))
+
+
+def test_raises_tool_error_for_network_error():
+    with pytest.raises(ToolError, match="Network error"):
+        raise_tool_error(NetworkError("timeout"))
+
+
+def test_raises_tool_error_for_scraping_error():
+    with pytest.raises(ToolError, match="Scraping failed"):
+        raise_tool_error(ScrapingError("bad html"))
+
+
+def test_raises_tool_error_for_base_scraper_exception():
+    from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+
+    with pytest.raises(ToolError, match="generic scraper error"):
+        raise_tool_error(LinkedInScraperException("generic scraper error"))
+
+
+def test_raises_tool_error_for_linkedin_mcp_error():
+    with pytest.raises(ToolError, match="custom mcp error"):
+        raise_tool_error(LinkedInMCPError("custom mcp error"))
+
+
+def test_raises_tool_error_for_authentication_error():
+    from linkedin_mcp_server.core.exceptions import AuthenticationError
+
+    with pytest.raises(ToolError, match="Authentication failed"):
+        raise_tool_error(AuthenticationError("bad creds"))
+
+
+def test_raises_tool_error_for_element_not_found():
+    from linkedin_mcp_server.core.exceptions import ElementNotFoundError
+
+    with pytest.raises(ToolError, match="Element not found"):
+        raise_tool_error(ElementNotFoundError("missing"))
+
+
+def test_reraises_unknown_exception():
+    """Unknown exceptions are re-raised as-is, not wrapped in ToolError."""
+    with pytest.raises(ValueError, match="oops"):
+        raise_tool_error(ValueError("oops"))

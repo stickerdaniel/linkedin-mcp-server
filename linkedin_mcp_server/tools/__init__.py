@@ -13,7 +13,7 @@ Available Tools:
 
 Architecture:
 - FastMCP integration for MCP-compliant tool registration
-- Shared error handling through centralized error_handler module
+- ToolError-based error handling through centralized raise_tool_error()
 - Singleton driver pattern for session persistence
 - Structured data return format for consistent MCP responses
 """
