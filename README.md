@@ -46,6 +46,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `search_jobs` | Search for jobs with keywords and location filters | Working |
 | `search_people` | Search for people by keywords and location | Working |
 | `get_job_details` | Get detailed information about a specific job posting | Working |
+| `get_saved_jobs` | Get saved/bookmarked jobs from your LinkedIn job tracker | Working |
 | `close_session` | Close browser session and clean up resources | Working |
 
 > [!IMPORTANT]
