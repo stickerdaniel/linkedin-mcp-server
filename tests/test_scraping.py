@@ -282,7 +282,7 @@ class TestScrapePersonUrls:
             result = await extractor.scrape_person("testuser", fields)
 
         urls = result["pages_visited"]
-        # main_profile, experience, education, interests, honors, languages, contact_info, posts
+        # main_profile, experience, education, interests, honors, languages, contact_info
         assert len(urls) == 8
         assert result["sections_requested"] == [
             "main_profile",
@@ -306,8 +306,9 @@ class TestScrapePersonUrls:
             result = await extractor.scrape_person(
                 "test-user", PersonScrapingFields.POSTS
             )
-        assert any("recent-activity" in url for url in result["pages_visited"])
+        assert any("/recent-activity/all/" in url for url in result["pages_visited"])
         assert "posts" in result["sections"]
+        assert result["sections_requested"] == ["main_profile", "posts"]
 
     async def test_error_isolation(self, mock_page):
         """One section failing doesn't block others."""
