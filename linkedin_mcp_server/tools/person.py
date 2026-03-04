@@ -50,14 +50,14 @@ def register_person_tools(mcp: FastMCP) -> None:
                 Default (None) scrapes only the main profile page.
 
         Returns:
-            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            Dict with url and sections (name -> raw text).
             Sections may be absent if extraction yielded no content for that page.
             The LLM should parse the raw text in each section.
         """
         try:
             await ensure_authenticated()
 
-            fields, unknown = parse_person_sections(sections)
+            requested, unknown = parse_person_sections(sections)
 
             logger.info(
                 "Scraping profile: %s (sections=%s)",
@@ -72,7 +72,7 @@ def register_person_tools(mcp: FastMCP) -> None:
                 progress=0, total=100, message="Starting person profile scrape"
             )
 
-            result = await extractor.scrape_person(linkedin_username, fields)
+            result = await extractor.scrape_person(linkedin_username, requested)
 
             if unknown:
                 result["unknown_sections"] = unknown
@@ -106,7 +106,7 @@ def register_person_tools(mcp: FastMCP) -> None:
             location: Optional location filter (e.g., "New York", "Remote")
 
         Returns:
-            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            Dict with url and sections (name -> raw text).
             The LLM should parse the raw text to extract individual people and their profiles.
         """
         try:

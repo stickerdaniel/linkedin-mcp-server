@@ -2,16 +2,16 @@
 
 from .extractor import LinkedInExtractor
 from .fields import (
-    CompanyScrapingFields,
-    PersonScrapingFields,
+    COMPANY_SECTIONS,
+    PERSON_SECTIONS,
     parse_company_sections,
     parse_person_sections,
 )
 
 __all__ = [
-    "CompanyScrapingFields",
+    "COMPANY_SECTIONS",
     "LinkedInExtractor",
-    "PersonScrapingFields",
+    "PERSON_SECTIONS",
     "parse_company_sections",
     "parse_person_sections",
 ]
