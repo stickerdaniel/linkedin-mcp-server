@@ -346,7 +346,7 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 
 ## 🐍 Local Setup (Develop & Contribute)
 
-Contributions are welcome! Please [open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) first to discuss the feature or bug fix before submitting a PR. This helps align on the approach before any code is written.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture guidelines and checklists. Please [open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) first to discuss the feature or bug fix before submitting a PR.
 
 **Prerequisites:** [Git](https://git-scm.com/downloads) and [uv](https://docs.astral.sh/uv/) installed
 
