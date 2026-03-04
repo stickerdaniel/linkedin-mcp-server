@@ -82,7 +82,7 @@ def register_company_tools(mcp: FastMCP) -> None:
             return result
 
         except Exception as e:
-            raise_tool_error(e, "get_company_profile")
+            raise_tool_error(e, "get_company_profile")  # NoReturn
 
     @mcp.tool(
         annotations=ToolAnnotations(
@@ -134,4 +134,4 @@ def register_company_tools(mcp: FastMCP) -> None:
             }
 
         except Exception as e:
-            raise_tool_error(e, "get_company_posts")
+            raise_tool_error(e, "get_company_posts")  # NoReturn

@@ -97,6 +97,8 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         ) from exception
 
     elif isinstance(exception, (LinkedInScraperException, LinkedInMCPError)):
+        # Catch-all for base exception types and any future subclasses
+        # without a dedicated handler above. Passes through str(exception).
         logger.warning("LinkedIn error%s: %s", ctx, exception)
         raise ToolError(str(exception)) from exception
 
