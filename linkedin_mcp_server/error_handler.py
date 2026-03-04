@@ -98,4 +98,5 @@ def raise_tool_error(exception: Exception) -> NoReturn:
         raise ToolError(str(exception)) from exception
 
     else:
+        logger.error("Unexpected error: %s", exception, exc_info=True)
         raise exception
