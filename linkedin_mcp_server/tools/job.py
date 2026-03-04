@@ -40,7 +40,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
 
         Returns:
-            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            Dict with url and sections (name -> raw text).
             The LLM should parse the raw text to extract job details.
         """
         try:
@@ -86,7 +86,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             location: Optional location filter (e.g., "San Francisco", "Remote")
 
         Returns:
-            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            Dict with url and sections (name -> raw text).
             The LLM should parse the raw text to extract job listings.
         """
         try:
