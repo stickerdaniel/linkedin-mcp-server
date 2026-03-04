@@ -16,6 +16,7 @@ class PersonScrapingFields(Flag):
     HONORS = auto()  # /in/{username}/details/honors/
     LANGUAGES = auto()  # /in/{username}/details/languages/
     CONTACT_INFO = auto()  # /in/{username}/overlay/contact-info/
+    POSTS = auto()  # /in/{username}/recent-activity/all/
 
 
 class CompanyScrapingFields(Flag):
@@ -34,6 +35,7 @@ PERSON_SECTION_MAP: dict[str, PersonScrapingFields] = {
     "honors": PersonScrapingFields.HONORS,
     "languages": PersonScrapingFields.LANGUAGES,
     "contact_info": PersonScrapingFields.CONTACT_INFO,
+    "posts": PersonScrapingFields.POSTS,
 }
 
 COMPANY_SECTION_MAP: dict[str, CompanyScrapingFields] = {
