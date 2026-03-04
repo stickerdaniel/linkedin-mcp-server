@@ -20,6 +20,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Format: `uv run ruff format .`
 - Type check: `uv run ty check` (using ty, not mypy)
 - Tests: `uv run pytest` (with coverage: `uv run pytest --cov`)
+- Single test: `uv run pytest tests/test_tools.py::test_name -v`
+- Parallel tests: `uv run pytest -n auto` (uses pytest-xdist)
+- Tests use `asyncio_mode = auto` — async test functions are collected automatically without `@pytest.mark.asyncio`
 - Pre-commit hooks: `uv run pre-commit install` then `uv run pre-commit run --all-files`
 
 **Docker Commands:**
@@ -115,14 +118,6 @@ All scraping tools return: `{url, sections: {name: raw_text}, pages_visited, sec
 **Commit Message Format:**
 
 - Follow conventional commits: `type(scope): subject`
-- Types: feat, fix, docs, style, refactor, test, chore, perf, ci
-- Keep subject <50 chars, imperative mood
-
-## Commit Message Guidelines
-
-**Commit Message Rules:**
-
-- Always use the commit message format type(scope): subject
 - Types: feat, fix, docs, style, refactor, test, chore, perf, ci
 - Keep subject <50 chars, imperative mood
 
