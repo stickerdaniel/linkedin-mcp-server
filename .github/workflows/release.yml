@@ -8,7 +8,7 @@ on:
 
 jobs:
   check-version-bump:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
       new-version: ${{ steps.check.outputs.new-version }}
@@ -48,7 +48,7 @@ jobs:
   release:
     needs: check-version-bump
     if: needs.check-version-bump.outputs.should-release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     env:
       VERSION: ${{ needs.check-version-bump.outputs.new-version }}
     permissions:
