@@ -81,6 +81,11 @@ class TestParsePersonSections:
         assert requested == {"main_profile", "experience", "education"}
         assert unknown == []
 
+    def test_baseline_passed_explicitly_not_unknown(self):
+        requested, unknown = parse_person_sections("main_profile,experience")
+        assert requested == {"main_profile", "experience"}
+        assert unknown == []
+
     def test_all_sections(self):
         requested, unknown = parse_person_sections(
             "experience,education,interests,honors,languages,contact_info,posts"
@@ -114,6 +119,11 @@ class TestParseCompanySections:
         requested, unknown = parse_company_sections("posts,bogus")
         assert requested == {"about", "posts"}
         assert unknown == ["bogus"]
+
+    def test_baseline_passed_explicitly_not_unknown(self):
+        requested, unknown = parse_company_sections("about,posts")
+        assert requested == {"about", "posts"}
+        assert unknown == []
 
     def test_whitespace_and_case_handling(self):
         requested, unknown = parse_company_sections(" Posts , JOBS ")
