@@ -15,12 +15,7 @@ from linkedin_mcp_server.core.utils import (
     scroll_to_bottom,
 )
 
-from .fields import (
-    COMPANY_SECTION_MAP,
-    PERSON_SECTION_MAP,
-    CompanyScrapingFields,
-    PersonScrapingFields,
-)
+from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -196,69 +191,24 @@ class LinkedInExtractor:
             return _RATE_LIMITED_MSG
         return cleaned
 
-    async def scrape_person(
-        self, username: str, fields: PersonScrapingFields
-    ) -> dict[str, Any]:
+    async def scrape_person(self, username: str, requested: set[str]) -> dict[str, Any]:
         """Scrape a person profile with configurable sections.
 
         Returns:
-            {url, sections: {name: text}, pages_visited, sections_requested}
+            {url, sections: {name: text}}
         """
-        fields |= PersonScrapingFields.BASIC_INFO
+        requested = requested | {"main_profile"}
         base_url = f"https://www.linkedin.com/in/{username}"
         sections: dict[str, str] = {}
-        pages_visited: list[str] = []
 
-        # Map flags to (section_name, url_suffix, is_overlay)
-        page_map: list[tuple[PersonScrapingFields, str, str, bool]] = [
-            (PersonScrapingFields.BASIC_INFO, "main_profile", "/", False),
-            (
-                PersonScrapingFields.EXPERIENCE,
-                "experience",
-                "/details/experience/",
-                False,
-            ),
-            (
-                PersonScrapingFields.EDUCATION,
-                "education",
-                "/details/education/",
-                False,
-            ),
-            (
-                PersonScrapingFields.INTERESTS,
-                "interests",
-                "/details/interests/",
-                False,
-            ),
-            (
-                PersonScrapingFields.HONORS,
-                "honors",
-                "/details/honors/",
-                False,
-            ),
-            (
-                PersonScrapingFields.LANGUAGES,
-                "languages",
-                "/details/languages/",
-                False,
-            ),
-            (
-                PersonScrapingFields.CONTACT_INFO,
-                "contact_info",
-                "/overlay/contact-info/",
-                True,
-            ),
-            (
-                PersonScrapingFields.POSTS,
-                "posts",
-                "/recent-activity/all/",
-                False,
-            ),
-        ]
-
-        for flag, section_name, suffix, is_overlay in page_map:
-            if not (flag & fields):
+        first = True
+        for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
+            if section_name not in requested:
                 continue
+
+            if not first:
+                await asyncio.sleep(_NAV_DELAY)
+            first = False
 
             url = base_url + suffix
             try:
@@ -269,86 +219,61 @@ class LinkedInExtractor:
 
                 if text:
                     sections[section_name] = text
-                pages_visited.append(url)
             except LinkedInScraperException:
                 raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
-                pages_visited.append(url)
-
-            # Delay between navigations
-            await asyncio.sleep(_NAV_DELAY)
-
-        # Build sections_requested from flags
-        requested = ["main_profile"]
-        reverse_map = {v: k for k, v in PERSON_SECTION_MAP.items()}
-        for flag in PersonScrapingFields:
-            if flag in fields and flag in reverse_map:
-                requested.append(reverse_map[flag])
 
         return {
             "url": f"{base_url}/",
             "sections": sections,
-            "pages_visited": pages_visited,
-            "sections_requested": requested,
         }
 
     async def scrape_company(
-        self, company_name: str, fields: CompanyScrapingFields
+        self, company_name: str, requested: set[str]
     ) -> dict[str, Any]:
         """Scrape a company profile with configurable sections.
 
         Returns:
-            {url, sections: {name: text}, pages_visited, sections_requested}
+            {url, sections: {name: text}}
         """
-        fields |= CompanyScrapingFields.ABOUT
+        requested = requested | {"about"}
         base_url = f"https://www.linkedin.com/company/{company_name}"
         sections: dict[str, str] = {}
-        pages_visited: list[str] = []
 
-        page_map: list[tuple[CompanyScrapingFields, str, str]] = [
-            (CompanyScrapingFields.ABOUT, "about", "/about/"),
-            (CompanyScrapingFields.POSTS, "posts", "/posts/"),
-            (CompanyScrapingFields.JOBS, "jobs", "/jobs/"),
-        ]
-
-        for flag, section_name, suffix in page_map:
-            if not (flag & fields):
+        first = True
+        for section_name, (suffix, is_overlay) in COMPANY_SECTIONS.items():
+            if section_name not in requested:
                 continue
+
+            if not first:
+                await asyncio.sleep(_NAV_DELAY)
+            first = False
 
             url = base_url + suffix
             try:
-                text = await self.extract_page(url)
+                if is_overlay:
+                    text = await self._extract_overlay(url)
+                else:
+                    text = await self.extract_page(url)
+
                 if text:
                     sections[section_name] = text
-                pages_visited.append(url)
             except LinkedInScraperException:
                 raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
-                pages_visited.append(url)
-
-            await asyncio.sleep(_NAV_DELAY)
-
-        # Build sections_requested from flags
-        requested = ["about"]
-        reverse_map = {v: k for k, v in COMPANY_SECTION_MAP.items()}
-        for flag in CompanyScrapingFields:
-            if flag in fields and flag in reverse_map:
-                requested.append(reverse_map[flag])
 
         return {
             "url": f"{base_url}/",
             "sections": sections,
-            "pages_visited": pages_visited,
-            "sections_requested": requested,
         }
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
         """Scrape a single job posting.
 
         Returns:
-            {url, sections: {name: text}, pages_visited, sections_requested}
+            {url, sections: {name: text}}
         """
         url = f"https://www.linkedin.com/jobs/view/{job_id}/"
         text = await self.extract_page(url)
@@ -360,8 +285,6 @@ class LinkedInExtractor:
         return {
             "url": url,
             "sections": sections,
-            "pages_visited": [url],
-            "sections_requested": ["job_posting"],
         }
 
     async def search_jobs(
@@ -370,7 +293,7 @@ class LinkedInExtractor:
         """Search for jobs and extract the results page.
 
         Returns:
-            {url, sections: {name: text}, pages_visited, sections_requested}
+            {url, sections: {name: text}}
         """
         params = f"keywords={quote_plus(keywords)}"
         if location:
@@ -386,8 +309,6 @@ class LinkedInExtractor:
         return {
             "url": url,
             "sections": sections,
-            "pages_visited": [url],
-            "sections_requested": ["search_results"],
         }
 
     async def search_people(
@@ -398,7 +319,7 @@ class LinkedInExtractor:
         """Search for people and extract the results page.
 
         Returns:
-            {url, sections: {name: text}, pages_visited, sections_requested}
+            {url, sections: {name: text}}
         """
         params = f"keywords={quote_plus(keywords)}"
         if location:
@@ -414,6 +335,4 @@ class LinkedInExtractor:
         return {
             "url": url,
             "sections": sections,
-            "pages_visited": [url],
-            "sections_requested": ["search_results"],
         }
