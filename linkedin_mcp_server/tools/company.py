@@ -51,6 +51,7 @@ def register_company_tools(mcp: FastMCP) -> None:
 
         Returns:
             Dict with url and sections (name -> raw text).
+            Includes unknown_sections list when unrecognised names are passed.
             The LLM should parse the raw text in each section.
         """
         try:

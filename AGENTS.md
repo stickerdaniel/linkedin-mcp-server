@@ -138,6 +138,16 @@ All scraping tools return: `{url, sections: {name: raw_text}}`. When unknown sec
   8. Manually review the PR and merge it if it's approved. Do not squash the commits.
   9. Delete the branch after the PR is merged.
 
+## PR Reviews
+
+Greptile posts initial reviews as PR review comments, but follow-ups as **issue comments**. Always check both. To trigger a re-review, comment `@greptileai review` on the PR.
+
+```bash
+gh api repos/{owner}/{repo}/pulls/{pr}/reviews    # initial reviews
+gh api repos/{owner}/{repo}/pulls/{pr}/comments   # inline comments
+gh api repos/{owner}/{repo}/issues/{pr}/comments   # follow-up reviews
+```
+
 ## btca
 
 When you need up-to-date information about technologies used in this project, use btca to query source repositories directly.

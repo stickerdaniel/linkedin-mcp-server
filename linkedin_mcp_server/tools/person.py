@@ -52,6 +52,7 @@ def register_person_tools(mcp: FastMCP) -> None:
         Returns:
             Dict with url and sections (name -> raw text).
             Sections may be absent if extraction yielded no content for that page.
+            Includes unknown_sections list when unrecognised names are passed.
             The LLM should parse the raw text in each section.
         """
         try:
