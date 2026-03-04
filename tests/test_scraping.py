@@ -263,6 +263,7 @@ class TestScrapePersonUrls:
             | PersonScrapingFields.HONORS
             | PersonScrapingFields.LANGUAGES
             | PersonScrapingFields.CONTACT_INFO
+            | PersonScrapingFields.POSTS
         )
         with (
             patch.object(
@@ -281,8 +282,8 @@ class TestScrapePersonUrls:
             result = await extractor.scrape_person("testuser", fields)
 
         urls = result["pages_visited"]
-        # main_profile, experience, education, interests, honors, languages, contact_info
-        assert len(urls) == 7
+        # main_profile, experience, education, interests, honors, languages, contact_info, posts
+        assert len(urls) == 8
         assert result["sections_requested"] == [
             "main_profile",
             "experience",
@@ -291,7 +292,23 @@ class TestScrapePersonUrls:
             "honors",
             "languages",
             "contact_info",
+            "posts",
         ]
+
+    async def test_posts_visits_recent_activity(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value="Post 1\nPost 2",
+        ):
+            result = await extractor.scrape_person(
+                "test-user", PersonScrapingFields.POSTS
+            )
+        assert any("/recent-activity/all/" in url for url in result["pages_visited"])
+        assert "posts" in result["sections"]
+        assert result["sections_requested"] == ["main_profile", "posts"]
 
     async def test_error_isolation(self, mock_page):
         """One section failing doesn't block others."""
