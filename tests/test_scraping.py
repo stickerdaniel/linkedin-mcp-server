@@ -299,6 +299,12 @@ class TestScrapePersonUrls:
                 new_callable=AsyncMock,
                 return_value="Post 1\nPost 2",
             ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
                 new_callable=AsyncMock,
