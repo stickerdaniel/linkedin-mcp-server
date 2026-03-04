@@ -8,12 +8,10 @@ import logging
 from typing import Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.dependencies import Depends
 from mcp.types import ToolAnnotations
 
-from linkedin_mcp_server.drivers.browser import (
-    ensure_authenticated,
-    get_or_create_browser,
-)
+from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor
 
@@ -31,7 +29,11 @@ def register_job_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         )
     )
-    async def get_job_details(job_id: str, ctx: Context) -> dict[str, Any]:
+    async def get_job_details(
+        job_id: str,
+        ctx: Context,
+        extractor: LinkedInExtractor = Depends(get_extractor),
+    ) -> dict[str, Any]:
         """
         Get job details for a specific job posting on LinkedIn.
 
@@ -44,12 +46,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text to extract job details.
         """
         try:
-            await ensure_authenticated()
-
             logger.info("Scraping job: %s", job_id)
-
-            browser = await get_or_create_browser()
-            extractor = LinkedInExtractor(browser.page)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting job scrape"
@@ -76,6 +73,7 @@ def register_job_tools(mcp: FastMCP) -> None:
         keywords: str,
         ctx: Context,
         location: str | None = None,
+        extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
@@ -90,16 +88,11 @@ def register_job_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text to extract job listings.
         """
         try:
-            await ensure_authenticated()
-
             logger.info(
                 "Searching jobs: keywords='%s', location='%s'",
                 keywords,
                 location,
             )
-
-            browser = await get_or_create_browser()
-            extractor = LinkedInExtractor(browser.page)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting job search"
