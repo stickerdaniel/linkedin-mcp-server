@@ -58,6 +58,20 @@ def test_raises_tool_error_for_linkedin_mcp_error():
         raise_tool_error(LinkedInMCPError("custom mcp error"))
 
 
+def test_raises_tool_error_for_authentication_error():
+    from linkedin_mcp_server.core.exceptions import AuthenticationError
+
+    with pytest.raises(ToolError, match="Authentication failed"):
+        raise_tool_error(AuthenticationError("bad creds"))
+
+
+def test_raises_tool_error_for_element_not_found():
+    from linkedin_mcp_server.core.exceptions import ElementNotFoundError
+
+    with pytest.raises(ToolError, match="Element not found"):
+        raise_tool_error(ElementNotFoundError("missing"))
+
+
 def test_reraises_unknown_exception():
     """Unknown exceptions are re-raised as-is, not wrapped in ToolError."""
     with pytest.raises(ValueError, match="oops"):
