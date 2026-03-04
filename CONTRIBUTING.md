@@ -10,6 +10,7 @@ See the [README](README.md#-local-setup-develop--contribute) for full setup inst
 git clone https://github.com/stickerdaniel/linkedin-mcp-server
 cd linkedin-mcp-server
 uv sync                                    # Install dependencies
+uv sync --group dev                        # Install dev dependencies
 uv run pre-commit install                  # Set up pre-commit hooks
 uv run patchright install chromium         # Install browser
 uv run pytest --cov                        # Run tests with coverage
