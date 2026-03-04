@@ -55,7 +55,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 | Tool | Description |
 |------|-------------|
-| `get_person_profile` | Get profile with explicit `sections` selection (experience, education, interests, honors, languages, contact_info) |
+| `get_person_profile` | Get profile with explicit `sections` selection (experience, education, interests, honors, languages, contact_info, posts) |
 | `get_company_profile` | Get company info with explicit `sections` selection (posts, jobs) |
 | `get_company_posts` | Get recent posts from company feed |
 | `get_job_details` | Get job posting details |
