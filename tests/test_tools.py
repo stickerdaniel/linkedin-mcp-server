@@ -131,6 +131,8 @@ class TestPersonTool:
         assert result["unknown_sections"] == ["bogus_section"]
 
     async def test_get_person_profile_error(self, mock_context, monkeypatch):
+        from fastmcp.exceptions import ToolError
+
         from linkedin_mcp_server.exceptions import SessionExpiredError
 
         monkeypatch.setattr(
@@ -144,8 +146,8 @@ class TestPersonTool:
         register_person_tools(mcp)
 
         tool_fn = await get_tool_fn(mcp, "get_person_profile")
-        result = await tool_fn("test-user", mock_context)
-        assert result["error"] == "session_expired"
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn("test-user", mock_context)
 
     async def test_search_people(self, mock_context, patch_tool_deps, monkeypatch):
         expected = {
