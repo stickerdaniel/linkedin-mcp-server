@@ -130,7 +130,7 @@ When adding an entirely new MCP tool (e.g., `search_companies`):
 ## Workflow
 
 1. [Open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) describing the feature or bug
-2. Create a branch: `feature/<issue-number>-<short-description>`
+2. Create a branch: `feature/<issue-number>-<short-description>` or `fix/<issue-number>-<short-description>`
 3. Implement, test, and update docs (see checklists above)
 4. Open a PR — AI agents review first, then manual review
 5. Don't squash commits on merge
