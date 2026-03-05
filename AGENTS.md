@@ -82,7 +82,7 @@ All scraping tools return: `{url, sections: {name: raw_text}}`. When unknown sec
 
 **Dependency Injection (`dependencies.py`):**
 
-- `get_extractor()` — async factory that runs `ensure_authenticated()`, acquires the singleton browser, and returns a `LinkedInExtractor`
+- `get_extractor()` — async factory that acquires the singleton browser, runs `ensure_authenticated()`, and returns a `LinkedInExtractor`
 - Injected into tool functions via `Depends(get_extractor)` (hidden from MCP tool schema)
 - No cleanup needed — browser lifecycle is managed by the server lifespan
 
