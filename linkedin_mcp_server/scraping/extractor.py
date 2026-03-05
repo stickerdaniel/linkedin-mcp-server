@@ -51,6 +51,16 @@ _EXPERIENCE_LEVEL_MAP = {
     "executive": "6",
 }
 
+_JOB_TYPE_MAP = {
+    "full_time": "F",
+    "part_time": "P",
+    "contract": "C",
+    "temporary": "T",
+    "volunteer": "V",
+    "internship": "I",
+    "other": "O",
+}
+
 _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
@@ -438,7 +448,7 @@ class LinkedInExtractor:
         if date_posted:
             params += f"&f_TPR={_normalize_csv(date_posted, _DATE_POSTED_MAP)}"
         if job_type:
-            params += f"&f_JT={quote_plus(job_type)}"
+            params += f"&f_JT={_normalize_csv(job_type, _JOB_TYPE_MAP)}"
         if experience_level:
             params += f"&f_E={_normalize_csv(experience_level, _EXPERIENCE_LEVEL_MAP)}"
         if work_type:
@@ -473,7 +483,7 @@ class LinkedInExtractor:
             location: Optional location filter
             max_pages: Maximum pages to load (1-10, default 3)
             date_posted: Filter by date posted (past_hour, past_24_hours, past_week, past_month)
-            job_type: Filter by job type (LinkedIn f_JT code)
+            job_type: Filter by job type (full_time, part_time, contract, temporary, volunteer, internship, other)
             experience_level: Filter by experience level (internship, entry, associate, mid_senior, director, executive)
             work_type: Filter by work type (on_site, remote, hybrid)
             easy_apply: Only show Easy Apply jobs

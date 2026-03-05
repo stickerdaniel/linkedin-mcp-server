@@ -90,7 +90,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             location: Optional location filter (e.g., "San Francisco", "Remote")
             max_pages: Maximum number of result pages to load (1-10, default 3)
             date_posted: Filter by posting date (past_hour, past_24_hours, past_week, past_month)
-            job_type: Filter by job type (LinkedIn f_JT code, e.g., "F" for full-time)
+            job_type: Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other)
             experience_level: Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive)
             work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
             easy_apply: Only show Easy Apply jobs (default false)
