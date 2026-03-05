@@ -842,8 +842,8 @@ class TestSearchJobs:
         # Empty text should skip ID extraction to avoid stale DOM
         mock_ids.assert_not_awaited()
 
-    async def test_rate_limited_text_excluded(self, mock_page):
-        """Rate-limited pages should not appear in sections text."""
+    async def test_rate_limited_skips_ids_and_text(self, mock_page):
+        """Rate-limited pages should yield no IDs or text."""
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
@@ -857,7 +857,7 @@ class TestSearchJobs:
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=["100"],
-            ),
+            ) as mock_ids,
             patch.object(
                 extractor,
                 "_get_total_search_pages",
@@ -871,8 +871,9 @@ class TestSearchJobs:
         ):
             result = await extractor.search_jobs("python", max_pages=1)
 
-        assert result["job_ids"] == ["100"]
+        assert result["job_ids"] == []
         assert result["sections"] == {}
+        mock_ids.assert_not_awaited()
 
 
 class TestStripLinkedInNoise:

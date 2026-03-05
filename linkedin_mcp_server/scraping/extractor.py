@@ -526,8 +526,8 @@ class LinkedInExtractor:
             try:
                 text = await self._extract_search_page(url)
 
-                if not text:
-                    # Navigation may have failed; skip ID extraction to avoid stale DOM
+                if not text or text == _RATE_LIMITED_MSG:
+                    # Navigation failed or rate-limited; skip ID extraction
                     break
 
                 # Read total pages from pagination state (e.g. "Page 1 of 40")
@@ -548,7 +548,7 @@ class LinkedInExtractor:
                     seen_ids.add(jid)
                     all_job_ids.append(jid)
 
-                if text and text != _RATE_LIMITED_MSG:
+                if text != _RATE_LIMITED_MSG:
                     page_texts.append(text)
 
             except LinkedInScraperException:
