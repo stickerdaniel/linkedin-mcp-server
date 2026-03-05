@@ -22,6 +22,7 @@ def register_person_tools(mcp: FastMCP) -> None:
     """Register all person-related tools with the MCP server."""
 
     @mcp.tool(
+        timeout=90.0,
         title="Get Person Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},
@@ -76,6 +77,7 @@ def register_person_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_person_profile")  # NoReturn
 
     @mcp.tool(
+        timeout=90.0,
         title="Search People",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "search"},

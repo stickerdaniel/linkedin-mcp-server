@@ -53,6 +53,7 @@ def create_mcp_server() -> FastMCP:
 
     # Register session management tool
     @mcp.tool(
+        timeout=90.0,
         title="Close Session",
         annotations={"destructiveHint": True},
         tags={"session"},
