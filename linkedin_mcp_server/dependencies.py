@@ -11,8 +11,8 @@ from linkedin_mcp_server.scraping import LinkedInExtractor
 async def get_extractor() -> LinkedInExtractor:
     """Authenticate, acquire the singleton browser, and return a ready extractor.
 
-    Errors are routed through raise_tool_error() so MCP clients receive
-    the same structured ToolError responses as tool-level exceptions.
+    Known LinkedIn exceptions are converted to structured ToolError responses
+    via raise_tool_error(); unexpected exceptions propagate as-is.
     """
     try:
         browser = await get_or_create_browser()
