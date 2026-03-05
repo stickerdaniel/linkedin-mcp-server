@@ -142,7 +142,10 @@ async def scroll_job_sidebar(
                 container = container.parentElement;
             }
 
-            if (!container || container === document.body) return 0;
+            if (!container || container === document.body) {
+                console.debug('[scroll_job_sidebar] no scrollable container found');
+                return 0;
+            }
 
             let scrollCount = 0;
             for (let i = 0; i < maxScrolls; i++) {
