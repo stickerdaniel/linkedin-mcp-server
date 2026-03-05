@@ -143,11 +143,14 @@ curl -s -D /tmp/mcp-headers -X POST http://127.0.0.1:8000/mcp \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
 
+# Extract the session ID from saved headers
+SESSION_ID=$(grep -i 'Mcp-Session-Id' /tmp/mcp-headers | awk '{print $2}' | tr -d '\r')
+
 # Call a tool (use Mcp-Session-Id from previous response)
 curl -s -X POST http://127.0.0.1:8000/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -H "Mcp-Session-Id: <SESSION_ID>" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_person_profile","arguments":{"linkedin_username":"williamhgates","sections":"posts"}}}'
 ```
 
