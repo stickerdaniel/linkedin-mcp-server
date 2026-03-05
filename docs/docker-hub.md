@@ -59,7 +59,7 @@ uvx linkedin-scraper-mcp --login
 | `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
 
-> **Note:** All MCP tools also use a fixed FastMCP execution timeout of `60` seconds. This is separate from the browser `TIMEOUT` env var above.
+> **Note:** All MCP tools also use a fixed FastMCP execution timeout of `90` seconds. This is separate from the browser `TIMEOUT` env var above.
 
 **Example with custom timeout:**
 
