@@ -72,6 +72,7 @@ All scraping tools return: `{url, sections: {name: raw_text}}`. When unknown sec
 - `fields.py` - `PERSON_SECTIONS` and `COMPANY_SECTIONS` config dicts mapping section name to `(url_suffix, is_overlay)`
 - `extractor.py` - `LinkedInExtractor` class using navigate-scroll-innerText pattern
 - **One section = one navigation.** Each entry in `PERSON_SECTIONS` / `COMPANY_SECTIONS` maps to exactly one page navigation. Never combine multiple URLs behind a single section.
+- **Minimize DOM dependence.** Prefer innerText and URL navigation over DOM selectors. When DOM access is unavoidable (e.g. extracting `href` attributes, finding scrollable containers), use minimal generic selectors (`a[href*="/jobs/view/"]`) — never class names tied to LinkedIn's layout.
 
 **Core Subpackage (`core/`):**
 
