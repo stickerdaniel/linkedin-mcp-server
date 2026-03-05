@@ -11,6 +11,7 @@ from typing import Any
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
 
+from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor, parse_company_sections
@@ -22,6 +23,7 @@ def register_company_tools(mcp: FastMCP) -> None:
     """Register all company-related tools with the MCP server."""
 
     @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
         title="Get Company Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
@@ -75,6 +77,7 @@ def register_company_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_company_profile")  # NoReturn
 
     @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
         title="Get Company Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},

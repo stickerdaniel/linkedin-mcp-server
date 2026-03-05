@@ -10,6 +10,7 @@ from typing import Any
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
 
+from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor
@@ -21,6 +22,7 @@ def register_job_tools(mcp: FastMCP) -> None:
     """Register all job-related tools with the MCP server."""
 
     @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
         title="Get Job Details",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},
@@ -58,6 +60,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_job_details")  # NoReturn
 
     @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
         title="Search Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},
