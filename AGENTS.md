@@ -66,6 +66,7 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 **Tool Return Format:**
 
 All scraping tools return: `{url, sections: {name: raw_text}}`. When unknown section names are provided, an `unknown_sections: [name, ...]` key is also included.
+All MCP tools use a fixed FastMCP execution timeout of `60` seconds.
 
 **Scraping Architecture (`scraping/`):**
 

@@ -21,6 +21,7 @@ def register_job_tools(mcp: FastMCP) -> None:
     """Register all job-related tools with the MCP server."""
 
     @mcp.tool(
+        timeout=90.0,
         title="Get Job Details",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},
@@ -58,6 +59,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_job_details")  # NoReturn
 
     @mcp.tool(
+        timeout=90.0,
         title="Search Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},
