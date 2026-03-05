@@ -39,7 +39,11 @@ def create_mcp_server() -> FastMCP:
     register_job_tools(mcp)
 
     # Register session management tool
-    @mcp.tool()
+    @mcp.tool(
+        title="Close Session",
+        annotations={"destructiveHint": True},
+        tags={"session"},
+    )
     async def close_session() -> Dict[str, Any]:
         """Close the current browser session and clean up resources."""
         try:

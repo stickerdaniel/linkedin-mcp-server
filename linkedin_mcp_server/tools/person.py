@@ -10,7 +10,6 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
-from mcp.types import ToolAnnotations
 
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -23,12 +22,9 @@ def register_person_tools(mcp: FastMCP) -> None:
     """Register all person-related tools with the MCP server."""
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Person Profile",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        title="Get Person Profile",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "scraping"},
     )
     async def get_person_profile(
         linkedin_username: str,
@@ -80,12 +76,9 @@ def register_person_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_person_profile")  # NoReturn
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Search People",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        title="Search People",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "search"},
     )
     async def search_people(
         keywords: str,
