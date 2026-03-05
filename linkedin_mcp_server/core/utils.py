@@ -129,7 +129,7 @@ async def scroll_job_sidebar(
     scrolled = await page.evaluate(
         """async ({pauseTime, maxScrolls}) => {
             const link = document.querySelector('a[href*="/jobs/view/"]');
-            if (!link) return 0;
+            if (!link) return -2;
 
             let container = link.parentElement;
             while (container && container !== document.body) {
@@ -158,7 +158,9 @@ async def scroll_job_sidebar(
         }""",
         {"pauseTime": pause_time, "maxScrolls": max_scrolls},
     )
-    if scrolled == -1:
+    if scrolled == -2:
+        logger.debug("Job card link disappeared before evaluate, skipping scroll")
+    elif scrolled == -1:
         logger.debug("No scrollable container found for job sidebar")
     elif scrolled:
         logger.debug("Scrolled job sidebar %d times", scrolled)

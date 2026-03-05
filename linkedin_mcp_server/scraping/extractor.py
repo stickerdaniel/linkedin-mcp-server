@@ -396,13 +396,16 @@ class LinkedInExtractor:
         if main_found:
             await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
 
-        raw = await self._page.evaluate(
+        raw_result = await self._page.evaluate(
             """() => {
                 const main = document.querySelector('main');
-                return main ? main.innerText : document.body.innerText;
+                return main
+                    ? { source: 'main', text: main.innerText }
+                    : { source: 'body', text: document.body.innerText };
             }"""
         )
-        if not main_found:
+        raw = raw_result["text"]
+        if raw_result["source"] == "body":
             logger.debug("No <main> at evaluation time on %s, using body fallback", url)
 
         if not raw:
