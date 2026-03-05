@@ -524,6 +524,10 @@ class TestScrapeJob:
 class TestSearchJobs:
     """Tests for search_jobs with job ID extraction and pagination."""
 
+    @pytest.fixture(autouse=True)
+    def _set_search_url(self, mock_page):
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=python"
+
     async def test_returns_job_ids(self, mock_page):
         """search_jobs should return a job_ids list extracted from hrefs."""
         extractor = LinkedInExtractor(mock_page)
@@ -581,7 +585,7 @@ class TestSearchJobs:
                 extractor,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
-                return_value=5,
+                return_value=None,
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -843,6 +847,38 @@ class TestSearchJobs:
         assert result["sections"] == {}
         # Empty text should skip ID extraction to avoid stale DOM
         mock_ids.assert_not_awaited()
+
+    async def test_no_ids_on_first_page_captures_text(self, mock_page):
+        """Non-empty text with zero job IDs should be returned in sections."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value="No matching jobs found",
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("xyzzy123", max_pages=1)
+
+        assert result["job_ids"] == []
+        assert result["sections"]["search_results"] == "No matching jobs found"
 
     async def test_rate_limited_skips_ids_and_text(self, mock_page):
         """Rate-limited pages should yield no IDs or text."""
