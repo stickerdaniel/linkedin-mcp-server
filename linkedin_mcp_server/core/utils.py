@@ -162,6 +162,8 @@ async def scroll_job_sidebar(
         logger.debug("No scrollable container found for job sidebar")
     elif scrolled:
         logger.debug("Scrolled job sidebar %d times", scrolled)
+    else:
+        logger.debug("Job sidebar container found but no new content loaded")
 
 
 async def handle_modal_close(page: Page) -> bool:
