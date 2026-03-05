@@ -785,7 +785,7 @@ class TestSearchJobs:
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 side_effect=lambda url: next(text_pages),
-            ),
+            ) as mock_extract,
             patch.object(
                 extractor,
                 "_extract_job_ids",
@@ -808,6 +808,7 @@ class TestSearchJobs:
         assert "\n---\n" in result["sections"]["search_results"]
         assert "Page 1 content" in result["sections"]["search_results"]
         assert "Page 2 content" in result["sections"]["search_results"]
+        assert mock_extract.await_count == 2
 
     async def test_empty_results(self, mock_page):
         """Should handle empty results gracefully and skip ID extraction."""
