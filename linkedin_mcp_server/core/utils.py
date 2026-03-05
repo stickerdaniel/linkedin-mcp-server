@@ -104,6 +104,55 @@ async def scroll_to_bottom(
             break
 
 
+async def scroll_job_sidebar(
+    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
+) -> None:
+    """Scroll the job search sidebar to load all job cards.
+
+    LinkedIn renders job search results in a scrollable sidebar container,
+    not the main page body. This function finds that container by locating
+    a job card link and walking up to its scrollable ancestor, then scrolls
+    it iteratively until no new content loads.
+
+    Args:
+        page: Patchright page object
+        pause_time: Time to pause between scrolls (seconds)
+        max_scrolls: Maximum number of scroll attempts
+    """
+    scrolled = await page.evaluate(
+        """async ({pauseTime, maxScrolls}) => {
+            const link = document.querySelector('a[href*="/jobs/view/"]');
+            if (!link) return 0;
+
+            let container = link.parentElement;
+            while (container && container !== document.body) {
+                const style = window.getComputedStyle(container);
+                const overflowY = style.overflowY;
+                if ((overflowY === 'auto' || overflowY === 'scroll')
+                    && container.scrollHeight > container.clientHeight) {
+                    break;
+                }
+                container = container.parentElement;
+            }
+
+            if (!container || container === document.body) return 0;
+
+            let scrollCount = 0;
+            for (let i = 0; i < maxScrolls; i++) {
+                const prevHeight = container.scrollHeight;
+                container.scrollTop = container.scrollHeight;
+                await new Promise(r => setTimeout(r, pauseTime * 1000));
+                if (container.scrollHeight === prevHeight) break;
+                scrollCount++;
+            }
+            return scrollCount;
+        }""",
+        {"pauseTime": pause_time, "maxScrolls": max_scrolls},
+    )
+    if scrolled:
+        logger.debug("Scrolled job sidebar %d times", scrolled)
+
+
 async def handle_modal_close(page: Page) -> bool:
     """Close any popup modals that might be blocking content.
 
