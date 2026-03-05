@@ -69,32 +69,37 @@ def register_job_tools(mcp: FastMCP) -> None:
         keywords: str,
         ctx: Context,
         location: str | None = None,
+        max_pages: int = 3,
         extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
 
+        Returns job_ids that can be passed to get_job_details for full info.
+
         Args:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
             ctx: FastMCP context for progress reporting
             location: Optional location filter (e.g., "San Francisco", "Remote")
+            max_pages: Maximum number of result pages to load (1-10, default 3)
 
         Returns:
-            Dict with url and sections (name -> raw text).
-            The LLM should parse the raw text to extract job listings.
+            Dict with url, sections (name -> raw text), and job_ids (list of
+            numeric job ID strings usable with get_job_details).
         """
         try:
             logger.info(
-                "Searching jobs: keywords='%s', location='%s'",
+                "Searching jobs: keywords='%s', location='%s', max_pages=%d",
                 keywords,
                 location,
+                max_pages,
             )
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting job search"
             )
 
-            result = await extractor.search_jobs(keywords, location)
+            result = await extractor.search_jobs(keywords, location, max_pages)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
