@@ -50,7 +50,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 ### Execution Timeouts
 
-- All MCP tools have a built-in FastMCP execution timeout of `60` seconds.
+- All MCP tools have a built-in FastMCP execution timeout of `90` seconds.
 - This is separate from CLI/env `--timeout` / `TIMEOUT`, which controls browser page operation timeout in milliseconds.
 
 > [!IMPORTANT]
