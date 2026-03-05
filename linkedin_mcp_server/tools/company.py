@@ -10,7 +10,6 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
-from mcp.types import ToolAnnotations
 
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -23,12 +22,9 @@ def register_company_tools(mcp: FastMCP) -> None:
     """Register all company-related tools with the MCP server."""
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Company Profile",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        title="Get Company Profile",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"company", "scraping"},
     )
     async def get_company_profile(
         company_name: str,
@@ -79,12 +75,9 @@ def register_company_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_company_profile")  # NoReturn
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Company Posts",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        title="Get Company Posts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"company", "scraping"},
     )
     async def get_company_posts(
         company_name: str,

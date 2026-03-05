@@ -9,7 +9,6 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
-from mcp.types import ToolAnnotations
 
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -22,12 +21,9 @@ def register_job_tools(mcp: FastMCP) -> None:
     """Register all job-related tools with the MCP server."""
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Job Details",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        title="Get Job Details",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "scraping"},
     )
     async def get_job_details(
         job_id: str,
@@ -62,12 +58,9 @@ def register_job_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_job_details")  # NoReturn
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Search Jobs",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        title="Search Jobs",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "search"},
     )
     async def search_jobs(
         keywords: str,
