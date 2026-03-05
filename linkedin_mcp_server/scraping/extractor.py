@@ -430,7 +430,7 @@ class LinkedInExtractor:
                 const el = document.querySelector(
                     '.jobs-search-pagination__page-state'
                 );
-                return el ? el.innerText.trim() : null;
+                return el ? el.textContent.trim() : null;
             }"""
         )
         if not text:
