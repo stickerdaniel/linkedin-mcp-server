@@ -880,6 +880,40 @@ class TestSearchJobs:
         assert result["job_ids"] == []
         assert result["sections"]["search_results"] == "No matching jobs found"
 
+    async def test_url_redirect_skips_id_extraction(self, mock_page):
+        """Unexpected page URL should skip ID extraction but capture text."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/uas/login"
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value="Login page content",
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=2)
+
+        mock_ids.assert_not_awaited()
+        assert result["job_ids"] == []
+        assert result["sections"]["search_results"] == "Login page content"
+
     async def test_rate_limited_skips_ids_and_text(self, mock_page):
         """Rate-limited pages should yield no IDs or text."""
         extractor = LinkedInExtractor(mock_page)
