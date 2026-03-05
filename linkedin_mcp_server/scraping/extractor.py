@@ -145,8 +145,26 @@ class LinkedInExtractor:
         # Dismiss any modals blocking content
         await handle_modal_close(self._page)
 
+        # Activity feed pages lazy-load post content after the tab header
+        is_activity = "/recent-activity/" in url
+        if is_activity:
+            try:
+                await self._page.wait_for_function(
+                    """() => {
+                        const main = document.querySelector('main');
+                        if (!main) return false;
+                        return main.innerText.length > 200;
+                    }""",
+                    timeout=10000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Activity feed content did not appear on %s", url)
+
         # Scroll to trigger lazy loading
-        await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+        if is_activity:
+            await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=10)
+        else:
+            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
 
         # Extract text from main content area
         raw = await self._page.evaluate(
