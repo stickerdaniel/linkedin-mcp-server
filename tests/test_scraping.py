@@ -604,7 +604,7 @@ class TestSearchJobs:
                 "_extract_search_page",
                 new_callable=AsyncMock,
                 return_value="text",
-            ),
+            ) as mock_extract,
             patch.object(
                 extractor,
                 "_extract_job_ids",
@@ -625,6 +625,7 @@ class TestSearchJobs:
             result = await extractor.search_jobs("python", max_pages=2)
 
         assert result["job_ids"] == ["100", "200", "300"]
+        assert mock_extract.await_count == 2
 
     async def test_early_stop_no_new_ids(self, mock_page):
         """Should stop early when a page yields no new job IDs."""
