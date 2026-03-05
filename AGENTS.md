@@ -80,6 +80,12 @@ All scraping tools return: `{url, sections: {name: raw_text}}`. When unknown sec
 - `auth.py` - `is_logged_in()`, `wait_for_manual_login()`, `warm_up_browser()`
 - `utils.py` - `detect_rate_limit()`, `scroll_to_bottom()`, `handle_modal_close()`
 
+**Dependency Injection (`dependencies.py`):**
+
+- `get_extractor()` — async factory that acquires the singleton browser, runs `ensure_authenticated()`, and returns a `LinkedInExtractor`
+- Injected into tool functions via `Depends(get_extractor)` (hidden from MCP tool schema)
+- No cleanup needed — browser lifecycle is managed by the server lifespan
+
 **Authentication Flow:**
 
 - Uses persistent browser profile at `~/.linkedin-mcp/profile/`
