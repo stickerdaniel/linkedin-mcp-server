@@ -413,6 +413,11 @@ class LinkedInExtractor:
 
         Parses the "Page X of Y" text from ``.jobs-search-pagination__page-state``.
         Returns ``None`` when the element is absent or unparseable.
+
+        NOTE: This is a deliberate DOM exception. The element has ``display: none``
+        (screen-reader only), so the text never appears in ``innerText``. A class-based
+        selector is the only reliable way to read it. Gracefully returns ``None`` if
+        LinkedIn renames the class — pagination just falls back to ``max_pages``.
         """
         text = await self._page.evaluate(
             """() => {
