@@ -9,12 +9,10 @@ import logging
 from typing import Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.dependencies import Depends
 from mcp.types import ToolAnnotations
 
-from linkedin_mcp_server.drivers.browser import (
-    ensure_authenticated,
-    get_or_create_browser,
-)
+from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor, parse_company_sections
 
@@ -36,6 +34,7 @@ def register_company_tools(mcp: FastMCP) -> None:
         company_name: str,
         ctx: Context,
         sections: str | None = None,
+        extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         Get a specific company's LinkedIn profile.
@@ -55,8 +54,6 @@ def register_company_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text in each section.
         """
         try:
-            await ensure_authenticated()
-
             requested, unknown = parse_company_sections(sections)
 
             logger.info(
@@ -64,9 +61,6 @@ def register_company_tools(mcp: FastMCP) -> None:
                 company_name,
                 sections,
             )
-
-            browser = await get_or_create_browser()
-            extractor = LinkedInExtractor(browser.page)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting company profile scrape"
@@ -95,6 +89,7 @@ def register_company_tools(mcp: FastMCP) -> None:
     async def get_company_posts(
         company_name: str,
         ctx: Context,
+        extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         Get recent posts from a company's LinkedIn feed.
@@ -108,12 +103,7 @@ def register_company_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text to extract individual posts.
         """
         try:
-            await ensure_authenticated()
-
             logger.info("Scraping company posts: %s", company_name)
-
-            browser = await get_or_create_browser()
-            extractor = LinkedInExtractor(browser.page)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting company posts scrape"
