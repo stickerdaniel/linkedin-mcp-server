@@ -11,6 +11,83 @@ from linkedin_mcp_server.scraping.extractor import (
 )
 
 
+class TestBuildJobSearchUrl:
+    """Tests for _build_job_search_url URL construction."""
+
+    def test_keywords_only(self):
+        url = LinkedInExtractor._build_job_search_url("python developer")
+        assert url == "https://www.linkedin.com/jobs/search/?keywords=python+developer"
+
+    def test_with_location(self):
+        url = LinkedInExtractor._build_job_search_url("python", location="Remote")
+        assert "keywords=python" in url
+        assert "location=Remote" in url
+
+    def test_date_posted_normalization(self):
+        url = LinkedInExtractor._build_job_search_url("python", date_posted="past_week")
+        assert "f_TPR=r604800" in url
+
+    def test_date_posted_passthrough(self):
+        url = LinkedInExtractor._build_job_search_url("python", date_posted="r3600")
+        assert "f_TPR=r3600" in url
+
+    def test_experience_level_normalization(self):
+        url = LinkedInExtractor._build_job_search_url(
+            "python", experience_level="entry"
+        )
+        assert "f_E=2" in url
+
+    def test_experience_level_csv(self):
+        url = LinkedInExtractor._build_job_search_url(
+            "python", experience_level="entry,director"
+        )
+        assert "f_E=2,5" in url
+
+    def test_work_type_normalization(self):
+        url = LinkedInExtractor._build_job_search_url("python", work_type="remote")
+        assert "f_WT=2" in url
+
+    def test_work_type_csv(self):
+        url = LinkedInExtractor._build_job_search_url(
+            "python", work_type="on_site,hybrid"
+        )
+        assert "f_WT=1,3" in url
+
+    def test_easy_apply(self):
+        url = LinkedInExtractor._build_job_search_url("python", easy_apply=True)
+        assert "f_EA=true" in url
+
+    def test_easy_apply_false_omitted(self):
+        url = LinkedInExtractor._build_job_search_url("python", easy_apply=False)
+        assert "f_EA" not in url
+
+    def test_sort_by_normalization(self):
+        url = LinkedInExtractor._build_job_search_url("python", sort_by="date")
+        assert "sortBy=DD" in url
+
+    def test_job_type_passthrough(self):
+        url = LinkedInExtractor._build_job_search_url("python", job_type="F")
+        assert "f_JT=F" in url
+
+    def test_all_filters_combined(self):
+        url = LinkedInExtractor._build_job_search_url(
+            "python",
+            location="Berlin",
+            date_posted="past_week",
+            experience_level="entry,mid_senior",
+            work_type="remote",
+            easy_apply=True,
+            sort_by="date",
+        )
+        assert "keywords=python" in url
+        assert "location=Berlin" in url
+        assert "f_TPR=r604800" in url
+        assert "f_E=2,4" in url
+        assert "f_WT=2" in url
+        assert "f_EA=true" in url
+        assert "sortBy=DD" in url
+
+
 @pytest.fixture
 def mock_page():
     """Create a mock Patchright page."""
@@ -610,8 +687,8 @@ class TestSearchJobs:
         assert mock_extract.await_count == 2
         assert result["job_ids"] == ["100", "200"]
 
-    async def test_max_pages_clamped(self, mock_page):
-        """max_pages should be clamped to 1-10 range."""
+    async def test_zero_max_pages_fetches_nothing(self, mock_page):
+        """max_pages=0 should fetch zero pages (validation at tool boundary)."""
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
@@ -639,11 +716,11 @@ class TestSearchJobs:
         ):
             result = await extractor.search_jobs("python", max_pages=0)
 
-        assert "job_ids" in result
-        assert mock_extract.await_count == 1
+        assert result["job_ids"] == []
+        assert mock_extract.await_count == 0
 
     async def test_single_page(self, mock_page):
-        """max_pages=1 should only visit one page."""
+        """max_pages=1 should only visit one page; filters appear in URL."""
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
@@ -669,11 +746,21 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await extractor.search_jobs("python", "Remote", max_pages=1)
+            result = await extractor.search_jobs(
+                "python",
+                "Remote",
+                max_pages=1,
+                date_posted="past_week",
+                work_type="remote",
+                easy_apply=True,
+            )
 
         assert result["job_ids"] == ["42"]
         assert "keywords=python" in result["url"]
         assert "location=Remote" in result["url"]
+        assert "f_TPR=r604800" in result["url"]
+        assert "f_WT=2" in result["url"]
+        assert "f_EA=true" in result["url"]
         assert mock_extract.await_count == 1
 
     async def test_page_texts_joined_with_separator(self, mock_page):
@@ -712,7 +799,7 @@ class TestSearchJobs:
         assert "Page 2 content" in result["sections"]["search_results"]
 
     async def test_empty_results(self, mock_page):
-        """Should handle empty results gracefully."""
+        """Should handle empty results gracefully and skip ID extraction."""
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
@@ -726,7 +813,7 @@ class TestSearchJobs:
                 "_extract_job_ids",
                 new_callable=AsyncMock,
                 return_value=[],
-            ),
+            ) as mock_ids,
             patch.object(
                 extractor,
                 "_get_total_search_pages",
@@ -742,6 +829,8 @@ class TestSearchJobs:
 
         assert result["job_ids"] == []
         assert result["sections"] == {}
+        # Empty text should skip ID extraction to avoid stale DOM
+        mock_ids.assert_not_awaited()
 
     async def test_rate_limited_text_excluded(self, mock_page):
         """Rate-limited pages should not appear in sections text."""

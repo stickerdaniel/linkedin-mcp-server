@@ -31,6 +31,30 @@ _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again lat
 
 # Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
 # Everything from the earliest match onwards is stripped.
+# LinkedIn shows 25 results per page
+_PAGE_SIZE = 25
+
+# Normalization maps for job search filters
+_DATE_POSTED_MAP = {
+    "past_hour": "r3600",
+    "past_24_hours": "r86400",
+    "past_week": "r604800",
+    "past_month": "r2592000",
+}
+
+_EXPERIENCE_LEVEL_MAP = {
+    "internship": "1",
+    "entry": "2",
+    "associate": "3",
+    "mid_senior": "4",
+    "director": "5",
+    "executive": "6",
+}
+
+_WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
+
+_SORT_BY_MAP = {"date": "DD", "relevance": "R"}
+
 _NOISE_MARKERS: list[re.Pattern[str]] = [
     # Footer nav links: "About" immediately followed by "Accessibility" or "Talent Solutions"
     re.compile(r"^About\n+(?:Accessibility|Talent Solutions)", re.MULTILINE),
@@ -386,11 +410,57 @@ class LinkedInExtractor:
         match = re.search(r"of\s+(\d+)", text)
         return int(match.group(1)) if match else None
 
+    @staticmethod
+    def _build_job_search_url(
+        keywords: str,
+        location: str | None = None,
+        date_posted: str | None = None,
+        job_type: str | None = None,
+        experience_level: str | None = None,
+        work_type: str | None = None,
+        easy_apply: bool = False,
+        sort_by: str | None = None,
+    ) -> str:
+        """Build a LinkedIn job search URL with optional filters.
+
+        Human-readable names are normalized to LinkedIn URL codes.
+        Comma-separated values are normalized individually.
+        Unknown values pass through unchanged.
+        """
+        params = f"keywords={quote_plus(keywords)}"
+        if location:
+            params += f"&location={quote_plus(location)}"
+
+        def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
+            parts = [v.strip() for v in value.split(",")]
+            return ",".join(mapping.get(p, p) for p in parts)
+
+        if date_posted:
+            params += f"&f_TPR={_normalize_csv(date_posted, _DATE_POSTED_MAP)}"
+        if job_type:
+            params += f"&f_JT={quote_plus(job_type)}"
+        if experience_level:
+            params += f"&f_E={_normalize_csv(experience_level, _EXPERIENCE_LEVEL_MAP)}"
+        if work_type:
+            params += f"&f_WT={_normalize_csv(work_type, _WORK_TYPE_MAP)}"
+        if easy_apply:
+            params += "&f_EA=true"
+        if sort_by:
+            params += f"&sortBy={_normalize_csv(sort_by, _SORT_BY_MAP)}"
+
+        return f"https://www.linkedin.com/jobs/search/?{params}"
+
     async def search_jobs(
         self,
         keywords: str,
         location: str | None = None,
         max_pages: int = 3,
+        date_posted: str | None = None,
+        job_type: str | None = None,
+        experience_level: str | None = None,
+        work_type: str | None = None,
+        easy_apply: bool = False,
+        sort_by: str | None = None,
     ) -> dict[str, Any]:
         """Search for jobs with pagination and job ID extraction.
 
@@ -402,20 +472,26 @@ class LinkedInExtractor:
             keywords: Search keywords
             location: Optional location filter
             max_pages: Maximum pages to load (1-10, default 3)
+            date_posted: Filter by date posted (past_hour, past_24_hours, past_week, past_month)
+            job_type: Filter by job type (LinkedIn f_JT code)
+            experience_level: Filter by experience level (internship, entry, associate, mid_senior, director, executive)
+            work_type: Filter by work type (on_site, remote, hybrid)
+            easy_apply: Only show Easy Apply jobs
+            sort_by: Sort results (date, relevance)
 
         Returns:
             {url, sections: {search_results: text}, job_ids: [str]}
         """
-        # LinkedIn shows 25 results per page
-        _PAGE_SIZE = 25
-
-        max_pages = max(1, min(10, max_pages))
-
-        params = f"keywords={quote_plus(keywords)}"
-        if location:
-            params += f"&location={quote_plus(location)}"
-
-        base_url = f"https://www.linkedin.com/jobs/search/?{params}"
+        base_url = self._build_job_search_url(
+            keywords,
+            location=location,
+            date_posted=date_posted,
+            job_type=job_type,
+            experience_level=experience_level,
+            work_type=work_type,
+            easy_apply=easy_apply,
+            sort_by=sort_by,
+        )
         all_job_ids: list[str] = []
         seen_ids: set[str] = set()
         page_texts: list[str] = []
@@ -440,6 +516,10 @@ class LinkedInExtractor:
             try:
                 text = await self._extract_search_page(url)
 
+                if not text:
+                    # Navigation may have failed; skip ID extraction to avoid stale DOM
+                    break
+
                 # Read total pages from pagination state (e.g. "Page 1 of 40")
                 if total_pages is None:
                     total_pages = await self._get_total_search_pages()
@@ -451,10 +531,7 @@ class LinkedInExtractor:
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
                 if not new_ids:
-                    if page_num > 0:
-                        logger.debug(
-                            "No new job IDs on page %d, stopping", page_num + 1
-                        )
+                    logger.debug("No new job IDs on page %d, stopping", page_num + 1)
                     break
 
                 for jid in new_ids:
