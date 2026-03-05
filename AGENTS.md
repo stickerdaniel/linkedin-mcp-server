@@ -131,7 +131,7 @@ All scraping tools return: `{url, sections: {name: raw_text}}`. When unknown sec
 
 ## Verifying Bug Reports
 
-Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`. Start the server with HTTP transport, then call the tool via curl:
+Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`. Start the server with HTTP transport in one terminal (this process is long-running and will block the shell), then in a second terminal call the tool via curl:
 
 ```bash
 # Start server
