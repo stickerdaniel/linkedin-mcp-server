@@ -12,6 +12,7 @@ from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
+    scroll_job_sidebar,
     scroll_to_bottom,
 )
 
@@ -287,28 +288,112 @@ class LinkedInExtractor:
             "sections": sections,
         }
 
+    async def _extract_job_ids(self) -> list[str]:
+        """Extract unique job IDs from job card links on the current page.
+
+        Finds all `a[href*="/jobs/view/"]` links and extracts the numeric
+        job ID from each href. Returns deduplicated IDs in DOM order.
+        """
+        return await self._page.evaluate(
+            """() => {
+                const links = document.querySelectorAll('a[href*="/jobs/view/"]');
+                const seen = new Set();
+                const ids = [];
+                for (const a of links) {
+                    const match = a.href.match(/\\/jobs\\/view\\/(\\d+)/);
+                    if (match && !seen.has(match[1])) {
+                        seen.add(match[1]);
+                        ids.push(match[1]);
+                    }
+                }
+                return ids;
+            }"""
+        )
+
     async def search_jobs(
-        self, keywords: str, location: str | None = None
+        self,
+        keywords: str,
+        location: str | None = None,
+        max_pages: int = 3,
     ) -> dict[str, Any]:
-        """Search for jobs and extract the results page.
+        """Search for jobs with pagination and job ID extraction.
+
+        Scrolls the job sidebar (not the main page) and paginates through
+        results. Stops early when a page yields no new job IDs.
+
+        Args:
+            keywords: Search keywords
+            location: Optional location filter
+            max_pages: Maximum pages to load (1-10, default 3)
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {search_results: text}, job_ids: [str]}
         """
+        max_pages = max(1, min(10, max_pages))
+
         params = f"keywords={quote_plus(keywords)}"
         if location:
             params += f"&location={quote_plus(location)}"
 
-        url = f"https://www.linkedin.com/jobs/search/?{params}"
-        text = await self.extract_page(url)
+        base_url = f"https://www.linkedin.com/jobs/search/?{params}"
+        all_job_ids: list[str] = []
+        seen_ids: set[str] = set()
+        page_texts: list[str] = []
 
-        sections: dict[str, str] = {}
-        if text:
-            sections["search_results"] = text
+        for page_num in range(max_pages):
+            if page_num > 0:
+                await asyncio.sleep(_NAV_DELAY)
+
+            url = base_url if page_num == 0 else f"{base_url}&start={len(seen_ids)}"
+
+            try:
+                await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await detect_rate_limit(self._page)
+
+                try:
+                    await self._page.wait_for_selector("main", timeout=5000)
+                except PlaywrightTimeoutError:
+                    logger.debug("No <main> element found on %s", url)
+
+                await handle_modal_close(self._page)
+                await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
+
+                # Extract job IDs from hrefs
+                page_ids = await self._extract_job_ids()
+                new_ids = [jid for jid in page_ids if jid not in seen_ids]
+
+                if not new_ids and page_num > 0:
+                    logger.debug("No new job IDs on page %d, stopping", page_num + 1)
+                    break
+
+                for jid in new_ids:
+                    seen_ids.add(jid)
+                    all_job_ids.append(jid)
+
+                # Extract innerText
+                raw = await self._page.evaluate(
+                    """() => {
+                        const main = document.querySelector('main');
+                        return main ? main.innerText : document.body.innerText;
+                    }"""
+                )
+                if raw:
+                    cleaned = strip_linkedin_noise(raw)
+                    if cleaned:
+                        page_texts.append(cleaned)
+
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Error on search page %d: %s", page_num + 1, e)
+                break
 
         return {
-            "url": url,
-            "sections": sections,
+            "url": base_url,
+            "sections": {"search_results": "\n---\n".join(page_texts)}
+            if page_texts
+            else {},
+            "job_ids": all_job_ids,
         }
 
     async def search_people(
