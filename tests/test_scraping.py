@@ -65,6 +65,16 @@ class TestBuildJobSearchUrl:
         url = LinkedInExtractor._build_job_search_url("python", sort_by="date")
         assert "sortBy=DD" in url
 
+    def test_job_type_normalization(self):
+        url = LinkedInExtractor._build_job_search_url("python", job_type="full_time")
+        assert "f_JT=F" in url
+
+    def test_job_type_csv(self):
+        url = LinkedInExtractor._build_job_search_url(
+            "python", job_type="full_time,contract"
+        )
+        assert "f_JT=F,C" in url
+
     def test_job_type_passthrough(self):
         url = LinkedInExtractor._build_job_search_url("python", job_type="F")
         assert "f_JT=F" in url
