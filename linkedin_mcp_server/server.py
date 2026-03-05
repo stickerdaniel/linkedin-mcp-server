@@ -6,11 +6,12 @@ person profiles, company data, job information, and session management capabilit
 """
 
 import logging
-from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator
 
 from fastmcp import FastMCP
+from fastmcp.server.lifespan import lifespan
 
+from linkedin_mcp_server.authentication import get_authentication_source
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.tools.company import register_company_tools
@@ -20,18 +21,30 @@ from linkedin_mcp_server.tools.person import register_person_tools
 logger = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def lifespan(app: FastMCP) -> AsyncIterator[None]:
-    """Manage server lifecycle - cleanup browser on shutdown."""
+@lifespan
+async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
+    """Manage browser lifecycle — cleanup on shutdown."""
     logger.info("LinkedIn MCP Server starting...")
-    yield
+    yield {}
     logger.info("LinkedIn MCP Server shutting down...")
     await close_browser()
 
 
+@lifespan
+async def auth_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
+    """Validate authentication profile exists at startup."""
+    logger.info("Validating LinkedIn authentication...")
+    get_authentication_source()
+    yield {}
+
+
 def create_mcp_server() -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools."""
-    mcp = FastMCP("linkedin_scraper", lifespan=lifespan, mask_error_details=True)
+    mcp = FastMCP(
+        "linkedin_scraper",
+        lifespan=auth_lifespan | browser_lifespan,
+        mask_error_details=True,
+    )
 
     # Register all tools
     register_person_tools(mcp)
@@ -44,7 +57,7 @@ def create_mcp_server() -> FastMCP:
         annotations={"destructiveHint": True},
         tags={"session"},
     )
-    async def close_session() -> Dict[str, Any]:
+    async def close_session() -> dict[str, Any]:
         """Close the current browser session and clean up resources."""
         try:
             await close_browser()
