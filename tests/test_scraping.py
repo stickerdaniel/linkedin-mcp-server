@@ -690,7 +690,7 @@ class TestSearchJobs:
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
                 return_value=2,
-            ),
+            ) as mock_total_pages,
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
                 new_callable=AsyncMock,
@@ -700,6 +700,7 @@ class TestSearchJobs:
 
         # Should only visit 2 pages despite max_pages=10
         assert mock_extract.await_count == 2
+        assert mock_total_pages.await_count == 1
         assert result["job_ids"] == ["100", "200"]
 
     async def test_zero_max_pages_fetches_nothing(self, mock_page):
