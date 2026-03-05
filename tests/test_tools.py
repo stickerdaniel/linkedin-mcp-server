@@ -254,3 +254,25 @@ class TestJobTools:
         )
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
+
+
+class TestToolTimeouts:
+    async def test_all_tools_have_global_timeout(self):
+        from linkedin_mcp_server.server import create_mcp_server
+
+        mcp = create_mcp_server()
+
+        tool_names = (
+            "get_person_profile",
+            "search_people",
+            "get_company_profile",
+            "get_company_posts",
+            "get_job_details",
+            "search_jobs",
+            "close_session",
+        )
+
+        for name in tool_names:
+            tool = await mcp.get_tool(name)
+            assert tool is not None
+            assert tool.timeout == 60.0

@@ -22,6 +22,7 @@ def register_company_tools(mcp: FastMCP) -> None:
     """Register all company-related tools with the MCP server."""
 
     @mcp.tool(
+        timeout=90.0,
         title="Get Company Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
@@ -75,6 +76,7 @@ def register_company_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_company_profile")  # NoReturn
 
     @mcp.tool(
+        timeout=90.0,
         title="Get Company Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
