@@ -369,7 +369,10 @@ class LinkedInExtractor:
                 _RATE_LIMIT_RETRY_DELAY,
             )
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            return await self._extract_search_page_once(url)
+            result = await self._extract_search_page_once(url)
+            if result == _RATE_LIMITED_MSG:
+                logger.warning("Search page %s still rate-limited after retry", url)
+            return result
 
         except LinkedInScraperException:
             raise
