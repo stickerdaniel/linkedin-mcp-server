@@ -454,7 +454,8 @@ class LinkedInExtractor:
             params += f"&location={quote_plus(location)}"
 
         if date_posted:
-            params += f"&f_TPR={_DATE_POSTED_MAP.get(date_posted.strip(), date_posted)}"
+            mapped = _DATE_POSTED_MAP.get(date_posted.strip(), date_posted)
+            params += f"&f_TPR={quote_plus(mapped)}"
         if job_type:
             params += f"&f_JT={_normalize_csv(job_type, _JOB_TYPE_MAP)}"
         if experience_level:
@@ -464,7 +465,8 @@ class LinkedInExtractor:
         if easy_apply:
             params += "&f_EA=true"
         if sort_by:
-            params += f"&sortBy={_SORT_BY_MAP.get(sort_by.strip(), sort_by)}"
+            mapped = _SORT_BY_MAP.get(sort_by.strip(), sort_by)
+            params += f"&sortBy={quote_plus(mapped)}"
 
         return f"https://www.linkedin.com/jobs/search/?{params}"
 
@@ -521,7 +523,7 @@ class LinkedInExtractor:
             if total_pages is not None and page_num >= total_pages:
                 logger.debug(
                     "Reached last page (%d of %d), stopping",
-                    page_num,
+                    page_num + 1,
                     total_pages,
                 )
                 break
