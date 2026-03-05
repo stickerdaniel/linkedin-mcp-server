@@ -533,8 +533,11 @@ class LinkedInExtractor:
             if page_num > 0:
                 await asyncio.sleep(_NAV_DELAY)
 
-            offset = page_num * _PAGE_SIZE
-            url = base_url if page_num == 0 else f"{base_url}&start={offset}"
+            url = (
+                base_url
+                if page_num == 0
+                else f"{base_url}&start={page_num * _PAGE_SIZE}"
+            )
 
             try:
                 text = await self._extract_search_page(url)
@@ -543,12 +546,16 @@ class LinkedInExtractor:
                     # Navigation failed or rate-limited; skip ID extraction
                     break
 
-                # Read total pages from pagination state (once only)
+                # Read total pages from pagination state (once only, best-effort)
                 if not total_pages_queried:
                     total_pages_queried = True
-                    total_pages = await self._get_total_search_pages()
-                    if total_pages is not None:
-                        logger.debug("LinkedIn reports %d total pages", total_pages)
+                    try:
+                        total_pages = await self._get_total_search_pages()
+                    except Exception as e:
+                        logger.debug("Could not read total pages: %s", e)
+                    else:
+                        if total_pages is not None:
+                            logger.debug("LinkedIn reports %d total pages", total_pages)
 
                 # Extract job IDs from hrefs (page is already loaded)
                 page_ids = await self._extract_job_ids()

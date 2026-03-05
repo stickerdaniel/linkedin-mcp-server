@@ -143,8 +143,7 @@ async def scroll_job_sidebar(
             }
 
             if (!container || container === document.body) {
-                console.debug('[scroll_job_sidebar] no scrollable container found');
-                return 0;
+                return -1;
             }
 
             let scrollCount = 0;
@@ -159,7 +158,9 @@ async def scroll_job_sidebar(
         }""",
         {"pauseTime": pause_time, "maxScrolls": max_scrolls},
     )
-    if scrolled:
+    if scrolled == -1:
+        logger.debug("No scrollable container found for job sidebar")
+    elif scrolled:
         logger.debug("Scrolled job sidebar %d times", scrolled)
 
 
