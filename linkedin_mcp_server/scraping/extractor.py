@@ -450,8 +450,11 @@ class LinkedInExtractor:
                 page_ids = await self._extract_job_ids()
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
-                if not new_ids and page_num > 0:
-                    logger.debug("No new job IDs on page %d, stopping", page_num + 1)
+                if not new_ids:
+                    if page_num > 0:
+                        logger.debug(
+                            "No new job IDs on page %d, stopping", page_num + 1
+                        )
                     break
 
                 for jid in new_ids:
