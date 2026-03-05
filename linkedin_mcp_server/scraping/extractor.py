@@ -555,6 +555,7 @@ class LinkedInExtractor:
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
                 if not new_ids:
+                    page_texts.append(text)
                     logger.debug("No new job IDs on page %d, stopping", page_num + 1)
                     break
 
