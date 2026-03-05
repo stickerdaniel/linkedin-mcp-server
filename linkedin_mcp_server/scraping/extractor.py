@@ -29,8 +29,6 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 # Returned as section text when LinkedIn rate-limits the page
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
-# Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
-# Everything from the earliest match onwards is stripped.
 # LinkedIn shows 25 results per page
 _PAGE_SIZE = 25
 
@@ -72,6 +70,8 @@ def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
     return ",".join(mapping.get(p, p) for p in parts)
 
 
+# Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
+# Everything from the earliest match onwards is stripped.
 _NOISE_MARKERS: list[re.Pattern[str]] = [
     # Footer nav links: "About" immediately followed by "Accessibility" or "Talent Solutions"
     re.compile(r"^About\n+(?:Accessibility|Talent Solutions)", re.MULTILINE),
@@ -407,6 +407,11 @@ class LinkedInExtractor:
         raw = raw_result["text"]
         if raw_result["source"] == "body":
             logger.debug("No <main> at evaluation time on %s, using body fallback", url)
+        elif not main_found:
+            logger.debug(
+                "<main> appeared after wait timeout on %s, sidebar scroll was skipped",
+                url,
+            )
 
         if not raw:
             return ""
