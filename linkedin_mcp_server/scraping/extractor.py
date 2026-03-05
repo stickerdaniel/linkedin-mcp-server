@@ -385,13 +385,16 @@ class LinkedInExtractor:
         await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await detect_rate_limit(self._page)
 
+        main_found = True
         try:
             await self._page.wait_for_selector("main", timeout=5000)
         except PlaywrightTimeoutError:
             logger.debug("No <main> element found on %s", url)
+            main_found = False
 
         await handle_modal_close(self._page)
-        await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
+        if main_found:
+            await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
 
         raw = await self._page.evaluate(
             """() => {
@@ -524,11 +527,7 @@ class LinkedInExtractor:
         for page_num in range(max_pages):
             # Stop if we already know we've reached the last page
             if total_pages is not None and page_num >= total_pages:
-                logger.debug(
-                    "Reached last page (%d of %d), stopping",
-                    page_num + 1,
-                    total_pages,
-                )
+                logger.debug("All %d pages fetched, stopping", total_pages)
                 break
 
             if page_num > 0:
