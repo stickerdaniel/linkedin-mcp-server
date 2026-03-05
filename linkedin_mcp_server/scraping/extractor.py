@@ -402,6 +402,8 @@ class LinkedInExtractor:
                 return main ? main.innerText : document.body.innerText;
             }"""
         )
+        if not main_found:
+            logger.debug("No <main> at evaluation time on %s, using body fallback", url)
 
         if not raw:
             return ""
