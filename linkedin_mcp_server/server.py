@@ -6,7 +6,7 @@ person profiles, company data, job information, and session management capabilit
 """
 
 import logging
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator
 
 from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan
@@ -33,6 +33,7 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
 @lifespan
 async def auth_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Validate authentication profile exists at startup."""
+    logger.info("Validating LinkedIn authentication...")
     get_authentication_source()
     yield {}
 
@@ -56,7 +57,7 @@ def create_mcp_server() -> FastMCP:
         annotations={"destructiveHint": True},
         tags={"session"},
     )
-    async def close_session() -> Dict[str, Any]:
+    async def close_session() -> dict[str, Any]:
         """Close the current browser session and clean up resources."""
         try:
             await close_browser()
