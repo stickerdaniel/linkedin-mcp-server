@@ -310,6 +310,82 @@ class LinkedInExtractor:
             }"""
         )
 
+    async def _extract_search_page(self, url: str) -> str:
+        """Extract innerText from a job search page with soft rate-limit retry.
+
+        Mirrors the noise-only detection and single-retry behavior of
+        ``extract_page`` / ``_extract_page_once`` so that callers get a
+        ``_RATE_LIMITED_MSG`` sentinel instead of silent empty results.
+        """
+        try:
+            result = await self._extract_search_page_once(url)
+            if result != _RATE_LIMITED_MSG:
+                return result
+
+            logger.info(
+                "Retrying search page %s after %.0fs backoff",
+                url,
+                _RATE_LIMIT_RETRY_DELAY,
+            )
+            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            return await self._extract_search_page_once(url)
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to extract search page %s: %s", url, e)
+            return ""
+
+    async def _extract_search_page_once(self, url: str) -> str:
+        """Single attempt to navigate, scroll sidebar, and extract innerText."""
+        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=5000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s", url)
+
+        await handle_modal_close(self._page)
+        await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
+
+        raw = await self._page.evaluate(
+            """() => {
+                const main = document.querySelector('main');
+                return main ? main.innerText : document.body.innerText;
+            }"""
+        )
+
+        if not raw:
+            return ""
+        cleaned = strip_linkedin_noise(raw)
+        if not cleaned and raw.strip():
+            logger.warning(
+                "Search page %s returned only LinkedIn chrome (likely rate-limited)",
+                url,
+            )
+            return _RATE_LIMITED_MSG
+        return cleaned
+
+    async def _get_total_search_pages(self) -> int | None:
+        """Read total page count from LinkedIn's pagination state element.
+
+        Parses the "Page X of Y" text from ``.jobs-search-pagination__page-state``.
+        Returns ``None`` when the element is absent or unparseable.
+        """
+        text = await self._page.evaluate(
+            """() => {
+                const el = document.querySelector(
+                    '.jobs-search-pagination__page-state'
+                );
+                return el ? el.innerText.trim() : null;
+            }"""
+        )
+        if not text:
+            return None
+        match = re.search(r"of\s+(\d+)", text)
+        return int(match.group(1)) if match else None
+
     async def search_jobs(
         self,
         keywords: str,
@@ -319,7 +395,8 @@ class LinkedInExtractor:
         """Search for jobs with pagination and job ID extraction.
 
         Scrolls the job sidebar (not the main page) and paginates through
-        results. Stops early when a page yields no new job IDs.
+        results. Uses LinkedIn's "Page X of Y" indicator to cap pagination,
+        and stops early when a page yields no new job IDs.
 
         Args:
             keywords: Search keywords
@@ -329,6 +406,9 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {search_results: text}, job_ids: [str]}
         """
+        # LinkedIn shows 25 results per page
+        _PAGE_SIZE = 25
+
         max_pages = max(1, min(10, max_pages))
 
         params = f"keywords={quote_plus(keywords)}"
@@ -339,26 +419,34 @@ class LinkedInExtractor:
         all_job_ids: list[str] = []
         seen_ids: set[str] = set()
         page_texts: list[str] = []
+        total_pages: int | None = None
 
         for page_num in range(max_pages):
+            # Stop if we already know we've reached the last page
+            if total_pages is not None and page_num >= total_pages:
+                logger.debug(
+                    "Reached last page (%d of %d), stopping",
+                    page_num,
+                    total_pages,
+                )
+                break
+
             if page_num > 0:
                 await asyncio.sleep(_NAV_DELAY)
 
-            url = base_url if page_num == 0 else f"{base_url}&start={len(seen_ids)}"
+            offset = page_num * _PAGE_SIZE
+            url = base_url if page_num == 0 else f"{base_url}&start={offset}"
 
             try:
-                await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await detect_rate_limit(self._page)
+                text = await self._extract_search_page(url)
 
-                try:
-                    await self._page.wait_for_selector("main", timeout=5000)
-                except PlaywrightTimeoutError:
-                    logger.debug("No <main> element found on %s", url)
+                # Read total pages from pagination state (e.g. "Page 1 of 40")
+                if total_pages is None:
+                    total_pages = await self._get_total_search_pages()
+                    if total_pages is not None:
+                        logger.debug("LinkedIn reports %d total pages", total_pages)
 
-                await handle_modal_close(self._page)
-                await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
-
-                # Extract job IDs from hrefs
+                # Extract job IDs from hrefs (page is already loaded)
                 page_ids = await self._extract_job_ids()
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
@@ -370,17 +458,8 @@ class LinkedInExtractor:
                     seen_ids.add(jid)
                     all_job_ids.append(jid)
 
-                # Extract innerText
-                raw = await self._page.evaluate(
-                    """() => {
-                        const main = document.querySelector('main');
-                        return main ? main.innerText : document.body.innerText;
-                    }"""
-                )
-                if raw:
-                    cleaned = strip_linkedin_noise(raw)
-                    if cleaned:
-                        page_texts.append(cleaned)
+                if text and text != _RATE_LIMITED_MSG:
+                    page_texts.append(text)
 
             except LinkedInScraperException:
                 raise
