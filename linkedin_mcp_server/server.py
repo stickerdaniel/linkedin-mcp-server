@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan
 
+from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.authentication import get_authentication_source
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -53,7 +54,7 @@ def create_mcp_server() -> FastMCP:
 
     # Register session management tool
     @mcp.tool(
-        timeout=90.0,
+        timeout=TOOL_TIMEOUT_SECONDS,
         title="Close Session",
         annotations={"destructiveHint": True},
         tags={"session"},
