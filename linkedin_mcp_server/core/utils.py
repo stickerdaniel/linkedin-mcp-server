@@ -119,6 +119,13 @@ async def scroll_job_sidebar(
         pause_time: Time to pause between scrolls (seconds)
         max_scrolls: Maximum number of scroll attempts
     """
+    # Wait for at least one job card link to render before scrolling
+    try:
+        await page.wait_for_selector('a[href*="/jobs/view/"]', timeout=5000)
+    except PlaywrightTimeoutError:
+        logger.debug("No job card links found, skipping sidebar scroll")
+        return
+
     scrolled = await page.evaluate(
         """async ({pauseTime, maxScrolls}) => {
             const link = document.querySelector('a[href*="/jobs/view/"]');
