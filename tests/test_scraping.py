@@ -578,6 +578,8 @@ class TestSearchJobs:
     async def test_stops_at_total_pages(self, mock_page):
         """Should stop when total_pages from pagination state is reached."""
         extractor = LinkedInExtractor(mock_page)
+        # Distinct IDs per page so the no-new-IDs guard never fires
+        id_pages = iter([["100"], ["200"]])
         with (
             patch.object(
                 extractor,
@@ -589,7 +591,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                return_value=["100"],
+                side_effect=lambda: next(id_pages),
             ),
             patch.object(
                 extractor,
@@ -606,7 +608,7 @@ class TestSearchJobs:
 
         # Should only visit 2 pages despite max_pages=10
         assert mock_extract.await_count == 2
-        assert "job_ids" in result
+        assert result["job_ids"] == ["100", "200"]
 
     async def test_max_pages_clamped(self, mock_page):
         """max_pages should be clamped to 1-10 range."""
