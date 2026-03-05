@@ -65,6 +65,13 @@ _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
+
+def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
+    """Normalize a comma-separated filter value using the provided mapping."""
+    parts = [v.strip() for v in value.split(",")]
+    return ",".join(mapping.get(p, p) for p in parts)
+
+
 _NOISE_MARKERS: list[re.Pattern[str]] = [
     # Footer nav links: "About" immediately followed by "Accessibility" or "Talent Solutions"
     re.compile(r"^About\n+(?:Accessibility|Talent Solutions)", re.MULTILINE),
@@ -440,10 +447,6 @@ class LinkedInExtractor:
         params = f"keywords={quote_plus(keywords)}"
         if location:
             params += f"&location={quote_plus(location)}"
-
-        def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
-            parts = [v.strip() for v in value.split(",")]
-            return ",".join(mapping.get(p, p) for p in parts)
 
         if date_posted:
             params += f"&f_TPR={_normalize_csv(date_posted, _DATE_POSTED_MAP)}"
