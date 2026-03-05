@@ -9,7 +9,7 @@ from linkedin_mcp_server.scraping import LinkedInExtractor
 
 
 async def get_extractor() -> LinkedInExtractor:
-    """Authenticate, acquire the singleton browser, and return a ready extractor.
+    """Acquire the singleton browser, authenticate, and return a ready extractor.
 
     Known LinkedIn exceptions are converted to structured ToolError responses
     via raise_tool_error(); unexpected exceptions propagate as-is.
