@@ -258,6 +258,7 @@ class TestJobTools:
 
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
+        from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
         from linkedin_mcp_server.server import create_mcp_server
 
         mcp = create_mcp_server()
@@ -275,4 +276,4 @@ class TestToolTimeouts:
         for name in tool_names:
             tool = await mcp.get_tool(name)
             assert tool is not None
-            assert tool.timeout == 90.0
+            assert tool.timeout == TOOL_TIMEOUT_SECONDS
