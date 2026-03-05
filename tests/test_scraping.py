@@ -11,6 +11,93 @@ from linkedin_mcp_server.scraping.extractor import (
 )
 
 
+class TestBuildJobSearchUrl:
+    """Tests for _build_job_search_url URL construction."""
+
+    def test_keywords_only(self):
+        url = LinkedInExtractor._build_job_search_url("python developer")
+        assert url == "https://www.linkedin.com/jobs/search/?keywords=python+developer"
+
+    def test_with_location(self):
+        url = LinkedInExtractor._build_job_search_url("python", location="Remote")
+        assert "keywords=python" in url
+        assert "location=Remote" in url
+
+    def test_date_posted_normalization(self):
+        url = LinkedInExtractor._build_job_search_url("python", date_posted="past_week")
+        assert "f_TPR=r604800" in url
+
+    def test_date_posted_passthrough(self):
+        url = LinkedInExtractor._build_job_search_url("python", date_posted="r3600")
+        assert "f_TPR=r3600" in url
+
+    def test_experience_level_normalization(self):
+        url = LinkedInExtractor._build_job_search_url(
+            "python", experience_level="entry"
+        )
+        assert "f_E=2" in url
+
+    def test_experience_level_csv(self):
+        url = LinkedInExtractor._build_job_search_url(
+            "python", experience_level="entry,director"
+        )
+        assert "f_E=2,5" in url
+
+    def test_work_type_normalization(self):
+        url = LinkedInExtractor._build_job_search_url("python", work_type="remote")
+        assert "f_WT=2" in url
+
+    def test_work_type_csv(self):
+        url = LinkedInExtractor._build_job_search_url(
+            "python", work_type="on_site,hybrid"
+        )
+        assert "f_WT=1,3" in url
+
+    def test_easy_apply(self):
+        url = LinkedInExtractor._build_job_search_url("python", easy_apply=True)
+        assert "f_EA=true" in url
+
+    def test_easy_apply_false_omitted(self):
+        url = LinkedInExtractor._build_job_search_url("python", easy_apply=False)
+        assert "f_EA" not in url
+
+    def test_sort_by_normalization(self):
+        url = LinkedInExtractor._build_job_search_url("python", sort_by="date")
+        assert "sortBy=DD" in url
+
+    def test_job_type_normalization(self):
+        url = LinkedInExtractor._build_job_search_url("python", job_type="full_time")
+        assert "f_JT=F" in url
+
+    def test_job_type_csv(self):
+        url = LinkedInExtractor._build_job_search_url(
+            "python", job_type="full_time,contract"
+        )
+        assert "f_JT=F,C" in url
+
+    def test_job_type_passthrough(self):
+        url = LinkedInExtractor._build_job_search_url("python", job_type="F")
+        assert "f_JT=F" in url
+
+    def test_all_filters_combined(self):
+        url = LinkedInExtractor._build_job_search_url(
+            "python",
+            location="Berlin",
+            date_posted="past_week",
+            experience_level="entry,mid_senior",
+            work_type="remote",
+            easy_apply=True,
+            sort_by="date",
+        )
+        assert "keywords=python" in url
+        assert "location=Berlin" in url
+        assert "f_TPR=r604800" in url
+        assert "f_E=2,4" in url
+        assert "f_WT=2" in url
+        assert "f_EA=true" in url
+        assert "sortBy=DD" in url
+
+
 @pytest.fixture
 def mock_page():
     """Create a mock Patchright page."""
@@ -433,21 +520,433 @@ class TestScrapeJob:
         assert "pages_visited" not in result
         assert "sections_requested" not in result
 
-    async def test_search_jobs(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
-        with patch.object(
-            extractor,
-            "extract_page",
-            new_callable=AsyncMock,
-            return_value="Job 1\nJob 2",
-        ):
-            result = await extractor.search_jobs("python", "Remote")
 
+class TestSearchJobs:
+    """Tests for search_jobs with job ID extraction and pagination."""
+
+    @pytest.fixture(autouse=True)
+    def _set_search_url(self, mock_page):
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=python"
+
+    async def test_returns_job_ids(self, mock_page):
+        """search_jobs should return a job_ids list extracted from hrefs."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value="Job 1\nJob 2\nJob 3",
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111", "222", "333"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["job_ids"] == ["111", "222", "333"]
+        assert "search_results" in result["sections"]
+
+    async def test_pagination_uses_fixed_page_size(self, mock_page):
+        """Pages use &start= with fixed 25-per-page offset."""
+        extractor = LinkedInExtractor(mock_page)
+        page1_ids = ["100", "200", "300"]
+        page2_ids = ["400", "500"]
+        id_pages = iter([page1_ids, page2_ids])
+        text_pages = iter(["Page 1 text", "Page 2 text"])
+        urls_visited: list[str] = []
+
+        async def mock_extract(url):
+            urls_visited.append(url)
+            return next(text_pages)
+
+        with (
+            patch.object(extractor, "_extract_search_page", side_effect=mock_extract),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=2)
+
+        assert result["job_ids"] == ["100", "200", "300", "400", "500"]
+        assert len(urls_visited) == 2
+        assert "&start=25" in urls_visited[1]
+
+    async def test_deduplication_across_pages(self, mock_page):
+        """Duplicate job IDs across pages should be deduplicated."""
+        extractor = LinkedInExtractor(mock_page)
+        id_pages = iter([["100", "200"], ["200", "300"]])
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value="text",
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=2)
+
+        assert result["job_ids"] == ["100", "200", "300"]
+        assert mock_extract.await_count == 2
+
+    async def test_early_stop_no_new_ids(self, mock_page):
+        """Should stop early when a page yields no new job IDs."""
+        extractor = LinkedInExtractor(mock_page)
+        # Page 2 returns same IDs as page 1
+        id_pages = iter([["100", "200"], ["100", "200"]])
+        extract_call_count = 0
+
+        async def mock_extract(url):
+            nonlocal extract_call_count
+            extract_call_count += 1
+            return "text"
+
+        with (
+            patch.object(extractor, "_extract_search_page", side_effect=mock_extract),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=5)
+
+        assert result["job_ids"] == ["100", "200"]
+        assert extract_call_count == 2
+
+    async def test_stops_at_total_pages(self, mock_page):
+        """Should stop when total_pages from pagination state is reached."""
+        extractor = LinkedInExtractor(mock_page)
+        # Distinct IDs per page so the no-new-IDs guard never fires
+        id_pages = iter([["100"], ["200"]])
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value="text",
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=2,
+            ) as mock_total_pages,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=10)
+
+        # Should only visit 2 pages despite max_pages=10
+        assert mock_extract.await_count == 2
+        assert mock_total_pages.await_count == 1
+        assert result["job_ids"] == ["100", "200"]
+
+    async def test_zero_max_pages_fetches_nothing(self, mock_page):
+        """max_pages=0 should fetch zero pages (validation at tool boundary)."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value="text",
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=0)
+
+        assert result["job_ids"] == []
+        assert mock_extract.await_count == 0
+
+    async def test_single_page(self, mock_page):
+        """max_pages=1 should only visit one page; filters appear in URL."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value="Job posting text",
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["42"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs(
+                "python",
+                "Remote",
+                max_pages=1,
+                date_posted="past_week",
+                work_type="remote",
+                easy_apply=True,
+            )
+
+        assert result["job_ids"] == ["42"]
         assert "keywords=python" in result["url"]
         assert "location=Remote" in result["url"]
-        assert "search_results" in result["sections"]
-        assert "pages_visited" not in result
-        assert "sections_requested" not in result
+        assert "f_TPR=r604800" in result["url"]
+        assert "f_WT=2" in result["url"]
+        assert "f_EA=true" in result["url"]
+        assert mock_extract.await_count == 1
+
+    async def test_page_texts_joined_with_separator(self, mock_page):
+        """Multiple pages should join text with --- separator."""
+        extractor = LinkedInExtractor(mock_page)
+        text_pages = iter(["Page 1 content", "Page 2 content"])
+        id_pages = iter([["100"], ["200"]])
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                side_effect=lambda url: next(text_pages),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=2)
+
+        assert "\n---\n" in result["sections"]["search_results"]
+        assert "Page 1 content" in result["sections"]["search_results"]
+        assert "Page 2 content" in result["sections"]["search_results"]
+        assert mock_extract.await_count == 2
+
+    async def test_empty_results(self, mock_page):
+        """Should handle empty results gracefully and skip ID extraction."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("nonexistent_xyz")
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        # Empty text should skip ID extraction to avoid stale DOM
+        mock_ids.assert_not_awaited()
+
+    async def test_no_ids_on_first_page_captures_text(self, mock_page):
+        """Non-empty text with zero job IDs should be returned in sections."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value="No matching jobs found",
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("xyzzy123", max_pages=1)
+
+        assert result["job_ids"] == []
+        assert result["sections"]["search_results"] == "No matching jobs found"
+
+    async def test_url_redirect_skips_id_extraction(self, mock_page):
+        """Unexpected page URL should skip ID extraction but capture text."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/uas/login"
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value="Login page content",
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=2)
+
+        mock_ids.assert_not_awaited()
+        assert result["job_ids"] == []
+        assert result["sections"]["search_results"] == "Login page content"
+
+    async def test_rate_limited_skips_ids_and_text(self, mock_page):
+        """Rate-limited pages should yield no IDs or text."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=_RATE_LIMITED_MSG,
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["100"],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        mock_ids.assert_not_awaited()
 
 
 class TestStripLinkedInNoise:

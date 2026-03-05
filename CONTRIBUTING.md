@@ -124,6 +124,16 @@ When adding an entirely new MCP tool (e.g., `search_companies`):
 4. Open a PR — AI agents review first, then manual review
 5. Don't squash commits on merge
 
+## Scraping Philosophy: Minimize DOM Dependence
+
+This project favours **innerText extraction and URL navigation** over DOM selectors. LinkedIn's markup changes frequently — class names, `data-` attributes, and component structure are unstable. Our scraping engine is deliberately built to survive those changes:
+
+- **Prefer `innerText`** over `querySelector` / DOM walking for data extraction.
+- **Prefer URL navigation** (e.g. `/details/experience/`) over clicking UI elements.
+- **When DOM access is unavoidable** (e.g. extracting `href` attributes that don't appear in innerText, finding a scrollable container), keep selectors minimal and generic. Favour tag + attribute patterns (`a[href*="/jobs/view/"]`) over class names (`.jobs-search-results-list`).
+- **Never scope queries to layout-specific containers** like `.jobs-search-results-list` — these break silently when LinkedIn redesigns. Use `main` as the broadest acceptable scope.
+- **Document any DOM dependency** with a comment explaining why innerText/URL navigation isn't sufficient.
+
 ## Code Style
 
 - **Commits:** conventional commits — `type(scope): subject` (see [CLAUDE.md](CLAUDE.md) for details)
