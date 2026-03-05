@@ -275,4 +275,4 @@ class TestToolTimeouts:
         for name in tool_names:
             tool = await mcp.get_tool(name)
             assert tool is not None
-            assert tool.timeout == 60.0
+            assert tool.timeout == 90.0
