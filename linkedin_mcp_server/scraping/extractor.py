@@ -563,6 +563,16 @@ class LinkedInExtractor:
                             logger.debug("LinkedIn reports %d total pages", total_pages)
 
                 # Extract job IDs from hrefs (page is already loaded)
+                if not self._page.url.startswith(
+                    "https://www.linkedin.com/jobs/search/"
+                ):
+                    logger.debug(
+                        "Unexpected page URL after extraction: %s — "
+                        "skipping job ID extraction",
+                        self._page.url,
+                    )
+                    page_texts.append(text)
+                    break
                 page_ids = await self._extract_job_ids()
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
