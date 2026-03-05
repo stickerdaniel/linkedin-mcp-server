@@ -99,7 +99,9 @@ def register_job_tools(mcp: FastMCP) -> None:
                 progress=0, total=100, message="Starting job search"
             )
 
-            result = await extractor.search_jobs(keywords, location, max_pages)
+            result = await extractor.search_jobs(
+                keywords, location=location, max_pages=max_pages
+            )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
