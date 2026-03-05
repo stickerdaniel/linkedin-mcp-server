@@ -992,3 +992,102 @@ class TestStripLinkedInNoise:
             "Select language\nEnglish (English)\nDeutsch (German)"
         )
         assert strip_linkedin_noise(text) == "Company info"
+
+
+class TestActivityFeedExtraction:
+    """Tests for activity page detection and wait behavior in _extract_page_once."""
+
+    async def test_activity_page_waits_for_content_and_uses_slow_scroll(
+        self, mock_page
+    ):
+        """Activity URLs should call wait_for_function and use slower scroll params."""
+        mock_page.evaluate = AsyncMock(return_value="Post content " * 50)
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/recent-activity/all/"
+            )
+
+        mock_page.wait_for_function.assert_awaited_once()
+        mock_scroll.assert_awaited_once()
+        _, kwargs = mock_scroll.call_args
+        assert kwargs["pause_time"] == 1.0
+        assert kwargs["max_scrolls"] == 10
+        assert len(result) > 200
+
+    async def test_non_activity_page_skips_wait_and_uses_fast_scroll(self, mock_page):
+        """Non-activity URLs should not call wait_for_function and use fast scroll."""
+        mock_page.evaluate = AsyncMock(return_value="Profile text")
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/details/experience/"
+            )
+
+        mock_page.wait_for_function.assert_not_awaited()
+        mock_scroll.assert_awaited_once()
+        _, kwargs = mock_scroll.call_args
+        assert kwargs["pause_time"] == 0.5
+        assert kwargs["max_scrolls"] == 5
+
+    async def test_activity_page_timeout_proceeds_gracefully(self, mock_page):
+        """When activity feed content never loads, extraction proceeds with available text."""
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        tab_headers = "All activity\nPosts\nComments\nVideos\nImages"
+        mock_page.evaluate = AsyncMock(return_value=tab_headers)
+        mock_page.wait_for_function = AsyncMock(
+            side_effect=PlaywrightTimeoutError("Timeout")
+        )
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/recent-activity/all/"
+            )
+
+        # Should return whatever text is available, not crash
+        assert result == tab_headers
