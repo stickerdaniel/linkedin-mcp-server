@@ -48,6 +48,11 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `get_job_details` | Get detailed information about a specific job posting | Working |
 | `close_session` | Close browser session and clean up resources | Working |
 
+### Execution Timeouts
+
+- All MCP tools have a built-in FastMCP execution timeout of `60` seconds.
+- This is separate from CLI/env `--timeout` / `TIMEOUT`, which controls browser page operation timeout in milliseconds.
+
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
 
