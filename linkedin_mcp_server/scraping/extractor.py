@@ -454,7 +454,7 @@ class LinkedInExtractor:
             params += f"&location={quote_plus(location)}"
 
         if date_posted:
-            params += f"&f_TPR={_normalize_csv(date_posted, _DATE_POSTED_MAP)}"
+            params += f"&f_TPR={_DATE_POSTED_MAP.get(date_posted.strip(), date_posted)}"
         if job_type:
             params += f"&f_JT={_normalize_csv(job_type, _JOB_TYPE_MAP)}"
         if experience_level:
@@ -464,7 +464,7 @@ class LinkedInExtractor:
         if easy_apply:
             params += "&f_EA=true"
         if sort_by:
-            params += f"&sortBy={_normalize_csv(sort_by, _SORT_BY_MAP)}"
+            params += f"&sortBy={_SORT_BY_MAP.get(sort_by.strip(), sort_by)}"
 
         return f"https://www.linkedin.com/jobs/search/?{params}"
 
@@ -514,6 +514,7 @@ class LinkedInExtractor:
         seen_ids: set[str] = set()
         page_texts: list[str] = []
         total_pages: int | None = None
+        total_pages_queried = False
 
         for page_num in range(max_pages):
             # Stop if we already know we've reached the last page
@@ -538,8 +539,9 @@ class LinkedInExtractor:
                     # Navigation failed or rate-limited; skip ID extraction
                     break
 
-                # Read total pages from pagination state (e.g. "Page 1 of 40")
-                if total_pages is None:
+                # Read total pages from pagination state (once only)
+                if not total_pages_queried:
+                    total_pages_queried = True
                     total_pages = await self._get_total_search_pages()
                     if total_pages is not None:
                         logger.debug("LinkedIn reports %d total pages", total_pages)
@@ -556,8 +558,7 @@ class LinkedInExtractor:
                     seen_ids.add(jid)
                     all_job_ids.append(jid)
 
-                if text != _RATE_LIMITED_MSG:
-                    page_texts.append(text)
+                page_texts.append(text)
 
             except LinkedInScraperException:
                 raise
