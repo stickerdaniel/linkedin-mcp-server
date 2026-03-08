@@ -179,6 +179,8 @@ class TestExtractPage:
         assert await_args is not None
         script = await_args.args[0]
         assert "MAX_HEADING_CONTAINERS = 300" in script
+        assert "const getPreviousHeading = node =>" in script
+        assert "index < 3" in script
         assert "if (!rawHref || rawHref === '#')" in script
         assert "in_list" not in script
         assert ".filter(Boolean);" in script
