@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
@@ -113,6 +114,7 @@ def mock_page():
     """Create a mock Patchright page."""
     page = MagicMock()
     page.goto = AsyncMock()
+    page.title = AsyncMock(return_value="LinkedIn")
     page.wait_for_selector = AsyncMock()
     page.evaluate = AsyncMock(
         return_value={"source": "root", "text": "Sample page text", "references": []}
@@ -192,6 +194,20 @@ class TestExtractPage:
         result = await extractor.extract_page("https://www.linkedin.com/in/bad/")
         assert result.text == ""
         assert result.references == []
+
+    async def test_extract_page_raises_auth_error_for_account_picker(self, mock_page):
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value="auth barrier text: welcome back + sign in using another account",
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor.extract_page("https://www.linkedin.com/in/testuser/")
 
     async def test_rate_limit_detected(self, mock_page):
         from linkedin_mcp_server.core.exceptions import RateLimitError
@@ -290,6 +306,24 @@ class TestExtractPage:
             )
 
         assert result.text == "Education\nHarvard University\n1973 – 1975"
+
+    async def test_extract_search_page_raises_auth_error_for_login_barrier(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+                side_effect=AuthenticationError("Run with --login"),
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page_once(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
 
 
 class TestScrapePersonUrls:
