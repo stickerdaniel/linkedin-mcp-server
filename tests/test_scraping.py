@@ -178,7 +178,9 @@ class TestExtractPage:
         await_args = mock_page.evaluate.await_args
         assert await_args is not None
         script = await_args.args[0]
+        assert "MAX_HEADING_CONTAINERS = 300" in script
         assert "if (!rawHref || rawHref === '#')" in script
+        assert "in_list" not in script
         assert ".filter(Boolean);" in script
 
     async def test_extract_page_returns_empty_on_failure(self, mock_page):
@@ -475,7 +477,7 @@ class TestScrapePersonUrls:
                         [
                             {
                                 "kind": "article",
-                                "url": "/pulse/test-post",
+                                "url": "/pulse/test-post/",
                                 "text": "Test post",
                             }
                         ],
@@ -500,7 +502,7 @@ class TestScrapePersonUrls:
                 {"kind": "person", "url": "/in/testuser/", "text": "Test User"}
             ],
             "posts": [
-                {"kind": "article", "url": "/pulse/test-post", "text": "Test post"}
+                {"kind": "article", "url": "/pulse/test-post/", "text": "Test post"}
             ],
         }
 
