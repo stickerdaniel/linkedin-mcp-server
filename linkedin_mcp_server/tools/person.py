@@ -47,7 +47,7 @@ def register_person_tools(mcp: FastMCP) -> None:
                 Default (None) scrapes only the main profile page.
 
         Returns:
-            Dict with url and sections (name -> raw text).
+            Dict with url, sections (name -> raw text), and optional references.
             Sections may be absent if extraction yielded no content for that page.
             Includes unknown_sections list when unrecognised names are passed.
             The LLM should parse the raw text in each section.
@@ -98,7 +98,7 @@ def register_person_tools(mcp: FastMCP) -> None:
             location: Optional location filter (e.g., "New York", "Remote")
 
         Returns:
-            Dict with url and sections (name -> raw text).
+            Dict with url, sections (name -> raw text), and optional references.
             The LLM should parse the raw text to extract individual people and their profiles.
         """
         try:
