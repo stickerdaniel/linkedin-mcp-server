@@ -237,7 +237,7 @@ def choose_reference_text(
     if not candidates:
         return None
 
-    candidates.sort(key=lambda item: (len(item[1]), item[0]))
+    candidates.sort(key=lambda item: (_label_sort_key(item[1]), item[0], len(item[1])))
     return candidates[0][1]
 
 
@@ -268,6 +268,8 @@ def clean_label(value: str, kind: ReferenceKind) -> str | None:
     if _CONNECTIONS_FOLLOW_RE.search(value):
         return None
     if value.lower() in _GENERIC_LABELS:
+        return None
+    if len(value) < 2:
         return None
     if len(value) > 80:
         return None
@@ -352,6 +354,11 @@ def _reference_score(reference: Reference) -> tuple[int, int, int]:
         1 if context else 0,
         -(len(text) if text else 999),
     )
+
+
+def _label_sort_key(label: str) -> tuple[int, int]:
+    """Prefer concise labels, but avoid low-signal 1-2 character strings."""
+    return (1 if len(label) < 3 else 0, len(label))
 
 
 def _is_linkedin_chrome(path: str) -> bool:
