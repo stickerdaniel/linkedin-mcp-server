@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, Required, TypedDict
 from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 
 ReferenceKind = Literal[
@@ -18,13 +18,13 @@ ReferenceKind = Literal[
 ]
 
 
-class Reference(TypedDict, total=False):
+class Reference(TypedDict):
     """Compact reference payload returned to MCP clients."""
 
-    kind: ReferenceKind
-    url: str
-    text: str
-    context: str
+    kind: Required[ReferenceKind]
+    url: Required[str]
+    text: NotRequired[str]
+    context: NotRequired[str]
 
 
 class RawReference(TypedDict, total=False):
@@ -108,25 +108,16 @@ def build_references(
     section_name: str,
 ) -> list[Reference]:
     """Filter and normalize raw DOM anchors into compact references."""
-    deduped: dict[str, Reference] = {}
-    ordered_urls: list[str] = []
     cap = _REFERENCE_CAPS.get(section_name, 12)
+    normalized_references: list[Reference] = []
 
     for raw in raw_references:
         normalized = normalize_reference(raw, section_name)
         if normalized is None:
             continue
+        normalized_references.append(normalized)
 
-        url = normalized["url"]
-        existing = deduped.get(url)
-        if existing is None:
-            deduped[url] = normalized
-            ordered_urls.append(url)
-            continue
-
-        deduped[url] = _choose_better_reference(existing, normalized)
-
-    return [deduped[url] for url in ordered_urls[:cap]]
+    return dedupe_references(normalized_references, cap=cap)
 
 
 def normalize_reference(
@@ -173,7 +164,8 @@ def normalize_url(href: str) -> str | None:
     if parsed.scheme.lower() in {"blob", "javascript", "mailto", "tel"}:
         return None
 
-    if "linkedin.com" in parsed.netloc.lower() and parsed.path == "/redir/redirect/":
+    host = parsed.netloc.lower()
+    if _is_linkedin_host(host) and parsed.path == "/redir/redirect/":
         target = unquote((parse_qs(parsed.query).get("url") or [""])[0]).strip()
         if not target:
             return None
@@ -191,7 +183,7 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
     host = parsed.netloc.lower()
     path = parsed.path or "/"
 
-    if "linkedin.com" not in host:
+    if not _is_linkedin_host(host):
         return "external", urlunparse(
             (parsed.scheme, parsed.netloc, parsed.path or "/", "", parsed.query, "")
         )
@@ -331,6 +323,27 @@ def _choose_better_reference(existing: Reference, new: Reference) -> Reference:
     return new if new_score > existing_score else existing
 
 
+def dedupe_references(
+    references: list[Reference],
+    cap: int | None = None,
+) -> list[Reference]:
+    """Dedupe references by URL while keeping the cleaner duplicate in order."""
+    deduped: dict[str, Reference] = {}
+    ordered_urls: list[str] = []
+
+    for reference in references:
+        url = reference["url"]
+        existing = deduped.get(url)
+        if existing is None:
+            deduped[url] = reference
+            ordered_urls.append(url)
+            continue
+        deduped[url] = _choose_better_reference(existing, reference)
+
+    ordered = [deduped[url] for url in ordered_urls]
+    return ordered[:cap] if cap is not None else ordered
+
+
 def _reference_score(reference: Reference) -> tuple[int, int, int]:
     text = reference.get("text")
     context = reference.get("context")
@@ -342,18 +355,35 @@ def _reference_score(reference: Reference) -> tuple[int, int, int]:
 
 
 def _is_linkedin_chrome(path: str) -> bool:
-    return any(
-        fragment in path
-        for fragment in (
-            "/help/",
-            "/legal",
-            "/about/",
-            "/accessibility",
-            "/mypreferences/",
-            "/preferences/",
-            "/search/results/",
-            "/overlay/background-photo/",
-            "/overlay/browsemap-recommendations/",
-            "/preload/custom-invite/",
-        )
-    )
+    path = path.split("?", 1)[0].split("#", 1)[0]
+    if not path.startswith("/"):
+        path = f"/{path}"
+
+    segments = [segment for segment in path.split("/") if segment]
+    if not segments:
+        return False
+
+    first = segments[0]
+    second = segments[1] if len(segments) > 1 else ""
+
+    if first in {
+        "help",
+        "legal",
+        "about",
+        "accessibility",
+        "mypreferences",
+        "preferences",
+    }:
+        return True
+    if first == "search" and second == "results":
+        return True
+    if first == "overlay" and second in {
+        "background-photo",
+        "browsemap-recommendations",
+    }:
+        return True
+    return first == "preload" and second == "custom-invite"
+
+
+def _is_linkedin_host(host: str) -> bool:
+    return host == "linkedin.com" or host.endswith(".linkedin.com")
