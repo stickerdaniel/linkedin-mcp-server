@@ -750,6 +750,7 @@ class LinkedInExtractor:
                 const containerSelector = 'section, article, li, div';
                 const headingSelector = 'h1, h2, h3';
                 const directHeadingSelector = ':scope > h1, :scope > h2, :scope > h3';
+                const MAX_HEADING_CONTAINERS = 300;
 
                 const getHeadingText = element => {
                     if (!element) return '';
@@ -772,7 +773,13 @@ class LinkedInExtractor:
                 const text = container ? (container.innerText || '').trim() : '';
                 const headingMap = new WeakMap();
 
-                const candidateContainers = [container, ...container.querySelectorAll(containerSelector)];
+                const candidateContainers = [
+                    container,
+                    ...Array.from(container.querySelectorAll(containerSelector)).slice(
+                        0,
+                        MAX_HEADING_CONTAINERS,
+                    ),
+                ];
                 candidateContainers.forEach(node => {
                     const ownHeading = getHeadingText(node);
                     const previousHeading = getHeadingText(node.previousElementSibling);
@@ -815,7 +822,6 @@ class LinkedInExtractor:
                             title: normalize(anchor.getAttribute('title')),
                             heading: findHeading(anchor),
                             in_article: Boolean(anchor.closest('article')),
-                            in_list: Boolean(anchor.closest('li')),
                             in_nav: Boolean(anchor.closest('nav')),
                             in_footer: Boolean(anchor.closest('footer')),
                         };

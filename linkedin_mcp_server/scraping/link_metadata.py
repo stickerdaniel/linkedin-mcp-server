@@ -36,7 +36,6 @@ class RawReference(TypedDict, total=False):
     title: str
     heading: str
     in_article: bool
-    in_list: bool
     in_nav: bool
     in_footer: bool
 
@@ -212,10 +211,10 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
         return "newsletter", f"/newsletters/{match.group(1)}/"
 
     if match := _PULSE_PATH_RE.match(path):
-        return "article", f"/pulse/{match.group(1)}"
+        return "article", f"/pulse/{match.group(1)}/"
 
     if match := _FEED_PATH_RE.match(path):
-        return "feed_post", f"/feed/update/{match.group(1)}"
+        return "feed_post", f"/feed/update/{match.group(1)}/"
 
     return None
 
