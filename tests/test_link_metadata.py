@@ -44,7 +44,7 @@ class TestBuildReferences:
             },
             {
                 "kind": "article",
-                "url": "/pulse/phone-call-saves-lives-bill-gates-yspvc",
+                "url": "/pulse/phone-call-saves-lives-bill-gates-yspvc/",
                 "text": "A phone call that saves lives",
                 "context": "top card",
             },
@@ -150,7 +150,7 @@ class TestBuildReferences:
         assert references == [
             {
                 "kind": "article",
-                "url": "/pulse/test-post",
+                "url": "/pulse/test-post/",
                 "text": "A phone call that saves lives",
                 "context": "post attachment",
             }
