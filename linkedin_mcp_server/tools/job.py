@@ -41,7 +41,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
 
         Returns:
-            Dict with url and sections (name -> raw text).
+            Dict with url, sections (name -> raw text), and optional references.
             The LLM should parse the raw text to extract job details.
         """
         try:
@@ -97,8 +97,8 @@ def register_job_tools(mcp: FastMCP) -> None:
             sort_by: Sort results (date, relevance)
 
         Returns:
-            Dict with url, sections (name -> raw text), and job_ids (list of
-            numeric job ID strings usable with get_job_details).
+            Dict with url, sections (name -> raw text), job_ids (list of
+            numeric job ID strings usable with get_job_details), and optional references.
         """
         try:
             logger.info(

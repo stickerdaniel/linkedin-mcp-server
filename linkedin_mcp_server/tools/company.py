@@ -47,7 +47,7 @@ def register_company_tools(mcp: FastMCP) -> None:
                 Default (None) scrapes only the about page.
 
         Returns:
-            Dict with url and sections (name -> raw text).
+            Dict with url, sections (name -> raw text), and optional references.
             Includes unknown_sections list when unrecognised names are passed.
             The LLM should parse the raw text in each section.
         """
@@ -95,7 +95,7 @@ def register_company_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
 
         Returns:
-            Dict with url and sections (name -> raw text).
+            Dict with url, sections (name -> raw text), and optional references.
             The LLM should parse the raw text to extract individual posts.
         """
         try:
@@ -106,18 +106,24 @@ def register_company_tools(mcp: FastMCP) -> None:
             )
 
             url = f"https://www.linkedin.com/company/{company_name}/posts/"
-            text = await extractor.extract_page(url)
+            extracted = await extractor.extract_page(url, section_name="posts")
 
             sections: dict[str, str] = {}
-            if text:
-                sections["posts"] = text
+            references: dict[str, Any] = {}
+            if extracted.text:
+                sections["posts"] = extracted.text
+            if extracted.references:
+                references["posts"] = extracted.references
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return {
+            result = {
                 "url": url,
                 "sections": sections,
             }
+            if references:
+                result["references"] = references
+            return result
 
         except Exception as e:
             raise_tool_error(e, "get_company_posts")  # NoReturn
