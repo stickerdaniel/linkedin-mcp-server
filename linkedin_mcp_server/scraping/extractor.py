@@ -16,7 +16,11 @@ from linkedin_mcp_server.core.utils import (
     scroll_job_sidebar,
     scroll_to_bottom,
 )
-from linkedin_mcp_server.scraping.link_metadata import Reference, build_references
+from linkedin_mcp_server.scraping.link_metadata import (
+    Reference,
+    build_references,
+    dedupe_references,
+)
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
 
@@ -694,14 +698,9 @@ class LinkedInExtractor:
             "job_ids": all_job_ids,
         }
         if page_references:
-            deduped_references: list[Reference] = []
-            seen_reference_urls: set[str] = set()
-            for reference in page_references:
-                if reference["url"] in seen_reference_urls:
-                    continue
-                seen_reference_urls.add(reference["url"])
-                deduped_references.append(reference)
-            result["references"] = {"search_results": deduped_references[:15]}
+            result["references"] = {
+                "search_results": dedupe_references(page_references, cap=15)
+            }
         return result
 
     async def search_people(
@@ -782,17 +781,24 @@ class LinkedInExtractor:
                 const container = root || document.body;
                 const text = container ? (container.innerText || '').trim() : '';
 
-                const references = Array.from(container.querySelectorAll('a[href]')).map(anchor => ({
-                    href: anchor.href || anchor.getAttribute('href') || '',
-                    text: normalize(anchor.innerText || anchor.textContent),
-                    aria_label: normalize(anchor.getAttribute('aria-label')),
-                    title: normalize(anchor.getAttribute('title')),
-                    heading: findHeading(anchor, container),
-                    in_article: Boolean(anchor.closest('article')),
-                    in_list: Boolean(anchor.closest('li')),
-                    in_nav: Boolean(anchor.closest('nav')),
-                    in_footer: Boolean(anchor.closest('footer')),
-                }));
+                const references = Array.from(container.querySelectorAll('a[href]')).map(anchor => {
+                    const rawHref = (anchor.getAttribute('href') || '').trim();
+                    const href = rawHref.startsWith('#')
+                        ? rawHref
+                        : (anchor.href || rawHref || '');
+
+                    return {
+                        href,
+                        text: normalize(anchor.innerText || anchor.textContent),
+                        aria_label: normalize(anchor.getAttribute('aria-label')),
+                        title: normalize(anchor.getAttribute('title')),
+                        heading: findHeading(anchor, container),
+                        in_article: Boolean(anchor.closest('article')),
+                        in_list: Boolean(anchor.closest('li')),
+                        in_nav: Boolean(anchor.closest('nav')),
+                        in_footer: Boolean(anchor.closest('footer')),
+                    };
+                });
 
                 return { source, text, references };
             }""",
