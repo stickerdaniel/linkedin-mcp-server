@@ -2,12 +2,32 @@
 
 import asyncio
 import logging
+import re
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from .exceptions import AuthenticationError
 
 logger = logging.getLogger(__name__)
+
+_AUTH_BLOCKER_URL_PATTERNS = (
+    "/login",
+    "/authwall",
+    "/checkpoint",
+    "/challenge",
+    "/uas/login",
+    "/uas/consumer-email-challenge",
+)
+_LOGIN_TITLE_PATTERNS = (
+    "linkedin login",
+    "sign in | linkedin",
+)
+_AUTH_BARRIER_TEXT_MARKERS = (
+    ("welcome back", "sign in using another account"),
+    ("welcome back", "join now"),
+    ("choose an account",),
+    ("continue as",),
+)
 
 
 async def warm_up_browser(page: Page) -> None:
@@ -49,15 +69,7 @@ async def is_logged_in(page: Page) -> bool:
         current_url = page.url
 
         # Step 1: Fail-fast on auth blockers
-        auth_blockers = [
-            "/login",
-            "/authwall",
-            "/checkpoint",
-            "/challenge",
-            "/uas/login",
-            "/uas/consumer-email-challenge",
-        ]
-        if any(pattern in current_url for pattern in auth_blockers):
+        if any(pattern in current_url for pattern in _AUTH_BLOCKER_URL_PATTERNS):
             return False
 
         # Step 2: Selector check (PRIMARY)
@@ -90,6 +102,44 @@ async def is_logged_in(page: Page) -> bool:
     except Exception:
         logger.error("Unexpected error checking login status", exc_info=True)
         raise
+
+
+async def detect_auth_barrier(page: Page) -> str | None:
+    """Detect LinkedIn auth/account-picker barriers on the current page."""
+    try:
+        current_url = page.url
+        if any(pattern in current_url for pattern in _AUTH_BLOCKER_URL_PATTERNS):
+            return f"auth blocker URL: {current_url}"
+
+        try:
+            title = (await page.title()).strip().lower()
+        except Exception:
+            title = ""
+        if any(pattern in title for pattern in _LOGIN_TITLE_PATTERNS):
+            return f"login title: {title}"
+
+        try:
+            body_text = await page.evaluate("() => document.body?.innerText || ''")
+        except Exception:
+            body_text = ""
+        if not isinstance(body_text, str):
+            body_text = ""
+
+        normalized = re.sub(r"\s+", " ", body_text).strip().lower()
+        for marker_group in _AUTH_BARRIER_TEXT_MARKERS:
+            if all(marker in normalized for marker in marker_group):
+                return f"auth barrier text: {' + '.join(marker_group)}"
+
+        return None
+    except PlaywrightTimeoutError:
+        logger.warning(
+            "Timeout checking auth barrier on %s — continuing without barrier detection",
+            page.url,
+        )
+        return None
+    except Exception:
+        logger.error("Unexpected error checking auth barrier", exc_info=True)
+        return None
 
 
 async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
