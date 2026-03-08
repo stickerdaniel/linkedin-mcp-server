@@ -359,7 +359,7 @@ def _reference_score(reference: Reference) -> tuple[int, int, int | float]:
 
 
 def _label_sort_key(label: str) -> tuple[int, int]:
-    """Prefer concise labels, but avoid low-signal 1-2 character strings."""
+    """Prefer concise labels, but deprioritize short 2-character strings."""
     return (1 if len(label) < 3 else 0, len(label))
 
 
