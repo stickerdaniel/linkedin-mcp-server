@@ -161,7 +161,10 @@ def normalize_url(href: str) -> str | None:
         return None
 
     parsed = urlparse(href)
-    if parsed.scheme.lower() in {"blob", "javascript", "mailto", "tel"}:
+    scheme = parsed.scheme.lower()
+    if scheme in {"blob", "javascript", "mailto", "tel"}:
+        return None
+    if scheme and scheme not in {"http", "https"}:
         return None
 
     host = parsed.netloc.lower()
@@ -237,7 +240,7 @@ def choose_reference_text(
     if not candidates:
         return None
 
-    candidates.sort(key=lambda item: (_label_sort_key(item[1]), item[0], len(item[1])))
+    candidates.sort(key=lambda item: (_label_sort_key(item[1]), item[0]))
     return candidates[0][1]
 
 
@@ -346,19 +349,24 @@ def dedupe_references(
     return ordered[:cap] if cap is not None else ordered
 
 
-def _reference_score(reference: Reference) -> tuple[int, int, int]:
+def _reference_score(reference: Reference) -> tuple[int, int, int | float]:
     text = reference.get("text")
     context = reference.get("context")
     return (
         1 if text else 0,
         1 if context else 0,
-        -(len(text) if text else 999),
+        _missing_text_penalty(text),
     )
 
 
 def _label_sort_key(label: str) -> tuple[int, int]:
     """Prefer concise labels, but avoid low-signal 1-2 character strings."""
     return (1 if len(label) < 3 else 0, len(label))
+
+
+def _missing_text_penalty(text: str | None) -> int | float:
+    """Score missing text as strictly worse than any text-bearing reference."""
+    return -len(text) if text else float("-inf")
 
 
 def _is_linkedin_chrome(path: str) -> bool:

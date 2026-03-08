@@ -163,6 +163,24 @@ class TestExtractPage:
         assert result.references == []
         mock_page.goto.assert_awaited_once()
 
+    async def test_root_content_filters_empty_href_before_resolution(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Sample profile text",
+                "references": [],
+            }
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        await extractor._extract_root_content(["main"])
+
+        await_args = mock_page.evaluate.await_args
+        assert await_args is not None
+        script = await_args.args[0]
+        assert "if (!rawHref || rawHref === '#')" in script
+        assert ".filter(Boolean);" in script
+
     async def test_extract_page_returns_empty_on_failure(self, mock_page):
         mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
         extractor = LinkedInExtractor(mock_page)

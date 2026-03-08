@@ -797,24 +797,30 @@ class LinkedInExtractor:
                     return '';
                 };
 
-                const references = Array.from(container.querySelectorAll('a[href]')).map(anchor => {
-                    const rawHref = (anchor.getAttribute('href') || '').trim();
-                    const href = rawHref.startsWith('#')
-                        ? rawHref
-                        : (anchor.href || rawHref || '');
+                const references = Array.from(container.querySelectorAll('a[href]'))
+                    .map(anchor => {
+                        const rawHref = (anchor.getAttribute('href') || '').trim();
+                        if (!rawHref || rawHref === '#') {
+                            return null;
+                        }
 
-                    return {
-                        href,
-                        text: normalize(anchor.innerText || anchor.textContent),
-                        aria_label: normalize(anchor.getAttribute('aria-label')),
-                        title: normalize(anchor.getAttribute('title')),
-                        heading: findHeading(anchor),
-                        in_article: Boolean(anchor.closest('article')),
-                        in_list: Boolean(anchor.closest('li')),
-                        in_nav: Boolean(anchor.closest('nav')),
-                        in_footer: Boolean(anchor.closest('footer')),
-                    };
-                });
+                        const href = rawHref.startsWith('#')
+                            ? rawHref
+                            : (anchor.href || rawHref);
+
+                        return {
+                            href,
+                            text: normalize(anchor.innerText || anchor.textContent),
+                            aria_label: normalize(anchor.getAttribute('aria-label')),
+                            title: normalize(anchor.getAttribute('title')),
+                            heading: findHeading(anchor),
+                            in_article: Boolean(anchor.closest('article')),
+                            in_list: Boolean(anchor.closest('li')),
+                            in_nav: Boolean(anchor.closest('nav')),
+                            in_footer: Boolean(anchor.closest('footer')),
+                        };
+                    })
+                    .filter(Boolean);
 
                 return { source, text, references };
             }""",

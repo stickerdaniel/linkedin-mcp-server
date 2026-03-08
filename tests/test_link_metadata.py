@@ -82,6 +82,34 @@ class TestBuildReferences:
             }
         ]
 
+    def test_drops_non_http_external_schemes(self):
+        references = build_references(
+            [
+                {
+                    "href": "data:text/html,<p>hello</p>",
+                    "text": "Inline payload",
+                },
+                {
+                    "href": "ftp://example.com/report.csv",
+                    "text": "FTP report",
+                },
+                {
+                    "href": "https://example.com/report.csv",
+                    "text": "HTTPS report",
+                },
+            ],
+            "posts",
+        )
+
+        assert references == [
+            {
+                "kind": "external",
+                "url": "https://example.com/report.csv",
+                "text": "HTTPS report",
+                "context": "post attachment",
+            }
+        ]
+
     def test_prefers_cleaner_duplicate_label(self):
         references = build_references(
             [
