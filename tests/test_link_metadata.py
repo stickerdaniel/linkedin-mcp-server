@@ -128,6 +128,27 @@ class TestBuildReferences:
             }
         ]
 
+    def test_deprioritizes_single_character_labels(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/williamhgates/",
+                    "text": "1",
+                    "aria_label": "Bill Gates",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references == [
+            {
+                "kind": "person",
+                "url": "/in/williamhgates/",
+                "text": "Bill Gates",
+                "context": "top card",
+            }
+        ]
+
     def test_drops_social_proof_company_labels(self):
         references = build_references(
             [
