@@ -1,6 +1,10 @@
 """Tests for compact LinkedIn reference extraction helpers."""
 
-from linkedin_mcp_server.scraping.link_metadata import RawReference, build_references
+from linkedin_mcp_server.scraping.link_metadata import (
+    RawReference,
+    build_references,
+    dedupe_references,
+)
 
 
 class TestBuildReferences:
@@ -191,4 +195,70 @@ class TestBuildReferences:
                 "text": "Daniel Sticker",
                 "context": "search result",
             },
+        ]
+
+    def test_does_not_treat_lookalike_domains_as_linkedin(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.notlinkedin.com/company/fake/about/",
+                    "text": "Fake Company",
+                }
+            ],
+            "about",
+        )
+
+        assert references == [
+            {
+                "kind": "external",
+                "url": "https://www.notlinkedin.com/company/fake/about/",
+                "text": "Fake Company",
+                "context": "top card",
+            }
+        ]
+
+    def test_keeps_company_about_routes(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/company/legalzoom/about/",
+                    "text": "LegalZoom",
+                }
+            ],
+            "about",
+        )
+
+        assert references == [
+            {
+                "kind": "company",
+                "url": "/company/legalzoom/",
+                "text": "LegalZoom",
+                "context": "top card",
+            }
+        ]
+
+    def test_cross_page_dedupe_keeps_better_reference(self):
+        references = dedupe_references(
+            [
+                {
+                    "kind": "job",
+                    "url": "/jobs/view/123/",
+                    "text": "Job",
+                },
+                {
+                    "kind": "job",
+                    "url": "/jobs/view/123/",
+                    "text": "Senior Software Engineer",
+                    "context": "job result",
+                },
+            ]
+        )
+
+        assert references == [
+            {
+                "kind": "job",
+                "url": "/jobs/view/123/",
+                "text": "Senior Software Engineer",
+                "context": "job result",
+            }
         ]
