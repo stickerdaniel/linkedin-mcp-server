@@ -765,6 +765,18 @@ class LinkedInExtractor:
                     return normalize(heading?.innerText || heading?.textContent);
                 };
 
+                const getPreviousHeading = node => {
+                    let sibling = node?.previousElementSibling || null;
+                    for (let index = 0; sibling && index < 3; index += 1) {
+                        const heading = getHeadingText(sibling);
+                        if (heading) {
+                            return heading;
+                        }
+                        sibling = sibling.previousElementSibling;
+                    }
+                    return '';
+                };
+
                 const root = selectors
                     .map(selector => document.querySelector(selector))
                     .find(Boolean);
@@ -782,7 +794,7 @@ class LinkedInExtractor:
                 ];
                 candidateContainers.forEach(node => {
                     const ownHeading = getHeadingText(node);
-                    const previousHeading = getHeadingText(node.previousElementSibling);
+                    const previousHeading = getPreviousHeading(node);
                     const heading = ownHeading || previousHeading;
                     if (heading) {
                         headingMap.set(node, heading);
