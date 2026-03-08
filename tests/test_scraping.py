@@ -767,7 +767,15 @@ class TestSearchJobs:
         async def mock_extract(url, *args, **kwargs):
             nonlocal extract_call_count
             extract_call_count += 1
-            return extracted("text")
+            if extract_call_count == 1:
+                return extracted(
+                    "text",
+                    [{"kind": "job", "url": "/jobs/view/100/", "text": "Job 100"}],
+                )
+            return extracted(
+                "text",
+                [{"kind": "job", "url": "/jobs/view/200/", "text": "Job 200"}],
+            )
 
         with (
             patch.object(extractor, "_extract_search_page", side_effect=mock_extract),
@@ -792,6 +800,12 @@ class TestSearchJobs:
 
         assert result["job_ids"] == ["100", "200"]
         assert extract_call_count == 2
+        assert result["references"] == {
+            "search_results": [
+                {"kind": "job", "url": "/jobs/view/100/", "text": "Job 100"},
+                {"kind": "job", "url": "/jobs/view/200/", "text": "Job 200"},
+            ]
+        }
 
     async def test_stops_at_total_pages(self, mock_page):
         """Should stop when total_pages from pagination state is reached."""
@@ -1118,6 +1132,14 @@ class TestStripLinkedInNoise:
             "Select language\nEnglish (English)\nDeutsch (German)"
         )
         assert strip_linkedin_noise(text) == "Company info"
+
+    def test_preserves_real_careers_content(self):
+        text = "Careers\nWe're hiring globally.\nOpen roles in engineering and design."
+        assert strip_linkedin_noise(text) == text
+
+    def test_preserves_real_questions_content(self):
+        text = "Questions?\nReach out to our recruiting team for details."
+        assert strip_linkedin_noise(text) == text
 
     def test_strips_media_controls_lines(self):
         text = (

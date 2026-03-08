@@ -87,11 +87,13 @@ _NOISE_MARKERS: list[re.Pattern[str]] = [
     re.compile(r"^Explore premium profiles$", re.MULTILINE),
     # InMail upsell in contact info overlay
     re.compile(r"^Get up to .+ replies when you message with InMail$", re.MULTILINE),
-    # Footer nav links in profile/posts pages
-    re.compile(r"^Careers$", re.MULTILINE),
-    re.compile(r"^Privacy & Terms$", re.MULTILINE),
-    re.compile(r"^Questions\?$", re.MULTILINE),
-    re.compile(r"^Select language$", re.MULTILINE),
+    # Footer nav clusters in profile/posts pages
+    re.compile(
+        r"^(?:Careers|Privacy & Terms|Questions\?|Select language)\n+"
+        r"(?:Privacy & Terms|Questions\?|Select language|Advertising|Ad Choices|"
+        r"[A-Za-z]+ \([A-Za-z]+\))",
+        re.MULTILINE,
+    ),
 ]
 
 _NOISE_LINES: list[re.Pattern[str]] = [
@@ -673,6 +675,8 @@ class LinkedInExtractor:
 
                 if not new_ids:
                     page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
                     logger.debug("No new job IDs on page %d, stopping", page_num + 1)
                     break
 
@@ -743,35 +747,21 @@ class LinkedInExtractor:
         result = await self._page.evaluate(
             """({ selectors }) => {
                 const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+                const containerSelector = 'section, article, li, div';
+                const headingSelector = 'h1, h2, h3';
+                const directHeadingSelector = ':scope > h1, :scope > h2, :scope > h3';
 
-                const findHeading = (element, root) => {
-                    let current = element;
-                    while (current && current !== root) {
-                        if (current.matches && current.matches('section, article, li, div')) {
-                            const ownHeading = current.querySelector(':scope > h1, :scope > h2, :scope > h3');
-                            if (ownHeading) {
-                                const text = normalize(ownHeading.innerText || ownHeading.textContent);
-                                if (text) return text;
-                            }
-                        }
+                const getHeadingText = element => {
+                    if (!element) return '';
 
-                        let sibling = current.previousElementSibling;
-                        while (sibling) {
-                            const heading =
-                                sibling.matches && sibling.matches('h1, h2, h3')
-                                    ? sibling
-                                    : sibling.querySelector
-                                      ? sibling.querySelector('h1, h2, h3')
-                                      : null;
-                            if (heading) {
-                                const text = normalize(heading.innerText || heading.textContent);
-                                if (text) return text;
-                            }
-                            sibling = sibling.previousElementSibling;
-                        }
-                        current = current.parentElement;
-                    }
-                    return '';
+                    const heading =
+                        element.matches && element.matches(headingSelector)
+                            ? element
+                            : element.querySelector
+                              ? element.querySelector(directHeadingSelector)
+                              : null;
+
+                    return normalize(heading?.innerText || heading?.textContent);
                 };
 
                 const root = selectors
@@ -780,6 +770,32 @@ class LinkedInExtractor:
                 const source = root ? 'root' : 'body';
                 const container = root || document.body;
                 const text = container ? (container.innerText || '').trim() : '';
+                const headingMap = new WeakMap();
+
+                const candidateContainers = [container, ...container.querySelectorAll(containerSelector)];
+                candidateContainers.forEach(node => {
+                    const ownHeading = getHeadingText(node);
+                    const previousHeading = getHeadingText(node.previousElementSibling);
+                    const heading = ownHeading || previousHeading;
+                    if (heading) {
+                        headingMap.set(node, heading);
+                    }
+                });
+
+                const findHeading = element => {
+                    let current = element.closest(containerSelector) || container;
+                    for (let depth = 0; current && depth < 4; depth += 1) {
+                        const heading = headingMap.get(current);
+                        if (heading) {
+                            return heading;
+                        }
+                        if (current === container) {
+                            break;
+                        }
+                        current = current.parentElement?.closest(containerSelector) || null;
+                    }
+                    return '';
+                };
 
                 const references = Array.from(container.querySelectorAll('a[href]')).map(anchor => {
                     const rawHref = (anchor.getAttribute('href') || '').trim();
@@ -792,7 +808,7 @@ class LinkedInExtractor:
                         text: normalize(anchor.innerText || anchor.textContent),
                         aria_label: normalize(anchor.getAttribute('aria-label')),
                         title: normalize(anchor.getAttribute('title')),
-                        heading: findHeading(anchor, container),
+                        heading: findHeading(anchor),
                         in_article: Boolean(anchor.closest('article')),
                         in_list: Boolean(anchor.closest('li')),
                         in_nav: Boolean(anchor.closest('nav')),
