@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Use `uv` for dependency management: `uv sync` (installs all dependencies)
 - Development dependencies: `uv sync --group dev`
-- Bump version: `uv version --bump minor` (or `major`, `patch`) - this is the **only manual step** for a release. The GitHub Actions release workflow (`.github/workflows/release.yml`) automatically handles: manifest.json/docker-compose.yml version updates, git tag, Docker build & push, DXT extension, GitHub release, and PyPI publish. After the workflow completes, manually file a PR in the MCP registry to update the version.
+- Bump version: see [Release Process](#release-process) below
 - Install browser: `uv run patchright install chromium`
 - Run server locally: `uv run -m linkedin_mcp_server --no-headless`
 - Run via uvx (PyPI): `uvx linkedin-scraper-mcp`
@@ -65,7 +65,13 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 
 **Tool Return Format:**
 
-All scraping tools return: `{url, sections: {name: raw_text}}`. When unknown section names are provided, an `unknown_sections: [name, ...]` key is also included.
+All scraping tools return: `{url, sections: {name: raw_text}}`.
+
+Tools may also include:
+
+- `references: {section_name: [{kind, url, text?, context?}, ...]}` — compact typed link targets for graph expansion. LinkedIn URLs are relative paths such as `/in/stickerdaniel/`; external URLs remain absolute.
+- `unknown_sections: [name, ...]` when unknown section names were passed.
+- `job_ids: [id, ...]` for `search_jobs`.
 
 **Scraping Architecture (`scraping/`):**
 
@@ -153,6 +159,17 @@ curl -s -X POST http://127.0.0.1:8000/mcp \
   -H "Mcp-Session-Id: $SESSION_ID" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_person_profile","arguments":{"linkedin_username":"williamhgates","sections":"posts"}}}'
 ```
+
+## Release Process
+
+```bash
+git checkout main && git pull
+uv version --bump minor          # or: major, patch — updates pyproject.toml AND uv.lock
+gt create -m "chore: Bump version to X.Y.Z"
+gt submit                        # merge PR to trigger release workflow
+```
+
+After the workflow completes, file a PR in the MCP registry to update the version.
 
 ## Important Development Notes
 

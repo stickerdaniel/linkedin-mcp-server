@@ -48,6 +48,8 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `get_job_details` | Get detailed information about a specific job posting | Working |
 | `close_session` | Close browser session and clean up resources | Working |
 
+Tool responses keep readable `sections` text and may also include a compact `references` map keyed by section. Each reference includes a typed target, a relative LinkedIn path (or absolute external URL), and a short label/context when available.
+
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
 

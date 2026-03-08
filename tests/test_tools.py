@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastmcp import FastMCP
 
+from linkedin_mcp_server.scraping.extractor import ExtractedSection
+
 
 async def get_tool_fn(
     mcp: FastMCP, name: str
@@ -23,7 +25,9 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
-    mock.extract_page = AsyncMock(return_value="some text")
+    mock.extract_page = AsyncMock(
+        return_value=ExtractedSection(text="some text", references=[])
+    )
     return mock
 
 
@@ -203,7 +207,9 @@ class TestCompanyTools:
 
     async def test_get_company_posts(self, mock_context):
         mock_extractor = MagicMock()
-        mock_extractor.extract_page = AsyncMock(return_value="Post 1\nPost 2")
+        mock_extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(text="Post 1\nPost 2", references=[])
+        )
 
         from linkedin_mcp_server.tools.company import register_company_tools
 
