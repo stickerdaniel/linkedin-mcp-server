@@ -669,6 +669,8 @@ class LinkedInExtractor:
                         self._page.url,
                     )
                     page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
                     break
                 page_ids = await self._extract_job_ids()
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]

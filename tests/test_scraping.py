@@ -1052,7 +1052,10 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value=extracted("Login page content"),
+                return_value=extracted(
+                    "Login page content",
+                    [{"kind": "person", "url": "/in/testuser/", "text": "Test User"}],
+                ),
             ),
             patch.object(
                 extractor,
@@ -1076,6 +1079,11 @@ class TestSearchJobs:
         mock_ids.assert_not_awaited()
         assert result["job_ids"] == []
         assert result["sections"]["search_results"] == "Login page content"
+        assert result["references"] == {
+            "search_results": [
+                {"kind": "person", "url": "/in/testuser/", "text": "Test User"}
+            ]
+        }
 
     async def test_rate_limited_skips_ids_and_text(self, mock_page):
         """Rate-limited pages should yield no IDs or text."""
