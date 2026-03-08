@@ -300,8 +300,6 @@ def derive_context(
             return "post author"
         if kind == "feed_post":
             return "company post"
-        if raw.get("in_article"):
-            return "post attachment"
         return "post attachment"
 
     if section_name in {"main_profile", "about"}:

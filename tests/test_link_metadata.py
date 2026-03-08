@@ -156,7 +156,7 @@ class TestBuildReferences:
             }
         ]
 
-    def test_deprioritizes_single_character_labels(self):
+    def test_rejects_single_character_labels(self):
         references = build_references(
             [
                 {
