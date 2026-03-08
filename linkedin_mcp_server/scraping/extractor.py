@@ -9,7 +9,11 @@ from urllib.parse import quote_plus
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core import detect_auth_barrier
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInScraperException,
+)
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
@@ -137,6 +141,36 @@ class LinkedInExtractor:
     def __init__(self, page: Page):
         self._page = page
 
+    async def _raise_if_auth_barrier(
+        self,
+        url: str,
+        *,
+        navigation_error: Exception | None = None,
+    ) -> None:
+        """Raise an auth error when LinkedIn shows login/account-picker UI."""
+        barrier = await detect_auth_barrier(self._page)
+        if not barrier:
+            return
+
+        logger.warning("Authentication barrier detected on %s: %s", url, barrier)
+        message = (
+            "LinkedIn requires interactive re-authentication. "
+            "Run with --login and complete the account selection/sign-in flow."
+        )
+        if navigation_error is not None:
+            raise AuthenticationError(message) from navigation_error
+        raise AuthenticationError(message)
+
+    async def _navigate_to_page(self, url: str) -> None:
+        """Navigate to a LinkedIn page and fail fast on auth barriers."""
+        try:
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as exc:
+            await self._raise_if_auth_barrier(url, navigation_error=exc)
+            raise
+
+        await self._raise_if_auth_barrier(url)
+
     async def extract_page(
         self,
         url: str,
@@ -174,7 +208,7 @@ class LinkedInExtractor:
         section_name: str | None = None,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll, and extract innerText."""
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
         # Wait for main content to render
@@ -262,7 +296,7 @@ class LinkedInExtractor:
         section_name: str | None = None,
     ) -> ExtractedSection:
         """Single attempt to extract content from an overlay/modal page."""
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
         # Wait for the dialog/modal to render (LinkedIn uses native <dialog>)
@@ -475,7 +509,7 @@ class LinkedInExtractor:
         section_name: str = "",
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
         main_found = True
