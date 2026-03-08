@@ -177,6 +177,27 @@ class TestBuildReferences:
             }
         ]
 
+    def test_prefers_company_post_context_for_feed_posts(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+                    "text": "Original company post",
+                    "in_article": True,
+                }
+            ],
+            "posts",
+        )
+
+        assert references == [
+            {
+                "kind": "feed_post",
+                "url": "/feed/update/urn:li:activity:123/",
+                "text": "Original company post",
+                "context": "company post",
+            }
+        ]
+
     def test_drops_social_proof_company_labels(self):
         references = build_references(
             [
