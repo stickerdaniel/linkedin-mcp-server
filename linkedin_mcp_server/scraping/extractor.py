@@ -120,19 +120,24 @@ def strip_linkedin_noise(text: str) -> str:
 
     Finds the earliest occurrence of any known noise marker and truncates there.
     """
-    earliest = len(text)
-    for pattern in _NOISE_MARKERS:
-        match = pattern.search(text)
-        if match and match.start() < earliest:
-            earliest = match.start()
-
-    cleaned = text[:earliest].strip()
+    cleaned = _truncate_linkedin_noise(text)
     filtered_lines = [
         line
         for line in cleaned.splitlines()
         if not any(pattern.match(line.strip()) for pattern in _NOISE_LINES)
     ]
     return "\n".join(filtered_lines).strip()
+
+
+def _truncate_linkedin_noise(text: str) -> str:
+    """Trim known LinkedIn chrome blocks before any per-line noise filtering."""
+    earliest = len(text)
+    for pattern in _NOISE_MARKERS:
+        match = pattern.search(text)
+        if match and match.start() < earliest:
+            earliest = match.start()
+
+    return text[:earliest].strip()
 
 
 class LinkedInExtractor:
@@ -247,12 +252,13 @@ class LinkedInExtractor:
 
         if not raw:
             return ExtractedSection(text="", references=[])
-        cleaned = strip_linkedin_noise(raw)
-        if not cleaned and raw.strip():
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
             logger.warning(
                 "Page %s returned only LinkedIn chrome (likely rate-limited)", url
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = strip_linkedin_noise(raw)
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name or ""),
@@ -318,13 +324,14 @@ class LinkedInExtractor:
 
         if not raw:
             return ExtractedSection(text="", references=[])
-        cleaned = strip_linkedin_noise(raw)
-        if not cleaned and raw.strip():
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
             logger.warning(
                 "Overlay %s returned only LinkedIn chrome (likely rate-limited)",
                 url,
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = strip_linkedin_noise(raw)
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name or ""),
@@ -359,7 +366,7 @@ class LinkedInExtractor:
                 else:
                     extracted = await self.extract_page(url, section_name=section_name)
 
-                if extracted.text:
+                if extracted.text and extracted.text != _RATE_LIMITED_MSG:
                     sections[section_name] = extracted.text
                     if extracted.references:
                         references[section_name] = extracted.references
@@ -407,7 +414,7 @@ class LinkedInExtractor:
                 else:
                     extracted = await self.extract_page(url, section_name=section_name)
 
-                if extracted.text:
+                if extracted.text and extracted.text != _RATE_LIMITED_MSG:
                     sections[section_name] = extracted.text
                     if extracted.references:
                         references[section_name] = extracted.references
@@ -435,9 +442,9 @@ class LinkedInExtractor:
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
-        if extracted.text:
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["job_posting"] = extracted.text
-        if extracted.references:
+        if extracted.text != _RATE_LIMITED_MSG and extracted.references:
             references["job_posting"] = extracted.references
 
         result: dict[str, Any] = {
@@ -535,13 +542,14 @@ class LinkedInExtractor:
 
         if not raw:
             return ExtractedSection(text="", references=[])
-        cleaned = strip_linkedin_noise(raw)
-        if not cleaned and raw.strip():
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
             logger.warning(
                 "Search page %s returned only LinkedIn chrome (likely rate-limited)",
                 url,
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = strip_linkedin_noise(raw)
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name),
@@ -762,9 +770,9 @@ class LinkedInExtractor:
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
-        if extracted.text:
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["search_results"] = extracted.text
-        if extracted.references:
+        if extracted.text != _RATE_LIMITED_MSG and extracted.references:
             references["search_results"] = extracted.references
 
         result: dict[str, Any] = {
