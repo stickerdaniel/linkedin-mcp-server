@@ -54,9 +54,15 @@ for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
 
 ```python
 {"url": str, "sections": {name: raw_text}}
+# Optional compact link metadata:
+{"url": str, "sections": {name: raw_text}, "references": {section: [{kind, url, text?, context?}, ...]}}
 # When unknown section names are provided:
 {"url": str, "sections": {name: raw_text}, "unknown_sections": [name, ...]}
+# search_jobs also returns:
+{"url": str, "sections": {name: raw_text}, "job_ids": [id, ...]}
 ```
+
+`sections` remains the main readable payload. `references` is a compact supplement for entity/article traversal. LinkedIn references are emitted as relative paths to minimize token use.
 
 ## Checklist: Adding a New Section
 
