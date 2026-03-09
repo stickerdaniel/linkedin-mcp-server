@@ -197,6 +197,16 @@ gh api repos/{owner}/{repo}/pulls/{pr}/comments   # inline comments
 gh api repos/{owner}/{repo}/issues/{pr}/comments   # follow-up reviews
 ```
 
+## Greptile MCP
+
+The project includes a `.mcp.json` that configures the Greptile MCP server for Claude Code. Contributors need to set `GREPTILE_API_KEY` in their environment (get one at [app.greptile.com](https://app.greptile.com)).
+
+For Codex CLI, run:
+
+```bash
+codex mcp add greptile --url https://api.greptile.com/mcp --bearer-token-env-var GREPTILE_API_KEY
+```
+
 ## btca
 
 When you need up-to-date information about technologies used in this project, use btca to query source repositories directly.
