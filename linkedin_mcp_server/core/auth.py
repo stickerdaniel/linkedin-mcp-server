@@ -107,6 +107,15 @@ async def is_logged_in(page: Page) -> bool:
 
 async def detect_auth_barrier(page: Page) -> str | None:
     """Detect LinkedIn auth/account-picker barriers on the current page."""
+    return await _detect_auth_barrier(page, include_body_text=True)
+
+
+async def _detect_auth_barrier(
+    page: Page,
+    *,
+    include_body_text: bool,
+) -> str | None:
+    """Detect LinkedIn auth/account-picker barriers on the current page."""
     try:
         current_url = page.url
         if _is_auth_blocker_url(current_url):
@@ -118,6 +127,9 @@ async def detect_auth_barrier(page: Page) -> str | None:
             title = ""
         if any(pattern in title for pattern in _LOGIN_TITLE_PATTERNS):
             return f"login title: {title}"
+
+        if not include_body_text:
+            return None
 
         try:
             body_text = await page.evaluate("() => document.body?.innerText || ''")
@@ -141,6 +153,14 @@ async def detect_auth_barrier(page: Page) -> str | None:
     except Exception:
         logger.error("Unexpected error checking auth barrier", exc_info=True)
         return None
+
+
+async def detect_auth_barrier_quick(page: Page) -> str | None:
+    """Cheap auth-barrier check for normal navigations.
+
+    Uses URL and title only, avoiding a full body-text fetch on healthy pages.
+    """
+    return await _detect_auth_barrier(page, include_body_text=False)
 
 
 def _is_auth_blocker_url(url: str) -> bool:
