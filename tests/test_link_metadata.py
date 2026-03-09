@@ -355,6 +355,34 @@ class TestBuildReferences:
         assert references[0]["url"] == "/company/test-0/"
         assert references[-1]["url"] == "/company/test-11/"
 
+    def test_caps_jobs_section_more_tightly(self):
+        raw: list[RawReference] = [
+            {
+                "href": f"https://www.linkedin.com/jobs/view/{idx}/",
+                "text": f"Job {idx}",
+            }
+            for idx in range(20)
+        ]
+
+        references = build_references(raw, "jobs")
+
+        assert len(references) == 8
+        assert references[0]["url"] == "/jobs/view/0/"
+        assert references[-1]["url"] == "/jobs/view/7/"
+
+    def test_uses_default_cap_for_unknown_section(self):
+        raw: list[RawReference] = [
+            {
+                "href": f"https://www.linkedin.com/company/test-{idx}/",
+                "text": f"Company {idx}",
+            }
+            for idx in range(20)
+        ]
+
+        references = build_references(raw, "unknown_section")
+
+        assert len(references) == 12
+
     def test_prefers_richer_duplicate_text(self):
         references = build_references(
             [
