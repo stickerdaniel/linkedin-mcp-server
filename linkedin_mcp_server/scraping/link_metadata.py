@@ -100,6 +100,7 @@ _JOB_PATH_RE = re.compile(r"^/jobs/view/(\d+)")
 _NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
 _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
+_MAX_REDIRECT_UNWRAP_DEPTH = 5
 
 
 def build_references(
@@ -153,8 +154,11 @@ def normalize_reference(
     return reference
 
 
-def normalize_url(href: str) -> str | None:
+def normalize_url(href: str, _depth: int = 0) -> str | None:
     """Normalize a raw href and unwrap LinkedIn redirect URLs."""
+    if _depth > _MAX_REDIRECT_UNWRAP_DEPTH:
+        return None
+
     href = href.strip()
     if not href or href.startswith("#"):
         return None
@@ -171,7 +175,7 @@ def normalize_url(href: str) -> str | None:
         target = unquote((parse_qs(parsed.query).get("url") or [""])[0]).strip()
         if not target:
             return None
-        return normalize_url(target)
+        return normalize_url(target, _depth + 1)
 
     if not parsed.scheme:
         return None
