@@ -444,8 +444,8 @@ class LinkedInExtractor:
         references: dict[str, list[Reference]] = {}
         if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["job_posting"] = extracted.text
-        if extracted.text != _RATE_LIMITED_MSG and extracted.references:
-            references["job_posting"] = extracted.references
+            if extracted.references:
+                references["job_posting"] = extracted.references
 
         result: dict[str, Any] = {
             "url": url,
@@ -772,8 +772,8 @@ class LinkedInExtractor:
         references: dict[str, list[Reference]] = {}
         if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["search_results"] = extracted.text
-        if extracted.text != _RATE_LIMITED_MSG and extracted.references:
-            references["search_results"] = extracted.references
+            if extracted.references:
+                references["search_results"] = extracted.references
 
         result: dict[str, Any] = {
             "url": url,

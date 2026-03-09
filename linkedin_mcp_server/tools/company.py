@@ -114,8 +114,8 @@ def register_company_tools(mcp: FastMCP) -> None:
             references: dict[str, list[Reference]] = {}
             if extracted.text and extracted.text != _RATE_LIMITED_MSG:
                 sections["posts"] = extracted.text
-            if extracted.text != _RATE_LIMITED_MSG and extracted.references:
-                references["posts"] = extracted.references
+                if extracted.references:
+                    references["posts"] = extracted.references
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
