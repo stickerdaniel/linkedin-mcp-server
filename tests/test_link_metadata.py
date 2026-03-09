@@ -53,6 +53,39 @@ class TestBuildReferences:
             },
         ]
 
+    def test_preserves_person_slug_named_details(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/details/",
+                    "text": "Details Person",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references == [
+            {
+                "kind": "person",
+                "url": "/in/details/",
+                "text": "Details Person",
+                "context": "top card",
+            }
+        ]
+
+    def test_drops_person_details_subpage(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/williamhgates/details/experience/",
+                    "text": "Bill Gates",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references == []
+
     def test_unwraps_redirect_and_drops_junk(self):
         references = build_references(
             [
