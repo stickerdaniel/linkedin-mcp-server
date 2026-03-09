@@ -77,7 +77,7 @@ _SECTION_CONTEXTS = {
     "honors": "honors",
     "languages": "languages",
     "contact_info": "contact info",
-    "job_posting": "job result",
+    "job_posting": "job posting",
 }
 
 _DEFAULT_REFERENCE_CAP = 12
