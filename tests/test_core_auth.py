@@ -60,3 +60,15 @@ async def test_detect_auth_barrier_ignores_continue_as_in_page_content():
     result = await detect_auth_barrier(page)
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_detect_auth_barrier_ignores_auth_substrings_in_slugs():
+    page = MagicMock()
+    page.url = "https://www.linkedin.com/company/challenge-labs/"
+    page.title = AsyncMock(return_value="Challenge Labs | LinkedIn")
+    page.evaluate = AsyncMock(return_value="Challenge Labs builds developer tools.")
+
+    result = await detect_auth_barrier(page)
+
+    assert result is None
