@@ -4,11 +4,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.scraping.extractor import (
+    ExtractedSection,
     LinkedInExtractor,
     _RATE_LIMITED_MSG,
+    _truncate_linkedin_noise,
     strip_linkedin_noise,
 )
+from linkedin_mcp_server.scraping.link_metadata import Reference
+
+
+def extracted(
+    text: str,
+    references: list[Reference] | None = None,
+) -> ExtractedSection:
+    """Create an ExtractedSection for tests."""
+    return ExtractedSection(text=text, references=references or [])
 
 
 class TestBuildJobSearchUrl:
@@ -103,8 +115,12 @@ def mock_page():
     """Create a mock Patchright page."""
     page = MagicMock()
     page.goto = AsyncMock()
+    page.title = AsyncMock(return_value="LinkedIn")
     page.wait_for_selector = AsyncMock()
-    page.evaluate = AsyncMock(return_value="Sample page text")
+    page.wait_for_function = AsyncMock()
+    page.evaluate = AsyncMock(
+        return_value={"source": "root", "text": "Sample page text", "references": []}
+    )
     page.url = "https://www.linkedin.com/in/testuser/"
     page.locator = MagicMock()
     # Default: no modals, no CAPTCHA
@@ -120,12 +136,11 @@ def mock_page():
 class TestExtractPage:
     async def test_extract_page_returns_text(self, mock_page):
         mock_page.evaluate = AsyncMock(
-            side_effect=[
-                "Sample profile text",  # main.innerText
-                100,  # scrollHeight (first check)
-                None,  # scrollTo
-                100,  # scrollHeight (unchanged = stop)
-            ]
+            return_value={
+                "source": "root",
+                "text": "Sample profile text",
+                "references": [],
+            }
         )
         extractor = LinkedInExtractor(mock_page)
         # Patch scroll_to_bottom and detect_rate_limit to avoid complex mock chains
@@ -145,18 +160,65 @@ class TestExtractPage:
             ),
         ):
             result = await extractor.extract_page(
-                "https://www.linkedin.com/in/testuser/"
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
             )
 
-        assert result == "Sample profile text"
+        assert result.text == "Sample profile text"
+        assert result.references == []
         mock_page.goto.assert_awaited_once()
+
+    async def test_root_content_filters_empty_href_before_resolution(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Sample profile text",
+                "references": [],
+            }
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        await extractor._extract_root_content(["main"])
+
+        await_args = mock_page.evaluate.await_args
+        assert await_args is not None
+        script = await_args.args[0]
+        assert "MAX_HEADING_CONTAINERS = 300" in script
+        assert "MAX_REFERENCE_ANCHORS = 500" in script
+        assert "const getPreviousHeading = node =>" in script
+        assert "index < 3" in script
+        assert "if (!rawHref || rawHref === '#')" in script
+        assert ".slice(0, MAX_REFERENCE_ANCHORS)" in script
+        assert "in_list" not in script
+        assert ".filter(Boolean);" in script
 
     async def test_extract_page_returns_empty_on_failure(self, mock_page):
         mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
         extractor = LinkedInExtractor(mock_page)
 
-        result = await extractor.extract_page("https://www.linkedin.com/in/bad/")
-        assert result == ""
+        result = await extractor.extract_page(
+            "https://www.linkedin.com/in/bad/",
+            section_name="main_profile",
+        )
+        assert result.text == ""
+        assert result.references == []
+
+    async def test_extract_page_raises_auth_error_for_account_picker(self, mock_page):
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value="auth barrier text: welcome back + sign in using another account",
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
+            )
 
     async def test_rate_limit_detected(self, mock_page):
         from linkedin_mcp_server.core.exceptions import RateLimitError
@@ -170,7 +232,10 @@ class TestExtractPage:
             ),
             pytest.raises(RateLimitError),
         ):
-            await extractor.extract_page("https://www.linkedin.com/in/testuser/")
+            await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
+            )
 
     async def test_returns_rate_limited_msg_after_retry(self, mock_page):
         """When both attempts return only noise, surface rate limit message."""
@@ -179,7 +244,9 @@ class TestExtractPage:
             "You've approached your profile search limit\n\n"
             "About\nAccessibility\nTalent Solutions"
         )
-        mock_page.evaluate = AsyncMock(return_value=noise_only)
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": noise_only, "references": []}
+        )
         extractor = LinkedInExtractor(mock_page)
         with (
             patch(
@@ -201,10 +268,11 @@ class TestExtractPage:
             ),
         ):
             result = await extractor.extract_page(
-                "https://www.linkedin.com/in/testuser/details/experience/"
+                "https://www.linkedin.com/in/testuser/details/experience/",
+                section_name="experience",
             )
 
-        assert result == _RATE_LIMITED_MSG
+        assert result.text == _RATE_LIMITED_MSG
         # goto called twice (initial + retry)
         assert mock_page.goto.await_count == 2
 
@@ -220,7 +288,14 @@ class TestExtractPage:
                 return noise_only
             return "Education\nHarvard University\n1973 – 1975"
 
-        mock_page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+        async def root_content_side_effect(*args, **kwargs):
+            return {
+                "source": "root",
+                "text": await evaluate_side_effect(),
+                "references": [],
+            }
+
+        mock_page.evaluate = AsyncMock(side_effect=root_content_side_effect)
         extractor = LinkedInExtractor(mock_page)
         with (
             patch(
@@ -242,10 +317,63 @@ class TestExtractPage:
             ),
         ):
             result = await extractor.extract_page(
-                "https://www.linkedin.com/in/testuser/details/education/"
+                "https://www.linkedin.com/in/testuser/details/education/",
+                section_name="education",
             )
 
-        assert result == "Education\nHarvard University\n1973 – 1975"
+        assert result.text == "Education\nHarvard University\n1973 – 1975"
+
+    async def test_media_only_controls_are_not_misclassified_as_rate_limited(
+        self, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Play\nLoaded: 100.00%\nRemaining time 0:07\nShow captions",
+                "references": [],
+            }
+        )
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/in/testuser/recent-activity/all/",
+                section_name="posts",
+            )
+
+        assert result.text == ""
+        assert result.references == []
+
+    async def test_extract_search_page_raises_auth_error_for_login_barrier(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+                side_effect=AuthenticationError("Run with --login"),
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page_once(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
 
 
 class TestScrapePersonUrls:
@@ -256,13 +384,16 @@ class TestScrapePersonUrls:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
             ) as mock_extract,
             patch.object(
                 extractor,
                 "_extract_overlay",
                 new_callable=AsyncMock,
-                return_value="",
+                return_value=extracted(""),
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -283,13 +414,13 @@ class TestScrapePersonUrls:
                 extractor,
                 "extract_page",
                 new_callable=AsyncMock,
-                return_value="profile text",
+                return_value=extracted("profile text"),
             ) as mock_extract,
             patch.object(
                 extractor,
                 "_extract_overlay",
                 new_callable=AsyncMock,
-                return_value="",
+                return_value=extracted(""),
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -307,13 +438,16 @@ class TestScrapePersonUrls:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
             ) as mock_extract,
             patch.object(
                 extractor,
                 "_extract_overlay",
                 new_callable=AsyncMock,
-                return_value="",
+                return_value=extracted(""),
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -345,13 +479,16 @@ class TestScrapePersonUrls:
         }
         with (
             patch.object(
-                extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
             ) as mock_extract,
             patch.object(
                 extractor,
                 "_extract_overlay",
                 new_callable=AsyncMock,
-                return_value="contact text",
+                return_value=extracted("contact text"),
             ) as mock_overlay,
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -384,13 +521,13 @@ class TestScrapePersonUrls:
                 extractor,
                 "extract_page",
                 new_callable=AsyncMock,
-                return_value="Post 1\nPost 2",
+                return_value=extracted("Post 1\nPost 2"),
             ) as mock_extract,
             patch.object(
                 extractor,
                 "_extract_overlay",
                 new_callable=AsyncMock,
-                return_value="",
+                return_value=extracted(""),
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -403,13 +540,65 @@ class TestScrapePersonUrls:
         assert any("/recent-activity/all/" in url for url in urls)
         assert "posts" in result["sections"]
 
+    async def test_references_are_grouped_by_section(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[
+                    extracted(
+                        "profile text",
+                        [
+                            {
+                                "kind": "person",
+                                "url": "/in/testuser/",
+                                "text": "Test User",
+                            }
+                        ],
+                    ),
+                    extracted(
+                        "post text",
+                        [
+                            {
+                                "kind": "article",
+                                "url": "/pulse/test-post/",
+                                "text": "Test post",
+                            }
+                        ],
+                    ),
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"posts"})
+
+        assert result["references"] == {
+            "main_profile": [
+                {"kind": "person", "url": "/in/testuser/", "text": "Test User"}
+            ],
+            "posts": [
+                {"kind": "article", "url": "/pulse/test-post/", "text": "Test post"}
+            ],
+        }
+
     async def test_error_isolation(self, mock_page):
         """One section failing doesn't block others."""
 
-        async def extract_with_failure(url):
+        async def extract_with_failure(url, *args, **kwargs):
             if "experience" in url:
                 raise Exception("Simulated failure")
-            return f"text for {url}"
+            return extracted(f"text for {url}")
 
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -422,7 +611,7 @@ class TestScrapePersonUrls:
                 extractor,
                 "_extract_overlay",
                 new_callable=AsyncMock,
-                return_value="",
+                return_value=extracted(""),
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -438,6 +627,34 @@ class TestScrapePersonUrls:
         assert "education" in result["sections"]
         assert "experience" not in result["sections"]
 
+    async def test_rate_limited_sections_are_omitted(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[
+                    extracted(_RATE_LIMITED_MSG),
+                    extracted("Post text"),
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"posts"})
+
+        assert "main_profile" not in result["sections"]
+        assert result["sections"]["posts"] == "Post text"
+
 
 class TestScrapeCompany:
     async def test_company_baseline_always_included(self, mock_page):
@@ -445,7 +662,10 @@ class TestScrapeCompany:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
             ) as mock_extract,
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -467,7 +687,7 @@ class TestScrapeCompany:
                 extractor,
                 "extract_page",
                 new_callable=AsyncMock,
-                return_value="about text",
+                return_value=extracted("about text"),
             ) as mock_extract,
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -485,7 +705,10 @@ class TestScrapeCompany:
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
-                extractor, "extract_page", new_callable=AsyncMock, return_value="text"
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
             ) as mock_extract,
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -503,6 +726,28 @@ class TestScrapeCompany:
         assert any("/jobs/" in u for u in urls)
         assert set(result["sections"]) == {"about", "posts", "jobs"}
 
+    async def test_rate_limited_company_sections_are_omitted(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[
+                    extracted(_RATE_LIMITED_MSG),
+                    extracted("Posts text"),
+                ],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_company("testcorp", {"posts"})
+
+        assert "about" not in result["sections"]
+        assert result["sections"]["posts"] == "Posts text"
+
 
 class TestScrapeJob:
     async def test_scrape_job(self, mock_page):
@@ -511,7 +756,7 @@ class TestScrapeJob:
             extractor,
             "extract_page",
             new_callable=AsyncMock,
-            return_value="Job: Software Engineer",
+            return_value=extracted("Job: Software Engineer"),
         ):
             result = await extractor.scrape_job("12345")
 
@@ -519,6 +764,36 @@ class TestScrapeJob:
         assert "job_posting" in result["sections"]
         assert "pages_visited" not in result
         assert "sections_requested" not in result
+
+    async def test_scrape_job_omits_rate_limited_sentinel(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(_RATE_LIMITED_MSG),
+        ):
+            result = await extractor.scrape_job("12345")
+
+        assert result["sections"] == {}
+
+    async def test_scrape_job_omits_orphaned_references_when_text_empty(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "",
+                [{"kind": "job", "url": "/jobs/view/12345/", "text": "Engineer"}],
+            ),
+        ):
+            result = await extractor.scrape_job("12345")
+
+        assert result["sections"] == {}
+        assert "references" not in result
 
 
 class TestSearchJobs:
@@ -536,7 +811,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value="Job 1\nJob 2\nJob 3",
+                return_value=extracted("Job 1\nJob 2\nJob 3"),
             ),
             patch.object(
                 extractor,
@@ -560,6 +835,43 @@ class TestSearchJobs:
         assert result["job_ids"] == ["111", "222", "333"]
         assert "search_results" in result["sections"]
 
+    async def test_returns_references(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted(
+                    "Job 1",
+                    [{"kind": "job", "url": "/jobs/view/111/", "text": "Job 1"}],
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["references"] == {
+            "search_results": [
+                {"kind": "job", "url": "/jobs/view/111/", "text": "Job 1"}
+            ]
+        }
+
     async def test_pagination_uses_fixed_page_size(self, mock_page):
         """Pages use &start= with fixed 25-per-page offset."""
         extractor = LinkedInExtractor(mock_page)
@@ -569,9 +881,9 @@ class TestSearchJobs:
         text_pages = iter(["Page 1 text", "Page 2 text"])
         urls_visited: list[str] = []
 
-        async def mock_extract(url):
+        async def mock_extract(url, *args, **kwargs):
             urls_visited.append(url)
-            return next(text_pages)
+            return extracted(next(text_pages))
 
         with (
             patch.object(extractor, "_extract_search_page", side_effect=mock_extract),
@@ -607,7 +919,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value="text",
+                return_value=extracted("text"),
             ) as mock_extract,
             patch.object(
                 extractor,
@@ -638,10 +950,18 @@ class TestSearchJobs:
         id_pages = iter([["100", "200"], ["100", "200"]])
         extract_call_count = 0
 
-        async def mock_extract(url):
+        async def mock_extract(url, *args, **kwargs):
             nonlocal extract_call_count
             extract_call_count += 1
-            return "text"
+            if extract_call_count == 1:
+                return extracted(
+                    "text",
+                    [{"kind": "job", "url": "/jobs/view/100/", "text": "Job 100"}],
+                )
+            return extracted(
+                "text",
+                [{"kind": "job", "url": "/jobs/view/200/", "text": "Job 200"}],
+            )
 
         with (
             patch.object(extractor, "_extract_search_page", side_effect=mock_extract),
@@ -666,6 +986,12 @@ class TestSearchJobs:
 
         assert result["job_ids"] == ["100", "200"]
         assert extract_call_count == 2
+        assert result["references"] == {
+            "search_results": [
+                {"kind": "job", "url": "/jobs/view/100/", "text": "Job 100"},
+                {"kind": "job", "url": "/jobs/view/200/", "text": "Job 200"},
+            ]
+        }
 
     async def test_stops_at_total_pages(self, mock_page):
         """Should stop when total_pages from pagination state is reached."""
@@ -677,7 +1003,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value="text",
+                return_value=extracted("text"),
             ) as mock_extract,
             patch.object(
                 extractor,
@@ -711,7 +1037,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value="text",
+                return_value=extracted("text"),
             ) as mock_extract,
             patch.object(
                 extractor,
@@ -743,7 +1069,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value="Job posting text",
+                return_value=extracted("Job posting text"),
             ) as mock_extract,
             patch.object(
                 extractor,
@@ -789,7 +1115,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                side_effect=lambda url: next(text_pages),
+                side_effect=lambda url, *args, **kwargs: extracted(next(text_pages)),
             ) as mock_extract,
             patch.object(
                 extractor,
@@ -823,7 +1149,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value="",
+                return_value=extracted(""),
             ),
             patch.object(
                 extractor,
@@ -857,7 +1183,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value="No matching jobs found",
+                return_value=extracted("No matching jobs found"),
             ),
             patch.object(
                 extractor,
@@ -890,7 +1216,10 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value="Login page content",
+                return_value=extracted(
+                    "Login page content",
+                    [{"kind": "person", "url": "/in/testuser/", "text": "Test User"}],
+                ),
             ),
             patch.object(
                 extractor,
@@ -914,6 +1243,11 @@ class TestSearchJobs:
         mock_ids.assert_not_awaited()
         assert result["job_ids"] == []
         assert result["sections"]["search_results"] == "Login page content"
+        assert result["references"] == {
+            "search_results": [
+                {"kind": "person", "url": "/in/testuser/", "text": "Test User"}
+            ]
+        }
 
     async def test_rate_limited_skips_ids_and_text(self, mock_page):
         """Rate-limited pages should yield no IDs or text."""
@@ -923,7 +1257,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value=_RATE_LIMITED_MSG,
+                return_value=extracted(_RATE_LIMITED_MSG),
             ),
             patch.object(
                 extractor,
@@ -947,6 +1281,28 @@ class TestSearchJobs:
         assert result["job_ids"] == []
         assert result["sections"] == {}
         mock_ids.assert_not_awaited()
+
+    async def test_search_people_omits_orphaned_references(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "",
+                [
+                    {
+                        "kind": "person",
+                        "url": "/in/testuser/",
+                        "text": "Test User",
+                    }
+                ],
+            ),
+        ):
+            result = await extractor.search_people("python")
+
+        assert result["sections"] == {}
+        assert "references" not in result
 
 
 class TestStripLinkedInNoise:
@@ -977,6 +1333,11 @@ class TestStripLinkedInNoise:
     def test_empty_string(self):
         assert strip_linkedin_noise("") == ""
 
+    def test_truncate_noise_preserves_media_controls_for_rate_limit_detection(self):
+        text = "Play\nLoaded: 100.00%\nRemaining time 0:07\nShow captions"
+        assert _truncate_linkedin_noise(text) == text
+        assert strip_linkedin_noise(text) == ""
+
     def test_about_in_profile_content_not_stripped(self):
         """'About' followed by actual content (not 'Accessibility') should be preserved."""
         text = "About\nChair of the Gates Foundation.\n\nFeatured\nPost"
@@ -993,6 +1354,27 @@ class TestStripLinkedInNoise:
         )
         assert strip_linkedin_noise(text) == "Company info"
 
+    def test_preserves_real_careers_content(self):
+        text = "Careers\nWe're hiring globally.\nOpen roles in engineering and design."
+        assert strip_linkedin_noise(text) == text
+
+    def test_preserves_real_questions_content(self):
+        text = "Questions?\nReach out to our recruiting team for details."
+        assert strip_linkedin_noise(text) == text
+
+    def test_strips_media_controls_lines(self):
+        text = (
+            "Feed post number 1\n"
+            "Play\n"
+            "Loaded: 100.00%\n"
+            "Remaining time 0:07\n"
+            "Playback speed\n"
+            "Actual post content\n"
+            "Show captions\n"
+            "Close modal window"
+        )
+        assert strip_linkedin_noise(text) == "Feed post number 1\nActual post content"
+
 
 class TestActivityFeedExtraction:
     """Tests for activity page detection and wait behavior in _extract_page_once."""
@@ -1001,7 +1383,13 @@ class TestActivityFeedExtraction:
         self, mock_page
     ):
         """Activity URLs should call wait_for_function and use slower scroll params."""
-        mock_page.evaluate = AsyncMock(return_value="Post content " * 50)
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Post content " * 50,
+                "references": [],
+            }
+        )
         mock_page.wait_for_function = AsyncMock()
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -1020,7 +1408,8 @@ class TestActivityFeedExtraction:
             ),
         ):
             result = await extractor._extract_page_once(
-                "https://www.linkedin.com/in/billgates/recent-activity/all/"
+                "https://www.linkedin.com/in/billgates/recent-activity/all/",
+                section_name="posts",
             )
 
         mock_page.wait_for_function.assert_awaited_once()
@@ -1028,11 +1417,13 @@ class TestActivityFeedExtraction:
         _, kwargs = mock_scroll.call_args
         assert kwargs["pause_time"] == 1.0
         assert kwargs["max_scrolls"] == 10
-        assert len(result) > 200
+        assert len(result.text) > 200
 
     async def test_non_activity_page_skips_wait_and_uses_fast_scroll(self, mock_page):
         """Non-activity URLs should not call wait_for_function and use fast scroll."""
-        mock_page.evaluate = AsyncMock(return_value="Profile text")
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "Profile text", "references": []}
+        )
         mock_page.wait_for_function = AsyncMock()
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -1051,7 +1442,8 @@ class TestActivityFeedExtraction:
             ),
         ):
             await extractor._extract_page_once(
-                "https://www.linkedin.com/in/billgates/details/experience/"
+                "https://www.linkedin.com/in/billgates/details/experience/",
+                section_name="experience",
             )
 
         mock_page.wait_for_function.assert_not_awaited()
@@ -1065,7 +1457,9 @@ class TestActivityFeedExtraction:
         from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
         tab_headers = "All activity\nPosts\nComments\nVideos\nImages"
-        mock_page.evaluate = AsyncMock(return_value=tab_headers)
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": tab_headers, "references": []}
+        )
         mock_page.wait_for_function = AsyncMock(
             side_effect=PlaywrightTimeoutError("Timeout")
         )
@@ -1086,8 +1480,9 @@ class TestActivityFeedExtraction:
             ),
         ):
             result = await extractor._extract_page_once(
-                "https://www.linkedin.com/in/billgates/recent-activity/all/"
+                "https://www.linkedin.com/in/billgates/recent-activity/all/",
+                section_name="posts",
             )
 
         # Should return whatever text is available, not crash
-        assert result == tab_headers
+        assert result.text == tab_headers
