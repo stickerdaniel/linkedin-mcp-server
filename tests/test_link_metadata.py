@@ -1,9 +1,12 @@
 """Tests for compact LinkedIn reference extraction helpers."""
 
+from urllib.parse import quote
+
 from linkedin_mcp_server.scraping.link_metadata import (
     RawReference,
     build_references,
     dedupe_references,
+    normalize_url,
 )
 
 
@@ -158,6 +161,25 @@ class TestBuildReferences:
                 "context": "post attachment",
             }
         ]
+
+    def test_normalize_url_unwraps_nested_redirects_within_cap(self):
+        target = "https://example.com/report"
+        nested = "https://www.linkedin.com/redir/redirect/?url=" + quote(
+            "https://www.linkedin.com/redir/redirect/?url=" + quote(target, safe=""),
+            safe="",
+        )
+
+        assert normalize_url(nested) == target
+
+    def test_normalize_url_drops_redirect_chain_beyond_cap(self):
+        target = "https://example.com/report"
+        href = target
+        for _ in range(7):
+            href = "https://www.linkedin.com/redir/redirect/?url=" + quote(
+                href, safe=""
+            )
+
+        assert normalize_url(href) is None
 
     def test_prefers_shorter_clean_label_over_merged_visible_text(self):
         references = build_references(
