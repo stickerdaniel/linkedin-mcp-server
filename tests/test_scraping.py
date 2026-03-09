@@ -160,7 +160,8 @@ class TestExtractPage:
             ),
         ):
             result = await extractor.extract_page(
-                "https://www.linkedin.com/in/testuser/"
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
             )
 
         assert result.text == "Sample profile text"
@@ -195,7 +196,10 @@ class TestExtractPage:
         mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
         extractor = LinkedInExtractor(mock_page)
 
-        result = await extractor.extract_page("https://www.linkedin.com/in/bad/")
+        result = await extractor.extract_page(
+            "https://www.linkedin.com/in/bad/",
+            section_name="main_profile",
+        )
         assert result.text == ""
         assert result.references == []
 
@@ -211,7 +215,10 @@ class TestExtractPage:
             ),
             pytest.raises(AuthenticationError, match="--login"),
         ):
-            await extractor.extract_page("https://www.linkedin.com/in/testuser/")
+            await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
+            )
 
     async def test_rate_limit_detected(self, mock_page):
         from linkedin_mcp_server.core.exceptions import RateLimitError
@@ -225,7 +232,10 @@ class TestExtractPage:
             ),
             pytest.raises(RateLimitError),
         ):
-            await extractor.extract_page("https://www.linkedin.com/in/testuser/")
+            await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
+            )
 
     async def test_returns_rate_limited_msg_after_retry(self, mock_page):
         """When both attempts return only noise, surface rate limit message."""
@@ -258,7 +268,8 @@ class TestExtractPage:
             ),
         ):
             result = await extractor.extract_page(
-                "https://www.linkedin.com/in/testuser/details/experience/"
+                "https://www.linkedin.com/in/testuser/details/experience/",
+                section_name="experience",
             )
 
         assert result.text == _RATE_LIMITED_MSG
@@ -306,7 +317,8 @@ class TestExtractPage:
             ),
         ):
             result = await extractor.extract_page(
-                "https://www.linkedin.com/in/testuser/details/education/"
+                "https://www.linkedin.com/in/testuser/details/education/",
+                section_name="education",
             )
 
         assert result.text == "Education\nHarvard University\n1973 – 1975"
@@ -1396,7 +1408,8 @@ class TestActivityFeedExtraction:
             ),
         ):
             result = await extractor._extract_page_once(
-                "https://www.linkedin.com/in/billgates/recent-activity/all/"
+                "https://www.linkedin.com/in/billgates/recent-activity/all/",
+                section_name="posts",
             )
 
         mock_page.wait_for_function.assert_awaited_once()
@@ -1429,7 +1442,8 @@ class TestActivityFeedExtraction:
             ),
         ):
             await extractor._extract_page_once(
-                "https://www.linkedin.com/in/billgates/details/experience/"
+                "https://www.linkedin.com/in/billgates/details/experience/",
+                section_name="experience",
             )
 
         mock_page.wait_for_function.assert_not_awaited()
@@ -1466,7 +1480,8 @@ class TestActivityFeedExtraction:
             ),
         ):
             result = await extractor._extract_page_once(
-                "https://www.linkedin.com/in/billgates/recent-activity/all/"
+                "https://www.linkedin.com/in/billgates/recent-activity/all/",
+                section_name="posts",
             )
 
         # Should return whatever text is available, not crash
