@@ -80,10 +80,17 @@ _SECTION_CONTEXTS = {
     "job_posting": "job result",
 }
 
+_DEFAULT_REFERENCE_CAP = 12
 _REFERENCE_CAPS = {
     "main_profile": 12,
     "about": 12,
+    "experience": 12,
+    "education": 12,
+    "interests": 12,
+    "honors": 12,
+    "languages": 12,
     "posts": 12,
+    "jobs": 8,
     "search_results": 15,
     "job_posting": 8,
     "contact_info": 8,
@@ -108,7 +115,7 @@ def build_references(
     section_name: str,
 ) -> list[Reference]:
     """Filter and normalize raw DOM anchors into compact references."""
-    cap = _REFERENCE_CAPS.get(section_name, 12)
+    cap = _REFERENCE_CAPS.get(section_name, _DEFAULT_REFERENCE_CAP)
     normalized_references: list[Reference] = []
 
     for raw in raw_references:
