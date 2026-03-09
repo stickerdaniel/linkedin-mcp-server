@@ -90,6 +90,13 @@ class TestLoaders:
         config = load_from_env(AppConfig())
         assert config.browser.headless is False
 
+    def test_load_from_env_headless_false_with_whitespace_and_case(self, monkeypatch):
+        monkeypatch.setenv("HEADLESS", "  FaLsE ")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.headless is False
+
     def test_load_from_env_headless_true_with_on_alias(self, monkeypatch):
         monkeypatch.setenv("HEADLESS", "on")
         from linkedin_mcp_server.config.loaders import load_from_env
