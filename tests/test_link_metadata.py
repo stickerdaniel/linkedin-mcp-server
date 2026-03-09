@@ -437,6 +437,26 @@ class TestBuildReferences:
             },
         ]
 
+    def test_uses_job_posting_context_for_job_pages(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/company/acme/",
+                    "text": "Acme",
+                }
+            ],
+            "job_posting",
+        )
+
+        assert references == [
+            {
+                "kind": "company",
+                "url": "/company/acme/",
+                "text": "Acme",
+                "context": "job posting",
+            }
+        ]
+
     def test_does_not_treat_lookalike_domains_as_linkedin(self):
         references = build_references(
             [
