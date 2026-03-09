@@ -104,6 +104,13 @@ class TestLoaders:
         config = load_from_env(AppConfig())
         assert config.server.log_level == "DEBUG"
 
+    def test_load_from_env_log_level_with_whitespace_and_case(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "  dEbUg  ")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.server.log_level == "DEBUG"
+
     def test_load_from_env_defaults(self, monkeypatch):
         # Clear env vars
         for var in ["HEADLESS", "LOG_LEVEL"]:
