@@ -26,7 +26,7 @@ _LOGIN_TITLE_PATTERNS = (
 _AUTH_BARRIER_TEXT_MARKERS = (
     ("welcome back", "sign in using another account"),
     ("welcome back", "join now"),
-    ("choose an account",),
+    ("choose an account", "sign in using another account"),
     ("continue as", "sign in using another account"),
 )
 
