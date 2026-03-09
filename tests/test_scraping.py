@@ -763,6 +763,24 @@ class TestScrapeJob:
 
         assert result["sections"] == {}
 
+    async def test_scrape_job_omits_orphaned_references_when_text_empty(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "",
+                [{"kind": "job", "url": "/jobs/view/12345/", "text": "Engineer"}],
+            ),
+        ):
+            result = await extractor.scrape_job("12345")
+
+        assert result["sections"] == {}
+        assert "references" not in result
+
 
 class TestSearchJobs:
     """Tests for search_jobs with job ID extraction and pagination."""
@@ -1249,6 +1267,28 @@ class TestSearchJobs:
         assert result["job_ids"] == []
         assert result["sections"] == {}
         mock_ids.assert_not_awaited()
+
+    async def test_search_people_omits_orphaned_references(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "",
+                [
+                    {
+                        "kind": "person",
+                        "url": "/in/testuser/",
+                        "text": "Test User",
+                    }
+                ],
+            ),
+        ):
+            result = await extractor.search_people("python")
+
+        assert result["sections"] == {}
+        assert "references" not in result
 
 
 class TestStripLinkedInNoise:
