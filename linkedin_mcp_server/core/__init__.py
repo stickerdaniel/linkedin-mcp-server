@@ -2,6 +2,7 @@
 
 from .auth import (
     detect_auth_barrier,
+    detect_auth_barrier_quick,
     is_logged_in,
     wait_for_manual_login,
     warm_up_browser,
@@ -22,6 +23,7 @@ __all__ = [
     "AuthenticationError",
     "BrowserManager",
     "detect_auth_barrier",
+    "detect_auth_barrier_quick",
     "ElementNotFoundError",
     "LinkedInScraperException",
     "NetworkError",
