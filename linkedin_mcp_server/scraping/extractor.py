@@ -9,7 +9,7 @@ from urllib.parse import quote_plus
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core import detect_auth_barrier
+from linkedin_mcp_server.core import detect_auth_barrier, detect_auth_barrier_quick
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
@@ -179,12 +179,20 @@ class LinkedInExtractor:
             await self._raise_if_auth_barrier(url, navigation_error=exc)
             raise
 
-        await self._raise_if_auth_barrier(url)
+        barrier = await detect_auth_barrier_quick(self._page)
+        if not barrier:
+            return
+
+        logger.warning("Authentication barrier detected on %s: %s", url, barrier)
+        raise AuthenticationError(
+            "LinkedIn requires interactive re-authentication. "
+            "Run with --login and complete the account selection/sign-in flow."
+        )
 
     async def extract_page(
         self,
         url: str,
-        section_name: str | None = None,
+        section_name: str,
     ) -> ExtractedSection:
         """Navigate to a URL, scroll to load lazy content, and extract innerText.
 
@@ -215,7 +223,7 @@ class LinkedInExtractor:
     async def _extract_page_once(
         self,
         url: str,
-        section_name: str | None = None,
+        section_name: str,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll, and extract innerText."""
         await self._navigate_to_page(url)
@@ -266,13 +274,13 @@ class LinkedInExtractor:
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
-            references=build_references(raw_result["references"], section_name or ""),
+            references=build_references(raw_result["references"], section_name),
         )
 
     async def _extract_overlay(
         self,
         url: str,
-        section_name: str | None = None,
+        section_name: str,
     ) -> ExtractedSection:
         """Extract content from an overlay/modal page (e.g. contact info).
 
@@ -304,7 +312,7 @@ class LinkedInExtractor:
     async def _extract_overlay_once(
         self,
         url: str,
-        section_name: str | None = None,
+        section_name: str,
     ) -> ExtractedSection:
         """Single attempt to extract content from an overlay/modal page."""
         await self._navigate_to_page(url)
@@ -339,7 +347,7 @@ class LinkedInExtractor:
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
-            references=build_references(raw_result["references"], section_name or ""),
+            references=build_references(raw_result["references"], section_name),
         )
 
     async def scrape_person(self, username: str, requested: set[str]) -> dict[str, Any]:
@@ -518,7 +526,7 @@ class LinkedInExtractor:
     async def _extract_search_page_once(
         self,
         url: str,
-        section_name: str = "",
+        section_name: str,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
         await self._navigate_to_page(url)

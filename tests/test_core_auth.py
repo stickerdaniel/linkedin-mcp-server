@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from linkedin_mcp_server.core.auth import detect_auth_barrier
+from linkedin_mcp_server.core.auth import (
+    detect_auth_barrier,
+    detect_auth_barrier_quick,
+)
 
 
 @pytest.mark.asyncio
@@ -60,6 +63,19 @@ async def test_detect_auth_barrier_returns_none_for_authenticated_page():
     result = await detect_auth_barrier(page)
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_detect_auth_barrier_quick_skips_body_text_on_authenticated_page():
+    page = MagicMock()
+    page.url = "https://www.linkedin.com/feed/"
+    page.title = AsyncMock(return_value="LinkedIn Feed")
+    page.evaluate = AsyncMock(return_value="Home\nMy Network\nJobs\nMessaging")
+
+    result = await detect_auth_barrier_quick(page)
+
+    assert result is None
+    page.evaluate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
