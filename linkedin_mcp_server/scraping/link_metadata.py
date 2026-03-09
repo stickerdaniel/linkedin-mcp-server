@@ -187,7 +187,7 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
 
     if not _is_linkedin_host(host):
         return "external", urlunparse(
-            (parsed.scheme, parsed.netloc, parsed.path or "/", "", parsed.query, "")
+            (parsed.scheme, parsed.netloc, parsed.path or "/", "", "", "")
         )
 
     if _is_linkedin_chrome(path):
@@ -249,7 +249,12 @@ def clean_label(value: str, kind: ReferenceKind) -> str | None:
     if not value:
         return None
 
-    value = re.sub(r"^(?:View:|View|Open article:)\s*", "", value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"^(?:View:\s*|View\b\s+|Open article:\s*)",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
     value = re.sub(r"[’']s\s+graphic link$", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+graphic link$", "", value, flags=re.IGNORECASE)
     value = value.strip(" :-")
@@ -354,7 +359,7 @@ def _reference_score(reference: Reference) -> tuple[int, int, int | float]:
     return (
         1 if text else 0,
         1 if context else 0,
-        _missing_text_penalty(text),
+        _text_score(text),
     )
 
 
@@ -363,9 +368,9 @@ def _label_sort_key(label: str) -> tuple[int, int]:
     return (1 if len(label) < 3 else 0, len(label))
 
 
-def _missing_text_penalty(text: str | None) -> int | float:
-    """Score missing text as strictly worse than any text-bearing reference."""
-    return -len(text) if text else float("-inf")
+def _text_score(text: str | None) -> int | float:
+    """Prefer richer labels while scoring missing text as strictly worst."""
+    return len(text) if text else float("-inf")
 
 
 def _is_linkedin_chrome(path: str) -> bool:

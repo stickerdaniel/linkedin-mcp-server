@@ -110,6 +110,30 @@ class TestBuildReferences:
             }
         ]
 
+    def test_dedupes_external_tracking_variants(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://example.com/report?utm_source=linkedin",
+                    "text": "Report",
+                },
+                {
+                    "href": "https://example.com/report?utm_source=share",
+                    "text": "Detailed annual report",
+                },
+            ],
+            "posts",
+        )
+
+        assert references == [
+            {
+                "kind": "external",
+                "url": "https://example.com/report",
+                "text": "Detailed annual report",
+                "context": "post attachment",
+            }
+        ]
+
     def test_prefers_cleaner_duplicate_label(self):
         references = build_references(
             [
@@ -177,6 +201,26 @@ class TestBuildReferences:
             }
         ]
 
+    def test_preserves_words_starting_with_view(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/company/viewpoint-economics/",
+                    "text": "Viewpoint Economics",
+                }
+            ],
+            "about",
+        )
+
+        assert references == [
+            {
+                "kind": "company",
+                "url": "/company/viewpoint-economics/",
+                "text": "Viewpoint Economics",
+                "context": "top card",
+            }
+        ]
+
     def test_prefers_company_post_context_for_feed_posts(self):
         references = build_references(
             [
@@ -222,6 +266,25 @@ class TestBuildReferences:
             }
         ]
 
+    def test_drops_nav_and_footer_anchors(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/williamhgates/",
+                    "text": "Bill Gates",
+                    "in_nav": True,
+                },
+                {
+                    "href": "https://www.linkedin.com/company/gates-foundation/",
+                    "text": "Gates Foundation",
+                    "in_footer": True,
+                },
+            ],
+            "main_profile",
+        )
+
+        assert references == []
+
     def test_caps_results_per_section(self):
         raw: list[RawReference] = [
             {
@@ -236,6 +299,30 @@ class TestBuildReferences:
         assert len(references) == 12
         assert references[0]["url"] == "/company/test-0/"
         assert references[-1]["url"] == "/company/test-11/"
+
+    def test_prefers_richer_duplicate_text(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/jobs/view/12345/",
+                    "text": "Job",
+                },
+                {
+                    "href": "https://www.linkedin.com/jobs/view/12345/",
+                    "text": "Senior Software Engineer",
+                },
+            ],
+            "search_results",
+        )
+
+        assert references == [
+            {
+                "kind": "job",
+                "url": "/jobs/view/12345/",
+                "text": "Senior Software Engineer",
+                "context": "job result",
+            }
+        ]
 
     def test_uses_search_result_contexts(self):
         references = build_references(
