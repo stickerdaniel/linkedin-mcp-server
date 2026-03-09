@@ -198,7 +198,9 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
         return None
 
     if match := _PERSON_PATH_RE.match(path):
-        if "/overlay/" in path or "/details/" in path or "/recent-activity/" in path:
+        person_suffix = path[match.end() :].lstrip("/")
+        first_suffix_segment = person_suffix.split("/", 1)[0] if person_suffix else ""
+        if first_suffix_segment in {"overlay", "details", "recent-activity"}:
             return None
         return "person", f"/in/{match.group(1)}/"
 
