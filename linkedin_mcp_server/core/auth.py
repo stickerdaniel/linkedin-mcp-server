@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+from urllib.parse import urlparse
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -69,7 +70,7 @@ async def is_logged_in(page: Page) -> bool:
         current_url = page.url
 
         # Step 1: Fail-fast on auth blockers
-        if any(pattern in current_url for pattern in _AUTH_BLOCKER_URL_PATTERNS):
+        if _is_auth_blocker_url(current_url):
             return False
 
         # Step 2: Selector check (PRIMARY)
@@ -108,7 +109,7 @@ async def detect_auth_barrier(page: Page) -> str | None:
     """Detect LinkedIn auth/account-picker barriers on the current page."""
     try:
         current_url = page.url
-        if any(pattern in current_url for pattern in _AUTH_BLOCKER_URL_PATTERNS):
+        if _is_auth_blocker_url(current_url):
             return f"auth blocker URL: {current_url}"
 
         try:
@@ -140,6 +141,19 @@ async def detect_auth_barrier(page: Page) -> str | None:
     except Exception:
         logger.error("Unexpected error checking auth barrier", exc_info=True)
         return None
+
+
+def _is_auth_blocker_url(url: str) -> bool:
+    """Return True only for real auth routes, not arbitrary slug substrings."""
+    path = urlparse(url).path or "/"
+
+    if path in _AUTH_BLOCKER_URL_PATTERNS:
+        return True
+
+    return any(
+        path == f"{pattern}/" or path.startswith(f"{pattern}/")
+        for pattern in _AUTH_BLOCKER_URL_PATTERNS
+    )
 
 
 async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:

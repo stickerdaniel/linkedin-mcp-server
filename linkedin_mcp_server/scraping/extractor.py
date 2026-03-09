@@ -121,9 +121,14 @@ def strip_linkedin_noise(text: str) -> str:
     Finds the earliest occurrence of any known noise marker and truncates there.
     """
     cleaned = _truncate_linkedin_noise(text)
+    return _filter_linkedin_noise_lines(cleaned)
+
+
+def _filter_linkedin_noise_lines(text: str) -> str:
+    """Remove known media/control noise lines from already-truncated content."""
     filtered_lines = [
         line
-        for line in cleaned.splitlines()
+        for line in text.splitlines()
         if not any(pattern.match(line.strip()) for pattern in _NOISE_LINES)
     ]
     return "\n".join(filtered_lines).strip()
@@ -258,7 +263,7 @@ class LinkedInExtractor:
                 "Page %s returned only LinkedIn chrome (likely rate-limited)", url
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
-        cleaned = strip_linkedin_noise(raw)
+        cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name or ""),
@@ -331,7 +336,7 @@ class LinkedInExtractor:
                 url,
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
-        cleaned = strip_linkedin_noise(raw)
+        cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name or ""),
@@ -549,7 +554,7 @@ class LinkedInExtractor:
                 url,
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
-        cleaned = strip_linkedin_noise(raw)
+        cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name),
