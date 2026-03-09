@@ -32,7 +32,7 @@ async def detect_rate_limit(page: Page) -> None:
         raise RateLimitError(
             "LinkedIn security checkpoint detected. "
             "You may need to verify your identity or wait before continuing.",
-            suggested_wait_time=3600,
+            suggested_wait_time=30,
         )
 
     # Check for CAPTCHA
@@ -43,7 +43,7 @@ async def detect_rate_limit(page: Page) -> None:
         if captcha > 0:
             raise RateLimitError(
                 "CAPTCHA challenge detected. Manual intervention required.",
-                suggested_wait_time=3600,
+                suggested_wait_time=30,
             )
     except RateLimitError:
         raise
@@ -75,7 +75,7 @@ async def detect_rate_limit(page: Page) -> None:
             ):
                 raise RateLimitError(
                     "Rate limit message detected on page.",
-                    suggested_wait_time=1800,
+                    suggested_wait_time=30,
                 )
     except RateLimitError:
         raise
