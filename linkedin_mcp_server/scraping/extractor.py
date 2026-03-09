@@ -800,6 +800,7 @@ class LinkedInExtractor:
                 const headingSelector = 'h1, h2, h3';
                 const directHeadingSelector = ':scope > h1, :scope > h2, :scope > h3';
                 const MAX_HEADING_CONTAINERS = 300;
+                const MAX_REFERENCE_ANCHORS = 500;
 
                 const getHeadingText = element => {
                     if (!element) return '';
@@ -866,6 +867,7 @@ class LinkedInExtractor:
                 };
 
                 const references = Array.from(container.querySelectorAll('a[href]'))
+                    .slice(0, MAX_REFERENCE_ANCHORS)
                     .map(anchor => {
                         const rawHref = (anchor.getAttribute('href') || '').trim();
                         if (!rawHref || rawHref === '#') {
