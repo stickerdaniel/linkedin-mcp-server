@@ -72,7 +72,7 @@ def load_from_env(config: AppConfig) -> AppConfig:
 
     # Log level
     if log_level_env := os.environ.get(EnvironmentKeys.LOG_LEVEL):
-        log_level_upper = log_level_env.strip().upper()
+        log_level_upper = _normalize_env(log_level_env).upper()
         if log_level_upper in ("DEBUG", "INFO", "WARNING", "ERROR"):
             config.server.log_level = cast(
                 Literal["DEBUG", "INFO", "WARNING", "ERROR"], log_level_upper
