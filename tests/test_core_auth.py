@@ -23,11 +23,39 @@ async def test_detect_auth_barrier_for_account_picker():
 
 
 @pytest.mark.asyncio
+async def test_detect_auth_barrier_for_continue_as_account_picker():
+    page = MagicMock()
+    page.url = "https://www.linkedin.com/checkpoint/lg/login-submit"
+    page.title = AsyncMock(return_value="LinkedIn Sign In")
+    page.evaluate = AsyncMock(
+        return_value="Continue as Daniel Sticker\nSign in using another account"
+    )
+
+    result = await detect_auth_barrier(page)
+
+    assert result is not None
+
+
+@pytest.mark.asyncio
 async def test_detect_auth_barrier_returns_none_for_authenticated_page():
     page = MagicMock()
     page.url = "https://www.linkedin.com/feed/"
     page.title = AsyncMock(return_value="LinkedIn Feed")
     page.evaluate = AsyncMock(return_value="Home\nMy Network\nJobs\nMessaging")
+
+    result = await detect_auth_barrier(page)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_detect_auth_barrier_ignores_continue_as_in_page_content():
+    page = MagicMock()
+    page.url = "https://www.linkedin.com/jobs/view/123456/"
+    page.title = AsyncMock(return_value="Software Engineer at Acme - LinkedIn")
+    page.evaluate = AsyncMock(
+        return_value="We need someone to continue as a senior engineer on our team."
+    )
 
     result = await detect_auth_barrier(page)
 

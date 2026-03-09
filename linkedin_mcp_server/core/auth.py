@@ -26,7 +26,7 @@ _AUTH_BARRIER_TEXT_MARKERS = (
     ("welcome back", "sign in using another account"),
     ("welcome back", "join now"),
     ("choose an account",),
-    ("continue as",),
+    ("continue as", "sign in using another account"),
 )
 
 
