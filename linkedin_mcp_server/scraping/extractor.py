@@ -1,6 +1,7 @@
 """Core extraction engine using innerText instead of DOM selectors."""
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import re
 from typing import Any
@@ -8,12 +9,21 @@ from urllib.parse import quote_plus
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core import detect_auth_barrier, detect_auth_barrier_quick
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInScraperException,
+)
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
     scroll_job_sidebar,
     scroll_to_bottom,
+)
+from linkedin_mcp_server.scraping.link_metadata import (
+    Reference,
+    build_references,
+    dedupe_references,
 )
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
@@ -81,7 +91,28 @@ _NOISE_MARKERS: list[re.Pattern[str]] = [
     re.compile(r"^Explore premium profiles$", re.MULTILINE),
     # InMail upsell in contact info overlay
     re.compile(r"^Get up to .+ replies when you message with InMail$", re.MULTILINE),
+    # Footer nav clusters in profile/posts pages
+    re.compile(
+        r"^(?:Careers|Privacy & Terms|Questions\?|Select language)\n+"
+        r"(?:Privacy & Terms|Questions\?|Select language|Advertising|Ad Choices|"
+        r"[A-Za-z]+ \([A-Za-z]+\))",
+        re.MULTILINE,
+    ),
 ]
+
+_NOISE_LINES: list[re.Pattern[str]] = [
+    re.compile(r"^(?:Play|Pause|Playback speed|Turn fullscreen on|Fullscreen)$"),
+    re.compile(r"^(?:Show captions|Close modal window|Media player modal window)$"),
+    re.compile(r"^(?:Loaded:.*|Remaining time.*|Stream Type.*)$"),
+]
+
+
+@dataclass
+class ExtractedSection:
+    """Text and compact references extracted from a loaded LinkedIn section."""
+
+    text: str
+    references: list[Reference]
 
 
 def strip_linkedin_noise(text: str) -> str:
@@ -89,6 +120,22 @@ def strip_linkedin_noise(text: str) -> str:
 
     Finds the earliest occurrence of any known noise marker and truncates there.
     """
+    cleaned = _truncate_linkedin_noise(text)
+    return _filter_linkedin_noise_lines(cleaned)
+
+
+def _filter_linkedin_noise_lines(text: str) -> str:
+    """Remove known media/control noise lines from already-truncated content."""
+    filtered_lines = [
+        line
+        for line in text.splitlines()
+        if not any(pattern.match(line.strip()) for pattern in _NOISE_LINES)
+    ]
+    return "\n".join(filtered_lines).strip()
+
+
+def _truncate_linkedin_noise(text: str) -> str:
+    """Trim known LinkedIn chrome blocks before any per-line noise filtering."""
     earliest = len(text)
     for pattern in _NOISE_MARKERS:
         match = pattern.search(text)
@@ -104,7 +151,49 @@ class LinkedInExtractor:
     def __init__(self, page: Page):
         self._page = page
 
-    async def extract_page(self, url: str) -> str:
+    async def _raise_if_auth_barrier(
+        self,
+        url: str,
+        *,
+        navigation_error: Exception | None = None,
+    ) -> None:
+        """Raise an auth error when LinkedIn shows login/account-picker UI."""
+        barrier = await detect_auth_barrier(self._page)
+        if not barrier:
+            return
+
+        logger.warning("Authentication barrier detected on %s: %s", url, barrier)
+        message = (
+            "LinkedIn requires interactive re-authentication. "
+            "Run with --login and complete the account selection/sign-in flow."
+        )
+        if navigation_error is not None:
+            raise AuthenticationError(message) from navigation_error
+        raise AuthenticationError(message)
+
+    async def _navigate_to_page(self, url: str) -> None:
+        """Navigate to a LinkedIn page and fail fast on auth barriers."""
+        try:
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as exc:
+            await self._raise_if_auth_barrier(url, navigation_error=exc)
+            raise
+
+        barrier = await detect_auth_barrier_quick(self._page)
+        if not barrier:
+            return
+
+        logger.warning("Authentication barrier detected on %s: %s", url, barrier)
+        raise AuthenticationError(
+            "LinkedIn requires interactive re-authentication. "
+            "Run with --login and complete the account selection/sign-in flow."
+        )
+
+    async def extract_page(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
         """Navigate to a URL, scroll to load lazy content, and extract innerText.
 
         Retries once after a backoff when the page returns only LinkedIn chrome
@@ -116,24 +205,28 @@ class LinkedInExtractor:
         Returns empty string for unexpected non-domain failures (error isolation).
         """
         try:
-            result = await self._extract_page_once(url)
-            if result != _RATE_LIMITED_MSG:
+            result = await self._extract_page_once(url, section_name)
+            if result.text != _RATE_LIMITED_MSG:
                 return result
 
             # Retry once after backoff
             logger.info("Retrying %s after %.0fs backoff", url, _RATE_LIMIT_RETRY_DELAY)
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            return await self._extract_page_once(url)
+            return await self._extract_page_once(url, section_name)
 
         except LinkedInScraperException:
             raise
         except Exception as e:
             logger.warning("Failed to extract page %s: %s", url, e)
-            return ""
+            return ExtractedSection(text="", references=[])
 
-    async def _extract_page_once(self, url: str) -> str:
+    async def _extract_page_once(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
         """Single attempt to navigate, scroll, and extract innerText."""
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
         # Wait for main content to render
@@ -167,24 +260,28 @@ class LinkedInExtractor:
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
 
         # Extract text from main content area
-        raw = await self._page.evaluate(
-            """() => {
-                const main = document.querySelector('main');
-                return main ? main.innerText : document.body.innerText;
-            }"""
-        )
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
 
         if not raw:
-            return ""
-        cleaned = strip_linkedin_noise(raw)
-        if not cleaned and raw.strip():
+            return ExtractedSection(text="", references=[])
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
             logger.warning(
                 "Page %s returned only LinkedIn chrome (likely rate-limited)", url
             )
-            return _RATE_LIMITED_MSG
-        return cleaned
+            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = _filter_linkedin_noise_lines(truncated)
+        return ExtractedSection(
+            text=cleaned,
+            references=build_references(raw_result["references"], section_name),
+        )
 
-    async def _extract_overlay(self, url: str) -> str:
+    async def _extract_overlay(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
         """Extract content from an overlay/modal page (e.g. contact info).
 
         LinkedIn renders contact info as a native <dialog> element.
@@ -194,8 +291,8 @@ class LinkedInExtractor:
         chrome (noise), mirroring `extract_page` behavior.
         """
         try:
-            result = await self._extract_overlay_once(url)
-            if result != _RATE_LIMITED_MSG:
+            result = await self._extract_overlay_once(url, section_name)
+            if result.text != _RATE_LIMITED_MSG:
                 return result
 
             logger.info(
@@ -204,17 +301,21 @@ class LinkedInExtractor:
                 _RATE_LIMIT_RETRY_DELAY,
             )
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            return await self._extract_overlay_once(url)
+            return await self._extract_overlay_once(url, section_name)
 
         except LinkedInScraperException:
             raise
         except Exception as e:
             logger.warning("Failed to extract overlay %s: %s", url, e)
-            return ""
+            return ExtractedSection(text="", references=[])
 
-    async def _extract_overlay_once(self, url: str) -> str:
+    async def _extract_overlay_once(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
         """Single attempt to extract content from an overlay/modal page."""
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
         # Wait for the dialog/modal to render (LinkedIn uses native <dialog>)
@@ -229,27 +330,25 @@ class LinkedInExtractor:
         # overlay *is* a dialog/modal. Dismissing it would destroy the
         # content before the JS evaluation below can read it.
 
-        raw = await self._page.evaluate(
-            """() => {
-                const dialog = document.querySelector('dialog[open]');
-                if (dialog) return dialog.innerText.trim();
-                const modal = document.querySelector('.artdeco-modal__content');
-                if (modal) return modal.innerText.trim();
-                const main = document.querySelector('main');
-                return main ? main.innerText.trim() : document.body.innerText.trim();
-            }"""
+        raw_result = await self._extract_root_content(
+            ["dialog[open]", ".artdeco-modal__content", "main"],
         )
+        raw = raw_result["text"]
 
         if not raw:
-            return ""
-        cleaned = strip_linkedin_noise(raw)
-        if not cleaned and raw.strip():
+            return ExtractedSection(text="", references=[])
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
             logger.warning(
                 "Overlay %s returned only LinkedIn chrome (likely rate-limited)",
                 url,
             )
-            return _RATE_LIMITED_MSG
-        return cleaned
+            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = _filter_linkedin_noise_lines(truncated)
+        return ExtractedSection(
+            text=cleaned,
+            references=build_references(raw_result["references"], section_name),
+        )
 
     async def scrape_person(self, username: str, requested: set[str]) -> dict[str, Any]:
         """Scrape a person profile with configurable sections.
@@ -260,6 +359,7 @@ class LinkedInExtractor:
         requested = requested | {"main_profile"}
         base_url = f"https://www.linkedin.com/in/{username}"
         sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
 
         first = True
         for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
@@ -273,21 +373,28 @@ class LinkedInExtractor:
             url = base_url + suffix
             try:
                 if is_overlay:
-                    text = await self._extract_overlay(url)
+                    extracted = await self._extract_overlay(
+                        url, section_name=section_name
+                    )
                 else:
-                    text = await self.extract_page(url)
+                    extracted = await self.extract_page(url, section_name=section_name)
 
-                if text:
-                    sections[section_name] = text
+                if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                    sections[section_name] = extracted.text
+                    if extracted.references:
+                        references[section_name] = extracted.references
             except LinkedInScraperException:
                 raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
 
-        return {
+        result: dict[str, Any] = {
             "url": f"{base_url}/",
             "sections": sections,
         }
+        if references:
+            result["references"] = references
+        return result
 
     async def scrape_company(
         self, company_name: str, requested: set[str]
@@ -300,6 +407,7 @@ class LinkedInExtractor:
         requested = requested | {"about"}
         base_url = f"https://www.linkedin.com/company/{company_name}"
         sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
 
         first = True
         for section_name, (suffix, is_overlay) in COMPANY_SECTIONS.items():
@@ -313,21 +421,28 @@ class LinkedInExtractor:
             url = base_url + suffix
             try:
                 if is_overlay:
-                    text = await self._extract_overlay(url)
+                    extracted = await self._extract_overlay(
+                        url, section_name=section_name
+                    )
                 else:
-                    text = await self.extract_page(url)
+                    extracted = await self.extract_page(url, section_name=section_name)
 
-                if text:
-                    sections[section_name] = text
+                if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                    sections[section_name] = extracted.text
+                    if extracted.references:
+                        references[section_name] = extracted.references
             except LinkedInScraperException:
                 raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
 
-        return {
+        result: dict[str, Any] = {
             "url": f"{base_url}/",
             "sections": sections,
         }
+        if references:
+            result["references"] = references
+        return result
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
         """Scrape a single job posting.
@@ -336,16 +451,22 @@ class LinkedInExtractor:
             {url, sections: {name: text}}
         """
         url = f"https://www.linkedin.com/jobs/view/{job_id}/"
-        text = await self.extract_page(url)
+        extracted = await self.extract_page(url, section_name="job_posting")
 
         sections: dict[str, str] = {}
-        if text:
-            sections["job_posting"] = text
+        references: dict[str, list[Reference]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["job_posting"] = extracted.text
+            if extracted.references:
+                references["job_posting"] = extracted.references
 
-        return {
+        result: dict[str, Any] = {
             "url": url,
             "sections": sections,
         }
+        if references:
+            result["references"] = references
+        return result
 
     async def _extract_job_ids(self) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
@@ -369,7 +490,11 @@ class LinkedInExtractor:
             }"""
         )
 
-    async def _extract_search_page(self, url: str) -> str:
+    async def _extract_search_page(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
         """Extract innerText from a job search page with soft rate-limit retry.
 
         Mirrors the noise-only detection and single-retry behavior of
@@ -377,8 +502,8 @@ class LinkedInExtractor:
         ``_RATE_LIMITED_MSG`` sentinel instead of silent empty results.
         """
         try:
-            result = await self._extract_search_page_once(url)
-            if result != _RATE_LIMITED_MSG:
+            result = await self._extract_search_page_once(url, section_name)
+            if result.text != _RATE_LIMITED_MSG:
                 return result
 
             logger.info(
@@ -387,8 +512,8 @@ class LinkedInExtractor:
                 _RATE_LIMIT_RETRY_DELAY,
             )
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            result = await self._extract_search_page_once(url)
-            if result == _RATE_LIMITED_MSG:
+            result = await self._extract_search_page_once(url, section_name)
+            if result.text == _RATE_LIMITED_MSG:
                 logger.warning("Search page %s still rate-limited after retry", url)
             return result
 
@@ -396,11 +521,15 @@ class LinkedInExtractor:
             raise
         except Exception as e:
             logger.warning("Failed to extract search page %s: %s", url, e)
-            return ""
+            return ExtractedSection(text="", references=[])
 
-    async def _extract_search_page_once(self, url: str) -> str:
+    async def _extract_search_page_once(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
         main_found = True
@@ -414,14 +543,7 @@ class LinkedInExtractor:
         if main_found:
             await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
 
-        raw_result = await self._page.evaluate(
-            """() => {
-                const main = document.querySelector('main');
-                return main
-                    ? { source: 'main', text: main.innerText }
-                    : { source: 'body', text: document.body.innerText };
-            }"""
-        )
+        raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
         if raw_result["source"] == "body":
             logger.debug("No <main> at evaluation time on %s, using body fallback", url)
@@ -432,15 +554,19 @@ class LinkedInExtractor:
             )
 
         if not raw:
-            return ""
-        cleaned = strip_linkedin_noise(raw)
-        if not cleaned and raw.strip():
+            return ExtractedSection(text="", references=[])
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
             logger.warning(
                 "Search page %s returned only LinkedIn chrome (likely rate-limited)",
                 url,
             )
-            return _RATE_LIMITED_MSG
-        return cleaned
+            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = _filter_linkedin_noise_lines(truncated)
+        return ExtractedSection(
+            text=cleaned,
+            references=build_references(raw_result["references"], section_name),
+        )
 
     async def _get_total_search_pages(self) -> int | None:
         """Read total page count from LinkedIn's pagination state element.
@@ -549,6 +675,7 @@ class LinkedInExtractor:
         all_job_ids: list[str] = []
         seen_ids: set[str] = set()
         page_texts: list[str] = []
+        page_references: list[Reference] = []
         total_pages: int | None = None
         total_pages_queried = False
 
@@ -568,9 +695,11 @@ class LinkedInExtractor:
             )
 
             try:
-                text = await self._extract_search_page(url)
+                extracted = await self._extract_search_page(
+                    url, section_name="search_results"
+                )
 
-                if not text or text == _RATE_LIMITED_MSG:
+                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
                     # Navigation failed or rate-limited; skip ID extraction
                     break
 
@@ -594,13 +723,17 @@ class LinkedInExtractor:
                         "skipping job ID extraction",
                         self._page.url,
                     )
-                    page_texts.append(text)
+                    page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
                     break
                 page_ids = await self._extract_job_ids()
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
                 if not new_ids:
-                    page_texts.append(text)
+                    page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
                     logger.debug("No new job IDs on page %d, stopping", page_num + 1)
                     break
 
@@ -608,7 +741,9 @@ class LinkedInExtractor:
                     seen_ids.add(jid)
                     all_job_ids.append(jid)
 
-                page_texts.append(text)
+                page_texts.append(extracted.text)
+                if extracted.references:
+                    page_references.extend(extracted.references)
 
             except LinkedInScraperException:
                 raise
@@ -616,13 +751,18 @@ class LinkedInExtractor:
                 logger.warning("Error on search page %d: %s", page_num + 1, e)
                 break
 
-        return {
+        result: dict[str, Any] = {
             "url": base_url,
             "sections": {"search_results": "\n---\n".join(page_texts)}
             if page_texts
             else {},
             "job_ids": all_job_ids,
         }
+        if page_references:
+            result["references"] = {
+                "search_results": dedupe_references(page_references, cap=15)
+            }
+        return result
 
     async def search_people(
         self,
@@ -639,13 +779,128 @@ class LinkedInExtractor:
             params += f"&location={quote_plus(location)}"
 
         url = f"https://www.linkedin.com/search/results/people/?{params}"
-        text = await self.extract_page(url)
+        extracted = await self.extract_page(url, section_name="search_results")
 
         sections: dict[str, str] = {}
-        if text:
-            sections["search_results"] = text
+        references: dict[str, list[Reference]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["search_results"] = extracted.text
+            if extracted.references:
+                references["search_results"] = extracted.references
 
-        return {
+        result: dict[str, Any] = {
             "url": url,
             "sections": sections,
         }
+        if references:
+            result["references"] = references
+        return result
+
+    async def _extract_root_content(
+        self,
+        selectors: list[str],
+    ) -> dict[str, Any]:
+        """Extract innerText and raw anchor metadata from the first matching root."""
+        result = await self._page.evaluate(
+            """({ selectors }) => {
+                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+                const containerSelector = 'section, article, li, div';
+                const headingSelector = 'h1, h2, h3';
+                const directHeadingSelector = ':scope > h1, :scope > h2, :scope > h3';
+                const MAX_HEADING_CONTAINERS = 300;
+                const MAX_REFERENCE_ANCHORS = 500;
+
+                const getHeadingText = element => {
+                    if (!element) return '';
+
+                    const heading =
+                        element.matches && element.matches(headingSelector)
+                            ? element
+                            : element.querySelector
+                              ? element.querySelector(directHeadingSelector)
+                              : null;
+
+                    return normalize(heading?.innerText || heading?.textContent);
+                };
+
+                const getPreviousHeading = node => {
+                    let sibling = node?.previousElementSibling || null;
+                    for (let index = 0; sibling && index < 3; index += 1) {
+                        const heading = getHeadingText(sibling);
+                        if (heading) {
+                            return heading;
+                        }
+                        sibling = sibling.previousElementSibling;
+                    }
+                    return '';
+                };
+
+                const root = selectors
+                    .map(selector => document.querySelector(selector))
+                    .find(Boolean);
+                const source = root ? 'root' : 'body';
+                const container = root || document.body;
+                const text = container ? (container.innerText || '').trim() : '';
+                const headingMap = new WeakMap();
+
+                const candidateContainers = [
+                    container,
+                    ...Array.from(container.querySelectorAll(containerSelector)).slice(
+                        0,
+                        MAX_HEADING_CONTAINERS,
+                    ),
+                ];
+                candidateContainers.forEach(node => {
+                    const ownHeading = getHeadingText(node);
+                    const previousHeading = getPreviousHeading(node);
+                    const heading = ownHeading || previousHeading;
+                    if (heading) {
+                        headingMap.set(node, heading);
+                    }
+                });
+
+                const findHeading = element => {
+                    let current = element.closest(containerSelector) || container;
+                    for (let depth = 0; current && depth < 4; depth += 1) {
+                        const heading = headingMap.get(current);
+                        if (heading) {
+                            return heading;
+                        }
+                        if (current === container) {
+                            break;
+                        }
+                        current = current.parentElement?.closest(containerSelector) || null;
+                    }
+                    return '';
+                };
+
+                const references = Array.from(container.querySelectorAll('a[href]'))
+                    .slice(0, MAX_REFERENCE_ANCHORS)
+                    .map(anchor => {
+                        const rawHref = (anchor.getAttribute('href') || '').trim();
+                        if (!rawHref || rawHref === '#') {
+                            return null;
+                        }
+
+                        const href = rawHref.startsWith('#')
+                            ? rawHref
+                            : (anchor.href || rawHref);
+
+                        return {
+                            href,
+                            text: normalize(anchor.innerText || anchor.textContent),
+                            aria_label: normalize(anchor.getAttribute('aria-label')),
+                            title: normalize(anchor.getAttribute('title')),
+                            heading: findHeading(anchor),
+                            in_article: Boolean(anchor.closest('article')),
+                            in_nav: Boolean(anchor.closest('nav')),
+                            in_footer: Boolean(anchor.closest('footer')),
+                        };
+                    })
+                    .filter(Boolean);
+
+                return { source, text, references };
+            }""",
+            {"selectors": selectors},
+        )
+        return result
