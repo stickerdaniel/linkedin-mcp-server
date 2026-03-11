@@ -1,4 +1,4 @@
-"""Tests for scraping/posts.py: normalize URL, get_my_recent_posts, get_post_comments, find_unreplied_comments."""
+"""Tests for scraping/posts.py: normalize URL, get_post_content, get_my_recent_posts, get_post_comments, find_unreplied_comments."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +9,7 @@ from linkedin_mcp_server.scraping.posts import (
     find_unreplied_comments,
     get_my_recent_posts,
     get_post_comments,
+    get_post_content,
 )
 
 
@@ -359,3 +360,72 @@ class TestFindUnrepliedComments:
         result = await find_unreplied_comments(mock_page, since_days=7, max_posts=5)
         assert result == []
         mock_posts.assert_awaited_once()
+
+
+class TestGetPostContent:
+    """Tests for get_post_content."""
+
+    @patch(
+        "linkedin_mcp_server.scraping.posts.LinkedInExtractor",
+    )
+    async def test_returns_post_content_from_extractor(
+        self, mock_extractor_cls, mock_page
+    ):
+        mock_instance = MagicMock()
+        mock_instance.extract_page = AsyncMock(
+            return_value="Hello, this is my post content!"
+        )
+        mock_extractor_cls.return_value = mock_instance
+
+        result = await get_post_content(mock_page, "12345")
+
+        assert (
+            result["url"]
+            == "https://www.linkedin.com/feed/update/urn:li:activity:12345/"
+        )
+        assert result["sections"]["post_content"] == "Hello, this is my post content!"
+        assert result["pages_visited"] == [result["url"]]
+        assert result["sections_requested"] == ["post_content"]
+        mock_instance.extract_page.assert_awaited_once_with(result["url"])
+
+    @patch(
+        "linkedin_mcp_server.scraping.posts.LinkedInExtractor",
+    )
+    async def test_normalizes_full_url(self, mock_extractor_cls, mock_page):
+        mock_instance = MagicMock()
+        mock_instance.extract_page = AsyncMock(return_value="Content")
+        mock_extractor_cls.return_value = mock_instance
+
+        url = "https://www.linkedin.com/feed/update/urn:li:activity:999/"
+        result = await get_post_content(mock_page, url)
+
+        assert result["url"] == url
+        mock_instance.extract_page.assert_awaited_once_with(url)
+
+    @patch(
+        "linkedin_mcp_server.scraping.posts.LinkedInExtractor",
+    )
+    async def test_empty_content_returns_empty_sections(
+        self, mock_extractor_cls, mock_page
+    ):
+        mock_instance = MagicMock()
+        mock_instance.extract_page = AsyncMock(return_value="")
+        mock_extractor_cls.return_value = mock_instance
+
+        result = await get_post_content(mock_page, "12345")
+
+        assert result["sections"] == {}
+        assert result["pages_visited"] == [result["url"]]
+
+    @patch(
+        "linkedin_mcp_server.scraping.posts.LinkedInExtractor",
+    )
+    async def test_normalizes_urn_input(self, mock_extractor_cls, mock_page):
+        mock_instance = MagicMock()
+        mock_instance.extract_page = AsyncMock(return_value="Post text")
+        mock_extractor_cls.return_value = mock_instance
+
+        result = await get_post_content(mock_page, "urn:li:activity:777")
+
+        assert "urn:li:activity:777" in result["url"]
+        assert result["sections"]["post_content"] == "Post text"
