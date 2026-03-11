@@ -58,7 +58,7 @@ Tool responses keep readable `sections` text and may also include a compact `ref
 
 ## 🚀 uvx Setup (Recommended - Universal)
 
-**Prerequisites:** Install uv and run `uvx patchright install chromium` to set up the browser.
+**Prerequisites:** [Install uv](https://docs.astral.sh/uv/getting-started/installation/) and run `uvx patchright install chromium` to set up the browser.
 
 ### Installation
 
