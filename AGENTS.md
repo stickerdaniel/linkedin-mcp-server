@@ -32,30 +32,62 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture Overview
 
-This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assistants to interact with LinkedIn through web scraping. The codebase follows a two-phase startup pattern:
+This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assistants to interact with LinkedIn through web scraping. Built with FastMCP and Patchright (anti-detection Playwright fork).
 
-1. **Authentication Phase** (`authentication.py`) - Validates LinkedIn browser profile exists
+### Startup Flow
+
+Two-phase startup pattern:
+
+1. **Authentication Phase** (`authentication.py`) - Validates LinkedIn browser profile exists at `~/.linkedin-mcp/profile/`
 2. **Server Runtime Phase** (`server.py`) - Runs FastMCP server with tool registration
 
-**Core Components:**
+Entry point is `cli_main.py` which handles CLI args (`--login`, `--logout`, `--status`) before reaching phase 2. Transport modes: `stdio` (default) or `streamable-http`.
 
-- `cli_main.py` - Entry point with CLI argument parsing and orchestration
-- `server.py` - FastMCP server setup and tool registration
-- `tools/` - LinkedIn scraping tools (person, company, job, posts)
-- `drivers/browser.py` - Patchright browser management with persistent profile (singleton)
-- `core/` - Inlined browser, auth, and utility code (replaces `linkedin_scraper` dependency)
-- `scraping/` - innerText extraction engine with Flag-based section selection
-- `config/` - Configuration management (schema, loaders)
-- `authentication.py` - LinkedIn profile-based authentication
+### Tool Registration Pattern
 
-**Tool Categories:**
+Tools are registered in `server.py` via `create_mcp_server()`:
 
-- **Person Tools** (`tools/person.py`) - Profile scraping with explicit section selection
-- **Company Tools** (`tools/company.py`) - Company profile and posts extraction
-- **Job Tools** (`tools/job.py`) - Job posting details and search functionality
-- **Posts Tools** (`tools/posts.py`) - My recent posts, post comments, unreplied comments
+```
+register_person_tools(mcp)   → get_person_profile, search_people
+register_company_tools(mcp)  → get_company_profile, get_company_posts
+register_job_tools(mcp)      → get_job_details, search_jobs
+register_posts_tools(mcp)    → get_my_recent_posts, get_post_comments, get_post_content, find_unreplied_comments
+close_session                → registered inline
+```
 
-**Available MCP Tools:**
+Each tool follows the same pattern: `ensure_authenticated()` → parse sections → `get_or_create_browser()` → `LinkedInExtractor(browser.page)` → scrape → return result.
+
+All scraping tools return: `{url, sections: {name: raw_text}, pages_visited, sections_requested}`
+
+### Two-Level Browser Architecture
+
+**Level 1 — Core** (`core/browser.py`): `BrowserManager` wraps Patchright's `chromium.launch_persistent_context()`. Manages playwright, context, page instances. Handles cookie import/export for the cross-platform cookie bridge (macOS profile → Docker Linux via `cookies.json`).
+
+**Level 2 — Driver** (`drivers/browser.py`): Module-level singleton. `get_or_create_browser()` returns existing or creates new. `close_browser()` exports cookies then cleans up. `ensure_authenticated()` uses a 120s TTL cache to avoid redundant DOM login checks.
+
+### Scraping Engine (`scraping/`)
+
+- **`fields.py`** — `PersonScrapingFields` and `CompanyScrapingFields` are `Flag` enums. **One flag = one page navigation.** Never combine multiple URLs behind a single flag. Section names are parsed from comma-separated strings via `parse_person_sections()` / `parse_company_sections()`.
+- **`extractor.py`** — `LinkedInExtractor` implements the navigate-scroll-innerText pattern:
+  1. Navigate to URL, wait for DOM load
+  2. Dismiss modals (`handle_modal_close`)
+  3. Scroll to load lazy content (max 5 scrolls)
+  4. Extract `main.innerText` (or `body.innerText` fallback)
+  5. Strip sidebar/footer noise via regex (`strip_linkedin_noise`)
+  6. On soft rate limit (only chrome returned, no content): retry once after 5s backoff
+  7. Humanized delay (1.5–4s) between section navigations
+- **`posts.py`** — Specialized scraping for user posts, post comments, and unreplied comment detection. Uses notifications page when possible for unreplied comments, falls back to scanning recent posts.
+- **`cache.py`** — `ScrapingCache` (module-level singleton, 300s TTL). Keyed by URL, skips navigation on cache hit.
+
+### Rate Limit Handling
+
+`RateLimitState` in `core/utils.py` uses exponential backoff: 30s → 60s → 120s → 300s cap. Success gradually decays the counter (not instant reset). Detection checks URL redirects, CAPTCHA markers, and body text heuristics via `detect_rate_limit()`.
+
+### Configuration Flow (`config/`)
+
+Three-layer precedence: defaults (`schema.py` dataclasses) → env vars (`load_from_env()`) → CLI args (`load_from_args()`). `AppConfig` contains `BrowserConfig` and `ServerConfig`. Accessed via `get_config()` singleton.
+
+### Available MCP Tools
 
 | Tool | Description |
 |------|-------------|
@@ -64,64 +96,38 @@ This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assis
 | `get_company_posts` | Get recent posts from company feed |
 | `get_my_recent_posts` | List recent posts from the logged-in user (post_url, post_id, text_preview, created_at) |
 | `get_post_comments` | Get top-level comments for a post (post_url or post_id) |
+| `get_post_content` | Get the text content of a specific post (post_url or post_id) |
 | `find_unreplied_comments` | Find comments on your posts without your reply (since_days, max_posts) |
 | `get_job_details` | Get job posting details |
 | `search_jobs` | Search jobs by keywords and location |
-| `close_session` | Close browser session and clean up resources |
 | `search_people` | Search for people by keywords and location |
+| `close_session` | Close browser session and clean up resources |
 
-**Tool Return Format:**
+## Testing
 
-All scraping tools return: `{url, sections: {name: raw_text}, pages_visited, sections_requested}`
+Tests live in `tests/` with ~13 test modules. Key fixtures in `conftest.py` (all `autouse=True`):
 
-**Scraping Architecture (`scraping/`):**
+- **`reset_singletons`** — Resets browser driver, config, scraping cache, and rate limit state before and after each test.
+- **`isolate_profile_dir`** — Monkeypatches `DEFAULT_PROFILE_DIR` and `get_profile_dir()` across all modules to redirect to `tmp_path`. Prevents tests from touching the real `~/.linkedin-mcp/profile/`.
+- **`profile_dir`** (not autouse) — Creates a fake profile directory with a placeholder `Default/Cookies` file so `profile_exists()` returns True.
+- **`mock_context`** — Mock FastMCP `Context` with `AsyncMock` for `report_progress`.
 
-- `fields.py` - `PersonScrapingFields` and `CompanyScrapingFields` Flag enums
-- `extractor.py` - `LinkedInExtractor` class using navigate-scroll-innerText pattern
-- **One flag = one navigation.** Each `PersonScrapingFields` / `CompanyScrapingFields` flag must map to exactly one page navigation. Never combine multiple URLs behind a single flag.
-
-**Core Subpackage (`core/`):**
-
-- `exceptions.py` - Exception hierarchy (AuthenticationError, RateLimitError, etc.)
-- `browser.py` - `BrowserManager` with persistent context and cookie import/export
-- `auth.py` - `is_logged_in()`, `wait_for_manual_login()`, `warm_up_browser()`
-- `utils.py` - `detect_rate_limit()`, `scroll_to_bottom()`, `handle_modal_close()`
-
-**Authentication Flow:**
-
-- Uses persistent browser profile at `~/.linkedin-mcp/profile/`
-- Run with `--login` to create a profile via browser login
-
-**Transport Modes:**
-
-- `stdio` (default) - Standard I/O for CLI MCP clients
-- `streamable-http` - HTTP server mode for web-based MCP clients
+When writing new tests: async functions are collected automatically (no `@pytest.mark.asyncio` needed). Use `profile_dir` fixture when the test needs an existing profile. Browser-related tests should mock at the driver level (`drivers/browser.py`) rather than the core level.
 
 ## Development Notes
 
 - **Python Version:** Requires Python 3.12+
 - **Package Manager:** Uses `uv` for fast dependency resolution
-- **Browser:** Uses Patchright (anti-detection Playwright fork) with Chromium
+- **Browser:** Patchright (anti-detection Playwright fork) with Chromium
+- **Key Dependencies:** `fastmcp` (MCP framework), `patchright` (browser automation)
 - **Logging:** Configurable levels, JSON format for non-interactive mode
-- **Error Handling:** Comprehensive exception handling for LinkedIn rate limits, captchas, etc.
-
-**Key Dependencies:**
-
-- `fastmcp` - MCP server framework
-- `patchright` - Anti-detection browser automation (Playwright fork)
-
-**Configuration:**
-
-- CLI arguments with comprehensive help (`--help`)
-- Browser profile stored at `~/.linkedin-mcp/profile/`
+- **Browser profile:** Persistent at `~/.linkedin-mcp/profile/`, run `--login` to create
 
 **Commit Message Format:**
 
 - Follow conventional commits: `type(scope): subject`
 - Types: feat, fix, docs, style, refactor, test, chore, perf, ci
 - Keep subject <50 chars, imperative mood
-
-## Important Development Notes
 
 ### Development Workflow
 
