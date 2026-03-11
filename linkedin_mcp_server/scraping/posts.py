@@ -523,6 +523,127 @@ async def get_post_comments(
     return comments
 
 
+async def get_notifications(
+    page: Page,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """
+    Scrape the LinkedIn notifications page and return structured items.
+
+    Navigates to /notifications/, scrolls to load lazy content, then extracts
+    each notification card's text, link, and best-effort type/timestamp.
+
+    Args:
+        page: Patchright page instance.
+        limit: Maximum number of notifications to return (default 20).
+
+    Returns:
+        List of dicts with text, link, type (best-effort category), created_at.
+    """
+    notifications: list[dict[str, Any]] = []
+    try:
+        await wait_for_cooldown()
+        await page.goto(
+            _NOTIFICATIONS_URL, wait_until="domcontentloaded", timeout=30000
+        )
+        await detect_rate_limit(page)
+        rate_limit_state.record_success()
+        await handle_modal_close(page)
+        await scroll_to_bottom(page, pause_time=0.5, max_scrolls=6)
+        await asyncio.sleep(1)
+
+        raw = await page.evaluate(
+            """(maxItems) => {
+            const items = [];
+            const main = document.querySelector('main');
+            if (!main) return items;
+
+            // Type detection keywords (order matters: first match wins)
+            const typeMap = [
+                { type: 'comment', terms: ['comment', 'commented', 'comentou', 'comentário', 'reply', 'replied', 'respondeu', 'resposta'] },
+                { type: 'reaction', terms: ['like', 'liked', 'love', 'celebrate', 'support', 'insightful', 'funny', 'curtiu', 'reagiu', 'reação'] },
+                { type: 'connection', terms: ['connect', 'connection', 'accepted', 'invitation', 'convite', 'conexão', 'aceito'] },
+                { type: 'mention', terms: ['mention', 'mentioned', 'mencionou', 'menção', 'tagged', 'marcou'] },
+                { type: 'endorsement', terms: ['endorse', 'endorsed', 'skill', 'competência', 'recomend'] },
+                { type: 'job', terms: ['job', 'hiring', 'vaga', 'emprego', 'position', 'career', 'carreira', 'recruiter'] },
+                { type: 'post', terms: ['post', 'posted', 'shared', 'publicou', 'compartilhou', 'article', 'artigo'] },
+                { type: 'birthday', terms: ['birthday', 'aniversário', 'born'] },
+                { type: 'work_anniversary', terms: ['anniversary', 'work anniversary', 'aniversário de trabalho'] },
+                { type: 'view', terms: ['view', 'viewed', 'appeared', 'visualiz', 'perfil'] },
+            ];
+
+            function detectType(text) {
+                const lower = text.toLowerCase();
+                for (const entry of typeMap) {
+                    if (entry.terms.some(t => lower.includes(t))) return entry.type;
+                }
+                return 'other';
+            }
+
+            // Each notification is typically an <li> or article inside main
+            const cards = main.querySelectorAll(
+                'div.nt-card, article, section li, div[data-urn], main > div > div > div'
+            );
+            const seen = new Set();
+
+            for (const card of cards) {
+                const text = (card.innerText || '').trim();
+                if (!text || text.length < 10) continue;
+
+                // Deduplicate by first 80 chars of text
+                const dedup = text.slice(0, 80);
+                if (seen.has(dedup)) continue;
+                seen.add(dedup);
+
+                // Find the most relevant link
+                let link = null;
+                const a = card.querySelector('a[href*="/feed/"], a[href*="/in/"], a[href*="/jobs/"], a[href*="/notifications/"]');
+                if (a) {
+                    const href = (a.getAttribute('href') || '').trim();
+                    link = href.startsWith('http') ? href : 'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
+                }
+
+                // Best-effort timestamp
+                let createdAt = null;
+                const timeEl = card.querySelector('time');
+                if (timeEl) {
+                    createdAt = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim() || null;
+                }
+                if (!createdAt) {
+                    // Look for relative time patterns like "2h", "3d", "1w"
+                    const relMatch = text.match(/\\b(\\d+[smhdw]|\\d+ (?:second|minute|hour|day|week|month|year|segundo|minuto|hora|dia|semana|mês|ano)s? ago)\\b/i);
+                    if (relMatch) createdAt = relMatch[0];
+                }
+
+                const type = detectType(text);
+                const snippet = text.slice(0, 300);
+
+                items.push({ text: snippet, link: link, type: type, created_at: createdAt });
+                if (items.length >= maxItems) break;
+            }
+            return items;
+        }""",
+            limit,
+        )
+
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict) and item.get("text"):
+                    notifications.append(
+                        {
+                            "text": (item.get("text") or "").strip(),
+                            "link": item.get("link"),
+                            "type": item.get("type", "other"),
+                            "created_at": item.get("created_at"),
+                        }
+                    )
+    except LinkedInScraperException:
+        raise
+    except Exception as e:
+        logger.warning("get_notifications extraction failed: %s", e)
+    return notifications
+
+
 async def _unreplied_via_notifications(
     page: Page, since_days: int, max_posts: int
 ) -> list[dict[str, Any]] | None:
