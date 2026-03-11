@@ -98,6 +98,7 @@ Three-layer precedence: defaults (`schema.py` dataclasses) → env vars (`load_f
 | `get_post_comments` | Get top-level comments for a post (post_url or post_id) |
 | `get_post_content` | Get the text content of a specific post (post_url or post_id) |
 | `find_unreplied_comments` | Find comments on your posts without your reply (since_days, max_posts) |
+| `get_notifications` | Get recent notifications from your LinkedIn notifications page (comments, reactions, connections, mentions, jobs, etc.) |
 | `get_job_details` | Get job posting details |
 | `search_jobs` | Search jobs by keywords and location |
 | `search_people` | Search for people by keywords and location |

@@ -16,6 +16,7 @@ from linkedin_mcp_server.error_handler import handle_tool_error
 from linkedin_mcp_server.scraping.posts import (
     find_unreplied_comments as scrape_find_unreplied_comments,
     get_my_recent_posts as scrape_get_my_recent_posts,
+    get_notifications as scrape_get_notifications,
     get_post_comments as scrape_get_post_comments,
     get_post_content as scrape_get_post_content,
 )
@@ -135,6 +136,48 @@ def register_posts_tools(mcp: FastMCP) -> None:
             return result
         except Exception as e:
             return handle_tool_error(e, "get_post_content")
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get Notifications",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
+    async def get_notifications(
+        ctx: Context,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """
+        Get recent notifications from your LinkedIn notifications page.
+
+        Scrapes the notifications page and returns structured items including
+        comments, reactions, connection requests, mentions, endorsements,
+        job alerts, and more.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            limit: Maximum number of notifications to return (default 20).
+
+        Returns:
+            Dict with notifications: list of {text, link, type, created_at}.
+            type is best-effort classification (comment, reaction, connection,
+            mention, endorsement, job, post, birthday, work_anniversary, view, other).
+            created_at is best-effort.
+        """
+        try:
+            await ensure_authenticated()
+            logger.info("Scraping notifications (limit=%s)", limit)
+            browser = await get_or_create_browser()
+            await ctx.report_progress(
+                progress=0, total=100, message="Fetching your notifications"
+            )
+            notifications = await scrape_get_notifications(browser.page, limit=limit)
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+            return {"notifications": notifications}
+        except Exception as e:
+            return handle_tool_error(e, "get_notifications")
 
     @mcp.tool(
         annotations=ToolAnnotations(

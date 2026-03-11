@@ -13,6 +13,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **My Recent Posts**: List recent posts from the logged-in user's feed
 - **Post Comments**: Get top-level comments for any post (by URL or post ID)
 - **Unreplied Comments**: Find comments on your posts that you have not replied to (notifications or scan)
+- **Notifications**: Get recent notifications (comments, reactions, connections, mentions, endorsements, jobs, etc.)
 
 ## Quick Start
 

@@ -8,6 +8,7 @@ from linkedin_mcp_server.scraping.posts import (
     _normalize_post_url,
     find_unreplied_comments,
     get_my_recent_posts,
+    get_notifications,
     get_post_comments,
     get_post_content,
 )
@@ -429,3 +430,95 @@ class TestGetPostContent:
 
         assert "urn:li:activity:777" in result["url"]
         assert result["sections"]["post_content"] == "Post text"
+
+
+@patch("linkedin_mcp_server.scraping.posts.detect_rate_limit", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.handle_modal_close", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.scroll_to_bottom", new_callable=AsyncMock)
+class TestGetNotifications:
+    """Tests for get_notifications."""
+
+    async def test_returns_notifications_from_evaluate(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "text": "Alice commented on your post",
+                    "link": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                    "type": "comment",
+                    "created_at": "2h",
+                },
+                {
+                    "text": "Bob liked your post",
+                    "link": "https://www.linkedin.com/feed/update/urn:li:activity:2/",
+                    "type": "reaction",
+                    "created_at": "3h",
+                },
+            ]
+        )
+        result = await get_notifications(mock_page, limit=10)
+        assert len(result) == 2
+        assert result[0]["text"] == "Alice commented on your post"
+        assert result[0]["type"] == "comment"
+        assert result[0]["link"] is not None
+        assert result[1]["type"] == "reaction"
+        mock_page.goto.assert_awaited_once()
+        mock_page.evaluate.assert_awaited_once()
+        assert mock_page.evaluate.await_args[0][1] == 10
+
+    async def test_passes_limit_to_evaluate(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(return_value=[])
+        await get_notifications(mock_page, limit=5)
+        assert mock_page.evaluate.await_args[0][1] == 5
+
+    async def test_returns_empty_list_on_exception(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
+        result = await get_notifications(mock_page, limit=10)
+        assert result == []
+
+    async def test_reraises_linkedin_scraper_exception(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        from linkedin_mcp_server.core.exceptions import RateLimitError
+
+        mock_rate_limit.side_effect = RateLimitError(
+            "Rate limited", suggested_wait_time=60
+        )
+        with pytest.raises(RateLimitError):
+            await get_notifications(mock_page, limit=5)
+
+    async def test_filters_invalid_entries(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "text": "Valid notification text here",
+                    "link": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                    "type": "comment",
+                    "created_at": None,
+                },
+                {},  # no text
+                {
+                    "text": "",
+                    "link": None,
+                    "type": "other",
+                    "created_at": None,
+                },  # empty text
+            ]
+        )
+        result = await get_notifications(mock_page, limit=10)
+        assert len(result) == 1
+        assert result[0]["text"] == "Valid notification text here"
+
+    async def test_default_limit_is_20(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(return_value=[])
+        await get_notifications(mock_page)
+        assert mock_page.evaluate.await_args[0][1] == 20
