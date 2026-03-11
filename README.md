@@ -45,6 +45,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | Working |
 | `get_my_recent_posts` | List recent posts from the logged-in user's feed (post_url, post_id, text_preview, created_at) | Working |
 | `get_post_comments` | Get top-level comments for a post (by post_url or post_id) | Working |
+| `get_post_content` | Get the full text content of a specific post (by post_url or post_id) | Working |
 | `find_unreplied_comments` | Find comments on your posts that you have not replied to (uses notifications when possible) | Working |
 | `search_jobs` | Search for jobs with keywords and location filters | Working |
 | `search_people` | Search for people by keywords and location | Working |
