@@ -17,6 +17,7 @@ from linkedin_mcp_server.scraping.posts import (
     find_unreplied_comments as scrape_find_unreplied_comments,
     get_my_recent_posts as scrape_get_my_recent_posts,
     get_post_comments as scrape_get_post_comments,
+    get_post_content as scrape_get_post_content,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,43 @@ def register_posts_tools(mcp: FastMCP) -> None:
             return {"comments": comments}
         except Exception as e:
             return handle_tool_error(e, "get_post_comments")
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get Post Content",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
+    async def get_post_content(
+        post_url: str,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """
+        Get the text content of a specific LinkedIn post.
+
+        Args:
+            post_url: Post URL (e.g. https://www.linkedin.com/feed/update/urn:li:activity:...)
+                or post URN/ID (e.g. urn:li:activity:123 or 123).
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, sections: {"post_content": raw_text}, pages_visited,
+            sections_requested.
+        """
+        try:
+            await ensure_authenticated()
+            logger.info("Scraping post content: %s", post_url[:80])
+            browser = await get_or_create_browser()
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading post content"
+            )
+            result = await scrape_get_post_content(browser.page, post_url)
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+            return result
+        except Exception as e:
+            return handle_tool_error(e, "get_post_content")
 
     @mcp.tool(
         annotations=ToolAnnotations(

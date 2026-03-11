@@ -22,6 +22,7 @@ from linkedin_mcp_server.core.utils import (
     wait_for_cooldown,
 )
 from linkedin_mcp_server.scraping.cache import scraping_cache
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
 
 logger = logging.getLogger(__name__)
 _FEED_URL = "https://www.linkedin.com/feed/"
@@ -43,6 +44,41 @@ def _normalize_post_url(post_url_or_id: str) -> str:
     if s.isdigit():
         return f"{_BASE_POST_URL}urn:li:activity:{s}/"
     return f"{_BASE_POST_URL}{s}/" if not s.endswith("/") else f"{_BASE_POST_URL}{s}"
+
+
+async def get_post_content(
+    page: Page,
+    post_url_or_id: str,
+) -> dict[str, Any]:
+    """
+    Get the text content of a LinkedIn post.
+
+    Navigates to the post URL, scrolls to load content, and extracts the
+    innerText using the standard LinkedInExtractor pipeline (handles caching,
+    rate limits, noise stripping, and retries).
+
+    Args:
+        page: Patchright page instance.
+        post_url_or_id: Post URL, URN (urn:li:activity:123), or numeric ID.
+
+    Returns:
+        Dict with url, sections: {"post_content": text}, pages_visited,
+        sections_requested.
+    """
+    url = _normalize_post_url(post_url_or_id)
+    extractor = LinkedInExtractor(page)
+    text = await extractor.extract_page(url)
+
+    sections: dict[str, str] = {}
+    if text:
+        sections["post_content"] = text
+
+    return {
+        "url": url,
+        "sections": sections,
+        "pages_visited": [url],
+        "sections_requested": ["post_content"],
+    }
 
 
 async def _get_current_user_name(page: Page) -> str | None:
