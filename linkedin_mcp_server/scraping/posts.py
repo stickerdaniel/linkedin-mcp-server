@@ -8,6 +8,7 @@ post_id/urn, created_at, comment_permalink may be missing if not present in DOM.
 import asyncio
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from patchright.async_api import Page
@@ -305,6 +306,26 @@ async def get_my_recent_posts(
         raise
     except Exception as e:
         logger.warning("get_my_recent_posts extraction failed: %s", e)
+
+    # Filter by since_days when provided
+    if since_days is not None and posts:
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=since_days)
+        filtered: list[dict[str, Any]] = []
+        for p in posts:
+            created = p.get("created_at")
+            if not created or not isinstance(created, str):
+                # Keep posts with unknown dates (best-effort)
+                filtered.append(p)
+                continue
+            try:
+                dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                if dt >= cutoff:
+                    filtered.append(p)
+            except (ValueError, TypeError):
+                # Unparseable date — keep the post
+                filtered.append(p)
+        posts = filtered
+
     return posts
 
 
@@ -388,7 +409,8 @@ async def get_post_comments(
     created_at, comment_permalink, has_reply_from_author (if current_user_name given).
     """
     url = _normalize_post_url(post_url_or_id)
-    cache_key = f"comments:{url}"
+    user_tag = current_user_name or ""
+    cache_key = f"comments:{url}:user={user_tag}"
     cached = scraping_cache.get(cache_key)
     if cached is not None:
         return cached
@@ -590,18 +612,18 @@ async def get_notifications(
                 const text = (card.innerText || '').trim();
                 if (!text || text.length < 10) continue;
 
-                // Deduplicate by first 80 chars of text
-                const dedup = text.slice(0, 80);
-                if (seen.has(dedup)) continue;
-                seen.add(dedup);
-
-                // Find the most relevant link
+                // Find the most relevant link (computed early for dedup)
                 let link = null;
                 const a = card.querySelector('a[href*="/feed/"], a[href*="/in/"], a[href*="/jobs/"], a[href*="/notifications/"]');
                 if (a) {
                     const href = (a.getAttribute('href') || '').trim();
                     link = href.startsWith('http') ? href : 'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
                 }
+
+                // Deduplicate: prefer link, fall back to text prefix
+                const dedup = link || text.slice(0, 120);
+                if (seen.has(dedup)) continue;
+                seen.add(dedup);
 
                 // Best-effort timestamp
                 let createdAt = null;
