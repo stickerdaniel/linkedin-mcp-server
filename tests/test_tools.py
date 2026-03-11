@@ -398,14 +398,63 @@ class TestPostsTools:
         assert "error" in result
         assert result["error"] == "authentication_failed"
 
+    async def test_get_notifications(self, mock_context, patch_tool_deps, monkeypatch):
+        from linkedin_mcp_server.tools.posts import register_posts_tools
+
+        mock_notifications = [
+            {
+                "text": "Alice commented on your post",
+                "link": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                "type": "comment",
+                "created_at": "2h",
+            },
+            {
+                "text": "Bob sent you a connection request",
+                "link": "https://www.linkedin.com/mynetwork/invitation-manager/",
+                "type": "connection",
+                "created_at": "1d",
+            },
+        ]
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.posts.scrape_get_notifications",
+            AsyncMock(return_value=mock_notifications),
+        )
+
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_notifications")
+        result = await tool_fn(mock_context, limit=10)
+        assert "notifications" in result
+        assert len(result["notifications"]) == 2
+        assert result["notifications"][0]["type"] == "comment"
+        assert result["notifications"][1]["type"] == "connection"
+
+    async def test_get_notifications_calls_scraper_with_limit(
+        self, mock_context, patch_tool_deps, monkeypatch
+    ):
+        from linkedin_mcp_server.tools.posts import register_posts_tools
+
+        mock_scraper = AsyncMock(return_value=[])
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.posts.scrape_get_notifications",
+            mock_scraper,
+        )
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_notifications")
+        await tool_fn(mock_context, limit=5)
+        mock_scraper.assert_awaited_once()
+        assert mock_scraper.await_args.kwargs.get("limit") == 5
+
     async def test_posts_tools_registered_in_server(self):
-        """All three posts tools are registered when creating the full MCP server."""
+        """All posts tools are registered when creating the full MCP server."""
         from linkedin_mcp_server.server import create_mcp_server
 
         mcp = create_mcp_server()
         for name in (
             "get_my_recent_posts",
             "get_post_comments",
+            "get_notifications",
             "find_unreplied_comments",
         ):
             tool = await mcp.get_tool(name)
