@@ -11,6 +11,8 @@ import json
 import logging
 from typing import Any, Dict
 
+from linkedin_mcp_server.debug_trace import get_trace_dir
+
 
 class MCPJSONFormatter(logging.Formatter):
     """JSON formatter for MCP server logs."""
@@ -106,6 +108,13 @@ def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
+
+    trace_dir = get_trace_dir()
+    if trace_dir is not None:
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(trace_dir / "server.log", encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
 
     # Set specific loggers to reduce noise
     logging.getLogger("urllib3").setLevel(logging.ERROR)

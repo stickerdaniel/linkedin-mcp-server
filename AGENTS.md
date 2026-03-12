@@ -71,6 +71,7 @@ All scraping tools return: `{url, sections: {name: raw_text}}`.
 Tools may also include:
 
 - `references: {section_name: [{kind, url, text?, context?}, ...]}` — compact typed link targets for graph expansion. LinkedIn URLs are relative paths such as `/in/stickerdaniel/`; external URLs remain absolute.
+- `section_errors: {section_name: {error_type, error_message, issue_template_path, issue_template, runtime, ...}}` when one section failed but the overall tool call still completed. These diagnostics include trace/log locations and an issue-ready markdown template.
 - `unknown_sections: [name, ...]` when unknown section names were passed.
 - `job_ids: [id, ...]` for `search_jobs`.
 
@@ -144,7 +145,7 @@ Tools may also include:
 
 ## Verifying Bug Reports
 
-Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. When working in this repository, use the local code path with `uv run`, not `uvx`, so the running process reflects the files in your workspace. Use `uvx` only when intentionally verifying the packaged distribution. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`. Start the server with HTTP transport in one terminal (this process is long-running and will block the shell), then in a second terminal call the tool via curl:
+Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. When working in this repository, use the local code path with `uv run`, not `uvx`, so the running process reflects the files in your workspace. Use `uvx` only when intentionally verifying the packaged distribution. For live Docker investigations, always refresh the source session first with a fresh local `uv run -m linkedin_mcp_server --login` before testing each materially different approach. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`. Start the server with HTTP transport in one terminal (this process is long-running and will block the shell), then in a second terminal call the tool via curl:
 
 ```bash
 # Create or refresh the local source session

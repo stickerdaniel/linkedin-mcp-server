@@ -21,6 +21,7 @@ from linkedin_mcp_server.core import (
 )
 
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.session_state import (
     SourceState,
     clear_runtime_profile,
@@ -62,6 +63,16 @@ async def _stabilize_navigation(label: str) -> None:
 def _debug_skip_checkpoint_restart() -> bool:
     """Return whether to keep the fresh bridged browser alive for this run."""
     return os.getenv("LINKEDIN_DEBUG_SKIP_CHECKPOINT_RESTART", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _debug_bridge_every_startup() -> bool:
+    """Return whether to force a fresh bridge on every foreign-runtime startup."""
+    return os.getenv("LINKEDIN_DEBUG_BRIDGE_EVERY_STARTUP", "").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -124,20 +135,45 @@ async def _feed_auth_succeeds(
             wait_until="domcontentloaded",
         )
         await _stabilize_navigation("feed navigation")
+        await record_page_trace(
+            browser.page,
+            "feed-after-goto",
+            extra={"allow_remember_me": allow_remember_me},
+        )
         if allow_remember_me:
             if await resolve_remember_me_prompt(browser.page):
                 await _stabilize_navigation("remember-me resolution")
+                await record_page_trace(
+                    browser.page,
+                    "feed-after-remember-me",
+                    extra={"allow_remember_me": allow_remember_me},
+                )
         barrier = await detect_auth_barrier_quick(browser.page)
         if barrier is not None:
+            await record_page_trace(
+                browser.page,
+                "feed-auth-barrier",
+                extra={"barrier": barrier},
+            )
             await _log_feed_failure_context(browser, barrier)
             return False
         return True
     except Exception as exc:
         if allow_remember_me and await resolve_remember_me_prompt(browser.page):
             await _stabilize_navigation("remember-me resolution after feed failure")
+            await record_page_trace(
+                browser.page,
+                "feed-after-remember-me-error-recovery",
+                extra={"error": f"{type(exc).__name__}: {exc}"},
+            )
             barrier = await detect_auth_barrier_quick(browser.page)
             if barrier is None:
                 return True
+        await record_page_trace(
+            browser.page,
+            "feed-navigation-error",
+            extra={"error": f"{type(exc).__name__}: {exc}"},
+        )
         await _log_feed_failure_context(browser, str(exc), exc)
         return False
 
@@ -212,21 +248,33 @@ async def _bridge_runtime_profile(
         profile_dir, launch_options=launch_options, viewport=viewport
     )
     await browser.start()
+    await record_page_trace(
+        browser.page,
+        "bridge-browser-started",
+        extra={"profile_dir": str(profile_dir)},
+    )
     try:
         await browser.page.goto(
             "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
         )
         await _stabilize_navigation("pre-import feed navigation")
+        await record_page_trace(browser.page, "bridge-after-pre-import-feed")
         if not await browser.import_cookies(cookie_path):
             raise AuthenticationError(
                 "Portable authentication could not be imported. Run with --login to create a fresh source session."
             )
         await _stabilize_navigation("bridge cookie import")
+        await record_page_trace(
+            browser.page,
+            "bridge-after-cookie-import",
+            extra={"cookie_path": str(cookie_path)},
+        )
         if not await _feed_auth_succeeds(browser):
             raise AuthenticationError(
                 "No authentication found. Run with --login to create a profile."
             )
         await _stabilize_navigation("post-import feed validation")
+        await record_page_trace(browser.page, "bridge-after-feed-validation")
         if _debug_skip_checkpoint_restart():
             logger.warning(
                 "Skipping checkpoint restart for derived runtime profile %s "
@@ -249,6 +297,11 @@ async def _bridge_runtime_profile(
         )
         await reopened.start()
         await _stabilize_navigation("derived profile reopen")
+        await record_page_trace(
+            reopened.page,
+            "bridge-after-profile-reopen",
+            extra={"profile_dir": str(profile_dir)},
+        )
         try:
             if not await _feed_auth_succeeds(reopened):
                 logger.warning(
@@ -258,6 +311,7 @@ async def _bridge_runtime_profile(
                     "Derived runtime validation failed; no automatic re-bridge will be attempted. Run with --login to create a fresh source session."
                 )
             await _stabilize_navigation("post-reopen feed validation")
+            await record_page_trace(reopened.page, "bridge-after-reopen-validation")
             write_runtime_state(
                 runtime_id,
                 source_state,
@@ -342,9 +396,11 @@ async def get_or_create_browser(
         runtime_state is not None
         and runtime_state.source_login_generation == source_state.login_generation
     )
+    force_bridge = _debug_bridge_every_startup()
 
     if (
-        generation_matches
+        not force_bridge
+        and generation_matches
         and profile_exists(derived_profile_dir)
         and storage_state_path.exists()
     ):
@@ -363,6 +419,12 @@ async def get_or_create_browser(
         _browser_cookie_export_path = None
         return _browser
 
+    if force_bridge:
+        logger.warning(
+            "Forcing a fresh bridge for %s on every startup "
+            "(LINKEDIN_DEBUG_BRIDGE_EVERY_STARTUP enabled)",
+            current_runtime_id,
+        )
     logger.info(
         "Deriving runtime profile for %s from source generation %s",
         current_runtime_id,

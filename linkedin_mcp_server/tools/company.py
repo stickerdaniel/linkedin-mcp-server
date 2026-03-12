@@ -112,10 +112,13 @@ def register_company_tools(mcp: FastMCP) -> None:
 
             sections: dict[str, str] = {}
             references: dict[str, list[Reference]] = {}
+            section_errors: dict[str, dict[str, Any]] = {}
             if extracted.text and extracted.text != _RATE_LIMITED_MSG:
                 sections["posts"] = extracted.text
                 if extracted.references:
                     references["posts"] = extracted.references
+            elif extracted.error:
+                section_errors["posts"] = extracted.error
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -125,6 +128,8 @@ def register_company_tools(mcp: FastMCP) -> None:
             }
             if references:
                 result["references"] = references
+            if section_errors:
+                result["section_errors"] = section_errors
             return result
 
         except Exception as e:
