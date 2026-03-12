@@ -25,6 +25,7 @@ from linkedin_mcp_server.drivers.browser import (
     get_or_create_browser,
     get_profile_dir,
     profile_exists,
+    _experimental_persist_derived_runtime,
     set_headless,
 )
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
@@ -165,23 +166,32 @@ def profile_info_and_exit() -> None:
         runtime_state = load_runtime_state(current_runtime, profile_dir)
         runtime_profile = runtime_profile_dir(current_runtime, profile_dir)
         runtime_storage_state = runtime_storage_state_path(current_runtime, profile_dir)
-        if (
-            runtime_state
-            and runtime_state.source_login_generation == source_state.login_generation
-            and profile_exists(runtime_profile)
-            and runtime_storage_state.exists()
-        ):
-            print(
-                f"Profile mode: derived (committed, current generation) ({runtime_profile})"
-            )
-        else:
+        if not _experimental_persist_derived_runtime():
             bridge_required = True
-            state = "stale generation" if runtime_state else "missing"
-            print(f"Profile mode: derived ({state})")
-        print(
-            "Storage snapshot: "
-            f"{runtime_storage_state if runtime_storage_state and runtime_storage_state.exists() else 'missing'}"
-        )
+            print("Profile mode: foreign runtime (fresh bridge each startup)")
+            if runtime_profile.exists():
+                print(
+                    f"Derived runtime cache present but ignored by default: {runtime_profile}"
+                )
+        else:
+            if (
+                runtime_state
+                and runtime_state.source_login_generation
+                == source_state.login_generation
+                and profile_exists(runtime_profile)
+                and runtime_storage_state.exists()
+            ):
+                print(
+                    f"Profile mode: derived (committed, current generation) ({runtime_profile})"
+                )
+            else:
+                bridge_required = True
+                state = "stale generation" if runtime_state else "missing"
+                print(f"Profile mode: derived ({state})")
+            print(
+                "Storage snapshot: "
+                f"{runtime_storage_state if runtime_storage_state and runtime_storage_state.exists() else 'missing'}"
+            )
 
     async def check_session() -> bool:
         try:
@@ -197,9 +207,14 @@ def profile_info_and_exit() -> None:
             await close_browser()
 
     if bridge_required:
-        print(
-            "ℹ️  A derived runtime profile will be created and checkpoint-committed on the next server startup."
-        )
+        if _experimental_persist_derived_runtime():
+            print(
+                "ℹ️  A derived runtime profile will be created and checkpoint-committed on the next server startup."
+            )
+        else:
+            print(
+                "ℹ️  A fresh bridged foreign-runtime session will be created on the next server startup."
+            )
         sys.exit(0)
 
     try:

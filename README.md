@@ -209,13 +209,15 @@ After login, the host writes:
 - portable cookies: `~/.linkedin-mcp/cookies.json`
 - source session metadata: `~/.linkedin-mcp/source-state.json`
 
-The first Docker run derives a Linux runtime profile under:
+Docker foreign runtimes derive a Linux runtime profile under:
 
 - `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/profile/`
 - `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/storage-state.json`
 - `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/runtime-state.json`
 
-That first Docker run also performs an internal checkpoint restart after `/feed/` succeeds, so the derived Linux runtime session is committed immediately instead of depending on later browser shutdown. Later Docker runs reuse that committed Linux runtime profile directly instead of reconstructing the session from cookies on every startup. Running `--login` again creates a new source login generation, which causes the next Docker run to rebuild its Linux runtime profile once.
+By default, Docker now creates a fresh bridged Linux session on every startup using the minimal working auth cookie subset (`li_at`, `JSESSIONID`, `bcookie`, `bscookie`, `lidc`) and keeps that session alive for the server lifetime. This currently works more reliably than reusing a checkpointed derived runtime profile across restarts.
+
+If you want to experiment with persistent derived runtime reuse anyway, set `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`. In that mode, the first Docker run performs an internal checkpoint restart after `/feed/` succeeds and later Docker runs try to reuse the committed Linux runtime profile directly.
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -235,7 +237,7 @@ That first Docker run also performs an internal checkpoint restart after `/feed/
 ```
 
 > [!NOTE]
-> Docker now keeps its own persistent derived runtime profile after the first successful bridge and checkpoint restart. If you run `--login` again on the host, the next Docker startup rebuilds that derived runtime profile from the new source login generation.
+> Docker now fresh-bridges by default on each startup. Persistent derived runtime reuse is still available behind `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`, but it remains experimental.
 
 > [!NOTE]
 > **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
@@ -303,7 +305,7 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
-- If Docker auth becomes stale after you re-login on the host, restart Docker once so it can rebuild its derived runtime profile from the new source login generation.
+- If Docker auth becomes stale after you re-login on the host, restart Docker once so it can fresh-bridge from the new source session generation.
 
 **Timeout issues:**
 
