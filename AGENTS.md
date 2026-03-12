@@ -202,7 +202,7 @@ Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or worki
 
 ## PR Reviews
 
-Greptile posts initial reviews as PR review comments, but follow-ups as **issue comments**. Always check both. To trigger a re-review, comment `@greptileai review` on the PR.
+Greptile posts initial reviews as PR review comments, but follow-ups as **issue comments**. Always check both.
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/{pr}/reviews    # initial reviews
