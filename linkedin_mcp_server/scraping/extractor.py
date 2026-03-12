@@ -84,9 +84,22 @@ _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
 
+def _debug_stabilize_navigation_enabled() -> bool:
+    """Return whether debug-only scraper stabilization sleeps are enabled."""
+    return os.getenv("LINKEDIN_DEBUG_STABILIZE_NAVIGATION", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 async def _stabilize_navigation(label: str) -> None:
     """Pause between LinkedIn navigations to rule out timing issues."""
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or not _debug_stabilize_navigation_enabled()
+    ):
         return
     logger.debug(
         "Stabilizing navigation for %.1fs after %s",
