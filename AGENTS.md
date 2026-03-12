@@ -184,6 +184,8 @@ After the workflow completes, file a PR in the MCP registry to update the versio
 
 ## Important Development Notes
 
+Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or working on this repository, and strictly follow its guidelines and checklists.
+
 ### Development Workflow
 
 - Never sign a PR or commit with Claude Code
