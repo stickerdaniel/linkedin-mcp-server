@@ -300,6 +300,52 @@ async def test_debug_skip_checkpoint_restart_keeps_fresh_bridged_browser(
 
 
 @pytest.mark.asyncio
+async def test_debug_bridge_every_startup_skips_matching_committed_profile(
+    tmp_path, monkeypatch
+):
+    _write_source_state(
+        tmp_path, runtime_id="macos-arm64-host", login_generation="gen-2"
+    )
+    _write_runtime_state(
+        tmp_path,
+        "linux-amd64-container",
+        source_login_generation="gen-2",
+    )
+    first_browser = _make_mock_browser()
+    first_browser.import_cookies = AsyncMock(return_value=True)
+    monkeypatch.setenv("LINKEDIN_DEBUG_BRIDGE_EVERY_STARTUP", "1")
+    monkeypatch.setenv("LINKEDIN_DEBUG_SKIP_CHECKPOINT_RESTART", "1")
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=first_browser,
+        ) as ctor,
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        result = await get_or_create_browser()
+
+    expected_profile = runtime_profile_dir(
+        "linux-amd64-container", tmp_path / "profile"
+    )
+    assert result is first_browser
+    assert ctor.call_count == 1
+    assert ctor.call_args.kwargs["user_data_dir"] == expected_profile
+    first_browser.import_cookies.assert_awaited_once_with(
+        portable_cookie_path(tmp_path / "profile")
+    )
+    first_browser.export_storage_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stale_derived_runtime_rebuilds_from_new_generation(tmp_path):
     _write_source_state(
         tmp_path, runtime_id="macos-arm64-host", login_generation="gen-3"
