@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
-from datetime import UTC, datetime
 import json
 import socket
 from pathlib import Path
-import re
 from typing import Any
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 
+from linkedin_mcp_server.common_utils import slugify_fragment, utcnow_iso
 from linkedin_mcp_server.debug_trace import get_trace_dir, mark_trace_for_retention
 from linkedin_mcp_server.session_state import (
     auth_root_dir,
@@ -37,7 +37,7 @@ def build_issue_diagnostics(
     section_name: str | None = None,
 ) -> dict[str, Any]:
     """Write an issue-ready report and return structured diagnostics."""
-    timestamp = _utcnow()
+    timestamp = utcnow_iso()
     source_profile_dir = _safe_source_profile_dir()
     current_runtime_id = get_runtime_id()
     source_state = load_source_state(source_profile_dir)
@@ -48,7 +48,7 @@ def build_issue_diagnostics(
     issue_dir.mkdir(parents=True, exist_ok=True)
     issue_path = (
         issue_dir
-        / f"{timestamp.replace(':', '').replace('-', '')}-{_slugify(context)}.md"
+        / f"{timestamp.replace(':', '').replace('-', '')}-{slugify_fragment(context) or 'issue'}.md"
     )
     gist_command = _build_gist_command(issue_dir, issue_path, log_path)
 
@@ -129,6 +129,8 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
     runtime = payload["runtime"]
     existing_issues = payload.get("existing_issues") or []
     has_existing_issues = bool(existing_issues)
+    installation_lines = _installation_method_lines(runtime)
+    tool_lines = _tool_lines(payload)
     return (
         "\n".join(
             [
@@ -156,18 +158,12 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                 ),
                 "",
                 "## Installation Method",
-                "- [x] Docker (specify docker image version/tag): `stickerdaniel/linkedin-mcp-server:latest` with local repo mounted into `/app`",
-                "- [ ] Claude Desktop DXT extension (specify docker image version/tag): _._._",
-                "- [ ] Local Python setup",
+                *installation_lines,
                 "",
                 "## When does the error occur?",
                 "- [ ] At startup",
                 "- [x] During tool call (specify which tool):",
-                "  - [x] get_person_profile",
-                "  - [ ] get_company_profile",
-                "  - [ ] get_job_details",
-                "  - [ ] search_jobs",
-                "  - [ ] close_session",
+                *tool_lines,
                 "",
                 "## MCP Client Configuration",
                 "",
@@ -224,7 +220,7 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                 "",
                 "## Reproduction",
                 "1. Run a fresh local `uv run -m linkedin_mcp_server --login`.",
-                "2. Start the local Docker server with the same debug env vars used for this run.",
+                "2. Start the server again using the same installation method and debug env vars used for this run.",
                 "3. Re-run the failing MCP tool call.",
                 (
                     "4. If one of the listed open issues matches, post the gist as a comment there as additional information."
@@ -235,11 +231,6 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
         )
         + "\n"
     )
-
-
-def _slugify(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return slug or "issue"
 
 
 def _safe_source_profile_dir():
@@ -281,6 +272,9 @@ def _build_gist_command(
 
 
 def _find_existing_issues(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if _inside_running_event_loop():
+        return []
+
     query = _issue_search_query(payload)
     if not query:
         return []
@@ -310,6 +304,68 @@ def _find_existing_issues(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return issues
 
 
+def _inside_running_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _installation_method_lines(runtime: dict[str, Any]) -> list[str]:
+    current_runtime_id = str(runtime.get("current_runtime_id") or "")
+    docker_checked = "x" if "container" in current_runtime_id else " "
+    return [
+        f"- [{docker_checked}] Docker (specify docker image version/tag): `stickerdaniel/linkedin-mcp-server:latest` with `~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`",
+        "- [ ] Claude Desktop DXT extension (specify docker image version/tag): _._._",
+        "- [ ] Local Python setup",
+    ]
+
+
+def _tool_lines(payload: dict[str, Any]) -> list[str]:
+    selected_tool = _tool_name_for_context(payload)
+    tool_names = [
+        "get_person_profile",
+        "get_company_profile",
+        "get_company_posts",
+        "get_job_details",
+        "search_jobs",
+        "search_people",
+        "close_session",
+    ]
+    return [
+        f"  - [{'x' if tool_name == selected_tool else ' '}] {tool_name}"
+        for tool_name in tool_names
+    ]
+
+
+def _tool_name_for_context(payload: dict[str, Any]) -> str | None:
+    context = str(payload.get("context") or "")
+    if context in {
+        "get_person_profile",
+        "get_company_profile",
+        "get_company_posts",
+        "get_job_details",
+        "search_jobs",
+        "search_people",
+        "close_session",
+    }:
+        return context
+
+    if context in {"extract_page", "extract_overlay", "scrape_person"}:
+        return "get_person_profile"
+    if context == "scrape_company":
+        return "get_company_profile"
+    if context == "extract_search_page":
+        target_url = str(payload.get("target_url") or "")
+        if "/search/results/people" in target_url:
+            return "search_people"
+        if "/jobs/search" in target_url:
+            return "search_jobs"
+
+    return None
+
+
 def _issue_search_query(payload: dict[str, Any]) -> str:
     route = payload.get("target_url") or payload.get("context") or ""
     if "/recent-activity/" in route:
@@ -318,7 +374,3 @@ def _issue_search_query(payload: dict[str, Any]) -> str:
         section = payload.get("section_name") or "scrape"
         summary = f'"{section}"'
     return f"repo:stickerdaniel/linkedin-mcp-server is:issue is:open {summary}"
-
-
-def _utcnow() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
