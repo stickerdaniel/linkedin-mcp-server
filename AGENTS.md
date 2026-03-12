@@ -195,7 +195,7 @@ Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or worki
   3. Implement the feature
   4. Test the feature
   5. Make sure the README.md, docs/docker-hub.md and AGENTS.md is updated with the new feature
-  6. Create a PR with a short description of the feature/fix
+  6. Create a draft PR with a short description of the feature/fix, and keep it in draft until it is ready to merge; only then convert it to a regular PR.
   7. First review the PR with ai agents.
   8. Manually review the PR and merge it if it's approved. Do not squash the commits.
   9. Delete the branch after the PR is merged.
