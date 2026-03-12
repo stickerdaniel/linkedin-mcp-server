@@ -191,8 +191,16 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
             logger.debug("Remember-me container did not appear in time")
             return False
 
-        target = page.locator(_REMEMBER_ME_BUTTON_SELECTOR).first
-        target_count = await page.locator(_REMEMBER_ME_BUTTON_SELECTOR).count()
+        target_locator = page.locator(_REMEMBER_ME_BUTTON_SELECTOR)
+        target = target_locator.first
+        try:
+            target_count = await target_locator.count()
+        except Exception:
+            logger.debug(
+                "Could not count remember-me buttons; continuing with first match",
+                exc_info=True,
+            )
+            target_count = -1
         logger.debug(
             "Remember-me target count for %s: %d",
             _REMEMBER_ME_BUTTON_SELECTOR,
