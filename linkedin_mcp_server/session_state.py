@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 import json
 import logging
 import platform
@@ -12,6 +11,7 @@ import shutil
 from typing import Any
 from uuid import uuid4
 
+from linkedin_mcp_server.common_utils import utcnow_iso
 from linkedin_mcp_server.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -164,7 +164,7 @@ def write_source_state(source_profile_dir: Path | None = None) -> SourceState:
         version=1,
         source_runtime_id=get_runtime_id(),
         login_generation=str(uuid4()),
-        created_at=_utcnow(),
+        created_at=utcnow_iso(),
         profile_path=str(profile_dir),
         cookies_path=str(portable_cookie_path(profile_dir)),
     )
@@ -196,7 +196,7 @@ def write_runtime_state(
 ) -> RuntimeState:
     """Write metadata for a derived runtime session."""
     profile_dir = runtime_profile_dir(runtime_id, source_profile_dir).resolve()
-    committed_at = _utcnow()
+    committed_at = utcnow_iso()
     state = RuntimeState(
         version=1,
         runtime_id=runtime_id,
@@ -269,7 +269,3 @@ def _load_json(path: Path) -> dict[str, Any] | None:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _utcnow() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

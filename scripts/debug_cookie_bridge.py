@@ -16,8 +16,6 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 
-from patchright._impl._api_structures import SetCookieParam
-
 from linkedin_mcp_server.core.auth import detect_auth_barrier, is_logged_in
 from linkedin_mcp_server.core.browser import BrowserManager
 
@@ -260,7 +258,7 @@ async def run_debug(args: argparse.Namespace) -> dict[str, Any]:
         if args.clear_existing:
             await browser.context.clear_cookies()
 
-        await browser.context.add_cookies(cast(list[SetCookieParam], imported_cookies))
+        await browser.context.add_cookies(cast(Any, imported_cookies))
         await _capture_step(
             report,
             browser.page,
