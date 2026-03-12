@@ -130,6 +130,10 @@ uvx linkedin-scraper-mcp --transport streamable-http --host 127.0.0.1 --port 808
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
+Tool calls are serialized within a single server process to protect the shared
+LinkedIn browser session. Concurrent client requests queue instead of running in
+parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
+
 **Test with mcp inspector:**
 
 1. Install and run mcp inspector ```bunx @modelcontextprotocol/inspector```
