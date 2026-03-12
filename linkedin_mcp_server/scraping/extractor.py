@@ -19,6 +19,8 @@ from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
 )
+from linkedin_mcp_server.debug_trace import record_page_trace
+from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
@@ -133,6 +135,7 @@ class ExtractedSection:
 
     text: str
     references: list[Reference]
+    error: dict[str, Any] | None = None
 
 
 def strip_linkedin_noise(text: str) -> str:
@@ -263,18 +266,46 @@ class LinkedInExtractor:
 
         self._page.on("framenavigated", record_navigation)
         try:
+            await record_page_trace(
+                self._page,
+                "extractor-before-goto",
+                extra={"target_url": url, "wait_until": wait_until},
+            )
             try:
                 await self._page.goto(url, wait_until=wait_until, timeout=30000)
                 await _stabilize_navigation(f"goto {url}")
+                await record_page_trace(
+                    self._page,
+                    "extractor-after-goto",
+                    extra={"target_url": url, "wait_until": wait_until},
+                )
             except Exception as exc:
                 if allow_remember_me and await resolve_remember_me_prompt(self._page):
                     await _stabilize_navigation(f"remember-me resolution for {url}")
+                    await record_page_trace(
+                        self._page,
+                        "extractor-after-remember-me",
+                        extra={
+                            "target_url": url,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
                     await self._goto_with_auth_checks(
                         url,
                         wait_until=wait_until,
                         allow_remember_me=False,
                     )
                     return
+                await record_page_trace(
+                    self._page,
+                    "extractor-navigation-error",
+                    extra={
+                        "target_url": url,
+                        "wait_until": wait_until,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "hops": hops,
+                    },
+                )
                 await self._log_navigation_failure(url, wait_until, exc, hops)
                 await self._raise_if_auth_barrier(url, navigation_error=exc)
                 raise
@@ -285,6 +316,11 @@ class LinkedInExtractor:
 
             if allow_remember_me and await resolve_remember_me_prompt(self._page):
                 await _stabilize_navigation(f"remember-me retry for {url}")
+                await record_page_trace(
+                    self._page,
+                    "extractor-after-remember-me-retry",
+                    extra={"target_url": url, "barrier": barrier},
+                )
                 await self._goto_with_auth_checks(
                     url,
                     wait_until=wait_until,
@@ -292,6 +328,11 @@ class LinkedInExtractor:
                 )
                 return
 
+            await record_page_trace(
+                self._page,
+                "extractor-auth-barrier",
+                extra={"target_url": url, "barrier": barrier},
+            )
             logger.warning("Authentication barrier detected on %s: %s", url, barrier)
             raise AuthenticationError(
                 "LinkedIn requires interactive re-authentication. "
@@ -333,7 +374,16 @@ class LinkedInExtractor:
             raise
         except Exception as e:
             logger.warning("Failed to extract page %s: %s", url, e)
-            return ExtractedSection(text="", references=[])
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="extract_page",
+                    target_url=url,
+                    section_name=section_name,
+                ),
+            )
 
     async def _extract_page_once(
         self,
@@ -422,7 +472,16 @@ class LinkedInExtractor:
             raise
         except Exception as e:
             logger.warning("Failed to extract overlay %s: %s", url, e)
-            return ExtractedSection(text="", references=[])
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="extract_overlay",
+                    target_url=url,
+                    section_name=section_name,
+                ),
+            )
 
     async def _extract_overlay_once(
         self,
@@ -475,6 +534,7 @@ class LinkedInExtractor:
         base_url = f"https://www.linkedin.com/in/{username}"
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
 
         first = True
         for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
@@ -498,10 +558,18 @@ class LinkedInExtractor:
                     sections[section_name] = extracted.text
                     if extracted.references:
                         references[section_name] = extracted.references
+                elif extracted.error:
+                    section_errors[section_name] = extracted.error
             except LinkedInScraperException:
                 raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
+                section_errors[section_name] = build_issue_diagnostics(
+                    e,
+                    context="scrape_person",
+                    target_url=url,
+                    section_name=section_name,
+                )
 
         result: dict[str, Any] = {
             "url": f"{base_url}/",
@@ -509,6 +577,8 @@ class LinkedInExtractor:
         }
         if references:
             result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
         return result
 
     async def scrape_company(
@@ -523,6 +593,7 @@ class LinkedInExtractor:
         base_url = f"https://www.linkedin.com/company/{company_name}"
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
 
         first = True
         for section_name, (suffix, is_overlay) in COMPANY_SECTIONS.items():
@@ -546,10 +617,18 @@ class LinkedInExtractor:
                     sections[section_name] = extracted.text
                     if extracted.references:
                         references[section_name] = extracted.references
+                elif extracted.error:
+                    section_errors[section_name] = extracted.error
             except LinkedInScraperException:
                 raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
+                section_errors[section_name] = build_issue_diagnostics(
+                    e,
+                    context="scrape_company",
+                    target_url=url,
+                    section_name=section_name,
+                )
 
         result: dict[str, Any] = {
             "url": f"{base_url}/",
@@ -557,6 +636,8 @@ class LinkedInExtractor:
         }
         if references:
             result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
         return result
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
@@ -570,10 +651,13 @@ class LinkedInExtractor:
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
         if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["job_posting"] = extracted.text
             if extracted.references:
                 references["job_posting"] = extracted.references
+        elif extracted.error:
+            section_errors["job_posting"] = extracted.error
 
         result: dict[str, Any] = {
             "url": url,
@@ -581,6 +665,8 @@ class LinkedInExtractor:
         }
         if references:
             result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
         return result
 
     async def _extract_job_ids(self) -> list[str]:
@@ -636,7 +722,16 @@ class LinkedInExtractor:
             raise
         except Exception as e:
             logger.warning("Failed to extract search page %s: %s", url, e)
-            return ExtractedSection(text="", references=[])
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="extract_search_page",
+                    target_url=url,
+                    section_name=section_name,
+                ),
+            )
 
     async def _extract_search_page_once(
         self,
@@ -791,6 +886,7 @@ class LinkedInExtractor:
         seen_ids: set[str] = set()
         page_texts: list[str] = []
         page_references: list[Reference] = []
+        section_errors: dict[str, dict[str, Any]] = {}
         total_pages: int | None = None
         total_pages_queried = False
 
@@ -815,6 +911,8 @@ class LinkedInExtractor:
                 )
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                    if extracted.error:
+                        section_errors["search_results"] = extracted.error
                     # Navigation failed or rate-limited; skip ID extraction
                     break
 
@@ -864,6 +962,12 @@ class LinkedInExtractor:
                 raise
             except Exception as e:
                 logger.warning("Error on search page %d: %s", page_num + 1, e)
+                section_errors["search_results"] = build_issue_diagnostics(
+                    e,
+                    context="search_jobs",
+                    target_url=url,
+                    section_name="search_results",
+                )
                 break
 
         result: dict[str, Any] = {
@@ -877,6 +981,8 @@ class LinkedInExtractor:
             result["references"] = {
                 "search_results": dedupe_references(page_references, cap=15)
             }
+        if section_errors:
+            result["section_errors"] = section_errors
         return result
 
     async def search_people(
@@ -898,10 +1004,13 @@ class LinkedInExtractor:
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
         if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references
+        elif extracted.error:
+            section_errors["search_results"] = extracted.error
 
         result: dict[str, Any] = {
             "url": url,
@@ -909,6 +1018,8 @@ class LinkedInExtractor:
         }
         if references:
             result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
         return result
 
     async def _extract_root_content(

@@ -18,9 +18,10 @@ from linkedin_mcp_server.scraping.link_metadata import Reference
 def extracted(
     text: str,
     references: list[Reference] | None = None,
+    error: dict | None = None,
 ) -> ExtractedSection:
     """Create an ExtractedSection for tests."""
-    return ExtractedSection(text=text, references=references or [])
+    return ExtractedSection(text=text, references=references or [], error=error)
 
 
 class TestBuildJobSearchUrl:
@@ -199,12 +200,17 @@ class TestExtractPage:
         mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
         extractor = LinkedInExtractor(mock_page)
 
-        result = await extractor.extract_page(
-            "https://www.linkedin.com/in/bad/",
-            section_name="main_profile",
-        )
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.build_issue_diagnostics",
+            return_value={"issue_template_path": "/tmp/issue.md"},
+        ):
+            result = await extractor.extract_page(
+                "https://www.linkedin.com/in/bad/",
+                section_name="main_profile",
+            )
         assert result.text == ""
         assert result.references == []
+        assert result.error == {"issue_template_path": "/tmp/issue.md"}
 
     async def test_extract_page_raises_auth_error_for_account_picker(self, mock_page):
         mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
@@ -500,6 +506,30 @@ class TestScrapePersonUrls:
         assert urls[0].endswith("/in/testuser/")
         assert set(result["sections"]) == {"main_profile"}
 
+    async def test_scrape_person_returns_section_errors(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[
+                    extracted("profile text"),
+                    extracted("", error={"issue_template_path": "/tmp/issue.md"}),
+                ],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"posts"})
+
+        assert result["sections"]["main_profile"] == "profile text"
+        assert (
+            result["section_errors"]["posts"]["issue_template_path"] == "/tmp/issue.md"
+        )
+
     async def test_experience_education_visits_correct_urls(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -673,6 +703,10 @@ class TestScrapePersonUrls:
                 "extract_page",
                 side_effect=extract_with_failure,
             ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_issue_diagnostics",
+                return_value={"issue_template_path": "/tmp/issue.md"},
+            ),
             patch.object(
                 extractor,
                 "_extract_overlay",
@@ -692,6 +726,9 @@ class TestScrapePersonUrls:
         assert "main_profile" in result["sections"]
         assert "education" in result["sections"]
         assert "experience" not in result["sections"]
+        assert result["section_errors"]["experience"]["issue_template_path"] == (
+            "/tmp/issue.md"
+        )
 
     async def test_rate_limited_sections_are_omitted(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
