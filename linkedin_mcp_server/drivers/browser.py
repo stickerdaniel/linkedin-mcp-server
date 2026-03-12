@@ -67,7 +67,7 @@ def _debug_bridge_every_startup() -> bool:
     }
 
 
-def _experimental_persist_derived_runtime() -> bool:
+def experimental_persist_derived_runtime() -> bool:
     """Return whether Docker-style foreign runtimes should reuse derived profiles."""
     return os.getenv(
         "LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", ""
@@ -398,7 +398,7 @@ async def get_or_create_browser(
         _browser_cookie_export_path = cookie_path
         return _browser
 
-    persist_runtime = _experimental_persist_derived_runtime()
+    persist_runtime = experimental_persist_derived_runtime()
     force_bridge = _debug_bridge_every_startup()
 
     if not persist_runtime:

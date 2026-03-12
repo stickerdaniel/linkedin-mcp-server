@@ -6,12 +6,12 @@ import itertools
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import tempfile
 from typing import Any, Literal
 
-from linkedin_mcp_server.session_state import auth_root_dir
+from linkedin_mcp_server.common_utils import slugify_fragment
+from linkedin_mcp_server.session_state import auth_root_dir, get_source_profile_dir
 
 TraceMode = Literal["off", "on_error", "always"]
 
@@ -31,9 +31,7 @@ def _trace_mode() -> TraceMode:
 
 
 def _trace_root() -> Path:
-    source_profile = Path(
-        os.getenv("USER_DATA_DIR", "~/.linkedin-mcp/profile")
-    ).expanduser()
+    source_profile = _safe_source_profile_dir()
     root = auth_root_dir(source_profile) / "trace-runs"
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -98,14 +96,22 @@ def cleanup_trace_dir() -> None:
 
 
 def reset_trace_state_for_testing() -> None:
-    global _TRACE_DIR, _TRACE_KEEP, _EXPLICIT_TRACE_DIR
+    global _TRACE_COUNTER, _TRACE_DIR, _TRACE_KEEP, _EXPLICIT_TRACE_DIR
+    _TRACE_COUNTER = itertools.count(1)
     _TRACE_DIR = None
     _TRACE_KEEP = False
     _EXPLICIT_TRACE_DIR = False
 
 
 def _slugify_step(step: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", step.lower()).strip("-")
+    return slugify_fragment(step)
+
+
+def _safe_source_profile_dir() -> Path:
+    try:
+        return get_source_profile_dir()
+    except BaseException:
+        return Path(os.getenv("USER_DATA_DIR", "~/.linkedin-mcp/profile")).expanduser()
 
 
 async def record_page_trace(
