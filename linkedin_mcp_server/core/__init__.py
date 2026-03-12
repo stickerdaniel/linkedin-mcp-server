@@ -4,6 +4,7 @@ from .auth import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
     is_logged_in,
+    resolve_remember_me_prompt,
     wait_for_manual_login,
     warm_up_browser,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "detect_rate_limit",
     "handle_modal_close",
     "is_logged_in",
+    "resolve_remember_me_prompt",
     "scroll_to_bottom",
     "wait_for_manual_login",
     "warm_up_browser",
