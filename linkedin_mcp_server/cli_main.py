@@ -13,10 +13,10 @@ from typing import Literal
 
 import inquirer
 
-from linkedin_mcp_server.core import AuthenticationError, RateLimitError, is_logged_in
+from linkedin_mcp_server.core import AuthenticationError, RateLimitError
 
 from linkedin_mcp_server.authentication import (
-    clear_profile,
+    clear_auth_state,
     get_authentication_source,
 )
 from linkedin_mcp_server.config import get_config
@@ -29,6 +29,15 @@ from linkedin_mcp_server.drivers.browser import (
 )
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 from linkedin_mcp_server.logging_config import configure_logging
+from linkedin_mcp_server.session_state import (
+    get_runtime_id,
+    load_runtime_state,
+    load_source_state,
+    portable_cookie_path,
+    runtime_profile_dir,
+    runtime_storage_state_path,
+    source_state_path,
+)
 from linkedin_mcp_server.server import create_mcp_server
 from linkedin_mcp_server.setup import run_interactive_setup, run_profile_creation
 
@@ -68,14 +77,18 @@ def clear_profile_and_exit() -> None:
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Profile Clear mode")
 
-    profile_dir = get_profile_dir()
+    auth_root = get_profile_dir().parent
 
-    if not profile_exists(profile_dir):
-        print("ℹ️  No browser profile found")
+    if not (
+        profile_exists(get_profile_dir())
+        or portable_cookie_path(get_profile_dir()).exists()
+        or source_state_path(get_profile_dir()).exists()
+    ):
+        print("ℹ️  No authentication state found")
         print("Nothing to clear.")
         sys.exit(0)
 
-    print(f"🔑 Clear LinkedIn browser profile from {profile_dir}?")
+    print(f"🔑 Clear LinkedIn authentication state from {auth_root}?")
 
     try:
         confirmation = (
@@ -88,10 +101,10 @@ def clear_profile_and_exit() -> None:
         print("\n❌ Operation cancelled")
         sys.exit(0)
 
-    if clear_profile(profile_dir):
-        print("✅ LinkedIn browser profile cleared successfully!")
+    if clear_auth_state(get_profile_dir()):
+        print("✅ LinkedIn authentication state cleared successfully!")
     else:
-        print("❌ Failed to clear profile")
+        print("❌ Failed to clear authentication state")
         sys.exit(1)
 
     sys.exit(0)
@@ -127,20 +140,54 @@ def profile_info_and_exit() -> None:
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Session Info mode")
 
-    # Check if profile directory exists first
     profile_dir = get_profile_dir()
-    if not profile_exists(profile_dir):
-        print(f"❌ No browser profile found at {profile_dir}")
-        print("   Run with --login to create a profile")
+    cookies_path = portable_cookie_path(profile_dir)
+    source_state = load_source_state(profile_dir)
+    current_runtime = get_runtime_id()
+
+    if not source_state or not profile_exists(profile_dir) or not cookies_path.exists():
+        print(f"❌ No valid source session found at {profile_dir}")
+        print("   Run with --login to create a source session")
         sys.exit(1)
 
-    # Check if session is valid by testing login status
+    print(f"Current runtime: {current_runtime}")
+    print(f"Source runtime: {source_state.source_runtime_id}")
+    print(f"Login generation: {source_state.login_generation}")
+
+    runtime_state = None
+    runtime_profile = None
+    runtime_storage_state = None
+    bridge_required = False
+
+    if current_runtime == source_state.source_runtime_id:
+        print(f"Profile mode: source ({profile_dir})")
+    else:
+        runtime_state = load_runtime_state(current_runtime, profile_dir)
+        runtime_profile = runtime_profile_dir(current_runtime, profile_dir)
+        runtime_storage_state = runtime_storage_state_path(current_runtime, profile_dir)
+        if (
+            runtime_state
+            and runtime_state.source_login_generation == source_state.login_generation
+            and profile_exists(runtime_profile)
+            and runtime_storage_state.exists()
+        ):
+            print(
+                f"Profile mode: derived (committed, current generation) ({runtime_profile})"
+            )
+        else:
+            bridge_required = True
+            state = "stale generation" if runtime_state else "missing"
+            print(f"Profile mode: derived ({state})")
+        print(
+            "Storage snapshot: "
+            f"{runtime_storage_state if runtime_storage_state and runtime_storage_state.exists() else 'missing'}"
+        )
+
     async def check_session() -> bool:
         try:
             set_headless(True)  # Always check headless
             browser = await get_or_create_browser()
-            valid = await is_logged_in(browser.page)
-            return valid
+            return browser.is_authenticated
         except AuthenticationError:
             return False
         except Exception as e:
@@ -149,6 +196,12 @@ def profile_info_and_exit() -> None:
         finally:
             await close_browser()
 
+    if bridge_required:
+        print(
+            "ℹ️  A derived runtime profile will be created and checkpoint-committed on the next server startup."
+        )
+        sys.exit(0)
+
     try:
         valid = asyncio.run(check_session())
     except Exception as e:
@@ -156,13 +209,14 @@ def profile_info_and_exit() -> None:
         print("   Check logs and browser configuration.")
         sys.exit(1)
 
+    active_profile = profile_dir if runtime_profile is None else runtime_profile
     if valid:
-        print(f"✅ Session is valid (profile: {profile_dir})")
+        print(f"✅ Session is valid (profile: {active_profile})")
         sys.exit(0)
-    else:
-        print(f"❌ Session expired or invalid (profile: {profile_dir})")
-        print("   Run with --login to re-authenticate")
-        sys.exit(1)
+
+    print(f"❌ Session expired or invalid (profile: {active_profile})")
+    print("   Run with --login to re-authenticate")
+    sys.exit(1)
 
 
 def ensure_authentication_ready() -> None:
