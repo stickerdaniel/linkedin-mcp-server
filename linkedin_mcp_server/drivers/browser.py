@@ -9,7 +9,6 @@ automatic profile persistence.
 import logging
 import os
 from pathlib import Path
-import asyncio
 
 from linkedin_mcp_server.core import (
     AuthenticationError,
@@ -22,6 +21,7 @@ from linkedin_mcp_server.core import (
 
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.debug_trace import record_page_trace
+from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.session_state import (
     SourceState,
     clear_runtime_profile,
@@ -45,32 +45,6 @@ DEFAULT_PROFILE_DIR = Path.home() / ".linkedin-mcp" / "profile"
 _browser: BrowserManager | None = None
 _browser_cookie_export_path: Path | None = None
 _headless: bool = True
-_NAV_STABILIZE_DELAY_SECONDS = 5.0
-
-
-def _debug_stabilize_navigation_enabled() -> bool:
-    """Return whether debug-only startup stabilization sleeps are enabled."""
-    return os.getenv("LINKEDIN_DEBUG_STABILIZE_NAVIGATION", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-async def _stabilize_navigation(label: str) -> None:
-    """Pause between LinkedIn startup actions to rule out timing issues."""
-    if (
-        os.environ.get("PYTEST_CURRENT_TEST")
-        or not _debug_stabilize_navigation_enabled()
-    ):
-        return
-    logger.debug(
-        "Stabilizing navigation for %.1fs after %s",
-        _NAV_STABILIZE_DELAY_SECONDS,
-        label,
-    )
-    await asyncio.sleep(_NAV_STABILIZE_DELAY_SECONDS)
 
 
 def _debug_skip_checkpoint_restart() -> bool:
@@ -159,7 +133,7 @@ async def _feed_auth_succeeds(
             "https://www.linkedin.com/feed/",
             wait_until="domcontentloaded",
         )
-        await _stabilize_navigation("feed navigation")
+        await stabilize_navigation("feed navigation", logger)
         await record_page_trace(
             browser.page,
             "feed-after-goto",
@@ -167,7 +141,7 @@ async def _feed_auth_succeeds(
         )
         if allow_remember_me:
             if await resolve_remember_me_prompt(browser.page):
-                await _stabilize_navigation("remember-me resolution")
+                await stabilize_navigation("remember-me resolution", logger)
                 await record_page_trace(
                     browser.page,
                     "feed-after-remember-me",
@@ -185,7 +159,9 @@ async def _feed_auth_succeeds(
         return True
     except Exception as exc:
         if allow_remember_me and await resolve_remember_me_prompt(browser.page):
-            await _stabilize_navigation("remember-me resolution after feed failure")
+            await stabilize_navigation(
+                "remember-me resolution after feed failure", logger
+            )
             await record_page_trace(
                 browser.page,
                 "feed-after-remember-me-error-recovery",
@@ -284,13 +260,13 @@ async def _bridge_runtime_profile(
         await browser.page.goto(
             "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
         )
-        await _stabilize_navigation("pre-import feed navigation")
+        await stabilize_navigation("pre-import feed navigation", logger)
         await record_page_trace(browser.page, "bridge-after-pre-import-feed")
         if not await browser.import_cookies(cookie_path, preset_name=cookie_preset):
             raise AuthenticationError(
                 "Portable authentication could not be imported. Run with --login to create a fresh source session."
             )
-        await _stabilize_navigation("bridge cookie import")
+        await stabilize_navigation("bridge cookie import", logger)
         await record_page_trace(
             browser.page,
             "bridge-after-cookie-import",
@@ -300,7 +276,7 @@ async def _bridge_runtime_profile(
             raise AuthenticationError(
                 "No authentication found. Run with --login to create a profile."
             )
-        await _stabilize_navigation("post-import feed validation")
+        await stabilize_navigation("post-import feed validation", logger)
         await record_page_trace(browser.page, "bridge-after-feed-validation")
         if not persist_runtime:
             logger.info(
@@ -322,7 +298,7 @@ async def _bridge_runtime_profile(
             raise AuthenticationError(
                 "Derived runtime session could not be checkpointed. Run with --login to create a fresh source session."
             )
-        await _stabilize_navigation("runtime storage-state export")
+        await stabilize_navigation("runtime storage-state export", logger)
         logger.info("Checkpoint-restarting derived runtime profile %s", profile_dir)
         await browser.close()
         reopened = _make_browser(
@@ -331,7 +307,7 @@ async def _bridge_runtime_profile(
             viewport=viewport,
         )
         await reopened.start()
-        await _stabilize_navigation("derived profile reopen")
+        await stabilize_navigation("derived profile reopen", logger)
         await record_page_trace(
             reopened.page,
             "bridge-after-profile-reopen",
@@ -345,7 +321,7 @@ async def _bridge_runtime_profile(
                 raise AuthenticationError(
                     "Derived runtime validation failed; no automatic re-bridge will be attempted. Run with --login to create a fresh source session."
                 )
-            await _stabilize_navigation("post-reopen feed validation")
+            await stabilize_navigation("post-reopen feed validation", logger)
             await record_page_trace(reopened.page, "bridge-after-reopen-validation")
             write_runtime_state(
                 runtime_id,
