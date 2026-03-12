@@ -180,10 +180,13 @@ async def test_same_runtime_clicks_remember_me_during_feed_validation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_derived_runtime_reuses_matching_committed_profile(tmp_path):
+async def test_experimental_derived_runtime_reuses_matching_committed_profile(
+    tmp_path, monkeypatch
+):
     _write_source_state(tmp_path, runtime_id="macos-arm64-host")
     derived_profile = _write_runtime_state(tmp_path, "linux-amd64-container")
     derived_browser = _make_mock_browser()
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
 
     with (
         patch(
@@ -209,13 +212,63 @@ async def test_derived_runtime_reuses_matching_committed_profile(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_missing_derived_runtime_bridges_and_checkpoint_commits(tmp_path):
+async def test_default_foreign_runtime_bridges_fresh_each_startup(tmp_path):
+    _write_source_state(
+        tmp_path, runtime_id="macos-arm64-host", login_generation="gen-2"
+    )
+    _write_runtime_state(
+        tmp_path,
+        "linux-amd64-container",
+        source_login_generation="gen-2",
+    )
+    first_browser = _make_mock_browser()
+    first_browser.import_cookies = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=first_browser,
+        ) as ctor,
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        result = await get_or_create_browser()
+
+    expected_profile = runtime_profile_dir(
+        "linux-amd64-container", tmp_path / "profile"
+    )
+    assert result is first_browser
+    assert ctor.call_count == 1
+    assert ctor.call_args.kwargs["user_data_dir"] == expected_profile
+    first_browser.import_cookies.assert_awaited_once_with(
+        portable_cookie_path(tmp_path / "profile"),
+        preset_name="auth_minimal",
+    )
+    first_browser.export_storage_state.assert_not_awaited()
+    first_browser.close.assert_not_awaited()
+    assert not runtime_state_path(
+        "linux-amd64-container", tmp_path / "profile"
+    ).exists()
+
+
+@pytest.mark.asyncio
+async def test_experimental_missing_derived_runtime_bridges_and_checkpoint_commits(
+    tmp_path, monkeypatch
+):
     _write_source_state(
         tmp_path, runtime_id="macos-arm64-host", login_generation="gen-2"
     )
     first_browser = _make_mock_browser()
     first_browser.import_cookies = AsyncMock(return_value=True)
     reopened_browser = _make_mock_browser()
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
 
     with (
         patch(
@@ -245,7 +298,8 @@ async def test_missing_derived_runtime_bridges_and_checkpoint_commits(tmp_path):
     assert ctor.call_args_list[0].kwargs["user_data_dir"] == expected_profile
     assert ctor.call_args_list[1].kwargs["user_data_dir"] == expected_profile
     first_browser.import_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile")
+        portable_cookie_path(tmp_path / "profile"),
+        preset_name="auth_minimal",
     )
     first_browser.export_storage_state.assert_awaited_once_with(
         expected_storage,
@@ -268,6 +322,7 @@ async def test_debug_skip_checkpoint_restart_keeps_fresh_bridged_browser(
     )
     first_browser = _make_mock_browser()
     first_browser.import_cookies = AsyncMock(return_value=True)
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
     monkeypatch.setenv("LINKEDIN_DEBUG_SKIP_CHECKPOINT_RESTART", "1")
 
     with (
@@ -290,7 +345,8 @@ async def test_debug_skip_checkpoint_restart_keeps_fresh_bridged_browser(
     assert result is first_browser
     assert ctor.call_count == 1
     first_browser.import_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile")
+        portable_cookie_path(tmp_path / "profile"),
+        preset_name="auth_minimal",
     )
     first_browser.export_storage_state.assert_not_awaited()
     first_browser.close.assert_not_awaited()
@@ -313,6 +369,7 @@ async def test_debug_bridge_every_startup_skips_matching_committed_profile(
     )
     first_browser = _make_mock_browser()
     first_browser.import_cookies = AsyncMock(return_value=True)
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
     monkeypatch.setenv("LINKEDIN_DEBUG_BRIDGE_EVERY_STARTUP", "1")
     monkeypatch.setenv("LINKEDIN_DEBUG_SKIP_CHECKPOINT_RESTART", "1")
 
@@ -340,13 +397,16 @@ async def test_debug_bridge_every_startup_skips_matching_committed_profile(
     assert ctor.call_count == 1
     assert ctor.call_args.kwargs["user_data_dir"] == expected_profile
     first_browser.import_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile")
+        portable_cookie_path(tmp_path / "profile"),
+        preset_name="auth_minimal",
     )
     first_browser.export_storage_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_stale_derived_runtime_rebuilds_from_new_generation(tmp_path):
+async def test_experimental_stale_derived_runtime_rebuilds_from_new_generation(
+    tmp_path, monkeypatch
+):
     _write_source_state(
         tmp_path, runtime_id="macos-arm64-host", login_generation="gen-3"
     )
@@ -360,6 +420,7 @@ async def test_stale_derived_runtime_rebuilds_from_new_generation(tmp_path):
     first_browser = _make_mock_browser()
     first_browser.import_cookies = AsyncMock(return_value=True)
     reopened_browser = _make_mock_browser()
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
 
     with (
         patch(
@@ -386,12 +447,15 @@ async def test_stale_derived_runtime_rebuilds_from_new_generation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_matching_derived_runtime_failure_does_not_fallback_to_bridge(tmp_path):
+async def test_experimental_matching_derived_runtime_failure_does_not_fallback_to_bridge(
+    tmp_path, monkeypatch
+):
     from linkedin_mcp_server.core import AuthenticationError
 
     _write_source_state(tmp_path, runtime_id="macos-arm64-host")
     _write_runtime_state(tmp_path, "linux-amd64-container")
     invalid_browser = _make_mock_browser()
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
 
     with (
         patch(
@@ -415,7 +479,9 @@ async def test_matching_derived_runtime_failure_does_not_fallback_to_bridge(tmp_
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_reopen_failure_clears_runtime_dir(tmp_path):
+async def test_experimental_checkpoint_reopen_failure_clears_runtime_dir(
+    tmp_path, monkeypatch
+):
     from linkedin_mcp_server.core import AuthenticationError
 
     _write_source_state(
@@ -424,6 +490,7 @@ async def test_checkpoint_reopen_failure_clears_runtime_dir(tmp_path):
     first_browser = _make_mock_browser()
     first_browser.import_cookies = AsyncMock(return_value=True)
     reopened_browser = _make_mock_browser()
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
 
     barrier_mock = AsyncMock(side_effect=[None, "checkpoint"])
     with (
@@ -452,7 +519,9 @@ async def test_checkpoint_reopen_failure_clears_runtime_dir(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_bridge_validation_failure_before_commit_clears_runtime_dir(tmp_path):
+async def test_experimental_bridge_validation_failure_before_commit_clears_runtime_dir(
+    tmp_path, monkeypatch
+):
     from linkedin_mcp_server.core import AuthenticationError
 
     _write_source_state(
@@ -460,6 +529,7 @@ async def test_bridge_validation_failure_before_commit_clears_runtime_dir(tmp_pa
     )
     first_browser = _make_mock_browser()
     first_browser.import_cookies = AsyncMock(return_value=True)
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
 
     barrier_mock = AsyncMock(return_value="login title: linkedin login")
     with (

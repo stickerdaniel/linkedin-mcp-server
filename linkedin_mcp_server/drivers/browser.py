@@ -48,9 +48,22 @@ _headless: bool = True
 _NAV_STABILIZE_DELAY_SECONDS = 5.0
 
 
+def _debug_stabilize_navigation_enabled() -> bool:
+    """Return whether debug-only startup stabilization sleeps are enabled."""
+    return os.getenv("LINKEDIN_DEBUG_STABILIZE_NAVIGATION", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 async def _stabilize_navigation(label: str) -> None:
     """Pause between LinkedIn startup actions to rule out timing issues."""
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or not _debug_stabilize_navigation_enabled()
+    ):
         return
     logger.debug(
         "Stabilizing navigation for %.1fs after %s",
@@ -73,6 +86,18 @@ def _debug_skip_checkpoint_restart() -> bool:
 def _debug_bridge_every_startup() -> bool:
     """Return whether to force a fresh bridge on every foreign-runtime startup."""
     return os.getenv("LINKEDIN_DEBUG_BRIDGE_EVERY_STARTUP", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _experimental_persist_derived_runtime() -> bool:
+    """Return whether Docker-style foreign runtimes should reuse derived profiles."""
+    return os.getenv(
+        "LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", ""
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -238,6 +263,8 @@ async def _bridge_runtime_profile(
     runtime_id: str,
     launch_options: dict[str, str],
     viewport: dict[str, int],
+    persist_runtime: bool,
+    cookie_preset: str = "auth_minimal",
 ) -> BrowserManager:
     clear_runtime_profile(runtime_id, get_source_profile_dir())
     profile_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -259,7 +286,7 @@ async def _bridge_runtime_profile(
         )
         await _stabilize_navigation("pre-import feed navigation")
         await record_page_trace(browser.page, "bridge-after-pre-import-feed")
-        if not await browser.import_cookies(cookie_path):
+        if not await browser.import_cookies(cookie_path, preset_name=cookie_preset):
             raise AuthenticationError(
                 "Portable authentication could not be imported. Run with --login to create a fresh source session."
             )
@@ -275,6 +302,14 @@ async def _bridge_runtime_profile(
             )
         await _stabilize_navigation("post-import feed validation")
         await record_page_trace(browser.page, "bridge-after-feed-validation")
+        if not persist_runtime:
+            logger.info(
+                "Foreign runtime %s authenticated via fresh bridge "
+                "(derived runtime persistence disabled)",
+                runtime_id,
+            )
+            browser.is_authenticated = True
+            return browser
         if _debug_skip_checkpoint_restart():
             logger.warning(
                 "Skipping checkpoint restart for derived runtime profile %s "
@@ -387,6 +422,30 @@ async def get_or_create_browser(
         _browser_cookie_export_path = cookie_path
         return _browser
 
+    persist_runtime = _experimental_persist_derived_runtime()
+    force_bridge = _debug_bridge_every_startup()
+
+    if not persist_runtime:
+        logger.info(
+            "Using fresh bridge for foreign runtime %s "
+            "(derived runtime persistence disabled by default)",
+            current_runtime_id,
+        )
+        browser = await _bridge_runtime_profile(
+            runtime_profile_dir(current_runtime_id, source_profile_dir),
+            cookie_path=cookie_path,
+            source_state=source_state,
+            runtime_id=current_runtime_id,
+            launch_options=launch_options,
+            viewport=viewport,
+            persist_runtime=False,
+            cookie_preset="auth_minimal",
+        )
+        _apply_browser_settings(browser)
+        _browser = browser
+        _browser_cookie_export_path = None
+        return _browser
+
     runtime_state = load_runtime_state(current_runtime_id, source_profile_dir)
     derived_profile_dir = runtime_profile_dir(current_runtime_id, source_profile_dir)
     storage_state_path = runtime_storage_state_path(
@@ -396,8 +455,6 @@ async def get_or_create_browser(
         runtime_state is not None
         and runtime_state.source_login_generation == source_state.login_generation
     )
-    force_bridge = _debug_bridge_every_startup()
-
     if (
         not force_bridge
         and generation_matches
@@ -437,6 +494,8 @@ async def get_or_create_browser(
         runtime_id=current_runtime_id,
         launch_options=launch_options,
         viewport=viewport,
+        persist_runtime=True,
+        cookie_preset="auth_minimal",
     )
     _apply_browser_settings(browser)
     _browser = browser

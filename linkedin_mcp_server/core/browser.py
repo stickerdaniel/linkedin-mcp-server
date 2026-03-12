@@ -246,24 +246,33 @@ class BrowserManager:
     }
 
     @classmethod
-    def _bridge_cookie_names(cls) -> frozenset[str]:
+    def _bridge_cookie_names(
+        cls, preset_name: str | None = None
+    ) -> tuple[str, frozenset[str]]:
         preset_name = (
-            os.getenv(
+            preset_name
+            or os.getenv(
                 "LINKEDIN_DEBUG_BRIDGE_COOKIE_SET",
-                "bridge_core",
+                "auth_minimal",
             ).strip()
-            or "bridge_core"
+            or "auth_minimal"
         )
         preset = cls._BRIDGE_COOKIE_PRESETS.get(preset_name)
         if preset is None:
             logger.warning(
-                "Unknown LINKEDIN_DEBUG_BRIDGE_COOKIE_SET=%r, falling back to bridge_core",
+                "Unknown LINKEDIN_DEBUG_BRIDGE_COOKIE_SET=%r, falling back to auth_minimal",
                 preset_name,
             )
-            return cls._BRIDGE_COOKIE_PRESETS["bridge_core"]
-        return preset
+            preset_name = "auth_minimal"
+            preset = cls._BRIDGE_COOKIE_PRESETS[preset_name]
+        return preset_name, preset
 
-    async def import_cookies(self, cookie_path: str | Path | None = None) -> bool:
+    async def import_cookies(
+        self,
+        cookie_path: str | Path | None = None,
+        *,
+        preset_name: str | None = None,
+    ) -> bool:
         """Import the portable LinkedIn bridge cookie subset.
 
         Fresh browser-side cookies are preserved. The imported subset is the
@@ -285,7 +294,9 @@ class BrowserManager:
                 logger.debug("Cookie file is empty")
                 return False
 
-            bridge_cookie_names = self._bridge_cookie_names()
+            resolved_preset_name, bridge_cookie_names = self._bridge_cookie_names(
+                preset_name
+            )
 
             cookies = [
                 self._normalize_cookie_domain(c)
@@ -304,7 +315,7 @@ class BrowserManager:
                 "Imported %d LinkedIn bridge cookies from %s (preset=%s, li_at=%s): %s",
                 len(cookies),
                 path,
-                os.getenv("LINKEDIN_DEBUG_BRIDGE_COOKIE_SET", "bridge_core"),
+                resolved_preset_name,
                 has_li_at,
                 ", ".join(c["name"] for c in cookies),
             )
