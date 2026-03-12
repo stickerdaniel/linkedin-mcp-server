@@ -102,6 +102,9 @@ Tools may also include:
 
 - `stdio` (default) - Standard I/O for CLI MCP clients
 - `streamable-http` - HTTP server mode for web-based MCP clients
+- Tool calls are serialized within one server process to protect the shared
+  LinkedIn browser session. Concurrent client requests queue instead of running
+  in parallel. Use debug logging to inspect scraper lock wait/acquire/release.
 
 ## Development Notes
 
