@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Bump version: see [Release Process](#release-process) below
 - Install browser: `uv run patchright install chromium`
 - Run server locally: `uv run -m linkedin_mcp_server --no-headless`
-- Run via uvx (PyPI): `uvx linkedin-scraper-mcp`
+- Run via uvx (PyPI/package verification only): `uvx linkedin-scraper-mcp`
 - Run in Docker: `docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp stickerdaniel/linkedin-mcp-server:latest`
 
 **Code Quality:**
@@ -25,7 +25,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Docker Commands:**
 
 - Build: `docker build -t linkedin-mcp-server .`
-- Login: Use uvx locally first: `uvx linkedin-scraper-mcp --login`
+- Login for local development: `uv run -m linkedin_mcp_server --login`
+- Login for packaged-distribution verification: `uvx linkedin-scraper-mcp --login`
 
 ## Architecture Overview
 
@@ -95,8 +96,11 @@ Tools may also include:
 
 **Authentication Flow:**
 
-- Uses persistent browser profile at `~/.linkedin-mcp/profile/`
-- Run with `--login` to create a profile via browser login
+- Source runtime uses persistent browser profile at `~/.linkedin-mcp/profile/`
+- `--login` creates a new source login generation and exports `cookies.json`
+- Foreign runtimes derive their own persistent profiles under `~/.linkedin-mcp/runtime-profiles/<runtime-id>/profile/`
+- The first foreign-runtime bridge exports `storage-state.json`, performs a checkpoint restart, and only then marks the derived runtime profile reusable
+- Derived runtime profiles are reused across restarts and rebuilt only after a new host `--login`
 
 **Transport Modes:**
 
@@ -140,9 +144,12 @@ Tools may also include:
 
 ## Verifying Bug Reports
 
-Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`. Start the server with HTTP transport in one terminal (this process is long-running and will block the shell), then in a second terminal call the tool via curl:
+Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. When working in this repository, use the local code path with `uv run`, not `uvx`, so the running process reflects the files in your workspace. Use `uvx` only when intentionally verifying the packaged distribution. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`. Start the server with HTTP transport in one terminal (this process is long-running and will block the shell), then in a second terminal call the tool via curl:
 
 ```bash
+# Create or refresh the local source session
+uv run -m linkedin_mcp_server --login
+
 # Start server
 uv run -m linkedin_mcp_server --transport streamable-http --log-level DEBUG
 
