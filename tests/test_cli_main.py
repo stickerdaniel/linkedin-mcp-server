@@ -209,8 +209,8 @@ def test_profile_info_reports_bridge_required_for_foreign_runtime(
 
     assert exit_info.value.code == 0
     captured = capsys.readouterr()
-    assert "derived (missing)" in captured.out.lower()
-    assert "checkpoint-committed" in captured.out.lower()
+    assert "fresh bridge each startup" in captured.out.lower()
+    assert "fresh bridged foreign-runtime session" in captured.out.lower()
 
 
 def test_profile_info_reports_committed_derived_runtime(
@@ -272,6 +272,7 @@ def test_profile_info_reports_committed_derived_runtime(
     monkeypatch.setattr(
         "linkedin_mcp_server.cli_main.get_runtime_id", lambda: "linux-amd64-container"
     )
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
     monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: AppConfig())
     monkeypatch.setattr(
         "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
