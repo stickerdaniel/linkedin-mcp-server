@@ -184,14 +184,15 @@ class BrowserManager:
             logger.exception("Failed to export cookies")
             return False
 
-    _AUTH_COOKIE_NAMES = frozenset({"li_at", "li_rm"})
+    _REQUIRED_COOKIE_NAMES = frozenset({"li_at", "li_rm"})
 
     async def import_cookies(self, cookie_path: str | Path | None = None) -> bool:
-        """Import auth cookies (li_at, li_rm) from a portable JSON file.
+        """Import all LinkedIn cookies from a portable JSON file.
 
         Clears all existing browser cookies before importing to avoid
         undecryptable cookie conflicts in the persistent store.
-        Only li_at and li_rm cookies are imported; others are ignored.
+        All LinkedIn cookies are imported to preserve session state
+        (JSESSIONID, bcookie, lidc, etc.) alongside auth tokens.
         """
         if not self._context:
             logger.warning("Cannot import cookies: no browser context")
@@ -211,9 +212,12 @@ class BrowserManager:
             cookies = [
                 self._normalize_cookie_domain(c)
                 for c in all_cookies
-                if c.get("name") in self._AUTH_COOKIE_NAMES
+                if "linkedin.com" in c.get("domain", "")
             ]
-            if not cookies:
+
+            # Verify that required auth cookies are present
+            cookie_names = {c.get("name") for c in cookies}
+            if not self._REQUIRED_COOKIE_NAMES & cookie_names:
                 logger.warning("No auth cookies (li_at/li_rm) found in %s", path)
                 return False
 
@@ -221,7 +225,7 @@ class BrowserManager:
             await self._context.clear_cookies()
             await self._context.add_cookies(cookies)  # type: ignore[arg-type]
             logger.info(
-                "Imported %d auth cookies from %s: %s",
+                "Imported %d LinkedIn cookies from %s: %s",
                 len(cookies),
                 path,
                 ", ".join(c["name"] for c in cookies),
