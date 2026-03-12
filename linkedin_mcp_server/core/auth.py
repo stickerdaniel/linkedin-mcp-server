@@ -29,6 +29,11 @@ _AUTH_BARRIER_TEXT_MARKERS = (
     ("choose an account", "sign in using another account"),
     ("continue as", "sign in using another account"),
 )
+_REMEMBER_ME_CONTAINER_SELECTOR = "#rememberme-div"
+_REMEMBER_ME_BUTTON_SELECTOR = (
+    "#rememberme-div > div.memberList-container > div > div > "
+    "div.member-profile-container.list-box > div.member-profile-block > button"
+)
 
 
 async def warm_up_browser(page: Page) -> None:
@@ -93,7 +98,19 @@ async def is_logged_in(page: Page) -> bool:
             pattern in current_url for pattern in authenticated_only_pages
         )
 
-        return has_nav_elements or is_authenticated_page
+        if not is_authenticated_page:
+            return has_nav_elements
+
+        if has_nav_elements:
+            return True
+
+        # Empty authenticated-only pages are a false positive during cookie
+        # bridge recovery. Require some real page content before trusting URL.
+        body_text = await page.evaluate("() => document.body?.innerText || ''")
+        if not isinstance(body_text, str):
+            return False
+
+        return bool(body_text.strip())
     except PlaywrightTimeoutError:
         logger.warning(
             "Timeout checking login status on %s — treating as not logged in",
@@ -163,6 +180,60 @@ async def detect_auth_barrier_quick(page: Page) -> str | None:
     return await _detect_auth_barrier(page, include_body_text=False)
 
 
+async def resolve_remember_me_prompt(page: Page) -> bool:
+    """Click through LinkedIn's saved-account chooser when it appears."""
+    try:
+        logger.debug("Checking remember-me prompt on %s", page.url)
+        try:
+            await page.wait_for_selector(_REMEMBER_ME_CONTAINER_SELECTOR, timeout=3000)
+            logger.debug("Remember-me container appeared")
+        except PlaywrightTimeoutError:
+            logger.debug("Remember-me container did not appear in time")
+            return False
+
+        target = page.locator(_REMEMBER_ME_BUTTON_SELECTOR).first
+        target_count = await page.locator(_REMEMBER_ME_BUTTON_SELECTOR).count()
+        logger.debug(
+            "Remember-me target count for %s: %d",
+            _REMEMBER_ME_BUTTON_SELECTOR,
+            target_count,
+        )
+        try:
+            await target.wait_for(state="visible", timeout=3000)
+            logger.debug("Remember-me button became visible")
+        except PlaywrightTimeoutError:
+            logger.debug(
+                "Remember-me prompt container appeared without a visible login button"
+            )
+            return False
+
+        logger.info("Clicking LinkedIn saved-account chooser to resume session")
+        try:
+            await target.scroll_into_view_if_needed(timeout=3000)
+        except PlaywrightTimeoutError:
+            logger.debug("Remember-me button did not scroll into view in time")
+
+        try:
+            await target.click(timeout=5000)
+            logger.debug("Remember-me button click succeeded")
+        except PlaywrightTimeoutError:
+            logger.debug("Retrying remember-me prompt click with force=True")
+            await target.click(timeout=5000, force=True)
+            logger.debug("Remember-me button force-click succeeded")
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("Remember-me prompt click did not finish loading in time")
+        await asyncio.sleep(1)
+        return True
+    except PlaywrightTimeoutError:
+        logger.debug("Remember-me prompt was present but not clickable in time")
+        return False
+    except Exception:
+        logger.debug("Failed to resolve remember-me prompt", exc_info=True)
+        return False
+
+
 def _is_auth_blocker_url(url: str) -> bool:
     """Return True only for real auth routes, not arbitrary slug substrings."""
     path = urlparse(url).path or "/"
@@ -194,6 +265,10 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
     start_time = asyncio.get_event_loop().time()
 
     while True:
+        if await resolve_remember_me_prompt(page):
+            logger.info("Resolved saved-account chooser during manual login flow")
+            continue
+
         if await is_logged_in(page):
             logger.info("Manual login completed successfully")
             return

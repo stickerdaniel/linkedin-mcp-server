@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 @lifespan
 async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """Manage browser lifecycle — cleanup on shutdown."""
+    """Manage browser lifecycle — cleanup on shutdown.
+
+    Derived runtime durability must not depend on this hook. Docker runtime
+    sessions are checkpoint-committed when they are created.
+    """
     logger.info("LinkedIn MCP Server starting...")
     yield {}
     logger.info("LinkedIn MCP Server shutting down...")

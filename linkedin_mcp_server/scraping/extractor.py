@@ -3,13 +3,18 @@
 import asyncio
 from dataclasses import dataclass
 import logging
+import os
 import re
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote_plus
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core import detect_auth_barrier, detect_auth_barrier_quick
+from linkedin_mcp_server.core import (
+    detect_auth_barrier,
+    detect_auth_barrier_quick,
+    resolve_remember_me_prompt,
+)
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
@@ -30,8 +35,11 @@ from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
 
 logger = logging.getLogger(__name__)
 
+WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
+
 # Delay between page navigations to avoid rate limiting
 _NAV_DELAY = 2.0
+_NAV_STABILIZE_DELAY = 5.0
 
 # Backoff before retrying a rate-limited page
 _RATE_LIMIT_RETRY_DELAY = 5.0
@@ -72,6 +80,18 @@ _JOB_TYPE_MAP = {
 _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
+
+
+async def _stabilize_navigation(label: str) -> None:
+    """Pause between LinkedIn navigations to rule out timing issues."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    logger.debug(
+        "Stabilizing navigation for %.1fs after %s",
+        _NAV_STABILIZE_DELAY,
+        label,
+    )
+    await asyncio.sleep(_NAV_STABILIZE_DELAY)
 
 
 def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
@@ -151,6 +171,59 @@ class LinkedInExtractor:
     def __init__(self, page: Page):
         self._page = page
 
+    @staticmethod
+    def _normalize_body_marker(value: Any) -> str:
+        """Compress body text into a short, single-line diagnostic marker."""
+        if not isinstance(value, str):
+            return ""
+        return re.sub(r"\s+", " ", value).strip()[:200]
+
+    async def _log_navigation_failure(
+        self,
+        target_url: str,
+        wait_until: str,
+        navigation_error: Exception,
+        hops: list[str],
+    ) -> None:
+        """Emit structured diagnostics for a failed target navigation."""
+        try:
+            title = await self._page.title()
+        except Exception:
+            title = ""
+
+        try:
+            auth_barrier = await detect_auth_barrier(self._page)
+        except Exception:
+            auth_barrier = None
+
+        try:
+            remember_me_visible = (
+                await self._page.locator("#rememberme-div").count()
+            ) > 0
+        except Exception:
+            remember_me_visible = False
+
+        try:
+            body_marker = self._normalize_body_marker(
+                await self._page.evaluate("() => document.body?.innerText || ''")
+            )
+        except Exception:
+            body_marker = ""
+
+        logger.warning(
+            "Navigation to %s failed (wait_until=%s, error=%s). "
+            "current_url=%s title=%r auth_barrier=%s remember_me=%s hops=%s body_marker=%r",
+            target_url,
+            wait_until,
+            navigation_error,
+            self._page.url,
+            title,
+            auth_barrier,
+            remember_me_visible,
+            hops,
+            body_marker,
+        )
+
     async def _raise_if_auth_barrier(
         self,
         url: str,
@@ -171,23 +244,65 @@ class LinkedInExtractor:
             raise AuthenticationError(message) from navigation_error
         raise AuthenticationError(message)
 
+    async def _goto_with_auth_checks(
+        self,
+        url: str,
+        *,
+        wait_until: WaitUntil = "domcontentloaded",
+        allow_remember_me: bool = True,
+    ) -> None:
+        """Navigate to a LinkedIn page and fail fast on auth barriers."""
+        hops: list[str] = []
+
+        def record_navigation(frame: Any) -> None:
+            if frame != self._page.main_frame:
+                return
+            frame_url = getattr(frame, "url", "")
+            if frame_url and (not hops or hops[-1] != frame_url):
+                hops.append(frame_url)
+
+        self._page.on("framenavigated", record_navigation)
+        try:
+            try:
+                await self._page.goto(url, wait_until=wait_until, timeout=30000)
+                await _stabilize_navigation(f"goto {url}")
+            except Exception as exc:
+                if allow_remember_me and await resolve_remember_me_prompt(self._page):
+                    await _stabilize_navigation(f"remember-me resolution for {url}")
+                    await self._goto_with_auth_checks(
+                        url,
+                        wait_until=wait_until,
+                        allow_remember_me=False,
+                    )
+                    return
+                await self._log_navigation_failure(url, wait_until, exc, hops)
+                await self._raise_if_auth_barrier(url, navigation_error=exc)
+                raise
+
+            barrier = await detect_auth_barrier_quick(self._page)
+            if not barrier:
+                return
+
+            if allow_remember_me and await resolve_remember_me_prompt(self._page):
+                await _stabilize_navigation(f"remember-me retry for {url}")
+                await self._goto_with_auth_checks(
+                    url,
+                    wait_until=wait_until,
+                    allow_remember_me=False,
+                )
+                return
+
+            logger.warning("Authentication barrier detected on %s: %s", url, barrier)
+            raise AuthenticationError(
+                "LinkedIn requires interactive re-authentication. "
+                "Run with --login and complete the account selection/sign-in flow."
+            )
+        finally:
+            self._page.remove_listener("framenavigated", record_navigation)
+
     async def _navigate_to_page(self, url: str) -> None:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
-        try:
-            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        except Exception as exc:
-            await self._raise_if_auth_barrier(url, navigation_error=exc)
-            raise
-
-        barrier = await detect_auth_barrier_quick(self._page)
-        if not barrier:
-            return
-
-        logger.warning("Authentication barrier detected on %s: %s", url, barrier)
-        raise AuthenticationError(
-            "LinkedIn requires interactive re-authentication. "
-            "Run with --login and complete the account selection/sign-in flow."
-        )
+        await self._goto_with_auth_checks(url)
 
     async def extract_page(
         self,

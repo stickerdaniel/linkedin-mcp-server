@@ -25,6 +25,7 @@ def isolate_profile_dir(tmp_path, monkeypatch):
         "linkedin_mcp_server.authentication",
         "linkedin_mcp_server.cli_main",
         "linkedin_mcp_server.setup",
+        "linkedin_mcp_server.session_state",
     ]:
         try:
             monkeypatch.setattr(f"{module}.DEFAULT_PROFILE_DIR", fake_profile)
@@ -40,6 +41,26 @@ def isolate_profile_dir(tmp_path, monkeypatch):
     ]:
         try:
             monkeypatch.setattr(f"{gp_module}.get_profile_dir", lambda: fake_profile)
+        except AttributeError:
+            pass
+
+    try:
+        monkeypatch.setattr(
+            "linkedin_mcp_server.session_state.get_source_profile_dir",
+            lambda: fake_profile,
+        )
+    except AttributeError:
+        pass
+
+    for source_module in [
+        "linkedin_mcp_server.authentication",
+        "linkedin_mcp_server.drivers.browser",
+    ]:
+        try:
+            monkeypatch.setattr(
+                f"{source_module}.get_source_profile_dir",
+                lambda: fake_profile,
+            )
         except AttributeError:
             pass
 
