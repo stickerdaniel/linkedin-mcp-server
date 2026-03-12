@@ -26,7 +26,6 @@ from linkedin_mcp_server.scraping.cache import scraping_cache
 from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
 
 logger = logging.getLogger(__name__)
-_FEED_URL = "https://www.linkedin.com/feed/"
 _MY_POSTS_URL = "https://www.linkedin.com/in/me/detail/recent-activity/shares/"
 _NOTIFICATIONS_URL = "https://www.linkedin.com/notifications/"
 _ACTIVITY_URN_PATTERN = re.compile(r"urn:li:activity:(\d+)")
