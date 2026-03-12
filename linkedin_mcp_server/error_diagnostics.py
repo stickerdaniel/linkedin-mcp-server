@@ -9,8 +9,10 @@ import socket
 from pathlib import Path
 import re
 from typing import Any
+from urllib.parse import quote_plus
+from urllib.request import Request, urlopen
 
-from linkedin_mcp_server.debug_trace import get_trace_dir
+from linkedin_mcp_server.debug_trace import get_trace_dir, mark_trace_for_retention
 from linkedin_mcp_server.session_state import (
     auth_root_dir,
     get_runtime_id,
@@ -24,6 +26,7 @@ from linkedin_mcp_server.session_state import (
 
 ISSUE_URL = "https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose"
 ISSUE_TITLE_PREFIX = "[BUG]"
+ISSUE_SEARCH_API = "https://api.github.com/search/issues"
 
 
 def build_issue_diagnostics(
@@ -39,7 +42,7 @@ def build_issue_diagnostics(
     current_runtime_id = get_runtime_id()
     source_state = load_source_state(source_profile_dir)
     runtime_state = load_runtime_state(current_runtime_id, source_profile_dir)
-    trace_dir = get_trace_dir()
+    trace_dir = mark_trace_for_retention() or get_trace_dir()
     log_path = trace_dir / "server.log" if trace_dir else None
     issue_dir = trace_dir or (auth_root_dir(source_profile_dir) / "issue-reports")
     issue_dir.mkdir(parents=True, exist_ok=True)
@@ -81,6 +84,7 @@ def build_issue_diagnostics(
             current_runtime_id=current_runtime_id,
         ),
     }
+    payload["existing_issues"] = _find_existing_issues(payload)
     issue_template = _render_issue_template(payload)
     issue_path.write_text(issue_template)
     payload["issue_template_path"] = str(issue_path)
@@ -105,26 +109,51 @@ def format_tool_error_with_diagnostics(
     lines.append(
         f"- Runtime: {runtime.get('current_runtime_id', 'unknown')} on {runtime.get('hostname', 'unknown')}"
     )
-    lines.append(f"- File the issue here: {ISSUE_URL}")
+    existing_issues = diagnostics.get("existing_issues") or []
+    if existing_issues:
+        lines.append("- Matching open issues were found. Review them first:")
+        for issue in existing_issues:
+            lines.append(f"  - #{issue['number']}: {issue['title']} ({issue['url']})")
+        lines.append(
+            "- If one matches this failure, upload the gist and post it as a comment on that issue instead of opening a new issue."
+        )
+    else:
+        lines.append(f"- File the issue here: {ISSUE_URL}")
     lines.append(
-        "- Read the generated issue template and attach the listed files to the GitHub issue."
+        "- Read the generated issue template and attach the listed files before posting."
     )
     return "\n".join(lines)
 
 
 def _render_issue_template(payload: dict[str, Any]) -> str:
     runtime = payload["runtime"]
+    existing_issues = payload.get("existing_issues") or []
+    has_existing_issues = bool(existing_issues)
     return (
         "\n".join(
             [
                 "# LinkedIn MCP scrape failure",
                 "",
                 "## File This Issue",
-                f"- GitHub issue link: {ISSUE_URL}",
                 f"- Suggested title: {payload['suggested_issue_title']}",
                 "- Read this generated file before posting.",
                 "- Copy the sections below into the GitHub bug report template.",
                 "- Attach this generated markdown file, the server log, and the trace artifacts directory.",
+                (
+                    "- Review the existing open issues below first. If one matches, post the gist as a comment there instead of opening a new issue."
+                    if has_existing_issues
+                    else f"- GitHub issue link: {ISSUE_URL}"
+                ),
+                "",
+                "## Existing Open Issues",
+                *(
+                    [
+                        f"- #{issue['number']}: {issue['title']} ({issue['url']})"
+                        for issue in existing_issues
+                    ]
+                    if has_existing_issues
+                    else ["- No matching open issues found during diagnostics."]
+                ),
                 "",
                 "## Installation Method",
                 "- [x] Docker (specify docker image version/tag): `stickerdaniel/linkedin-mcp-server:latest` with local repo mounted into `/app`",
@@ -197,6 +226,11 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                 "1. Run a fresh local `uv run -m linkedin_mcp_server --login`.",
                 "2. Start the local Docker server with the same debug env vars used for this run.",
                 "3. Re-run the failing MCP tool call.",
+                (
+                    "4. If one of the listed open issues matches, post the gist as a comment there as additional information."
+                    if has_existing_issues
+                    else "4. If no existing issue matches, open a new GitHub bug report with the information above."
+                ),
             ]
         )
         + "\n"
@@ -244,6 +278,46 @@ def _build_gist_command(
         files.append(str(trace_path))
     quoted = " ".join(f'"{path}"' for path in files)
     return f'gh gist create {quoted} -d "LinkedIn MCP debug artifacts"'
+
+
+def _find_existing_issues(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    query = _issue_search_query(payload)
+    if not query:
+        return []
+
+    request = Request(
+        f"{ISSUE_SEARCH_API}?q={quote_plus(query)}&per_page=3",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "linkedin-mcp-server-diagnostics",
+        },
+    )
+    try:
+        with urlopen(request, timeout=3) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+
+    issues: list[dict[str, Any]] = []
+    for item in data.get("items", []):
+        issues.append(
+            {
+                "number": item.get("number"),
+                "title": item.get("title"),
+                "url": item.get("html_url"),
+            }
+        )
+    return issues
+
+
+def _issue_search_query(payload: dict[str, Any]) -> str:
+    route = payload.get("target_url") or payload.get("context") or ""
+    if "/recent-activity/" in route:
+        summary = '"recent-activity redirect loop"'
+    else:
+        section = payload.get("section_name") or "scrape"
+        summary = f'"{section}"'
+    return f"repo:stickerdaniel/linkedin-mcp-server is:issue is:open {summary}"
 
 
 def _utcnow() -> str:
