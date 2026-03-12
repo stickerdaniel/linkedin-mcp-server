@@ -28,8 +28,9 @@ from linkedin_mcp_server.drivers.browser import (
     _experimental_persist_derived_runtime,
     set_headless,
 )
+from linkedin_mcp_server.debug_trace import should_keep_traces
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
-from linkedin_mcp_server.logging_config import configure_logging
+from linkedin_mcp_server.logging_config import configure_logging, teardown_trace_logging
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
     load_runtime_state,
@@ -317,84 +318,87 @@ def main() -> None:
 
     logger.info(f"LinkedIn MCP Server v{version}")
 
-    # Set headless mode from config
-    set_headless(config.browser.headless)
-
-    # Handle --logout flag
-    if config.server.logout:
-        clear_profile_and_exit()
-
-    # Handle --login flag
-    if config.server.login:
-        get_profile_and_exit()
-
-    # Handle --status flag
-    if config.server.status:
-        profile_info_and_exit()
-
-    logger.debug(f"Server configuration: {config}")
-
-    # Phase 1: Ensure Authentication is Ready
     try:
-        ensure_authentication_ready()
-        if config.is_interactive:
-            print("✅ Authentication ready")
-        logger.info("Authentication ready")
+        # Set headless mode from config
+        set_headless(config.browser.headless)
 
-    except CredentialsNotFoundError as e:
-        logger.error(f"Authentication setup failed: {e}")
-        if config.is_interactive:
-            print("\n❌ Authentication required")
-            print(str(e))
-        sys.exit(1)
+        # Handle --logout flag
+        if config.server.logout:
+            clear_profile_and_exit()
 
-    except KeyboardInterrupt:
-        if config.is_interactive:
-            print("\n\n👋 Setup cancelled by user")
-        sys.exit(0)
+        # Handle --login flag
+        if config.server.login:
+            get_profile_and_exit()
 
-    except (AuthenticationError, RateLimitError) as e:
-        logger.error(f"LinkedIn error during setup: {e}")
-        if config.is_interactive:
-            print(f"\n❌ {str(e)}")
-        sys.exit(1)
+        # Handle --status flag
+        if config.server.status:
+            profile_info_and_exit()
 
-    except Exception as e:
-        logger.exception(f"Unexpected error during authentication setup: {e}")
-        if config.is_interactive:
-            print(f"\n❌ Setup failed: {e}")
-        sys.exit(1)
+        logger.debug(f"Server configuration: {config}")
 
-    # Phase 2: Server Runtime
-    try:
-        transport = config.server.transport
+        # Phase 1: Ensure Authentication is Ready
+        try:
+            ensure_authentication_ready()
+            if config.is_interactive:
+                print("✅ Authentication ready")
+            logger.info("Authentication ready")
 
-        # Prompt for transport in interactive mode if not explicitly set
-        if config.is_interactive and not config.server.transport_explicitly_set:
-            print("\n🚀 Server ready! Choose transport mode:")
-            transport = choose_transport_interactive()
+        except CredentialsNotFoundError as e:
+            logger.error(f"Authentication setup failed: {e}")
+            if config.is_interactive:
+                print("\n❌ Authentication required")
+                print(str(e))
+            sys.exit(1)
 
-        # Create and run the MCP server
-        mcp = create_mcp_server()
+        except KeyboardInterrupt:
+            if config.is_interactive:
+                print("\n\n👋 Setup cancelled by user")
+            sys.exit(0)
 
-        if transport == "streamable-http":
-            mcp.run(
-                transport=transport,
-                host=config.server.host,
-                port=config.server.port,
-                path=config.server.path,
-            )
-        else:
-            mcp.run(transport=transport)
+        except (AuthenticationError, RateLimitError) as e:
+            logger.error(f"LinkedIn error during setup: {e}")
+            if config.is_interactive:
+                print(f"\n❌ {str(e)}")
+            sys.exit(1)
 
-    except KeyboardInterrupt:
-        exit_gracefully(0)
+        except Exception as e:
+            logger.exception(f"Unexpected error during authentication setup: {e}")
+            if config.is_interactive:
+                print(f"\n❌ Setup failed: {e}")
+            sys.exit(1)
 
-    except Exception as e:
-        logger.exception(f"Server runtime error: {e}")
-        if config.is_interactive:
-            print(f"\n❌ Server error: {e}")
-        exit_gracefully(1)
+        # Phase 2: Server Runtime
+        try:
+            transport = config.server.transport
+
+            # Prompt for transport in interactive mode if not explicitly set
+            if config.is_interactive and not config.server.transport_explicitly_set:
+                print("\n🚀 Server ready! Choose transport mode:")
+                transport = choose_transport_interactive()
+
+            # Create and run the MCP server
+            mcp = create_mcp_server()
+
+            if transport == "streamable-http":
+                mcp.run(
+                    transport=transport,
+                    host=config.server.host,
+                    port=config.server.port,
+                    path=config.server.path,
+                )
+            else:
+                mcp.run(transport=transport)
+
+        except KeyboardInterrupt:
+            exit_gracefully(0)
+
+        except Exception as e:
+            logger.exception(f"Server runtime error: {e}")
+            if config.is_interactive:
+                print(f"\n❌ Server error: {e}")
+            exit_gracefully(1)
+    finally:
+        teardown_trace_logging(keep_traces=should_keep_traces())
 
 
 def exit_gracefully(exit_code: int = 0) -> None:

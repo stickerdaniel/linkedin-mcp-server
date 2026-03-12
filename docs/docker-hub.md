@@ -37,6 +37,8 @@ Docker foreign runtimes derive a Linux runtime profile under:
 
 By default, Docker now creates a fresh bridged Linux session on every startup using the minimal working auth cookie subset (`li_at`, `JSESSIONID`, `bcookie`, `bscookie`, `lidc`) and keeps that session alive for the server lifetime.
 
+Runtime traces/logs are captured into an ephemeral run directory by default and are automatically preserved only when a scrape failure occurs. Set `LINKEDIN_TRACE_MODE=always` to keep every run or `LINKEDIN_TRACE_MODE=off` to disable trace persistence entirely.
+
 If you want to experiment with persistent derived runtime reuse anyway, set `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`. In that mode, the first Docker run performs an internal checkpoint restart after `/feed/` succeeds and later Docker runs try to reuse the committed Linux runtime profile directly.
 
 **Step 2: Configure Claude Desktop with Docker**
@@ -80,6 +82,7 @@ If you want to experiment with persistent derived runtime reuse anyway, set `LIN
 | `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
 | `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: reuse checkpointed derived Linux runtime profiles across Docker restarts instead of fresh-bridging each startup |
+| `LINKEDIN_TRACE_MODE` | `on_error` | Trace/log retention mode: `on_error` keeps ephemeral artifacts only when a failure occurs, `always` keeps every run, `off` disables trace persistence |
 
 **Example with custom timeout:**
 
