@@ -50,7 +50,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 Tool responses keep readable `sections` text and may also include a compact `references` map keyed by section. Each reference includes a typed target, a relative LinkedIn path (or absolute external URL), and a short label/context when available.
 
-When one section fails but the overall tool call still completes, responses may also include `section_errors`. Each entry contains structured diagnostics for that section, including the error type/message, runtime/session details, trace and log locations when enabled, and an issue-ready markdown template path.
+When one section fails but the overall tool call still completes, responses may also include `section_errors`. Each entry contains structured diagnostics for that section, including the error type/message, runtime/session details, trace/log locations, matching-open-issue hints when available, and an issue-ready markdown template path.
 
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
@@ -216,6 +216,8 @@ Docker foreign runtimes derive a Linux runtime profile under:
 - `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/runtime-state.json`
 
 By default, Docker now creates a fresh bridged Linux session on every startup using the minimal working auth cookie subset (`li_at`, `JSESSIONID`, `bcookie`, `bscookie`, `lidc`) and keeps that session alive for the server lifetime. This currently works more reliably than reusing a checkpointed derived runtime profile across restarts.
+
+Runtime traces/logs are captured into an ephemeral run directory by default and are automatically preserved only when a scrape failure occurs. Set `LINKEDIN_TRACE_MODE=always` to keep every run or `LINKEDIN_TRACE_MODE=off` to disable trace persistence entirely.
 
 If you want to experiment with persistent derived runtime reuse anyway, set `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`. In that mode, the first Docker run performs an internal checkpoint restart after `/feed/` succeeds and later Docker runs try to reuse the committed Linux runtime profile directly.
 
