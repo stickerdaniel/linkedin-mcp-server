@@ -3,7 +3,6 @@
 import asyncio
 from dataclasses import dataclass
 import logging
-import os
 import re
 from typing import Any, Literal
 from urllib.parse import quote_plus
@@ -20,6 +19,7 @@ from linkedin_mcp_server.core.exceptions import (
     LinkedInScraperException,
 )
 from linkedin_mcp_server.debug_trace import record_page_trace
+from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
@@ -41,7 +41,6 @@ WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
 
 # Delay between page navigations to avoid rate limiting
 _NAV_DELAY = 2.0
-_NAV_STABILIZE_DELAY = 5.0
 
 # Backoff before retrying a rate-limited page
 _RATE_LIMIT_RETRY_DELAY = 5.0
@@ -82,31 +81,6 @@ _JOB_TYPE_MAP = {
 _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
-
-
-def _debug_stabilize_navigation_enabled() -> bool:
-    """Return whether debug-only scraper stabilization sleeps are enabled."""
-    return os.getenv("LINKEDIN_DEBUG_STABILIZE_NAVIGATION", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-async def _stabilize_navigation(label: str) -> None:
-    """Pause between LinkedIn navigations to rule out timing issues."""
-    if (
-        os.environ.get("PYTEST_CURRENT_TEST")
-        or not _debug_stabilize_navigation_enabled()
-    ):
-        return
-    logger.debug(
-        "Stabilizing navigation for %.1fs after %s",
-        _NAV_STABILIZE_DELAY,
-        label,
-    )
-    await asyncio.sleep(_NAV_STABILIZE_DELAY)
 
 
 def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
@@ -286,7 +260,7 @@ class LinkedInExtractor:
             )
             try:
                 await self._page.goto(url, wait_until=wait_until, timeout=30000)
-                await _stabilize_navigation(f"goto {url}")
+                await stabilize_navigation(f"goto {url}", logger)
                 await record_page_trace(
                     self._page,
                     "extractor-after-goto",
@@ -294,7 +268,9 @@ class LinkedInExtractor:
                 )
             except Exception as exc:
                 if allow_remember_me and await resolve_remember_me_prompt(self._page):
-                    await _stabilize_navigation(f"remember-me resolution for {url}")
+                    await stabilize_navigation(
+                        f"remember-me resolution for {url}", logger
+                    )
                     await record_page_trace(
                         self._page,
                         "extractor-after-remember-me",
@@ -328,7 +304,7 @@ class LinkedInExtractor:
                 return
 
             if allow_remember_me and await resolve_remember_me_prompt(self._page):
-                await _stabilize_navigation(f"remember-me retry for {url}")
+                await stabilize_navigation(f"remember-me retry for {url}", logger)
                 await record_page_trace(
                     self._page,
                     "extractor-after-remember-me-retry",
