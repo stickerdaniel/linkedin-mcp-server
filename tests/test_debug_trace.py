@@ -1,7 +1,13 @@
+import json
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from linkedin_mcp_server.debug_trace import (
     cleanup_trace_dir,
     get_trace_dir,
     mark_trace_for_retention,
+    record_page_trace,
     reset_trace_state_for_testing,
 )
 
@@ -62,3 +68,35 @@ def test_trace_mode_off_disables_trace_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("LINKEDIN_TRACE_MODE", "off")
 
     assert get_trace_dir() is None
+
+
+@pytest.mark.asyncio
+async def test_reset_trace_state_resets_step_counter(monkeypatch, tmp_path):
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+
+    page = MagicMock()
+    page.url = "https://www.linkedin.com/feed/"
+    page.title = AsyncMock(return_value="LinkedIn")
+    page.evaluate = AsyncMock(return_value="Feed")
+    locator = MagicMock()
+    locator.count = AsyncMock(return_value=0)
+    page.locator = MagicMock(return_value=locator)
+    page.context.cookies = AsyncMock(return_value=[])
+    page.screenshot = AsyncMock()
+
+    await record_page_trace(page, "first")
+    trace_dir = get_trace_dir()
+    assert trace_dir is not None
+    first_payload = json.loads((trace_dir / "trace.jsonl").read_text().splitlines()[0])
+    assert first_payload["step_id"] == 1
+
+    reset_trace_state_for_testing()
+    monkeypatch.setenv("USER_DATA_DIR", str((tmp_path / "second") / "profile"))
+
+    await record_page_trace(page, "first-again")
+    second_trace_dir = get_trace_dir()
+    assert second_trace_dir is not None
+    second_payload = json.loads(
+        (second_trace_dir / "trace.jsonl").read_text().splitlines()[0]
+    )
+    assert second_payload["step_id"] == 1

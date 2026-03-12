@@ -1,3 +1,5 @@
+import pytest
+
 from linkedin_mcp_server.error_diagnostics import (
     build_issue_diagnostics,
     format_tool_error_with_diagnostics,
@@ -76,3 +78,54 @@ def test_find_existing_issues_query_failure_is_tolerated(monkeypatch, tmp_path):
     )
 
     assert diagnostics["existing_issues"] == []
+
+
+@pytest.mark.asyncio
+async def test_build_issue_diagnostics_skips_network_search_in_event_loop(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+
+    called = {"value": False}
+
+    def fail(*args, **kwargs):
+        called["value"] = True
+        raise AssertionError("urlopen should not be called inside the event loop")
+
+    monkeypatch.setattr("linkedin_mcp_server.error_diagnostics.urlopen", fail)
+
+    diagnostics = build_issue_diagnostics(
+        RuntimeError("boom"),
+        context="extract-page",
+        target_url="https://www.linkedin.com/in/test/",
+        section_name="main_profile",
+    )
+
+    assert diagnostics["existing_issues"] == []
+    assert called["value"] is False
+
+
+def test_build_issue_diagnostics_marks_inferred_tool_and_container_runtime(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics.get_runtime_id",
+        lambda: "linux-amd64-container",
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics._find_existing_issues",
+        lambda payload: [],
+    )
+
+    diagnostics = build_issue_diagnostics(
+        RuntimeError("boom"),
+        context="search_jobs",
+        target_url="https://www.linkedin.com/jobs/search/?keywords=python",
+        section_name="search_results",
+    )
+
+    issue_body = diagnostics["issue_template"]
+    assert "`~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`" in issue_body
+    assert "- [x] Docker" in issue_body
+    assert "  - [x] search_jobs" in issue_body

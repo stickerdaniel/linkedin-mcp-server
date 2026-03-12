@@ -21,11 +21,11 @@ from linkedin_mcp_server.authentication import (
 )
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.drivers.browser import (
+    experimental_persist_derived_runtime,
     close_browser,
     get_or_create_browser,
     get_profile_dir,
     profile_exists,
-    _experimental_persist_derived_runtime,
     set_headless,
 )
 from linkedin_mcp_server.debug_trace import should_keep_traces
@@ -167,7 +167,7 @@ def profile_info_and_exit() -> None:
         runtime_state = load_runtime_state(current_runtime, profile_dir)
         runtime_profile = runtime_profile_dir(current_runtime, profile_dir)
         runtime_storage_state = runtime_storage_state_path(current_runtime, profile_dir)
-        if not _experimental_persist_derived_runtime():
+        if not experimental_persist_derived_runtime():
             bridge_required = True
             print("Profile mode: foreign runtime (fresh bridge each startup)")
             if runtime_profile.exists():
@@ -208,7 +208,7 @@ def profile_info_and_exit() -> None:
             await close_browser()
 
     if bridge_required:
-        if _experimental_persist_derived_runtime():
+        if experimental_persist_derived_runtime():
             print(
                 "ℹ️  A derived runtime profile will be created and checkpoint-committed on the next server startup."
             )

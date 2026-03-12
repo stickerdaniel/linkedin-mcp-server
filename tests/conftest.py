@@ -18,6 +18,7 @@ def reset_singletons():
 def isolate_profile_dir(tmp_path, monkeypatch):
     """Redirect profile directory to tmp_path via config and DEFAULT_PROFILE_DIR."""
     fake_profile = tmp_path / "profile"
+    monkeypatch.setenv("USER_DATA_DIR", str(fake_profile))
 
     # Patch DEFAULT_PROFILE_DIR for any code still referencing the constant
     for module in [
