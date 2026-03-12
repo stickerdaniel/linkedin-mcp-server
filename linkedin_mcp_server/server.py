@@ -15,6 +15,9 @@ from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.authentication import get_authentication_source
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.sequential_tool_middleware import (
+    SequentialToolExecutionMiddleware,
+)
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.person import register_person_tools
@@ -46,6 +49,7 @@ def create_mcp_server() -> FastMCP:
         lifespan=auth_lifespan | browser_lifespan,
         mask_error_details=True,
     )
+    mcp.add_middleware(SequentialToolExecutionMiddleware())
 
     # Register all tools
     register_person_tools(mcp)

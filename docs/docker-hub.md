@@ -43,6 +43,10 @@ uvx linkedin-scraper-mcp --login
 > **Note:** Docker containers don't have a display server, so you can't use the `--login` command in Docker. Create a profile on your host first.
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
+>
+> **Note:** Tool calls are serialized within one server process to protect the
+> shared LinkedIn browser session. Concurrent client requests queue instead of
+> running in parallel. Use `LOG_LEVEL=DEBUG` to see scraper lock logs.
 
 ## Environment Variables
 
