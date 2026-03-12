@@ -20,14 +20,8 @@ Create a browser profile locally, then mount it into Docker.
 **Step 1: Create profile on the host (one-time setup)**
 
 ```bash
-# Installed package usage
 uvx linkedin-scraper-mcp --login
-
-# Local development from this repo
-uv run -m linkedin_mcp_server --login
 ```
-
-If you are debugging or verifying code changes in this repository, prefer `uv run -m linkedin_mcp_server ...` so the running process matches your workspace files. Use `uvx` when intentionally testing the packaged distribution.
 
 This creates the source session artifacts on the host:
 
@@ -35,13 +29,15 @@ This creates the source session artifacts on the host:
 - `~/.linkedin-mcp/cookies.json`
 - `~/.linkedin-mcp/source-state.json`
 
-The first Docker run derives a persistent Linux runtime profile under:
+Docker foreign runtimes derive a Linux runtime profile under:
 
 - `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/profile/`
 - `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/storage-state.json`
 - `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/runtime-state.json`
 
-That first Docker run also performs an internal checkpoint restart after `/feed/` succeeds, so the derived Linux runtime session is committed immediately instead of depending on later browser shutdown. Later Docker runs reuse that committed Linux runtime profile directly. Re-running `--login` on the host creates a new source login generation, and the next Docker run rebuilds its derived Linux profile once.
+By default, Docker now creates a fresh bridged Linux session on every startup using the minimal working auth cookie subset (`li_at`, `JSESSIONID`, `bcookie`, `bscookie`, `lidc`) and keeps that session alive for the server lifetime.
+
+If you want to experiment with persistent derived runtime reuse anyway, set `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`. In that mode, the first Docker run performs an internal checkpoint restart after `/feed/` succeeds and later Docker runs try to reuse the committed Linux runtime profile directly.
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -83,6 +79,7 @@ That first Docker run also performs an internal checkpoint restart after `/feed/
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
+| `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: reuse checkpointed derived Linux runtime profiles across Docker restarts instead of fresh-bridging each startup |
 
 **Example with custom timeout:**
 

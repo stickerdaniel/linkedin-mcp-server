@@ -99,9 +99,9 @@ Tools may also include:
 
 - Source runtime uses persistent browser profile at `~/.linkedin-mcp/profile/`
 - `--login` creates a new source login generation and exports `cookies.json`
-- Foreign runtimes derive their own persistent profiles under `~/.linkedin-mcp/runtime-profiles/<runtime-id>/profile/`
-- The first foreign-runtime bridge exports `storage-state.json`, performs a checkpoint restart, and only then marks the derived runtime profile reusable
-- Derived runtime profiles are reused across restarts and rebuilt only after a new host `--login`
+- Foreign runtimes derive their Linux bridge state under `~/.linkedin-mcp/runtime-profiles/<runtime-id>/profile/`
+- By default, foreign runtimes fresh-bridge on every startup using the minimal working auth cookie subset and keep that bridged browser alive for the server lifetime
+- Persistent derived runtime reuse remains experimental behind `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`
 
 **Transport Modes:**
 

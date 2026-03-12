@@ -40,6 +40,7 @@ async def test_import_cookies_imports_bridge_subset_only(tmp_path):
         _make_cookie("li_at"),
         _make_cookie("JSESSIONID"),
         _make_cookie("bcookie"),
+        _make_cookie("bscookie"),
         _make_cookie("lidc"),
         _make_cookie("session", domain=".example.com"),
         _make_cookie("timezone"),
@@ -51,12 +52,12 @@ async def test_import_cookies_imports_bridge_subset_only(tmp_path):
     assert imported is True
     context.clear_cookies.assert_not_awaited()
     context.add_cookies.assert_awaited_once_with(
-        [cookies[0], cookies[1], cookies[2], cookies[3], cookies[5]]
+        [cookies[0], cookies[1], cookies[2], cookies[3], cookies[4]]
     )
 
 
 @pytest.mark.asyncio
-async def test_import_cookies_uses_auth_minimal_debug_preset(tmp_path, monkeypatch):
+async def test_import_cookies_uses_bridge_core_debug_preset(tmp_path, monkeypatch):
     browser, context = _make_browser_manager(tmp_path)
     cookie_path = tmp_path / "cookies.json"
     cookies = [
@@ -69,12 +70,12 @@ async def test_import_cookies_uses_auth_minimal_debug_preset(tmp_path, monkeypat
         _make_cookie("timezone"),
     ]
     cookie_path.write_text(json.dumps(cookies))
-    monkeypatch.setenv("LINKEDIN_DEBUG_BRIDGE_COOKIE_SET", "auth_minimal")
+    monkeypatch.setenv("LINKEDIN_DEBUG_BRIDGE_COOKIE_SET", "bridge_core")
 
     imported = await browser.import_cookies(cookie_path)
 
     assert imported is True
-    context.add_cookies.assert_awaited_once_with(cookies[:5])
+    context.add_cookies.assert_awaited_once_with(cookies)
 
 
 @pytest.mark.asyncio
