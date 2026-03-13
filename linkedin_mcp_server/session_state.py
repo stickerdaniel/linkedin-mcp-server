@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 import json
 import logging
 import platform
@@ -42,6 +42,10 @@ class RuntimeState:
     profile_path: str
     storage_state_path: str
     commit_method: str
+
+
+_SOURCE_STATE_FIELDS = frozenset(field.name for field in fields(SourceState))
+_RUNTIME_STATE_FIELDS = frozenset(field.name for field in fields(RuntimeState))
 
 
 def get_source_profile_dir() -> Path:
@@ -196,7 +200,9 @@ def load_source_state(source_profile_dir: Path | None = None) -> SourceState | N
     if not data:
         return None
     try:
-        return SourceState(**data)
+        return SourceState(
+            **{key: value for key, value in data.items() if key in _SOURCE_STATE_FIELDS}
+        )
     except TypeError:
         logger.warning("Ignoring invalid source-state.json")
         return None
@@ -227,7 +233,13 @@ def load_runtime_state(
     if not data:
         return None
     try:
-        return RuntimeState(**data)
+        return RuntimeState(
+            **{
+                key: value
+                for key, value in data.items()
+                if key in _RUNTIME_STATE_FIELDS
+            }
+        )
     except TypeError:
         logger.warning("Ignoring invalid runtime-state.json for %s", runtime_id)
         return None
