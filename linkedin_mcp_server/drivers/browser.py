@@ -19,6 +19,7 @@ from linkedin_mcp_server.core import (
     resolve_remember_me_prompt,
 )
 
+from linkedin_mcp_server.common_utils import utcnow_iso
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
@@ -242,6 +243,7 @@ async def _bridge_runtime_profile(
     persist_runtime: bool,
     cookie_preset: str = "auth_minimal",
 ) -> BrowserManager:
+    bridge_started_at = utcnow_iso()
     clear_runtime_profile(runtime_id, get_source_profile_dir())
     profile_dir.parent.mkdir(parents=True, exist_ok=True)
     storage_state_path = runtime_storage_state_path(
@@ -328,6 +330,7 @@ async def _bridge_runtime_profile(
                 source_state,
                 storage_state_path,
                 get_source_profile_dir(),
+                created_at=bridge_started_at,
             )
             logger.info("Derived runtime profile committed for %s", runtime_id)
             reopened.is_authenticated = True

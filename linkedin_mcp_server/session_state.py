@@ -211,6 +211,7 @@ def write_runtime_state(
     storage_state_path: Path,
     source_profile_dir: Path | None = None,
     *,
+    created_at: str | None = None,
     commit_method: str = "checkpoint_restart",
 ) -> RuntimeState:
     """Write metadata for a derived runtime session."""
@@ -221,7 +222,7 @@ def write_runtime_state(
         runtime_id=runtime_id,
         source_runtime_id=source_state.source_runtime_id,
         source_login_generation=source_state.login_generation,
-        created_at=committed_at,
+        created_at=created_at or committed_at,
         committed_at=committed_at,
         profile_path=str(profile_dir),
         storage_state_path=str(storage_state_path.resolve()),
