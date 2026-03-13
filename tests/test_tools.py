@@ -238,6 +238,28 @@ class TestCompanyTools:
         result = await tool_fn("testcorp", mock_context, extractor=mock_extractor)
         assert result["sections"] == {}
 
+    async def test_get_company_posts_returns_section_errors(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(
+                text="",
+                references=[],
+                error={"issue_template_path": "/tmp/company-posts-issue.md"},
+            )
+        )
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_company_posts")
+        result = await tool_fn("testcorp", mock_context, extractor=mock_extractor)
+        assert result["sections"] == {}
+        assert result["section_errors"]["posts"]["issue_template_path"] == (
+            "/tmp/company-posts-issue.md"
+        )
+
     async def test_get_company_posts_omits_orphaned_references(self, mock_context):
         mock_extractor = MagicMock()
         mock_extractor.extract_page = AsyncMock(
