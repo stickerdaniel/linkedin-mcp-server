@@ -270,7 +270,8 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
         "Waiting up to 5 minutes..."
     )
 
-    start_time = asyncio.get_event_loop().time()
+    loop = asyncio.get_running_loop()
+    start_time = loop.time()
 
     while True:
         if await resolve_remember_me_prompt(page):
@@ -281,7 +282,7 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
             logger.info("Manual login completed successfully")
             return
 
-        elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
+        elapsed = (loop.time() - start_time) * 1000
         if elapsed > timeout:
             raise AuthenticationError(
                 "Manual login timeout. Please try again and complete login faster."
