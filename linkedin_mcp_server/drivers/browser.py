@@ -148,6 +148,7 @@ async def _feed_auth_succeeds(
                     "feed-after-remember-me",
                     extra={"allow_remember_me": allow_remember_me},
                 )
+                return await _feed_auth_succeeds(browser, allow_remember_me=False)
         barrier = await detect_auth_barrier_quick(browser.page)
         if barrier is not None:
             await record_page_trace(
