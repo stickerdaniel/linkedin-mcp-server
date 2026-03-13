@@ -276,6 +276,11 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
     while True:
         if await resolve_remember_me_prompt(page):
             logger.info("Resolved saved-account chooser during manual login flow")
+            elapsed = (loop.time() - start_time) * 1000
+            if elapsed > timeout:
+                raise AuthenticationError(
+                    "Manual login timeout. Please try again and complete login faster."
+                )
             continue
 
         if await is_logged_in(page):
