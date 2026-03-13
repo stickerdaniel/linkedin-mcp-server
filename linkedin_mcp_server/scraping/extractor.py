@@ -243,6 +243,7 @@ class LinkedInExtractor:
     ) -> None:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
         hops: list[str] = []
+        listener_registered = False
 
         def record_navigation(frame: Any) -> None:
             if frame != self._page.main_frame:
@@ -251,7 +252,15 @@ class LinkedInExtractor:
             if frame_url and (not hops or hops[-1] != frame_url):
                 hops.append(frame_url)
 
+        def unregister_navigation_listener() -> None:
+            nonlocal listener_registered
+            if not listener_registered:
+                return
+            self._page.remove_listener("framenavigated", record_navigation)
+            listener_registered = False
+
         self._page.on("framenavigated", record_navigation)
+        listener_registered = True
         try:
             await record_page_trace(
                 self._page,
@@ -273,12 +282,23 @@ class LinkedInExtractor:
                     )
                     await record_page_trace(
                         self._page,
+                        "extractor-navigation-error-before-remember-me-retry",
+                        extra={
+                            "target_url": url,
+                            "wait_until": wait_until,
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "hops": hops,
+                        },
+                    )
+                    await record_page_trace(
+                        self._page,
                         "extractor-after-remember-me",
                         extra={
                             "target_url": url,
                             "error": f"{type(exc).__name__}: {exc}",
                         },
                     )
+                    unregister_navigation_listener()
                     await self._goto_with_auth_checks(
                         url,
                         wait_until=wait_until,
@@ -310,6 +330,7 @@ class LinkedInExtractor:
                     "extractor-after-remember-me-retry",
                     extra={"target_url": url, "barrier": barrier},
                 )
+                unregister_navigation_listener()
                 await self._goto_with_auth_checks(
                     url,
                     wait_until=wait_until,
@@ -328,7 +349,7 @@ class LinkedInExtractor:
                 "Run with --login and complete the account selection/sign-in flow."
             )
         finally:
-            self._page.remove_listener("framenavigated", record_navigation)
+            unregister_navigation_listener()
 
     async def _navigate_to_page(self, url: str) -> None:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""

@@ -417,6 +417,89 @@ class TestNavigationDiagnostics:
         assert mock_page.goto.await_count == 2
         mock_resolve.assert_awaited_once()
 
+    async def test_goto_with_auth_checks_unhooks_outer_listener_before_retry(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        listener_events: list[str] = []
+
+        def record_on(event_name, callback):
+            listener_events.append(f"on:{event_name}")
+
+        def record_remove(event_name, callback):
+            listener_events.append(f"off:{event_name}")
+
+        mock_page.on.side_effect = record_on
+        mock_page.remove_listener.side_effect = record_remove
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                side_effect=["account picker", None],
+            ),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert listener_events == [
+            "on:framenavigated",
+            "off:framenavigated",
+            "on:framenavigated",
+            "off:framenavigated",
+        ]
+
+    async def test_goto_with_auth_checks_records_original_failure_before_retry(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=[
+                Exception("net::ERR_TOO_MANY_REDIRECTS"),
+                Exception("retry failed"),
+            ]
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                side_effect=[True, False],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.record_page_trace",
+                new_callable=AsyncMock,
+            ) as mock_trace,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            pytest.raises(Exception, match="retry failed"),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        trace_steps = [call.args[1] for call in mock_trace.await_args_list]
+        assert "extractor-navigation-error-before-remember-me-retry" in trace_steps
+
+        trace_call = next(
+            call
+            for call in mock_trace.await_args_list
+            if call.args[1] == "extractor-navigation-error-before-remember-me-retry"
+        )
+        assert (
+            trace_call.kwargs["extra"]["error"]
+            == "Exception: net::ERR_TOO_MANY_REDIRECTS"
+        )
+
     async def test_goto_with_auth_checks_logs_failure_context(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
