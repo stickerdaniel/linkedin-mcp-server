@@ -516,6 +516,47 @@ async def test_experimental_checkpoint_reopen_failure_clears_runtime_dir(
     assert not runtime_profile_dir(
         "linux-amd64-container", tmp_path / "profile"
     ).exists()
+    reopened_browser.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_experimental_reopen_start_failure_closes_reopened_browser(
+    tmp_path, monkeypatch
+):
+    _write_source_state(
+        tmp_path, runtime_id="macos-arm64-host", login_generation="gen-2"
+    )
+    first_browser = _make_mock_browser()
+    first_browser.import_cookies = AsyncMock(return_value=True)
+    reopened_browser = _make_mock_browser()
+    reopened_browser.start = AsyncMock(side_effect=RuntimeError("reopen failed"))
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            side_effect=[first_browser, reopened_browser],
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        pytest.raises(RuntimeError, match="reopen failed"),
+    ):
+        await get_or_create_browser()
+
+    reopened_browser.close.assert_awaited_once()
+    assert not runtime_state_path(
+        "linux-amd64-container", tmp_path / "profile"
+    ).exists()
+    assert not runtime_profile_dir(
+        "linux-amd64-container", tmp_path / "profile"
+    ).exists()
 
 
 @pytest.mark.asyncio

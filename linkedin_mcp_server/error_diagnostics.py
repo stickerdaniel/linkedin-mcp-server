@@ -84,7 +84,11 @@ def build_issue_diagnostics(
             current_runtime_id=current_runtime_id,
         ),
     }
-    payload["existing_issues"] = _find_existing_issues(payload)
+    payload["issue_search_skipped"] = _inside_running_event_loop()
+    if payload["issue_search_skipped"]:
+        payload["existing_issues"] = []
+    else:
+        payload["existing_issues"] = _find_existing_issues(payload)
     issue_template = _render_issue_template(payload)
     issue_path.write_text(issue_template)
     return _public_issue_diagnostics(payload, issue_path=issue_path)
@@ -117,6 +121,10 @@ def format_tool_error_with_diagnostics(
             "- If one matches this failure, upload the gist and post it as a comment on that issue instead of opening a new issue."
         )
     else:
+        if diagnostics.get("issue_search_skipped"):
+            lines.append(
+                "- Matching open-issue search was skipped in async server context to avoid blocking the server event loop."
+            )
         lines.append(f"- File the issue here: {ISSUE_URL}")
     lines.append(
         "- Read the generated issue template and attach the listed files before posting."
@@ -128,6 +136,7 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
     runtime = payload["runtime"]
     existing_issues = payload.get("existing_issues") or []
     has_existing_issues = bool(existing_issues)
+    issue_search_skipped = bool(payload.get("issue_search_skipped"))
     installation_lines = _installation_method_lines(runtime)
     tool_lines = _tool_lines(payload)
     return (
@@ -153,7 +162,13 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                         for issue in existing_issues
                     ]
                     if has_existing_issues
-                    else ["- No matching open issues found during diagnostics."]
+                    else (
+                        [
+                            "- Matching open-issue search was skipped in async server context to avoid blocking the server event loop."
+                        ]
+                        if issue_search_skipped
+                        else ["- No matching open issues found during diagnostics."]
+                    )
                 ),
                 "",
                 "## Installation Method",
@@ -245,6 +260,7 @@ def _public_issue_diagnostics(
         "error_message": payload["error_message"],
         "suggested_issue_title": payload["suggested_issue_title"],
         "existing_issues": payload["existing_issues"],
+        "issue_search_skipped": payload["issue_search_skipped"],
         "issue_template_path": str(issue_path),
         "runtime": {
             "current_runtime_id": runtime["current_runtime_id"],
@@ -294,9 +310,6 @@ def _build_gist_command(
 
 
 def _find_existing_issues(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    if _inside_running_event_loop():
-        return []
-
     query = _issue_search_query(payload)
     if not query:
         return []
