@@ -232,6 +232,7 @@ async def run_debug(args: argparse.Namespace) -> dict[str, Any]:
         report["artifact_dir"] = str(artifact_dir)
 
     browser = BrowserManager(user_data_dir=profile_dir, headless=True)
+    browser_closed = False
     try:
         await browser.start()
         await _capture_step(
@@ -295,6 +296,7 @@ async def run_debug(args: argparse.Namespace) -> dict[str, Any]:
             )
             report["storage_state_path"] = str(storage_state_path)
             await browser.close()
+            browser_closed = True
 
             reopened = BrowserManager(user_data_dir=profile_dir, headless=True)
             try:
@@ -326,7 +328,8 @@ async def run_debug(args: argparse.Namespace) -> dict[str, Any]:
                 await reopened.close()
         return report
     finally:
-        await browser.close()
+        if not browser_closed:
+            await browser.close()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 

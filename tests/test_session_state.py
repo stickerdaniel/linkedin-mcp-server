@@ -133,3 +133,26 @@ def test_get_runtime_id_marks_container_from_cgroup_v2_mountinfo(monkeypatch):
     )
 
     assert get_runtime_id() == "linux-amd64-container"
+
+
+def test_get_runtime_id_ignores_non_root_overlay_mounts(monkeypatch):
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.platform.machine", lambda: "x86_64"
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.Path.exists",
+        lambda self: str(self) == "/proc/1/mountinfo",
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.Path.read_text",
+        lambda self, *args, **kwargs: (
+            "257 248 0:61 /var/lib/containers/storage/overlay "
+            "/var/lib/containers/storage/overlay rw,relatime - overlay overlay "
+            "rw,lowerdir=/var/lib/overlay-host/l"
+        ),
+    )
+
+    assert get_runtime_id() == "linux-amd64-host"
