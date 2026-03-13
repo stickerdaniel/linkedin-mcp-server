@@ -7,6 +7,7 @@ JSON format for production MCP integration, compact format for development.
 Includes proper logger hierarchy and external library noise reduction.
 """
 
+import atexit
 import json
 import logging
 from typing import Any, Dict
@@ -14,6 +15,7 @@ from typing import Any, Dict
 from linkedin_mcp_server.debug_trace import cleanup_trace_dir, get_trace_dir
 
 _TRACE_FILE_HANDLER: logging.Handler | None = None
+_TRACE_CLEANUP_REGISTERED = False
 
 
 class MCPJSONFormatter(logging.Formatter):
@@ -110,7 +112,7 @@ def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> 
         except Exception:
             pass
 
-    global _TRACE_FILE_HANDLER
+    global _TRACE_CLEANUP_REGISTERED, _TRACE_FILE_HANDLER
     _TRACE_FILE_HANDLER = None
 
     # Add console handler
@@ -125,6 +127,9 @@ def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> 
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
         _TRACE_FILE_HANDLER = file_handler
+        if not _TRACE_CLEANUP_REGISTERED:
+            atexit.register(teardown_trace_logging)
+            _TRACE_CLEANUP_REGISTERED = True
 
     # Set specific loggers to reduce noise
     logging.getLogger("urllib3").setLevel(logging.ERROR)

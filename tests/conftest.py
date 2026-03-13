@@ -56,6 +56,8 @@ def isolate_profile_dir(tmp_path, monkeypatch):
     for source_module in [
         "linkedin_mcp_server.authentication",
         "linkedin_mcp_server.drivers.browser",
+        "linkedin_mcp_server.debug_trace",
+        "linkedin_mcp_server.error_diagnostics",
     ]:
         try:
             monkeypatch.setattr(

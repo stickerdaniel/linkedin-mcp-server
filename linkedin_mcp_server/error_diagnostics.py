@@ -258,7 +258,7 @@ def _public_issue_diagnostics(
 def _safe_source_profile_dir():
     try:
         return get_source_profile_dir()
-    except BaseException:
+    except Exception:
         return (Path.home() / ".linkedin-mcp" / "profile").expanduser()
 
 
