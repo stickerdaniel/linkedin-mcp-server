@@ -206,6 +206,36 @@ async def test_feed_auth_retries_feed_after_remember_me_error_recovery():
 
 
 @pytest.mark.asyncio
+async def test_feed_auth_records_single_post_recovery_trace():
+    browser = _make_mock_browser()
+    browser.page.goto = AsyncMock(
+        side_effect=[Exception("net::ERR_TOO_MANY_REDIRECTS"), None]
+    )
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.record_page_trace",
+            new_callable=AsyncMock,
+        ) as record_page_trace,
+    ):
+        assert await _feed_auth_succeeds(browser) is True
+
+    steps = [call.args[1] for call in record_page_trace.await_args_list]
+    assert "feed-after-remember-me-error-recovery" in steps
+    assert "feed-navigation-error-before-remember-me-retry" not in steps
+
+
+@pytest.mark.asyncio
 async def test_experimental_derived_runtime_reuses_matching_committed_profile(
     tmp_path, monkeypatch
 ):
