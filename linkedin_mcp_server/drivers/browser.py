@@ -183,7 +183,7 @@ async def _feed_auth_succeeds(
         return False
 
 
-def _launch_options() -> tuple[dict[str, str], dict[str, int], object]:
+def _launch_options() -> tuple[dict[str, str], dict[str, int]]:
     config = get_config()
     viewport = {
         "width": config.browser.viewport_width,
@@ -193,7 +193,7 @@ def _launch_options() -> tuple[dict[str, str], dict[str, int], object]:
     if config.browser.chrome_path:
         launch_options["executable_path"] = config.browser.chrome_path
         logger.info("Using custom Chrome path: %s", config.browser.chrome_path)
-    return launch_options, viewport, config
+    return launch_options, viewport
 
 
 def _make_browser(
@@ -373,7 +373,7 @@ async def get_or_create_browser(
     if _browser is not None:
         return _browser
 
-    launch_options, viewport, config = _launch_options()
+    launch_options, viewport = _launch_options()
     source_profile_dir = get_profile_dir()
     cookie_path = portable_cookie_path(source_profile_dir)
     source_state = load_source_state(source_profile_dir)
