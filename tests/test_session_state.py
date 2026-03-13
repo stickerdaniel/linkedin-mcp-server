@@ -83,3 +83,25 @@ def test_get_runtime_id_marks_container(monkeypatch):
     )
 
     assert get_runtime_id() == "linux-amd64-container"
+
+
+def test_get_runtime_id_marks_container_from_cgroup_v2_mountinfo(monkeypatch):
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.platform.machine", lambda: "x86_64"
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.Path.exists",
+        lambda self: str(self) == "/proc/1/mountinfo",
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.Path.read_text",
+        lambda self, *args, **kwargs: (
+            "257 248 0:61 / / rw,relatime - overlay overlay "
+            "rw,lowerdir=/var/lib/docker/overlay2/l"
+        ),
+    )
+
+    assert get_runtime_id() == "linux-amd64-container"
