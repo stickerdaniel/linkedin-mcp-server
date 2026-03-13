@@ -111,7 +111,7 @@ def _safe_source_profile_dir() -> Path:
     try:
         return get_source_profile_dir()
     except Exception:
-        return Path(os.getenv("USER_DATA_DIR", "~/.linkedin-mcp/profile")).expanduser()
+        return Path("~/.linkedin-mcp/profile").expanduser()
 
 
 async def record_page_trace(
