@@ -127,20 +127,39 @@ def _normalize_arch(machine: str) -> str:
 
 
 def _is_container_runtime() -> bool:
-    if Path("/.dockerenv").exists():
+    if any(
+        path.exists()
+        for path in (
+            Path("/.dockerenv"),
+            Path("/run/.containerenv"),
+            Path("/run/containerenv"),
+        )
+    ):
         return True
 
-    cgroup = Path("/proc/1/cgroup")
-    if cgroup.exists():
-        try:
-            text = cgroup.read_text()
-        except OSError:
-            text = ""
-        markers = ("docker", "containerd", "kubepods", "podman")
-        if any(marker in text for marker in markers):
+    markers = ("docker", "containerd", "kubepods", "podman", "libpod", "overlay")
+    for probe in (
+        Path("/proc/1/cgroup"),
+        Path("/proc/self/cgroup"),
+        Path("/proc/1/mountinfo"),
+        Path("/proc/self/mountinfo"),
+    ):
+        if _path_contains_markers(probe, markers):
             return True
 
     return False
+
+
+def _path_contains_markers(path: Path, markers: tuple[str, ...]) -> bool:
+    if not path.exists():
+        return False
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore").lower()
+    except OSError:
+        return False
+
+    return any(marker in text for marker in markers)
 
 
 def load_source_state(source_profile_dir: Path | None = None) -> SourceState | None:

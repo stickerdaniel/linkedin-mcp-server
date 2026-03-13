@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from linkedin_mcp_server.error_diagnostics import (
@@ -29,7 +31,9 @@ def test_build_issue_diagnostics_includes_existing_issues(monkeypatch, tmp_path)
     assert diagnostics["existing_issues"][0]["number"] == 220
     assert diagnostics["section_name"] == "posts"
     assert diagnostics["runtime"]["trace_dir"] is not None
-    issue_body = diagnostics["issue_template"]
+    assert "issue_template" not in diagnostics
+    assert "hostname" not in diagnostics["runtime"]
+    issue_body = Path(diagnostics["issue_template_path"]).read_text()
     assert "## Existing Open Issues" in issue_body
     assert "#220" in issue_body
     assert "post the gist as a comment there" in issue_body
@@ -125,7 +129,32 @@ def test_build_issue_diagnostics_marks_inferred_tool_and_container_runtime(
         section_name="search_results",
     )
 
-    issue_body = diagnostics["issue_template"]
+    issue_body = Path(diagnostics["issue_template_path"]).read_text()
     assert "`~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`" in issue_body
     assert "- [x] Docker" in issue_body
     assert "  - [x] search_jobs" in issue_body
+
+
+def test_build_issue_diagnostics_keeps_sensitive_runtime_details_out_of_mcp_payload(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics._find_existing_issues",
+        lambda payload: [],
+    )
+
+    diagnostics = build_issue_diagnostics(
+        RuntimeError("boom"),
+        context="extract-page",
+        target_url="https://www.linkedin.com/in/test/",
+        section_name="main_profile",
+    )
+
+    assert diagnostics["issue_template_path"]
+    assert "issue_template" not in diagnostics
+    assert "hostname" not in diagnostics["runtime"]
+    assert "source_profile_dir" not in diagnostics["runtime"]
+    issue_body = Path(diagnostics["issue_template_path"]).read_text()
+    assert "## Runtime Diagnostics" in issue_body
+    assert "Source profile:" in issue_body
