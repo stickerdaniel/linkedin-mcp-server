@@ -10,9 +10,11 @@ from pathlib import Path
 
 from linkedin_mcp_server.core import (
     BrowserManager,
+    resolve_remember_me_prompt,
     wait_for_manual_login,
     warm_up_browser,
 )
+from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
 
 from linkedin_mcp_server.drivers.browser import get_profile_dir
 
@@ -52,6 +54,13 @@ async def interactive_login(
 
         # Navigate to LinkedIn login
         await browser.page.goto("https://www.linkedin.com/login")
+        # Let LinkedIn finish rendering the saved-account chooser, then retry the
+        # same exact click target a few times before falling back to the normal
+        # manual-login wait loop.
+        for _ in range(3):
+            await asyncio.sleep(2)
+            if await resolve_remember_me_prompt(browser.page):
+                break
 
         # Wait for manual login completion
         # 5 minute timeout (300000ms) allows time for 2FA, captcha, security challenges
@@ -68,10 +77,19 @@ async def interactive_login(
             print("   Waiting longer for cookie propagation...")
             await asyncio.sleep(5)
 
-        # Export cookies for cross-platform portability (macOS -> Docker)
-        if await browser.export_cookies():
+        # Export source-session cookies for the one-time foreign-runtime bridge.
+        # Docker now checkpoint-commits its own derived runtime profile after the
+        # first successful /feed/ recovery instead of relying on browser teardown.
+        if await browser.export_cookies(portable_cookie_path(user_data_dir)):
             print("   Cookies exported for Docker portability")
-
+            source_state = write_source_state(user_data_dir)
+            print(f"   Source session generation: {source_state.login_generation}")
+        else:
+            print(
+                "   Warning: cookie export failed; Docker bridge may not work. "
+                "Run --login again to retry."
+            )
+            return False
         print(f"Profile saved to {user_data_dir}")
         return True
 

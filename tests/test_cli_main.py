@@ -1,8 +1,9 @@
 """Tests for CLI startup behavior and transport selection."""
 
 import importlib.metadata
+import json
 from typing import Literal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -166,3 +167,166 @@ def test_main_non_interactive_auth_failure_has_no_stdout(
     assert exit_info.value.code == 1
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+def test_profile_info_reports_bridge_required_for_foreign_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "Default").mkdir(parents=True)
+    (profile_dir / "Default" / "Cookies").write_text("placeholder")
+    (tmp_path / "cookies.json").write_text(json.dumps([{"name": "li_at"}]))
+    (tmp_path / "source-state.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_runtime_id": "macos-arm64-host",
+                "login_generation": "gen-1",
+                "created_at": "2026-03-12T17:00:00Z",
+                "profile_path": str(profile_dir),
+                "cookies_path": str(tmp_path / "cookies.json"),
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_profile_dir", lambda: profile_dir
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_runtime_id", lambda: "linux-amd64-container"
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: AppConfig())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.profile_info_and_exit()
+
+    assert exit_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "fresh bridge each startup" in captured.out.lower()
+    assert "fresh bridged foreign-runtime session" in captured.out.lower()
+    assert "source cookie validity is not verified" in captured.out.lower()
+
+
+def test_profile_info_reports_committed_derived_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "Default").mkdir(parents=True)
+    (profile_dir / "Default" / "Cookies").write_text("placeholder")
+    runtime_profile = (
+        tmp_path / "runtime-profiles" / "linux-amd64-container" / "profile"
+    )
+    runtime_profile.mkdir(parents=True)
+    (runtime_profile / "Default").mkdir(parents=True)
+    (runtime_profile / "Default" / "Cookies").write_text("placeholder")
+    storage_state = (
+        tmp_path / "runtime-profiles" / "linux-amd64-container" / "storage-state.json"
+    )
+    storage_state.write_text("{}")
+    (tmp_path / "cookies.json").write_text(json.dumps([{"name": "li_at"}]))
+    (tmp_path / "source-state.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_runtime_id": "macos-arm64-host",
+                "login_generation": "gen-1",
+                "created_at": "2026-03-12T17:00:00Z",
+                "profile_path": str(profile_dir),
+                "cookies_path": str(tmp_path / "cookies.json"),
+            }
+        )
+    )
+    (
+        tmp_path / "runtime-profiles" / "linux-amd64-container" / "runtime-state.json"
+    ).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "runtime_id": "linux-amd64-container",
+                "source_runtime_id": "macos-arm64-host",
+                "source_login_generation": "gen-1",
+                "created_at": "2026-03-12T17:10:00Z",
+                "committed_at": "2026-03-12T17:10:05Z",
+                "profile_path": str(runtime_profile),
+                "storage_state_path": str(storage_state),
+                "commit_method": "checkpoint_restart",
+            }
+        )
+    )
+
+    browser = MagicMock()
+    browser.is_authenticated = True
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_profile_dir", lambda: profile_dir
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_runtime_id", lambda: "linux-amd64-container"
+    )
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: AppConfig())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_or_create_browser",
+        AsyncMock(return_value=browser),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.close_browser", AsyncMock())
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.profile_info_and_exit()
+
+    assert exit_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "derived (committed, current generation)" in captured.out.lower()
+    assert str(storage_state) in captured.out
+
+
+def test_clear_profile_and_exit_clears_all_auth_state(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    config = AppConfig()
+    config.browser.user_data_dir = str(tmp_path / "profile")
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: config)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_profile_dir", lambda: tmp_path / "profile"
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir(parents=True)
+    (tmp_path / "source-state.json").write_text("{}")
+
+    cleared = {}
+
+    def fake_clear(profile):
+        cleared["profile"] = profile
+        return True
+
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.clear_auth_state", fake_clear)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.clear_profile_and_exit()
+
+    assert exit_info.value.code == 0
+    assert cleared["profile"] == profile_dir
+    captured = capsys.readouterr()
+    assert "authentication state cleared" in captured.out.lower()

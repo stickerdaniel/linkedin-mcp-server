@@ -205,3 +205,6 @@ cookies.json
 
 # Local snapshot dumps (contain scraped LinkedIn data)
 scripts/snapshot_dumps/
+
+# Debug artifacts
+.debug/
