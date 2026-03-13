@@ -274,8 +274,7 @@ async def test_default_foreign_runtime_bridges_fresh_each_startup(tmp_path):
     assert ctor.call_count == 1
     assert ctor.call_args.kwargs["user_data_dir"] == expected_profile
     first_browser.import_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile"),
-        preset_name=None,
+        portable_cookie_path(tmp_path / "profile")
     )
     first_browser.export_storage_state.assert_not_awaited()
     first_browser.close.assert_not_awaited()
@@ -324,8 +323,7 @@ async def test_experimental_missing_derived_runtime_bridges_and_checkpoint_commi
     assert ctor.call_args_list[0].kwargs["user_data_dir"] == expected_profile
     assert ctor.call_args_list[1].kwargs["user_data_dir"] == expected_profile
     first_browser.import_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile"),
-        preset_name=None,
+        portable_cookie_path(tmp_path / "profile")
     )
     first_browser.export_storage_state.assert_awaited_once_with(
         expected_storage,
@@ -371,8 +369,7 @@ async def test_debug_skip_checkpoint_restart_keeps_fresh_bridged_browser(
     assert result is first_browser
     assert ctor.call_count == 1
     first_browser.import_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile"),
-        preset_name=None,
+        portable_cookie_path(tmp_path / "profile")
     )
     first_browser.export_storage_state.assert_not_awaited()
     first_browser.close.assert_not_awaited()
@@ -423,8 +420,7 @@ async def test_debug_bridge_every_startup_skips_matching_committed_profile(
     assert ctor.call_count == 1
     assert ctor.call_args.kwargs["user_data_dir"] == expected_profile
     first_browser.import_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile"),
-        preset_name=None,
+        portable_cookie_path(tmp_path / "profile")
     )
     first_browser.export_storage_state.assert_not_awaited()
 
@@ -458,8 +454,7 @@ async def test_debug_bridge_cookie_set_flows_through_foreign_runtime_bridge(
         await get_or_create_browser()
 
     first_browser.import_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile"),
-        preset_name=None,
+        portable_cookie_path(tmp_path / "profile")
     )
 
 

@@ -245,7 +245,6 @@ async def _bridge_runtime_profile(
     launch_options: dict[str, str],
     viewport: dict[str, int],
     persist_runtime: bool,
-    cookie_preset: str | None = None,
 ) -> BrowserManager:
     bridge_started_at = utcnow_iso()
     clear_runtime_profile(runtime_id, get_source_profile_dir())
@@ -268,7 +267,7 @@ async def _bridge_runtime_profile(
         )
         await stabilize_navigation("pre-import feed navigation", logger)
         await record_page_trace(browser.page, "bridge-after-pre-import-feed")
-        if not await browser.import_cookies(cookie_path, preset_name=cookie_preset):
+        if not await browser.import_cookies(cookie_path):
             raise AuthenticationError(
                 "Portable authentication could not be imported. Run with --login to create a fresh source session."
             )
