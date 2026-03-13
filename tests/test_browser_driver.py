@@ -502,15 +502,16 @@ async def test_experimental_stale_derived_runtime_rebuilds_from_new_generation(
 
 
 @pytest.mark.asyncio
-async def test_experimental_matching_derived_runtime_failure_does_not_fallback_to_bridge(
+async def test_experimental_matching_derived_runtime_failure_rebridges_from_source(
     tmp_path, monkeypatch
 ):
-    from linkedin_mcp_server.core import AuthenticationError
-
     _write_source_state(tmp_path, runtime_id="macos-arm64-host")
     _write_runtime_state(tmp_path, "linux-amd64-container")
     invalid_browser = _make_mock_browser()
+    bridged_browser = _make_mock_browser()
+    bridged_browser.import_cookies = AsyncMock(return_value=True)
     monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
+    monkeypatch.setenv("LINKEDIN_DEBUG_SKIP_CHECKPOINT_RESTART", "1")
 
     with (
         patch(
@@ -519,18 +520,22 @@ async def test_experimental_matching_derived_runtime_failure_does_not_fallback_t
         ),
         patch(
             "linkedin_mcp_server.drivers.browser.BrowserManager",
-            return_value=invalid_browser,
+            side_effect=[invalid_browser, bridged_browser],
         ),
         patch(
             "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
             new_callable=AsyncMock,
-            return_value="login title: linkedin login",
+            side_effect=["login title: linkedin login", None],
         ),
-        pytest.raises(AuthenticationError),
     ):
-        await get_or_create_browser()
+        result = await get_or_create_browser()
 
+    assert result is bridged_browser
+    invalid_browser.close.assert_awaited_once()
     invalid_browser.import_cookies.assert_not_awaited()
+    bridged_browser.import_cookies.assert_awaited_once_with(
+        portable_cookie_path(tmp_path / "profile")
+    )
 
 
 @pytest.mark.asyncio
