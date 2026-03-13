@@ -50,6 +50,8 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 Tool responses keep readable `sections` text and may also include a compact `references` map keyed by section. Each reference includes a typed target, a relative LinkedIn path (or absolute external URL), and a short label/context when available.
 
+When one section fails but the overall tool call still completes, responses may also include `section_errors`. Each entry contains structured diagnostics for that section, including the error type/message, a compact runtime summary, trace/log locations, matching-open-issue hints when available, and the path to a generated issue-ready markdown report with the full session details.
+
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
 
@@ -187,13 +189,37 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 
 Docker runs headless (no browser window), so you need to create a browser profile locally first and mount it into the container.
 
-**Step 1: Create profile using uvx (one-time setup)**
+**Step 1: Create profile on the host (one-time setup)**
 
 ```bash
+# Installed package usage
 uvx linkedin-scraper-mcp --login
+
+# Local development from this repo
+uv run -m linkedin_mcp_server --login
 ```
 
+If you are debugging or verifying code changes in this repository, prefer `uv run -m linkedin_mcp_server ...` so the running process matches your workspace files. Use `uvx` when intentionally testing the packaged distribution.
+
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile is saved to `~/.linkedin-mcp/profile/`.
+
+After login, the host writes:
+
+- source profile: `~/.linkedin-mcp/profile/`
+- portable cookies: `~/.linkedin-mcp/cookies.json`
+- source session metadata: `~/.linkedin-mcp/source-state.json`
+
+Docker foreign runtimes derive a Linux runtime profile under:
+
+- `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/profile/`
+- `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/storage-state.json`
+- `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/runtime-state.json`
+
+By default, Docker now creates a fresh bridged Linux session on every startup using the minimal working auth cookie subset (`li_at`, `JSESSIONID`, `bcookie`, `bscookie`, `lidc`) and keeps that session alive for the server lifetime. This currently works more reliably than reusing a checkpointed derived runtime profile across restarts.
+
+Runtime traces/logs are captured into an ephemeral run directory by default and are automatically preserved only when a scrape failure occurs. Set `LINKEDIN_TRACE_MODE=always` to keep every run or `LINKEDIN_TRACE_MODE=off` to disable trace persistence entirely.
+
+If you want to experiment with persistent derived runtime reuse anyway, set `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`. In that mode, the first Docker run performs an internal checkpoint restart after `/feed/` succeeds and later Docker runs try to reuse the committed Linux runtime profile directly.
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -213,7 +239,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again locally.
+> Docker now fresh-bridges by default on each startup. Persistent derived runtime reuse is still available behind `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`, but it remains experimental.
 
 > [!NOTE]
 > **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
@@ -237,7 +263,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--logout` - Clear stored LinkedIn browser profile
+- `--logout` - Clear all stored LinkedIn auth state, including source and derived runtime profiles
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (rarely needed in Docker)
@@ -281,6 +307,7 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
+- If Docker auth becomes stale after you re-login on the host, restart Docker once so it can fresh-bridge from the new source session generation.
 
 **Timeout issues:**
 
