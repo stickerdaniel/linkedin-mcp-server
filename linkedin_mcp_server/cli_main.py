@@ -216,6 +216,9 @@ def profile_info_and_exit() -> None:
             print(
                 "ℹ️  A fresh bridged foreign-runtime session will be created on the next server startup."
             )
+        print(
+            "ℹ️  Source cookie validity is not verified in this mode. Run the server to test the bridge end-to-end."
+        )
         sys.exit(0)
 
     try:

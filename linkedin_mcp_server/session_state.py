@@ -137,14 +137,19 @@ def _is_container_runtime() -> bool:
     ):
         return True
 
-    markers = ("docker", "containerd", "kubepods", "podman", "libpod", "overlay")
+    markers = ("docker", "containerd", "kubepods", "podman", "libpod")
     for probe in (
         Path("/proc/1/cgroup"),
         Path("/proc/self/cgroup"),
+    ):
+        if _path_contains_markers(probe, markers):
+            return True
+
+    for probe in (
         Path("/proc/1/mountinfo"),
         Path("/proc/self/mountinfo"),
     ):
-        if _path_contains_markers(probe, markers):
+        if _path_contains_markers(probe, markers) or _root_mount_uses_overlay(probe):
             return True
 
     return False
@@ -160,6 +165,29 @@ def _path_contains_markers(path: Path, markers: tuple[str, ...]) -> bool:
         return False
 
     return any(marker in text for marker in markers)
+
+
+def _root_mount_uses_overlay(path: Path) -> bool:
+    if not path.exists():
+        return False
+
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return False
+
+    for line in lines:
+        if " - " not in line:
+            continue
+        left, right = line.split(" - ", maxsplit=1)
+        left_fields = left.split()
+        right_fields = right.split()
+        if len(left_fields) < 5 or not right_fields:
+            continue
+        if left_fields[4] == "/" and right_fields[0] == "overlay":
+            return True
+
+    return False
 
 
 def load_source_state(source_profile_dir: Path | None = None) -> SourceState | None:

@@ -211,6 +211,7 @@ def test_profile_info_reports_bridge_required_for_foreign_runtime(
     captured = capsys.readouterr()
     assert "fresh bridge each startup" in captured.out.lower()
     assert "fresh bridged foreign-runtime session" in captured.out.lower()
+    assert "source cookie validity is not verified" in captured.out.lower()
 
 
 def test_profile_info_reports_committed_derived_runtime(
