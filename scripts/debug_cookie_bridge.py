@@ -10,12 +10,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import re
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, cast
 
+from linkedin_mcp_server.common_utils import slugify_fragment
 from linkedin_mcp_server.core.auth import detect_auth_barrier, is_logged_in
 from linkedin_mcp_server.core.browser import BrowserManager
 
@@ -154,7 +154,7 @@ async def capture_page_state(page, *, body_lines: int) -> dict[str, Any]:
 
 
 def _slugify_step(step: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", step.lower()).strip("-")
+    return slugify_fragment(step)
 
 
 def _resolve_artifact_dir(args: argparse.Namespace) -> Path | None:
