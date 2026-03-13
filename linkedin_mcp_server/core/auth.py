@@ -207,6 +207,7 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
             logger.debug(
                 "Remember-me container appeared without any matching button selector"
             )
+            return False
         try:
             await target.wait_for(state="visible", timeout=3000)
             logger.debug("Remember-me button became visible")
