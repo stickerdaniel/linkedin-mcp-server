@@ -176,6 +176,23 @@ async def test_resolve_remember_me_prompt_returns_false_when_absent():
 
 
 @pytest.mark.asyncio
+async def test_resolve_remember_me_prompt_returns_false_when_container_has_no_button():
+    page = MagicMock()
+    target = MagicMock()
+    target.wait_for = AsyncMock()
+    locator = MagicMock()
+    locator.count = AsyncMock(return_value=0)
+    locator.first = target
+    page.locator.return_value = locator
+    page.wait_for_selector = AsyncMock()
+
+    result = await resolve_remember_me_prompt(page)
+
+    assert result is False
+    target.wait_for.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_wait_for_manual_login_clicks_saved_account(monkeypatch):
     page = MagicMock()
     clicked = {"value": False}
