@@ -539,6 +539,56 @@ async def test_experimental_matching_derived_runtime_failure_does_not_fallback_t
 
 
 @pytest.mark.asyncio
+async def test_same_runtime_start_failure_closes_browser(tmp_path):
+    _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+    source_browser = _make_mock_browser()
+    source_browser.start = AsyncMock(side_effect=RuntimeError("start failed"))
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="macos-arm64-host",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=source_browser,
+        ),
+        pytest.raises(RuntimeError, match="start failed"),
+    ):
+        await get_or_create_browser()
+
+    source_browser.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_default_foreign_runtime_start_failure_closes_browser(tmp_path):
+    _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+    first_browser = _make_mock_browser()
+    first_browser.start = AsyncMock(side_effect=RuntimeError("start failed"))
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=first_browser,
+        ),
+        pytest.raises(RuntimeError, match="start failed"),
+    ):
+        await get_or_create_browser()
+
+    first_browser.close.assert_awaited_once()
+    assert not runtime_profile_dir(
+        "linux-amd64-container", tmp_path / "profile"
+    ).exists()
+    assert not runtime_state_path(
+        "linux-amd64-container", tmp_path / "profile"
+    ).exists()
+
+
+@pytest.mark.asyncio
 async def test_experimental_checkpoint_reopen_failure_clears_runtime_dir(
     tmp_path, monkeypatch
 ):
