@@ -298,7 +298,7 @@ def _build_gist_command(
 ) -> str:
     trace_path = issue_dir / "trace.jsonl"
     files = [str(issue_path)]
-    if log_path is not None:
+    if log_path is not None and log_path.exists():
         files.append(str(log_path))
     if trace_path.exists():
         files.append(str(trace_path))
