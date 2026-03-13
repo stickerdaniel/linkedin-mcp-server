@@ -36,7 +36,7 @@ def build_issue_diagnostics(
     target_url: str | None = None,
     section_name: str | None = None,
 ) -> dict[str, Any]:
-    """Write an issue-ready report and return structured diagnostics."""
+    """Write an issue-ready report and return MCP-safe diagnostics."""
     timestamp = utcnow_iso()
     source_profile_dir = _safe_source_profile_dir()
     current_runtime_id = get_runtime_id()
@@ -87,9 +87,7 @@ def build_issue_diagnostics(
     payload["existing_issues"] = _find_existing_issues(payload)
     issue_template = _render_issue_template(payload)
     issue_path.write_text(issue_template)
-    payload["issue_template_path"] = str(issue_path)
-    payload["issue_template"] = issue_template
-    return payload
+    return _public_issue_diagnostics(payload, issue_path=issue_path)
 
 
 def format_tool_error_with_diagnostics(
@@ -106,9 +104,10 @@ def format_tool_error_with_diagnostics(
         lines.append(f"- Server log: {runtime['log_path']}")
     if runtime.get("suggested_gist_command"):
         lines.append(f"- Suggested gist command: {runtime['suggested_gist_command']}")
-    lines.append(
-        f"- Runtime: {runtime.get('current_runtime_id', 'unknown')} on {runtime.get('hostname', 'unknown')}"
-    )
+    runtime_summary = f"- Runtime: {runtime.get('current_runtime_id', 'unknown')}"
+    if runtime.get("hostname"):
+        runtime_summary += f" on {runtime['hostname']}"
+    lines.append(runtime_summary)
     existing_issues = diagnostics.get("existing_issues") or []
     if existing_issues:
         lines.append("- Matching open issues were found. Review them first:")
@@ -231,6 +230,29 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
         )
         + "\n"
     )
+
+
+def _public_issue_diagnostics(
+    payload: dict[str, Any], *, issue_path: Path
+) -> dict[str, Any]:
+    runtime = payload["runtime"]
+    return {
+        "created_at": payload["created_at"],
+        "context": payload["context"],
+        "section_name": payload["section_name"],
+        "target_url": payload["target_url"],
+        "error_type": payload["error_type"],
+        "error_message": payload["error_message"],
+        "suggested_issue_title": payload["suggested_issue_title"],
+        "existing_issues": payload["existing_issues"],
+        "issue_template_path": str(issue_path),
+        "runtime": {
+            "current_runtime_id": runtime["current_runtime_id"],
+            "trace_dir": runtime["trace_dir"],
+            "log_path": runtime["log_path"],
+            "suggested_gist_command": runtime["suggested_gist_command"],
+        },
+    }
 
 
 def _safe_source_profile_dir():

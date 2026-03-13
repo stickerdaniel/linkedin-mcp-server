@@ -71,7 +71,7 @@ All scraping tools return: `{url, sections: {name: raw_text}}`.
 Tools may also include:
 
 - `references: {section_name: [{kind, url, text?, context?}, ...]}` — compact typed link targets for graph expansion. LinkedIn URLs are relative paths such as `/in/stickerdaniel/`; external URLs remain absolute.
-- `section_errors: {section_name: {error_type, error_message, issue_template_path, issue_template, runtime, ...}}` when one section failed but the overall tool call still completed. These diagnostics include trace/log locations and an issue-ready markdown template.
+- `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}` when one section failed but the overall tool call still completed. These diagnostics include a compact runtime summary plus trace/log locations; the full issue-ready markdown template is written to `issue_template_path`.
 - `unknown_sections: [name, ...]` when unknown section names were passed.
 - `job_ids: [id, ...]` for `search_jobs`.
 
