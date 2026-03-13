@@ -88,6 +88,26 @@ def test_find_existing_issues_query_failure_is_tolerated(monkeypatch, tmp_path):
     assert diagnostics["issue_search_skipped"] is False
 
 
+def test_build_issue_diagnostics_omits_missing_server_log_from_gist(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics._find_existing_issues",
+        lambda payload: [],
+    )
+
+    diagnostics = build_issue_diagnostics(
+        RuntimeError("boom"),
+        context="extract-page",
+        target_url="https://www.linkedin.com/in/test/",
+        section_name="main_profile",
+    )
+
+    gist_command = diagnostics["runtime"]["suggested_gist_command"]
+    assert "server.log" not in gist_command
+
+
 @pytest.mark.asyncio
 async def test_build_issue_diagnostics_skips_network_search_in_event_loop(
     monkeypatch, tmp_path
