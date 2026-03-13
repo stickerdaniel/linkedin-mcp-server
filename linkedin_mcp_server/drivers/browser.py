@@ -308,14 +308,14 @@ async def _bridge_runtime_profile(
             launch_options=launch_options,
             viewport=viewport,
         )
-        await reopened.start()
-        await stabilize_navigation("derived profile reopen", logger)
-        await record_page_trace(
-            reopened.page,
-            "bridge-after-profile-reopen",
-            extra={"profile_dir": str(profile_dir)},
-        )
         try:
+            await reopened.start()
+            await stabilize_navigation("derived profile reopen", logger)
+            await record_page_trace(
+                reopened.page,
+                "bridge-after-profile-reopen",
+                extra={"profile_dir": str(profile_dir)},
+            )
             if not await _feed_auth_succeeds(reopened):
                 logger.warning(
                     "Stored derived runtime profile failed post-commit validation"
