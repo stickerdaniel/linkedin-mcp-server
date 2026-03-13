@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Bump version: see [Release Process](#release-process) below
 - Install browser: `uv run patchright install chromium`
 - Run server locally: `uv run -m linkedin_mcp_server --no-headless`
-- Run via uvx (PyPI): `uvx linkedin-scraper-mcp`
+- Run via uvx (PyPI/package verification only): `uvx linkedin-scraper-mcp`
 - Run in Docker: `docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp stickerdaniel/linkedin-mcp-server:latest`
 
 **Code Quality:**
@@ -25,7 +25,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Docker Commands:**
 
 - Build: `docker build -t linkedin-mcp-server .`
-- Login: Use uvx locally first: `uvx linkedin-scraper-mcp --login`
+- Login for local development: `uv run -m linkedin_mcp_server --login`
+- Login for packaged-distribution verification: `uvx linkedin-scraper-mcp --login`
 
 ## Architecture Overview
 
@@ -70,6 +71,7 @@ All scraping tools return: `{url, sections: {name: raw_text}}`.
 Tools may also include:
 
 - `references: {section_name: [{kind, url, text?, context?}, ...]}` — compact typed link targets for graph expansion. LinkedIn URLs are relative paths such as `/in/stickerdaniel/`; external URLs remain absolute.
+- `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}` when one section failed but the overall tool call still completed. These diagnostics include a compact runtime summary plus trace/log locations; the full issue-ready markdown template is written to `issue_template_path`.
 - `unknown_sections: [name, ...]` when unknown section names were passed.
 - `job_ids: [id, ...]` for `search_jobs`.
 
@@ -95,8 +97,11 @@ Tools may also include:
 
 **Authentication Flow:**
 
-- Uses persistent browser profile at `~/.linkedin-mcp/profile/`
-- Run with `--login` to create a profile via browser login
+- Source runtime uses persistent browser profile at `~/.linkedin-mcp/profile/`
+- `--login` creates a new source login generation and exports `cookies.json`
+- Foreign runtimes derive their Linux bridge state under `~/.linkedin-mcp/runtime-profiles/<runtime-id>/profile/`
+- By default, foreign runtimes fresh-bridge on every startup using the minimal working auth cookie subset and keep that bridged browser alive for the server lifetime
+- Persistent derived runtime reuse remains experimental behind `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`
 
 **Transport Modes:**
 
@@ -140,9 +145,12 @@ Tools may also include:
 
 ## Verifying Bug Reports
 
-Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`. Start the server with HTTP transport in one terminal (this process is long-running and will block the shell), then in a second terminal call the tool via curl:
+Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. When working in this repository, use the local code path with `uv run`, not `uvx`, so the running process reflects the files in your workspace. Use `uvx` only when intentionally verifying the packaged distribution. For live Docker investigations, always refresh the source session first with a fresh local `uv run -m linkedin_mcp_server --login` before testing each materially different approach. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`. Start the server with HTTP transport in one terminal (this process is long-running and will block the shell), then in a second terminal call the tool via curl:
 
 ```bash
+# Create or refresh the local source session
+uv run -m linkedin_mcp_server --login
+
 # Start server
 uv run -m linkedin_mcp_server --transport streamable-http --log-level DEBUG
 
@@ -176,6 +184,8 @@ After the workflow completes, file a PR in the MCP registry to update the versio
 
 ## Important Development Notes
 
+Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or working on this repository, and strictly follow its guidelines and checklists.
+
 ### Development Workflow
 
 - Never sign a PR or commit with Claude Code
@@ -185,14 +195,14 @@ After the workflow completes, file a PR in the MCP registry to update the versio
   3. Implement the feature
   4. Test the feature
   5. Make sure the README.md, docs/docker-hub.md and AGENTS.md is updated with the new feature
-  6. Create a PR with a short description of the feature/fix
+  6. Create a draft PR with a short description of the feature/fix, and keep it in draft until it is ready to merge; only then convert it to a regular PR.
   7. First review the PR with ai agents.
   8. Manually review the PR and merge it if it's approved. Do not squash the commits.
   9. Delete the branch after the PR is merged.
 
 ## PR Reviews
 
-Greptile posts initial reviews as PR review comments, but follow-ups as **issue comments**. Always check both. To trigger a re-review, comment `@greptileai review` on the PR.
+Greptile posts initial reviews as PR review comments, but follow-ups as **issue comments**. Always check both.
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/{pr}/reviews    # initial reviews

@@ -18,9 +18,10 @@ from linkedin_mcp_server.scraping.link_metadata import Reference
 def extracted(
     text: str,
     references: list[Reference] | None = None,
+    error: dict | None = None,
 ) -> ExtractedSection:
     """Create an ExtractedSection for tests."""
-    return ExtractedSection(text=text, references=references or [])
+    return ExtractedSection(text=text, references=references or [], error=error)
 
 
 class TestBuildJobSearchUrl:
@@ -130,6 +131,9 @@ def mock_page():
     mock_locator.first = mock_locator
     mock_locator.inner_text = AsyncMock(return_value="normal page content")
     page.locator.return_value = mock_locator
+    page.main_frame = object()
+    page.on = MagicMock()
+    page.remove_listener = MagicMock()
     return page
 
 
@@ -196,12 +200,17 @@ class TestExtractPage:
         mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
         extractor = LinkedInExtractor(mock_page)
 
-        result = await extractor.extract_page(
-            "https://www.linkedin.com/in/bad/",
-            section_name="main_profile",
-        )
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.build_issue_diagnostics",
+            return_value={"issue_template_path": "/tmp/issue.md"},
+        ):
+            result = await extractor.extract_page(
+                "https://www.linkedin.com/in/bad/",
+                section_name="main_profile",
+            )
         assert result.text == ""
         assert result.references == []
+        assert result.error == {"issue_template_path": "/tmp/issue.md"}
 
     async def test_extract_page_raises_auth_error_for_account_picker(self, mock_page):
         mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
@@ -376,6 +385,152 @@ class TestExtractPage:
             )
 
 
+class TestNavigationDiagnostics:
+    async def test_goto_with_auth_checks_clicks_remember_me_and_retries(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+
+        async def goto_side_effect(*args, **kwargs):
+            if mock_page.goto.await_count == 1:
+                raise Exception("net::ERR_TOO_MANY_REDIRECTS")
+            return None
+
+        mock_page.goto = AsyncMock(side_effect=goto_side_effect)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                side_effect=[True],
+            ) as mock_resolve,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert mock_page.goto.await_count == 2
+        mock_resolve.assert_awaited_once()
+
+    async def test_goto_with_auth_checks_unhooks_outer_listener_before_retry(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        listener_events: list[str] = []
+
+        def record_on(event_name, callback):
+            listener_events.append(f"on:{event_name}")
+
+        def record_remove(event_name, callback):
+            listener_events.append(f"off:{event_name}")
+
+        mock_page.on.side_effect = record_on
+        mock_page.remove_listener.side_effect = record_remove
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                side_effect=["account picker", None],
+            ),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert listener_events == [
+            "on:framenavigated",
+            "off:framenavigated",
+            "on:framenavigated",
+            "off:framenavigated",
+        ]
+
+    async def test_goto_with_auth_checks_records_original_failure_before_retry(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=[
+                Exception("net::ERR_TOO_MANY_REDIRECTS"),
+                Exception("retry failed"),
+            ]
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                side_effect=[True, False],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.record_page_trace",
+                new_callable=AsyncMock,
+            ) as mock_trace,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            pytest.raises(Exception, match="retry failed"),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        trace_steps = [call.args[1] for call in mock_trace.await_args_list]
+        assert "extractor-navigation-error-before-remember-me-retry" in trace_steps
+
+        trace_call = next(
+            call
+            for call in mock_trace.await_args_list
+            if call.args[1] == "extractor-navigation-error-before-remember-me-retry"
+        )
+        assert (
+            trace_call.kwargs["extra"]["error"]
+            == "Exception: net::ERR_TOO_MANY_REDIRECTS"
+        )
+
+    async def test_goto_with_auth_checks_logs_failure_context(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                extractor,
+                "_log_navigation_failure",
+                new_callable=AsyncMock,
+            ) as mock_log_failure,
+            pytest.raises(Exception, match="ERR_TOO_MANY_REDIRECTS"),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        mock_log_failure.assert_awaited_once()
+        mock_page.on.assert_called_once()
+        mock_page.remove_listener.assert_called_once()
+
+
 class TestScrapePersonUrls:
     """Test that scrape_person visits the correct URLs per section set."""
 
@@ -433,6 +588,30 @@ class TestScrapePersonUrls:
         assert len(urls) == 1
         assert urls[0].endswith("/in/testuser/")
         assert set(result["sections"]) == {"main_profile"}
+
+    async def test_scrape_person_returns_section_errors(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[
+                    extracted("profile text"),
+                    extracted("", error={"issue_template_path": "/tmp/issue.md"}),
+                ],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"posts"})
+
+        assert result["sections"]["main_profile"] == "profile text"
+        assert (
+            result["section_errors"]["posts"]["issue_template_path"] == "/tmp/issue.md"
+        )
 
     async def test_experience_education_visits_correct_urls(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -607,6 +786,10 @@ class TestScrapePersonUrls:
                 "extract_page",
                 side_effect=extract_with_failure,
             ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_issue_diagnostics",
+                return_value={"issue_template_path": "/tmp/issue.md"},
+            ),
             patch.object(
                 extractor,
                 "_extract_overlay",
@@ -626,6 +809,9 @@ class TestScrapePersonUrls:
         assert "main_profile" in result["sections"]
         assert "education" in result["sections"]
         assert "experience" not in result["sections"]
+        assert result["section_errors"]["experience"]["issue_template_path"] == (
+            "/tmp/issue.md"
+        )
 
     async def test_rate_limited_sections_are_omitted(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
