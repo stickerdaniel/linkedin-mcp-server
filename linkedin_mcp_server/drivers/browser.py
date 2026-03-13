@@ -245,7 +245,7 @@ async def _bridge_runtime_profile(
     launch_options: dict[str, str],
     viewport: dict[str, int],
     persist_runtime: bool,
-    cookie_preset: str = "auth_minimal",
+    cookie_preset: str | None = None,
 ) -> BrowserManager:
     bridge_started_at = utcnow_iso()
     clear_runtime_profile(runtime_id, get_source_profile_dir())
@@ -422,7 +422,6 @@ async def get_or_create_browser(
             launch_options=launch_options,
             viewport=viewport,
             persist_runtime=False,
-            cookie_preset="auth_minimal",
         )
         _apply_browser_settings(browser)
         _browser = browser
@@ -478,7 +477,6 @@ async def get_or_create_browser(
         launch_options=launch_options,
         viewport=viewport,
         persist_runtime=True,
-        cookie_preset="auth_minimal",
     )
     _apply_browser_settings(browser)
     _browser = browser
@@ -526,10 +524,13 @@ def set_headless(headless: bool) -> None:
 
 async def validate_session() -> bool:
     """
-    Check if the current session is still valid (logged in).
+    Check whether startup authentication has already succeeded for this browser.
+
+    Mid-session expiry is detected during real LinkedIn navigations and scraper
+    auth checks rather than via a fresh login probe on every tool call.
 
     Returns:
-        True if session is valid and user is logged in
+        True if startup authentication succeeded for the current browser
     """
     browser = await get_or_create_browser()
     if browser.is_authenticated:
@@ -539,10 +540,10 @@ async def validate_session() -> bool:
 
 async def ensure_authenticated() -> None:
     """
-    Validate session and raise if expired.
+    Confirm that the shared browser completed startup authentication.
 
     Raises:
-        AuthenticationError: If session is expired or invalid
+        AuthenticationError: If no authenticated browser session is available
     """
     if not await validate_session():
         raise AuthenticationError("Session expired or invalid.")
