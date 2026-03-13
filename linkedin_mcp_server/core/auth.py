@@ -30,10 +30,7 @@ _AUTH_BARRIER_TEXT_MARKERS = (
     ("continue as", "sign in using another account"),
 )
 _REMEMBER_ME_CONTAINER_SELECTOR = "#rememberme-div"
-_REMEMBER_ME_BUTTON_SELECTOR = (
-    "#rememberme-div > div.memberList-container > div > div > "
-    "div.member-profile-container.list-box > div.member-profile-block > button"
-)
+_REMEMBER_ME_BUTTON_SELECTOR = "#rememberme-div button"
 
 
 async def warm_up_browser(page: Page) -> None:
@@ -206,6 +203,10 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
             _REMEMBER_ME_BUTTON_SELECTOR,
             target_count,
         )
+        if target_count == 0:
+            logger.debug(
+                "Remember-me container appeared without any matching button selector"
+            )
         try:
             await target.wait_for(state="visible", timeout=3000)
             logger.debug("Remember-me button became visible")
