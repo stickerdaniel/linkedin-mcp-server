@@ -29,6 +29,7 @@ def test_build_issue_diagnostics_includes_existing_issues(monkeypatch, tmp_path)
     )
 
     assert diagnostics["existing_issues"][0]["number"] == 220
+    assert diagnostics["issue_search_skipped"] is False
     assert diagnostics["section_name"] == "posts"
     assert diagnostics["runtime"]["trace_dir"] is not None
     assert "issue_template" not in diagnostics
@@ -82,6 +83,7 @@ def test_find_existing_issues_query_failure_is_tolerated(monkeypatch, tmp_path):
     )
 
     assert diagnostics["existing_issues"] == []
+    assert diagnostics["issue_search_skipped"] is False
 
 
 @pytest.mark.asyncio
@@ -106,7 +108,10 @@ async def test_build_issue_diagnostics_skips_network_search_in_event_loop(
     )
 
     assert diagnostics["existing_issues"] == []
+    assert diagnostics["issue_search_skipped"] is True
     assert called["value"] is False
+    issue_body = Path(diagnostics["issue_template_path"]).read_text()
+    assert "search was skipped in async server context" in issue_body
 
 
 def test_build_issue_diagnostics_marks_inferred_tool_and_container_runtime(
@@ -155,6 +160,7 @@ def test_build_issue_diagnostics_keeps_sensitive_runtime_details_out_of_mcp_payl
     assert "issue_template" not in diagnostics
     assert "hostname" not in diagnostics["runtime"]
     assert "source_profile_dir" not in diagnostics["runtime"]
+    assert diagnostics["issue_search_skipped"] is False
     issue_body = Path(diagnostics["issue_template_path"]).read_text()
     assert "## Runtime Diagnostics" in issue_body
     assert "Source profile:" in issue_body
