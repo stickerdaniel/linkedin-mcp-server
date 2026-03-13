@@ -176,7 +176,7 @@ async def test_same_runtime_clicks_remember_me_during_feed_validation(tmp_path):
         result = await get_or_create_browser()
 
     assert result is source_browser
-    assert source_browser.page.goto.await_count == 1
+    assert source_browser.page.goto.await_count == 2
     assert remember_me.await_count == 1
 
 

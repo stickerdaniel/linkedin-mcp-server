@@ -95,19 +95,15 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     elif isinstance(exception, RateLimitError):
         wait_time = getattr(exception, "suggested_wait_time", 300)
         logger.warning("Rate limit%s: %s (wait=%ds)", ctx, exception, wait_time)
-        _raise_tool_error_with_diagnostics(
-            exception,
-            f"Rate limit detected. Wait {wait_time} seconds before trying again.",
-            context=context,
-        )
+        raise ToolError(
+            f"Rate limit detected. Wait {wait_time} seconds before trying again."
+        ) from exception
 
     elif isinstance(exception, ProfileNotFoundError):
         logger.warning("Profile not found%s: %s", ctx, exception)
-        _raise_tool_error_with_diagnostics(
-            exception,
-            "Profile not found. Check the profile URL is correct.",
-            context=context,
-        )
+        raise ToolError(
+            "Profile not found. Check the profile URL is correct."
+        ) from exception
 
     elif isinstance(exception, ElementNotFoundError):
         logger.warning("Element not found%s: %s", ctx, exception)
