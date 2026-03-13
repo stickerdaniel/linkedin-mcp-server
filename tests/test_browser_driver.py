@@ -275,7 +275,7 @@ async def test_default_foreign_runtime_bridges_fresh_each_startup(tmp_path):
     assert ctor.call_args.kwargs["user_data_dir"] == expected_profile
     first_browser.import_cookies.assert_awaited_once_with(
         portable_cookie_path(tmp_path / "profile"),
-        preset_name="auth_minimal",
+        preset_name=None,
     )
     first_browser.export_storage_state.assert_not_awaited()
     first_browser.close.assert_not_awaited()
@@ -325,7 +325,7 @@ async def test_experimental_missing_derived_runtime_bridges_and_checkpoint_commi
     assert ctor.call_args_list[1].kwargs["user_data_dir"] == expected_profile
     first_browser.import_cookies.assert_awaited_once_with(
         portable_cookie_path(tmp_path / "profile"),
-        preset_name="auth_minimal",
+        preset_name=None,
     )
     first_browser.export_storage_state.assert_awaited_once_with(
         expected_storage,
@@ -372,7 +372,7 @@ async def test_debug_skip_checkpoint_restart_keeps_fresh_bridged_browser(
     assert ctor.call_count == 1
     first_browser.import_cookies.assert_awaited_once_with(
         portable_cookie_path(tmp_path / "profile"),
-        preset_name="auth_minimal",
+        preset_name=None,
     )
     first_browser.export_storage_state.assert_not_awaited()
     first_browser.close.assert_not_awaited()
@@ -424,9 +424,43 @@ async def test_debug_bridge_every_startup_skips_matching_committed_profile(
     assert ctor.call_args.kwargs["user_data_dir"] == expected_profile
     first_browser.import_cookies.assert_awaited_once_with(
         portable_cookie_path(tmp_path / "profile"),
-        preset_name="auth_minimal",
+        preset_name=None,
     )
     first_browser.export_storage_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_debug_bridge_cookie_set_flows_through_foreign_runtime_bridge(
+    tmp_path, monkeypatch
+):
+    _write_source_state(
+        tmp_path, runtime_id="macos-arm64-host", login_generation="gen-2"
+    )
+    first_browser = _make_mock_browser()
+    first_browser.import_cookies = AsyncMock(return_value=True)
+    monkeypatch.setenv("LINKEDIN_DEBUG_BRIDGE_COOKIE_SET", "bridge_core")
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=first_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        await get_or_create_browser()
+
+    first_browser.import_cookies.assert_awaited_once_with(
+        portable_cookie_path(tmp_path / "profile"),
+        preset_name=None,
+    )
 
 
 @pytest.mark.asyncio
