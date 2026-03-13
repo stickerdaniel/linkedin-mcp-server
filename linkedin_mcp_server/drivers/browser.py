@@ -223,8 +223,8 @@ async def _authenticate_existing_profile(
     browser = _make_browser(
         profile_dir, launch_options=launch_options, viewport=viewport
     )
-    await browser.start()
     try:
+        await browser.start()
         if not await _feed_auth_succeeds(browser):
             raise AuthenticationError(
                 f"Stored runtime profile is invalid: {profile_dir}. Run with --login to refresh the source session."
@@ -256,13 +256,13 @@ async def _bridge_runtime_profile(
     browser = _make_browser(
         profile_dir, launch_options=launch_options, viewport=viewport
     )
-    await browser.start()
-    await record_page_trace(
-        browser.page,
-        "bridge-browser-started",
-        extra={"profile_dir": str(profile_dir)},
-    )
     try:
+        await browser.start()
+        await record_page_trace(
+            browser.page,
+            "bridge-browser-started",
+            extra={"profile_dir": str(profile_dir)},
+        )
         await browser.page.goto(
             "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
         )
