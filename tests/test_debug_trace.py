@@ -1,9 +1,11 @@
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from linkedin_mcp_server.debug_trace import (
+    _safe_source_profile_dir,
     cleanup_trace_dir,
     get_trace_dir,
     mark_trace_for_retention,
@@ -100,3 +102,13 @@ async def test_reset_trace_state_resets_step_counter(monkeypatch, tmp_path):
         (second_trace_dir / "trace.jsonl").read_text().splitlines()[0]
     )
     assert second_payload["step_id"] == 1
+
+
+def test_safe_source_profile_dir_ignores_generic_env_fallback(monkeypatch):
+    monkeypatch.setenv("USER_DATA_DIR", "/tmp/unrelated-user-data")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.debug_trace.get_source_profile_dir",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    assert _safe_source_profile_dir() == Path("~/.linkedin-mcp/profile").expanduser()
