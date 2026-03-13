@@ -82,9 +82,10 @@ async def interactive_login(
         # first successful /feed/ recovery instead of relying on browser teardown.
         if await browser.export_cookies():
             print("   Cookies exported for Docker portability")
-
-        source_state = write_source_state(user_data_dir)
-        print(f"   Source session generation: {source_state.login_generation}")
+            source_state = write_source_state(user_data_dir)
+            print(f"   Source session generation: {source_state.login_generation}")
+        else:
+            print("   Warning: cookie export failed; Docker bridge may not work")
         print(f"Profile saved to {user_data_dir}")
         return True
 
