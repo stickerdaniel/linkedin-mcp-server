@@ -106,7 +106,7 @@ def load_portable_cookies(
 ) -> list[dict[str, Any]]:
     all_cookies = json.loads(cookie_path.read_text())
     normalized = [
-        BrowserManager._normalize_cookie_domain(cookie)
+        _normalize_cookie_domain(cookie)
         for cookie in all_cookies
         if "linkedin.com" in cookie.get("domain", "")
     ]
@@ -114,6 +114,13 @@ def load_portable_cookies(
     if keep_names is None:
         return normalized
     return [cookie for cookie in normalized if cookie.get("name") in keep_names]
+
+
+def _normalize_cookie_domain(cookie: dict[str, Any]) -> dict[str, Any]:
+    domain = cookie.get("domain", "")
+    if domain in (".www.linkedin.com", "www.linkedin.com"):
+        return {**cookie, "domain": ".linkedin.com"}
+    return cookie
 
 
 async def capture_page_state(page, *, body_lines: int) -> dict[str, Any]:
