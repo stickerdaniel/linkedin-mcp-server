@@ -85,7 +85,11 @@ async def interactive_login(
             source_state = write_source_state(user_data_dir)
             print(f"   Source session generation: {source_state.login_generation}")
         else:
-            print("   Warning: cookie export failed; Docker bridge may not work")
+            print(
+                "   Warning: cookie export failed; Docker bridge may not work. "
+                "Run --login again to retry."
+            )
+            return False
         print(f"Profile saved to {user_data_dir}")
         return True
 
