@@ -165,12 +165,15 @@ async def _feed_auth_succeeds(
             )
             await record_page_trace(
                 browser.page,
+                "feed-navigation-error-before-remember-me-retry",
+                extra={"error": f"{type(exc).__name__}: {exc}"},
+            )
+            await record_page_trace(
+                browser.page,
                 "feed-after-remember-me-error-recovery",
                 extra={"error": f"{type(exc).__name__}: {exc}"},
             )
-            barrier = await detect_auth_barrier_quick(browser.page)
-            if barrier is None:
-                return True
+            return await _feed_auth_succeeds(browser, allow_remember_me=False)
         await record_page_trace(
             browser.page,
             "feed-navigation-error",
