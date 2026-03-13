@@ -58,6 +58,34 @@ def test_write_runtime_state_tracks_source_generation(monkeypatch, isolate_profi
     )
 
 
+def test_write_runtime_state_accepts_explicit_created_at(
+    monkeypatch, isolate_profile_dir
+):
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.get_runtime_id",
+        lambda: "macos-arm64-host",
+    )
+    source_state = write_source_state(isolate_profile_dir)
+
+    storage_state_path = runtime_storage_state_path(
+        "linux-amd64-container",
+        isolate_profile_dir,
+    )
+    storage_state_path.parent.mkdir(parents=True, exist_ok=True)
+    storage_state_path.write_text("{}")
+
+    runtime_state = write_runtime_state(
+        "linux-amd64-container",
+        source_state,
+        storage_state_path,
+        isolate_profile_dir,
+        created_at="2026-03-12T17:09:00Z",
+    )
+
+    assert runtime_state.created_at == "2026-03-12T17:09:00Z"
+    assert runtime_state.committed_at != runtime_state.created_at
+
+
 def test_runtime_storage_state_path_uses_runtime_dir(isolate_profile_dir):
     assert runtime_storage_state_path(
         "linux-amd64-container",
