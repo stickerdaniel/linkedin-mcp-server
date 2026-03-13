@@ -166,11 +166,6 @@ async def _feed_auth_succeeds(
             )
             await record_page_trace(
                 browser.page,
-                "feed-navigation-error-before-remember-me-retry",
-                extra={"error": f"{type(exc).__name__}: {exc}"},
-            )
-            await record_page_trace(
-                browser.page,
                 "feed-after-remember-me-error-recovery",
                 extra={"error": f"{type(exc).__name__}: {exc}"},
             )
@@ -246,12 +241,11 @@ async def _bridge_runtime_profile(
     viewport: dict[str, int],
     persist_runtime: bool,
 ) -> BrowserManager:
+    source_profile_dir = get_source_profile_dir()
     bridge_started_at = utcnow_iso()
-    clear_runtime_profile(runtime_id, get_source_profile_dir())
+    clear_runtime_profile(runtime_id, source_profile_dir)
     profile_dir.parent.mkdir(parents=True, exist_ok=True)
-    storage_state_path = runtime_storage_state_path(
-        runtime_id, get_source_profile_dir()
-    )
+    storage_state_path = runtime_storage_state_path(runtime_id, source_profile_dir)
     browser = _make_browser(
         profile_dir, launch_options=launch_options, viewport=viewport
     )
@@ -332,7 +326,7 @@ async def _bridge_runtime_profile(
                 runtime_id,
                 source_state,
                 storage_state_path,
-                get_source_profile_dir(),
+                source_profile_dir,
                 created_at=bridge_started_at,
             )
             logger.info("Derived runtime profile committed for %s", runtime_id)
@@ -343,7 +337,7 @@ async def _bridge_runtime_profile(
             raise
     except Exception:
         await browser.close()
-        clear_runtime_profile(runtime_id, get_source_profile_dir())
+        clear_runtime_profile(runtime_id, source_profile_dir)
         raise
 
 

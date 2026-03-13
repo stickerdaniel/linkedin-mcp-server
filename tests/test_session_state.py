@@ -3,6 +3,7 @@ from linkedin_mcp_server.session_state import (
     load_runtime_state,
     load_source_state,
     runtime_profile_dir,
+    runtime_state_path,
     runtime_storage_state_path,
     source_state_path,
     write_runtime_state,
@@ -52,6 +53,50 @@ def test_write_runtime_state_tracks_source_generation(monkeypatch, isolate_profi
     assert runtime_state.profile_path == str(
         runtime_profile_dir("linux-amd64-container", isolate_profile_dir).resolve()
     )
+    assert (
+        load_runtime_state("linux-amd64-container", isolate_profile_dir)
+        == runtime_state
+    )
+
+
+def test_load_source_state_ignores_unknown_fields(monkeypatch, isolate_profile_dir):
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.get_runtime_id",
+        lambda: "macos-arm64-host",
+    )
+    state = write_source_state(isolate_profile_dir)
+    payload = source_state_path(isolate_profile_dir)
+    payload.write_text(
+        payload.read_text().replace("}", ', "future_field": "keep calm"}', 1)
+    )
+
+    assert load_source_state(isolate_profile_dir) == state
+
+
+def test_load_runtime_state_ignores_unknown_fields(monkeypatch, isolate_profile_dir):
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.get_runtime_id",
+        lambda: "macos-arm64-host",
+    )
+    source_state = write_source_state(isolate_profile_dir)
+
+    storage_state = runtime_storage_state_path(
+        "linux-amd64-container",
+        isolate_profile_dir,
+    )
+    storage_state.parent.mkdir(parents=True, exist_ok=True)
+    storage_state.write_text("{}")
+    runtime_state = write_runtime_state(
+        "linux-amd64-container",
+        source_state,
+        storage_state,
+        isolate_profile_dir,
+    )
+    payload = runtime_state_path("linux-amd64-container", isolate_profile_dir)
+    payload.write_text(
+        payload.read_text().replace("}", ', "future_field": "still fine"}', 1)
+    )
+
     assert (
         load_runtime_state("linux-amd64-container", isolate_profile_dir)
         == runtime_state
