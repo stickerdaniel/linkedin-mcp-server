@@ -447,15 +447,21 @@ async def get_or_create_browser(
             current_runtime_id,
             derived_profile_dir,
         )
-        browser = await _authenticate_existing_profile(
-            derived_profile_dir,
-            launch_options=launch_options,
-            viewport=viewport,
-        )
-        _apply_browser_settings(browser)
-        _browser = browser
-        _browser_cookie_export_path = None
-        return _browser
+        try:
+            browser = await _authenticate_existing_profile(
+                derived_profile_dir,
+                launch_options=launch_options,
+                viewport=viewport,
+            )
+            _apply_browser_settings(browser)
+            _browser = browser
+            _browser_cookie_export_path = None
+            return _browser
+        except AuthenticationError:
+            logger.warning(
+                "Derived runtime profile auth failed for %s; re-bridging from source cookies",
+                current_runtime_id,
+            )
 
     if force_bridge:
         logger.warning(
