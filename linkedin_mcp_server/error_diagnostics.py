@@ -108,10 +108,7 @@ def format_tool_error_with_diagnostics(
         lines.append(f"- Server log: {runtime['log_path']}")
     if runtime.get("suggested_gist_command"):
         lines.append(f"- Suggested gist command: {runtime['suggested_gist_command']}")
-    runtime_summary = f"- Runtime: {runtime.get('current_runtime_id', 'unknown')}"
-    if runtime.get("hostname"):
-        runtime_summary += f" on {runtime['hostname']}"
-    lines.append(runtime_summary)
+    lines.append(f"- Runtime: {runtime.get('current_runtime_id', 'unknown')}")
     existing_issues = diagnostics.get("existing_issues") or []
     if existing_issues:
         lines.append("- Matching open issues were found. Review them first:")

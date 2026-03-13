@@ -65,6 +65,8 @@ def test_format_tool_error_with_diagnostics_prefers_existing_issue_comment_flow(
     assert "#220" in message
     assert "post it as a comment" in message
     assert "File the issue here" not in message
+    assert "- Runtime: linux-arm64-container" in message
+    assert "test-host" not in message
 
 
 def test_find_existing_issues_query_failure_is_tolerated(monkeypatch, tmp_path):
