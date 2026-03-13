@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.auth import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
@@ -196,3 +197,27 @@ async def test_wait_for_manual_login_clicks_saved_account(monkeypatch):
     await wait_for_manual_login(page, timeout=1000)
 
     assert clicked["value"] is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_times_out_when_remember_me_repeats(monkeypatch):
+    page = MagicMock()
+
+    class _FakeLoop:
+        def __init__(self):
+            self._times = iter([0.0, 1.1])
+
+        def time(self):
+            return next(self._times)
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.asyncio.get_running_loop",
+        lambda: _FakeLoop(),
+    )
+
+    with pytest.raises(AuthenticationError, match="Manual login timeout"):
+        await wait_for_manual_login(page, timeout=1000)
