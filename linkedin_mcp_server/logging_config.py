@@ -128,6 +128,9 @@ def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> 
         root_logger.addHandler(file_handler)
         _TRACE_FILE_HANDLER = file_handler
         if not _TRACE_CLEANUP_REGISTERED:
+            # The atexit fallback intentionally delegates the keep/delete
+            # decision to teardown_trace_logging(), which re-checks runtime
+            # trace retention state via cleanup_trace_dir().
             atexit.register(teardown_trace_logging)
             _TRACE_CLEANUP_REGISTERED = True
 

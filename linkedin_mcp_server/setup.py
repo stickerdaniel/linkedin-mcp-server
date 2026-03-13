@@ -14,7 +14,7 @@ from linkedin_mcp_server.core import (
     wait_for_manual_login,
     warm_up_browser,
 )
-from linkedin_mcp_server.session_state import write_source_state
+from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
 
 from linkedin_mcp_server.drivers.browser import get_profile_dir
 
@@ -80,7 +80,7 @@ async def interactive_login(
         # Export source-session cookies for the one-time foreign-runtime bridge.
         # Docker now checkpoint-commits its own derived runtime profile after the
         # first successful /feed/ recovery instead of relying on browser teardown.
-        if await browser.export_cookies():
+        if await browser.export_cookies(portable_cookie_path(user_data_dir)):
             print("   Cookies exported for Docker portability")
             source_state = write_source_state(user_data_dir)
             print(f"   Source session generation: {source_state.login_generation}")
