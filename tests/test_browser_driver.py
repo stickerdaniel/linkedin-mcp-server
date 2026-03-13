@@ -7,6 +7,7 @@ import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.drivers.browser import (
+    _feed_auth_succeeds,
     get_or_create_browser,
     reset_browser_for_testing,
 )
@@ -177,6 +178,31 @@ async def test_same_runtime_clicks_remember_me_during_feed_validation(tmp_path):
     assert result is source_browser
     assert source_browser.page.goto.await_count == 1
     assert remember_me.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_feed_auth_retries_feed_after_remember_me_error_recovery():
+    browser = _make_mock_browser()
+    browser.page.goto = AsyncMock(
+        side_effect=[Exception("net::ERR_TOO_MANY_REDIRECTS"), None]
+    )
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as remember_me,
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        assert await _feed_auth_succeeds(browser) is True
+
+    assert browser.page.goto.await_count == 2
+    remember_me.assert_awaited_once()
 
 
 @pytest.mark.asyncio
