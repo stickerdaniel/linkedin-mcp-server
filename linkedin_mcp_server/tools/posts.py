@@ -15,10 +15,12 @@ from linkedin_mcp_server.drivers.browser import (
 from linkedin_mcp_server.error_handler import handle_tool_error
 from linkedin_mcp_server.scraping.posts import (
     find_unreplied_comments as scrape_find_unreplied_comments,
+    get_feed_posts as scrape_get_feed_posts,
     get_my_recent_posts as scrape_get_my_recent_posts,
     get_notifications as scrape_get_notifications,
     get_post_comments as scrape_get_post_comments,
     get_post_content as scrape_get_post_content,
+    get_profile_recent_posts as scrape_get_profile_recent_posts,
 )
 
 logger = logging.getLogger(__name__)
@@ -178,6 +180,89 @@ def register_posts_tools(mcp: FastMCP) -> None:
             return {"notifications": notifications}
         except Exception as e:
             return handle_tool_error(e, "get_notifications")
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get Person Posts",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
+    async def get_person_posts(
+        linkedin_username: str,
+        ctx: Context,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """
+        Get recent posts from a specific person's LinkedIn profile.
+
+        Navigates to the person's profile page, scrolls to load activity,
+        and extracts post links with text previews.
+
+        Args:
+            linkedin_username: LinkedIn username (e.g., "williamhgates", "satyanadella")
+            ctx: FastMCP context for progress reporting
+            limit: Maximum number of posts to return (default 20).
+
+        Returns:
+            Dict with posts: list of {post_url, post_id, text_preview, created_at}.
+            post_id and created_at are best-effort.
+        """
+        try:
+            await ensure_authenticated()
+            logger.info("Scraping person posts: %s (limit=%s)", linkedin_username, limit)
+            browser = await get_or_create_browser()
+            await ctx.report_progress(
+                progress=0, total=100, message=f"Fetching posts for {linkedin_username}"
+            )
+            posts = await scrape_get_profile_recent_posts(
+                browser.page, linkedin_username, limit=limit
+            )
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+            return {"posts": posts}
+        except Exception as e:
+            return handle_tool_error(e, "get_person_posts")
+
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="Get Feed Posts",
+            readOnlyHint=True,
+            destructiveHint=False,
+            openWorldHint=True,
+        )
+    )
+    async def get_feed_posts(
+        ctx: Context,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """
+        Get posts from the logged-in user's LinkedIn home feed.
+
+        Scrapes the main feed to capture algorithmically-surfaced posts,
+        including posts from connections and suggested content.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            limit: Maximum number of posts to return (default 20).
+
+        Returns:
+            Dict with posts: list of {post_url, post_id, text_preview,
+            author_name, author_url, created_at}.
+            All fields are best-effort.
+        """
+        try:
+            await ensure_authenticated()
+            logger.info("Scraping feed posts (limit=%s)", limit)
+            browser = await get_or_create_browser()
+            await ctx.report_progress(
+                progress=0, total=100, message="Fetching feed posts"
+            )
+            posts = await scrape_get_feed_posts(browser.page, limit=limit)
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+            return {"posts": posts}
+        except Exception as e:
+            return handle_tool_error(e, "get_feed_posts")
 
     @mcp.tool(
         annotations=ToolAnnotations(

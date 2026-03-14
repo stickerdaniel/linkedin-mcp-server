@@ -47,16 +47,191 @@ def _normalize_post_url(post_url_or_id: str) -> str:
     return f"{_BASE_POST_URL}{s}/" if not s.endswith("/") else f"{_BASE_POST_URL}{s}"
 
 
+async def _extract_engagement_metrics(page: Page) -> dict[str, Any]:
+    """Extract engagement metrics (reactions, comments, reposts) from a post page.
+
+    Best-effort extraction from the social counts bar visible on post pages.
+    Returns dict with reactions, comments_count, reposts_count (all int or None).
+    """
+    try:
+        raw = await page.evaluate(
+            """() => {
+            const metrics = { reactions: null, comments_count: null, reposts_count: null };
+            const main = document.querySelector('main') || document.body;
+            if (!main) return metrics;
+
+            // Helper: parse "1,234" or "1.234" or "1K" or "1.2K" to int
+            function parseCount(s) {
+                if (!s) return null;
+                s = s.trim().replace(/,/g, '').replace(/\\./g, '');
+                const kMatch = s.match(/([\\d.]+)\\s*[kK]/);
+                if (kMatch) return Math.round(parseFloat(kMatch[1]) * 1000);
+                const mMatch = s.match(/([\\d.]+)\\s*[mM]/);
+                if (mMatch) return Math.round(parseFloat(mMatch[1]) * 1000000);
+                const num = parseInt(s.replace(/\\D/g, ''), 10);
+                return isNaN(num) ? null : num;
+            }
+
+            // Reactions count: usually in a button/span with "reactions" or "reações"
+            const reactionsEl = main.querySelector(
+                'button[aria-label*="reaction"], button[aria-label*="reação"], ' +
+                'span[aria-label*="reaction"], span[aria-label*="reação"], ' +
+                'button.social-details-social-counts__reactions-count, ' +
+                'span.social-details-social-counts__reactions-count'
+            );
+            if (reactionsEl) {
+                const label = reactionsEl.getAttribute('aria-label') || reactionsEl.innerText || '';
+                metrics.reactions = parseCount(label);
+            }
+
+            // Comments count
+            const commentsEl = main.querySelector(
+                'button[aria-label*="comment"], button[aria-label*="comentário"], ' +
+                'span[aria-label*="comment"], span[aria-label*="comentário"]'
+            );
+            if (commentsEl) {
+                const label = commentsEl.getAttribute('aria-label') || commentsEl.innerText || '';
+                metrics.comments_count = parseCount(label);
+            }
+
+            // Reposts count
+            const repostsEl = main.querySelector(
+                'button[aria-label*="repost"], button[aria-label*="republicaç"], ' +
+                'span[aria-label*="repost"], span[aria-label*="republicaç"]'
+            );
+            if (repostsEl) {
+                const label = repostsEl.getAttribute('aria-label') || repostsEl.innerText || '';
+                metrics.reposts_count = parseCount(label);
+            }
+
+            // Fallback: scan all social counts text
+            if (metrics.reactions === null && metrics.comments_count === null) {
+                const countsBar = main.querySelector(
+                    '.social-details-social-counts, ' +
+                    '[class*="social-counts"], ' +
+                    '[class*="social-details"]'
+                );
+                if (countsBar) {
+                    const text = countsBar.innerText || '';
+                    // Pattern: "42 reactions · 12 comments · 3 reposts"
+                    const rxn = text.match(/(\\d[\\d,.kKmM]*)\\s*(?:reaction|reação|like|curtida)/i);
+                    if (rxn) metrics.reactions = parseCount(rxn[1]);
+                    const cmt = text.match(/(\\d[\\d,.kKmM]*)\\s*(?:comment|comentário)/i);
+                    if (cmt) metrics.comments_count = parseCount(cmt[1]);
+                    const rp = text.match(/(\\d[\\d,.kKmM]*)\\s*(?:repost|republicaç|compartilh)/i);
+                    if (rp) metrics.reposts_count = parseCount(rp[1]);
+                }
+            }
+
+            return metrics;
+        }"""
+        )
+        return raw if isinstance(raw, dict) else {}
+    except Exception as e:
+        logger.debug("Could not extract engagement metrics: %s", e)
+        return {}
+
+
+async def _detect_post_type(page: Page) -> str:
+    """Detect the post format type from the post page (best-effort).
+
+    Returns one of: text, carousel, video, image, poll, newsletter, article, unknown.
+    """
+    try:
+        result = await page.evaluate(
+            """() => {
+            const main = document.querySelector('main') || document.body;
+            if (!main) return 'unknown';
+
+            // Video
+            if (main.querySelector('video, [class*="video-player"], [data-urn*="video"]'))
+                return 'video';
+
+            // Carousel / Document
+            if (main.querySelector(
+                '[class*="document"], [class*="carousel"], ' +
+                '[aria-label*="carousel"], [aria-label*="document"], ' +
+                '[aria-label*="carrossel"], [aria-label*="documento"]'
+            )) return 'carousel';
+
+            // Poll
+            if (main.querySelector('[class*="poll"], [data-urn*="poll"]'))
+                return 'poll';
+
+            // Newsletter / Article
+            if (main.querySelector('[class*="newsletter"], [data-urn*="newsletter"]'))
+                return 'newsletter';
+            if (main.querySelector('[class*="article"], a[href*="/pulse/"]'))
+                return 'article';
+
+            // Image
+            if (main.querySelector(
+                'img[class*="feed-shared-image"], ' +
+                'div[class*="feed-shared-image"], ' +
+                'img[class*="update-components-image"]'
+            )) return 'image';
+
+            return 'text';
+        }"""
+        )
+        return result if isinstance(result, str) else "unknown"
+    except Exception as e:
+        logger.debug("Could not detect post type: %s", e)
+        return "unknown"
+
+
+async def _extract_author_info(page: Page) -> dict[str, Any]:
+    """Extract author name, headline, and profile URL from a post page (best-effort)."""
+    try:
+        raw = await page.evaluate(
+            """() => {
+            const main = document.querySelector('main') || document.body;
+            if (!main) return { name: null, headline: null, profile_url: null };
+
+            const authorLink = main.querySelector(
+                'a.update-components-actor__meta-link, ' +
+                'a[data-tracking-control-name*="actor"], ' +
+                'a.app-aware-link[href*="/in/"]'
+            );
+            let name = null, profileUrl = null, headline = null;
+            if (authorLink) {
+                name = (authorLink.innerText || '').trim().split('\\n')[0].trim();
+                const href = (authorLink.getAttribute('href') || '').trim();
+                profileUrl = href.startsWith('http') ? href :
+                    'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
+            }
+
+            // Headline is usually a sibling/child near the author name
+            const headlineEl = main.querySelector(
+                'span.update-components-actor__description, ' +
+                'span.feed-shared-actor__description, ' +
+                '[class*="actor__sub-description"], ' +
+                '[class*="actor__description"]'
+            );
+            if (headlineEl) {
+                headline = (headlineEl.innerText || '').trim().split('\\n')[0].trim();
+            }
+
+            return { name: name, headline: headline, profile_url: profileUrl };
+        }"""
+        )
+        return raw if isinstance(raw, dict) else {}
+    except Exception as e:
+        logger.debug("Could not extract author info: %s", e)
+        return {}
+
+
 async def get_post_content(
     page: Page,
     post_url_or_id: str,
 ) -> dict[str, Any]:
     """
-    Get the text content of a LinkedIn post.
+    Get the text content, engagement metrics, and metadata of a LinkedIn post.
 
     Navigates to the post URL, scrolls to load content, and extracts the
     innerText using the standard LinkedInExtractor pipeline (handles caching,
-    rate limits, noise stripping, and retries).
+    rate limits, noise stripping, and retries). Also extracts engagement
+    metrics (reactions, comments, reposts), post type, and author info.
 
     Args:
         page: Patchright page instance.
@@ -64,7 +239,7 @@ async def get_post_content(
 
     Returns:
         Dict with url, sections: {"post_content": text}, pages_visited,
-        sections_requested.
+        sections_requested, engagement, post_type, author.
     """
     url = _normalize_post_url(post_url_or_id)
     extractor = LinkedInExtractor(page)
@@ -74,11 +249,19 @@ async def get_post_content(
     if text:
         sections["post_content"] = text
 
+    # Extract engagement metrics, post type, and author from the loaded page
+    engagement = await _extract_engagement_metrics(page)
+    post_type = await _detect_post_type(page)
+    author = await _extract_author_info(page)
+
     return {
         "url": url,
         "sections": sections,
         "pages_visited": [url],
         "sections_requested": ["post_content"],
+        "engagement": engagement,
+        "post_type": post_type,
+        "author": author,
     }
 
 
@@ -394,6 +577,179 @@ async def get_profile_recent_posts(
         logger.warning(
             "get_profile_recent_posts extraction failed for %s: %s", profile_url, e
         )
+    return posts
+
+
+async def get_feed_posts(
+    page: Page,
+    limit: int = 20,
+    max_scrolls: int = 15,
+) -> list[dict[str, Any]]:
+    """
+    Scrape posts from the logged-in user's LinkedIn home feed.
+
+    Navigates to the main feed, incrementally scrolls, and extracts post cards
+    with author info, text previews, and engagement counts (best-effort).
+
+    Args:
+        page: Patchright page instance.
+        limit: Maximum number of posts to return (default 20).
+        max_scrolls: Maximum scroll iterations.
+
+    Returns:
+        List of dicts with post_url, post_id, text_preview, author_name,
+        author_url, created_at (all best-effort).
+    """
+    posts: list[dict[str, Any]] = []
+    seen_urns: set[str] = set()
+    prev_height: int | None = None
+    try:
+        await wait_for_cooldown()
+        await page.goto(_FEED_URL, wait_until="domcontentloaded", timeout=30000)
+        await detect_rate_limit(page)
+        rate_limit_state.record_success()
+        await handle_modal_close(page)
+
+        for _ in range(max_scrolls):
+            await detect_rate_limit(page)
+            await handle_modal_close(page)
+
+            prev_count = len(posts)
+
+            raw = await page.evaluate(
+                """(limit) => {
+                const out = [];
+                const seen = new Set();
+
+                const root = document.querySelector('main') || document.body;
+                if (!root) return { items: out, scrollHeight: document.body.scrollHeight };
+
+                const cards = root.querySelectorAll(
+                    'div.feed-shared-update-v2, div[data-urn*="activity"], article'
+                );
+                for (const card of cards) {
+                    let urn = '';
+                    const dataUrn = (card.getAttribute('data-urn') || '').trim();
+                    const m1 = dataUrn.match(/urn:li:activity:\\d+/);
+                    if (m1) urn = m1[0];
+
+                    if (!urn) {
+                        const a = card.querySelector('a[href*="/feed/update/"]');
+                        const href = (a?.getAttribute('href') || '').trim();
+                        const m2 = href.match(/feed\\/update\\/(urn:li:activity:\\d+)/);
+                        if (m2) urn = m2[1];
+                    }
+
+                    if (!urn || seen.has(urn)) continue;
+                    seen.add(urn);
+
+                    // Author info
+                    let authorName = null;
+                    let authorUrl = null;
+                    const authorLink = card.querySelector(
+                        'a.update-components-actor__meta-link, ' +
+                        'a[data-tracking-control-name*="actor"], ' +
+                        'a[href*="/in/"]'
+                    );
+                    if (authorLink) {
+                        authorName = (authorLink.innerText || '').trim().split('\\n')[0].trim();
+                        const href = (authorLink.getAttribute('href') || '').trim();
+                        authorUrl = href.startsWith('http') ? href :
+                            'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
+                    }
+
+                    // Post text
+                    let text = '';
+                    const textEl = card.querySelector(
+                        'div.feed-shared-update-v2__description, ' +
+                        'div.update-components-text, ' +
+                        'span[dir="ltr"]'
+                    ) || card.querySelector('[dir="ltr"]') || card;
+                    text = (textEl?.innerText || '').trim().slice(0, 500);
+
+                    // Timestamp
+                    let createdAt = null;
+                    const timeEl = card.querySelector('time');
+                    if (timeEl) {
+                        createdAt = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim() || null;
+                    }
+
+                    const idMatch = urn.match(/urn:li:activity:(\\d+)/);
+                    const postUrl = idMatch
+                        ? `https://www.linkedin.com/feed/update/${urn}/`
+                        : null;
+
+                    if (postUrl) {
+                        out.push({
+                            post_url: postUrl,
+                            post_id: urn,
+                            text_preview: text,
+                            author_name: authorName,
+                            author_url: authorUrl,
+                            created_at: createdAt
+                        });
+                        if (out.length >= limit) break;
+                    }
+                }
+
+                return { items: out, scrollHeight: document.body.scrollHeight };
+            }""",
+                limit,
+            )
+
+            if isinstance(raw, dict):
+                items = raw.get("items") if isinstance(raw.get("items"), list) else []
+                new_height = (
+                    raw.get("scrollHeight")
+                    if isinstance(raw.get("scrollHeight"), (int, float))
+                    else None
+                )
+            else:
+                items = raw if isinstance(raw, list) else []
+                new_height = None
+
+            for p in items if isinstance(items, list) else []:
+                if not isinstance(p, dict):
+                    continue
+                pid = p.get("post_id")
+                url = p.get("post_url")
+                if not url or not pid or pid in seen_urns:
+                    continue
+                seen_urns.add(pid)
+                posts.append(
+                    {
+                        "post_url": url,
+                        "post_id": pid,
+                        "text_preview": (p.get("text_preview") or "")[:500],
+                        "author_name": p.get("author_name"),
+                        "author_url": p.get("author_url"),
+                        "created_at": p.get("created_at"),
+                    }
+                )
+                if len(posts) >= limit:
+                    break
+
+            if len(posts) >= limit:
+                break
+            if (
+                len(posts) == prev_count
+                and new_height is not None
+                and prev_height is not None
+                and new_height == prev_height
+            ):
+                break
+            if not isinstance(raw, dict):
+                break
+            prev_height = new_height
+
+            await scroll_to_bottom(page, pause_time=0.6, max_scrolls=1)
+            await asyncio.sleep(0.4)
+
+    except LinkedInScraperException:
+        raise
+    except Exception as e:
+        logger.warning("get_feed_posts extraction failed: %s", e)
+
     return posts
 
 
