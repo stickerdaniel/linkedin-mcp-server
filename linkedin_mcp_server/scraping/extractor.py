@@ -428,6 +428,22 @@ class LinkedInExtractor:
             except PlaywrightTimeoutError:
                 logger.debug("Activity feed content did not appear on %s", url)
 
+        # Search results pages load a placeholder first then fill in results
+        # via JavaScript. Wait for actual content before extracting.
+        is_search = "/search/results/" in url
+        if is_search:
+            try:
+                await self._page.wait_for_function(
+                    """() => {
+                        const main = document.querySelector('main');
+                        if (!main) return false;
+                        return main.innerText.length > 100;
+                    }""",
+                    timeout=10000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Search results content did not appear on %s", url)
+
         # Scroll to trigger lazy loading
         if is_activity:
             await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=10)

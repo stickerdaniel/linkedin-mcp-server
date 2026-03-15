@@ -1672,3 +1672,104 @@ class TestActivityFeedExtraction:
 
         # Should return whatever text is available, not crash
         assert result.text == tab_headers
+
+
+class TestSearchResultsExtraction:
+    """Tests for search results page detection and wait behavior in _extract_page_once."""
+
+    async def test_search_results_page_waits_for_content(self, mock_page):
+        """Search results URLs should call wait_for_function to wait for content."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Search results for John Doe. " * 10,
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/search/results/people/?keywords=John+Doe",
+                section_name="search_results",
+            )
+
+        mock_page.wait_for_function.assert_awaited_once()
+        assert len(result.text) > 100
+
+    async def test_non_search_page_does_not_wait_for_search_content(self, mock_page):
+        """Non-search URLs should not trigger the search results wait."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "Profile text", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/",
+                section_name="main_profile",
+            )
+
+        mock_page.wait_for_function.assert_not_awaited()
+
+    async def test_search_results_timeout_proceeds_gracefully(self, mock_page):
+        """When search results never load, extraction proceeds with available text."""
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        placeholder = "Search results for John Doe. No results found"
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": placeholder, "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock(
+            side_effect=PlaywrightTimeoutError("Timeout")
+        )
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/search/results/people/?keywords=John+Doe",
+                section_name="search_results",
+            )
+
+        assert result.text == placeholder
