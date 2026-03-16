@@ -82,7 +82,7 @@ Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or worki
   1. Check open issues. If no issue exists, create one following the issue template.
   2. Branch from `main`: `feature/issue-number-short-description`
   3. Implement and test
-  4. Update README.md, docs/docker-hub.md, and AGENTS.md if relevant
+  4. Update README.md and docs/docker-hub.md if relevant
   5. Create a draft PR; only convert to regular PR when ready to merge
   6. Review with AI agents first, then manual review. Do not squash commits.
 
