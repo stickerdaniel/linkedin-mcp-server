@@ -1506,7 +1506,12 @@ class LinkedInExtractor:
             'button.msg-form__send-button',
             'button[type="submit"].msg-form__send-button',
             'button.msg-form__send-btn',
+            # Multi-language send button text
             'button:has-text("Send")',
+            'button:has-text("Wyślij")',
+            'button:has-text("Senden")',
+            'button:has-text("Enviar")',
+            'button:has-text("Envoyer")',
         ]
 
         for selector in send_selectors:
@@ -1525,24 +1530,116 @@ class LinkedInExtractor:
         logger.info("Send button not found, attempting Enter key as fallback")
         await self._page.keyboard.press("Enter")
 
+    async def _click_profile_message_button(self) -> None:
+        """Click the 'Message' button/link on a LinkedIn profile page.
+
+        LinkedIn renders the Message action as a plain <a> tag (not a button)
+        with an href containing '/messaging/compose/'. We find and click it
+        using JavaScript to handle all locales.
+        """
+        clicked = await self._page.evaluate(
+            """() => {
+                // First try: find <a> with href containing messaging/compose
+                const composeLink = document.querySelector(
+                    'a[href*="messaging/compose"]'
+                );
+                if (composeLink) {
+                    composeLink.click();
+                    return 'compose_link';
+                }
+
+                // Second try: find any clickable element with messaging-related text
+                const messageTexts = [
+                    'message', 'wyślij wiadomość', 'nachricht senden',
+                    'nachricht', 'mensaje', 'envoyer un message',
+                    'send message', 'enviar mensaje', 'messaggio',
+                ];
+                const allClickable = document.querySelectorAll(
+                    'button, a, [role="button"]'
+                );
+                for (const el of allClickable) {
+                    const text = (el.innerText || el.textContent || '')
+                        .trim().toLowerCase();
+                    const ariaLabel = (el.getAttribute('aria-label') || '')
+                        .toLowerCase();
+                    for (const msgText of messageTexts) {
+                        if (text === msgText || text.includes(msgText)
+                            || ariaLabel.includes(msgText)
+                            || ariaLabel.includes('message')) {
+                            el.click();
+                            return 'text_match';
+                        }
+                    }
+                }
+
+                return null;
+            }"""
+        )
+
+        if not clicked:
+            raise LinkedInScraperException(
+                "Could not find the 'Message' button on this profile. "
+                "The user may not allow messages or you may not be connected."
+            )
+        logger.info("Message button clicked via: %s", clicked)
+
     async def send_message(
         self, linkedin_username: str, message: str
     ) -> dict[str, Any]:
         """Send a new message to a LinkedIn user.
 
-        Navigates to the compose URL for the user, types the message,
-        and clicks send.
+        Navigates to the user's profile, clicks the Message button to open
+        the compose overlay, types the message, and clicks send.
 
         Returns:
             {status, url, recipient, message_preview}
         """
-        url = f"https://www.linkedin.com/messaging/compose/?to={linkedin_username}"
+        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
 
         try:
-            await self._goto_with_auth_checks(url)
+            await self._goto_with_auth_checks(profile_url)
             await detect_rate_limit(self._page)
 
-            # Wait for messaging UI to load
+            # Wait for profile action buttons to render
+            try:
+                await self._page.wait_for_function(
+                    """() => {
+                        const body = document.body;
+                        if (!body) return false;
+                        return body.innerText.length > 500;
+                    }""",
+                    timeout=15000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Profile content did not fully load on %s", profile_url)
+
+            await asyncio.sleep(2.0)
+            await handle_modal_close(self._page)
+
+            # Debug: log all buttons AND links on the page
+            button_debug = await self._page.evaluate(
+                """() => {
+                    const elements = document.querySelectorAll(
+                        'button, a[role="button"], a[href*="messaging"], '
+                        + 'a[href*="wiadomo"], [class*="message" i], '
+                        + '[aria-label*="message" i], [aria-label*="wiadomo" i]'
+                    );
+                    return Array.from(elements).slice(0, 40).map(el => ({
+                        tag: el.tagName,
+                        text: (el.innerText || '').trim().substring(0, 80),
+                        ariaLabel: el.getAttribute('aria-label') || '',
+                        href: el.getAttribute('href') || '',
+                        classes: el.className.substring(0, 120),
+                        visible: el.offsetParent !== null,
+                    }));
+                }"""
+            )
+            logger.info("Elements found on profile page: %s", button_debug)
+
+            # Click "Message" button on the profile
+            await self._click_profile_message_button()
+
+            # Wait for the messaging overlay/panel to open
             await asyncio.sleep(2.0)
             await handle_modal_close(self._page)
 
@@ -1567,7 +1664,7 @@ class LinkedInExtractor:
             )
             return {
                 "status": "error",
-                "url": url,
+                "url": profile_url,
                 "recipient": linkedin_username,
                 "error": str(e),
             }
