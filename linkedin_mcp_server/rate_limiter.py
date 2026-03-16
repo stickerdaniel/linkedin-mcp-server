@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULTS = {
     # Daily caps
-    "LINKEDIN_DAILY_CONNECTION_LIMIT": 20,       # conservative (~100/week max)
-    "LINKEDIN_DAILY_MESSAGE_LIMIT": 40,          # messages to connections
-    "LINKEDIN_DAILY_SEARCH_MESSAGE_LIMIT": 10,   # messages to non-connections (InMail-like)
+    "LINKEDIN_DAILY_CONNECTION_LIMIT": 40,       # safe for active recruiters (~100/week max)
+    "LINKEDIN_DAILY_MESSAGE_LIMIT": 80,          # messages to connections
+    "LINKEDIN_DAILY_SEARCH_MESSAGE_LIMIT": 20,   # messages to non-connections (InMail-like)
     # Delays (seconds) — random value between min and max
     "LINKEDIN_MIN_ACTION_DELAY": 3,
     "LINKEDIN_MAX_ACTION_DELAY": 8,
