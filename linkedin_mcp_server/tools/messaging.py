@@ -303,6 +303,51 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(
         timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Unread Conversations",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"messaging"},
+    )
+    async def get_unread_conversations(
+        ctx: Context,
+        extractor: LinkedInExtractor = Depends(get_extractor),
+    ) -> dict[str, Any]:
+        """
+        Get all conversations with unread messages.
+
+        Uses LinkedIn's built-in 'unread' filter to show ONLY conversations
+        that have unread messages, regardless of how old they are. This
+        ensures no responses are missed even if they arrive days later.
+
+        Ideal for outreach pipeline monitoring — call this periodically
+        to catch all new responses from prospects.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url and sections (unread -> raw text with conversation
+            names, timestamps, and message previews).
+            Parse the text to identify who responded — lines starting with
+            a person's name (not "Ty:") indicate their response.
+        """
+        try:
+            logger.info("Scraping unread conversations")
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading unread filter"
+            )
+
+            result = await extractor.scrape_unread_conversations()
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except Exception as e:
+            raise_tool_error(e, "get_unread_conversations")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
         title="Check Connection Status",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"networking"},

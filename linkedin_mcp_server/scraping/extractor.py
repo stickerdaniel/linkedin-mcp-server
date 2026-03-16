@@ -1474,6 +1474,59 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    async def scrape_unread_conversations(self) -> dict[str, Any]:
+        """Scrape only unread conversations using LinkedIn's built-in filter.
+
+        Navigates to the messaging inbox with the 'unread' filter applied.
+        This guarantees ALL conversations with unread messages are shown,
+        regardless of how old they are — no scrolling depth issues.
+
+        Returns:
+            {url, sections: {unread: text}, references?: {...}}
+        """
+        url = "https://www.linkedin.com/messaging/?filter=unread"
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+
+        try:
+            extracted = await self._extract_messaging_page(
+                url,
+                section_name="unread",
+                scroll_fn=lambda: self._scroll_messaging_list(
+                    max_scrolls=10,
+                    pause_time=1.0,
+                ),
+            )
+
+            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                sections["unread"] = extracted.text
+                if extracted.references:
+                    references["unread"] = extracted.references
+            elif extracted.error:
+                section_errors["unread"] = extracted.error
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Error scraping unread conversations: %s", e)
+            section_errors["unread"] = build_issue_diagnostics(
+                e,
+                context="scrape_unread_conversations",
+                target_url=url,
+                section_name="unread",
+            )
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
     async def _extract_messaging_page(
         self,
         url: str,
