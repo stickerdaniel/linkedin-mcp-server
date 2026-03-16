@@ -1156,3 +1156,314 @@ class LinkedInExtractor:
             {"selectors": selectors},
         )
         return result
+
+    # ── Messaging / Inbox ──────────────────────────────────────────────
+
+    async def _scroll_messaging_list(
+        self,
+        max_scrolls: int = 10,
+        pause_time: float = 1.0,
+    ) -> None:
+        """Scroll the messaging conversation list to load more conversations.
+
+        LinkedIn's messaging sidebar is a scrollable container. We scroll
+        the list element rather than the page body.
+        """
+        for _ in range(max_scrolls):
+            prev_height = await self._page.evaluate(
+                """() => {
+                    const list = document.querySelector('.msg-conversations-container__conversations-list')
+                        || document.querySelector('[role="list"]')
+                        || document.querySelector('main');
+                    if (!list) return 0;
+                    list.scrollTop = list.scrollHeight;
+                    return list.scrollHeight;
+                }"""
+            )
+            await asyncio.sleep(pause_time)
+            new_height = await self._page.evaluate(
+                """() => {
+                    const list = document.querySelector('.msg-conversations-container__conversations-list')
+                        || document.querySelector('[role="list"]')
+                        || document.querySelector('main');
+                    return list ? list.scrollHeight : 0;
+                }"""
+            )
+            if new_height <= prev_height:
+                break
+
+    async def _scroll_messages_up(
+        self,
+        max_scrolls: int = 20,
+        pause_time: float = 1.0,
+    ) -> None:
+        """Scroll the message thread container upward to load older messages.
+
+        LinkedIn loads older messages when scrolling up in the conversation pane.
+        """
+        for _ in range(max_scrolls):
+            prev_top = await self._page.evaluate(
+                """() => {
+                    const thread = document.querySelector('.msg-s-message-list-container')
+                        || document.querySelector('[role="log"]')
+                        || document.querySelector('main');
+                    if (!thread) return 0;
+                    const oldTop = thread.scrollTop;
+                    thread.scrollTop = 0;
+                    return oldTop;
+                }"""
+            )
+            await asyncio.sleep(pause_time)
+            # If scrollTop was already 0, we've hit the top
+            if prev_top <= 0:
+                break
+
+    async def scrape_conversations(self, limit: int = 20) -> dict[str, Any]:
+        """Scrape the LinkedIn messaging inbox conversation list.
+
+        Returns:
+            {url, sections: {inbox: text}, references?: {...}}
+        """
+        url = "https://www.linkedin.com/messaging/"
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+
+        try:
+            extracted = await self._extract_messaging_page(
+                url,
+                section_name="inbox",
+                scroll_fn=lambda: self._scroll_messaging_list(
+                    max_scrolls=max(1, limit // 5),
+                    pause_time=1.0,
+                ),
+            )
+
+            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                sections["inbox"] = extracted.text
+                if extracted.references:
+                    references["inbox"] = extracted.references
+            elif extracted.error:
+                section_errors["inbox"] = extracted.error
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Error scraping inbox: %s", e)
+            section_errors["inbox"] = build_issue_diagnostics(
+                e,
+                context="scrape_conversations",
+                target_url=url,
+                section_name="inbox",
+            )
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def scrape_conversation_messages(
+        self,
+        thread_id: str,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Scrape messages from a specific LinkedIn conversation thread.
+
+        Returns:
+            {url, sections: {messages: text}, references?: {...}}
+        """
+        url = f"https://www.linkedin.com/messaging/thread/{thread_id}/"
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+
+        try:
+            extracted = await self._extract_messaging_page(
+                url,
+                section_name="messages",
+                scroll_fn=lambda: self._scroll_messages_up(
+                    max_scrolls=limit,
+                    pause_time=1.0,
+                ),
+            )
+
+            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                sections["messages"] = extracted.text
+                if extracted.references:
+                    references["messages"] = extracted.references
+            elif extracted.error:
+                section_errors["messages"] = extracted.error
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Error scraping thread %s: %s", thread_id, e)
+            section_errors["messages"] = build_issue_diagnostics(
+                e,
+                context="scrape_conversation_messages",
+                target_url=url,
+                section_name="messages",
+            )
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def scrape_conversation_search(self, query: str) -> dict[str, Any]:
+        """Search LinkedIn messaging conversations by keyword.
+
+        Returns:
+            {url, sections: {search_results: text}, references?: {...}}
+        """
+        url = f"https://www.linkedin.com/messaging/?searchTerm={quote_plus(query)}"
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+
+        try:
+            extracted = await self._extract_messaging_page(
+                url,
+                section_name="search_results",
+                scroll_fn=lambda: self._scroll_messaging_list(
+                    max_scrolls=5,
+                    pause_time=1.0,
+                ),
+            )
+
+            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                sections["search_results"] = extracted.text
+                if extracted.references:
+                    references["search_results"] = extracted.references
+            elif extracted.error:
+                section_errors["search_results"] = extracted.error
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Error searching conversations: %s", e)
+            section_errors["search_results"] = build_issue_diagnostics(
+                e,
+                context="scrape_conversation_search",
+                target_url=url,
+                section_name="search_results",
+            )
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def _extract_messaging_page(
+        self,
+        url: str,
+        section_name: str,
+        scroll_fn: Any = None,
+    ) -> ExtractedSection:
+        """Navigate to a messaging page, scroll, and extract innerText.
+
+        Retries once after a backoff when the page returns only LinkedIn
+        chrome (soft rate limit), mirroring extract_page behavior.
+        """
+        try:
+            result = await self._extract_messaging_page_once(
+                url, section_name, scroll_fn
+            )
+            if result.text != _RATE_LIMITED_MSG:
+                return result
+
+            logger.info(
+                "Retrying messaging page %s after %.0fs backoff",
+                url,
+                _RATE_LIMIT_RETRY_DELAY,
+            )
+            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            return await self._extract_messaging_page_once(
+                url, section_name, scroll_fn
+            )
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to extract messaging page %s: %s", url, e)
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="extract_messaging_page",
+                    target_url=url,
+                    section_name=section_name,
+                ),
+            )
+
+    async def _extract_messaging_page_once(
+        self,
+        url: str,
+        section_name: str,
+        scroll_fn: Any = None,
+    ) -> ExtractedSection:
+        """Single attempt to navigate, scroll, and extract messaging content."""
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        # Wait for messaging content to render
+        try:
+            await self._page.wait_for_function(
+                """() => {
+                    const main = document.querySelector('main')
+                        || document.querySelector('.msg-conversations-container')
+                        || document.querySelector('.messaging');
+                    if (!main) return false;
+                    return main.innerText.length > 50;
+                }""",
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Messaging content did not appear on %s", url)
+
+        # Dismiss any modals blocking content
+        await handle_modal_close(self._page)
+
+        # Run the custom scroll function if provided
+        if scroll_fn is not None:
+            await scroll_fn()
+
+        # Extract text — try messaging-specific containers first, then main/body
+        raw_result = await self._extract_root_content([
+            ".msg-conversations-container",
+            ".msg-s-message-list-container",
+            ".messaging",
+            "main",
+        ])
+        raw = raw_result["text"]
+
+        if not raw:
+            return ExtractedSection(text="", references=[])
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
+            logger.warning(
+                "Messaging page %s returned only LinkedIn chrome (likely rate-limited)",
+                url,
+            )
+            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = _filter_linkedin_noise_lines(truncated)
+        return ExtractedSection(
+            text=cleaned,
+            references=build_references(raw_result["references"], section_name),
+        )
