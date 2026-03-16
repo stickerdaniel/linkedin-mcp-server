@@ -66,6 +66,12 @@ gt submit                        # merge PR to trigger release workflow
 
 After the workflow completes, file a PR in the MCP registry to update the version.
 
+## Commit Messages
+
+- Follow conventional commits: `type(scope): subject`
+- Types: feat, fix, docs, style, refactor, test, chore, perf, ci
+- Keep subject <50 chars, imperative mood
+
 ## Development Workflow
 
 Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or working on this repository.
