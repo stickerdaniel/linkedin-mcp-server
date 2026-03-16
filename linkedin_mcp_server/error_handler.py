@@ -95,6 +95,15 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     elif isinstance(exception, RateLimitError):
         wait_time = getattr(exception, "suggested_wait_time", 300)
         logger.warning("Rate limit%s: %s (wait=%ds)", ctx, exception, wait_time)
+
+        # Notify our proactive rate limiter about LinkedIn's rate limit
+        try:
+            from linkedin_mcp_server.rate_limiter import get_rate_limiter
+            import asyncio
+            asyncio.ensure_future(get_rate_limiter().on_linkedin_rate_limit())
+        except Exception:
+            pass  # Don't let rate limiter errors break error handling
+
         raise ToolError(
             f"Rate limit detected. Wait {wait_time} seconds before trying again."
         ) from exception

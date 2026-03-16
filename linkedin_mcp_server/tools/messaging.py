@@ -13,6 +13,10 @@ from fastmcp.dependencies import Depends
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.rate_limiter import (
+    RateLimitExceeded,
+    get_rate_limiter,
+)
 from linkedin_mcp_server.scraping import LinkedInExtractor
 
 logger = logging.getLogger(__name__)
@@ -39,6 +43,11 @@ def register_messaging_tools(mcp: FastMCP) -> None:
         Opens a new conversation (or navigates to an existing one) with the
         specified person and sends a message.
 
+        Rate limited: subject to daily message limits and randomized delays
+        to avoid LinkedIn ban detection. Configure via env vars:
+        LINKEDIN_DAILY_MESSAGE_LIMIT (default 40),
+        LINKEDIN_MIN_WRITE_DELAY / LINKEDIN_MAX_WRITE_DELAY.
+
         Args:
             linkedin_username: LinkedIn username of the recipient
                               (e.g., "stickerdaniel", "williamhgates")
@@ -48,6 +57,12 @@ def register_messaging_tools(mcp: FastMCP) -> None:
         Returns:
             Dict with status, url, and confirmation details.
         """
+        limiter = get_rate_limiter()
+        try:
+            await limiter.check_and_wait("message")
+        except RateLimitExceeded as e:
+            return {"status": "rate_limited", "error": str(e)}
+
         try:
             logger.info("Sending message to: %s", linkedin_username)
 
@@ -56,6 +71,9 @@ def register_messaging_tools(mcp: FastMCP) -> None:
             )
 
             result = await extractor.send_message(linkedin_username, message)
+
+            success = result.get("status") == "sent"
+            await limiter.record_action("message", linkedin_username, success)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -82,6 +100,10 @@ def register_messaging_tools(mcp: FastMCP) -> None:
         Navigates to the person's profile, clicks "Connect", optionally adds
         a personal note, and sends the invitation.
 
+        Rate limited: subject to daily connection limits and randomized delays.
+        Configure via env vars: LINKEDIN_DAILY_CONNECTION_LIMIT (default 20),
+        LINKEDIN_MIN_WRITE_DELAY / LINKEDIN_MAX_WRITE_DELAY.
+
         Args:
             linkedin_username: LinkedIn username of the person to connect with
                               (e.g., "stickerdaniel", "williamhgates")
@@ -93,8 +115,14 @@ def register_messaging_tools(mcp: FastMCP) -> None:
         Returns:
             Dict with status, url, and confirmation details.
             Status will be "sent" on success, "already_connected" if already
-            connected, or "error" with details on failure.
+            connected, "rate_limited" if daily cap reached, or "error".
         """
+        limiter = get_rate_limiter()
+        try:
+            await limiter.check_and_wait("connection")
+        except RateLimitExceeded as e:
+            return {"status": "rate_limited", "error": str(e)}
+
         try:
             logger.info(
                 "Sending connection request to: %s (with_note=%s)",
@@ -109,6 +137,9 @@ def register_messaging_tools(mcp: FastMCP) -> None:
             result = await extractor.send_connection_request(
                 linkedin_username, message=message
             )
+
+            success = result.get("status") == "sent"
+            await limiter.record_action("connection", linkedin_username, success)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -388,3 +419,26 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
         except Exception as e:
             raise_tool_error(e, "get_pending_invitations")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Rate Limit Status",
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+        tags={"system"},
+    )
+    async def get_rate_limit_status(
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """
+        Check current rate limiter status and remaining daily capacity.
+
+        Returns today's action counts, configured limits, remaining capacity,
+        and cooldown status. Use this before batch operations to know how
+        many actions you can still perform today.
+
+        Returns:
+            Dict with date, connections {sent, limit, remaining},
+            messages {sent, limit, remaining}, cooldown_active, etc.
+        """
+        limiter = get_rate_limiter()
+        return limiter.get_status()
