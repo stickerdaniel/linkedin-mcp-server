@@ -23,23 +23,7 @@ Create a browser profile locally, then mount it into Docker.
 uvx linkedin-scraper-mcp --login
 ```
 
-This creates the source session artifacts on the host:
-
-- `~/.linkedin-mcp/profile/`
-- `~/.linkedin-mcp/cookies.json`
-- `~/.linkedin-mcp/source-state.json`
-
-Docker foreign runtimes derive a Linux runtime profile under:
-
-- `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/profile/`
-- `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/storage-state.json`
-- `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/runtime-state.json`
-
-By default, Docker now creates a fresh bridged Linux session on every startup using the minimal working auth cookie subset (`li_at`, `JSESSIONID`, `bcookie`, `bscookie`, `lidc`) and keeps that session alive for the server lifetime.
-
-Runtime traces/logs are captured into an ephemeral run directory by default and are automatically preserved only when a scrape failure occurs. Set `LINKEDIN_TRACE_MODE=always` to keep every run or `LINKEDIN_TRACE_MODE=off` to disable trace persistence entirely.
-
-If you want to experiment with persistent derived runtime reuse anyway, set `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`. In that mode, the first Docker run performs an internal checkpoint restart after `/feed/` succeeds and later Docker runs try to reuse the committed Linux runtime profile directly.
+This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. For better stability, consider the [uvx setup](https://github.com/stickerdaniel/linkedin-mcp-server#-uvx-setup-recommended---universal).
 
 **Step 2: Configure Claude Desktop with Docker**
 
