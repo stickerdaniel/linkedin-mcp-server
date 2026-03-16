@@ -1221,51 +1221,156 @@ class LinkedInExtractor:
     async def scrape_conversations(self, limit: int = 20) -> dict[str, Any]:
         """Scrape the LinkedIn messaging inbox conversation list.
 
+        Uses JavaScript to extract structured data from the conversation
+        sidebar rather than raw innerText, providing reliable name,
+        timestamp, preview, unread status, and thread ID extraction.
+
         Returns:
-            {url, sections: {inbox: text}, references?: {...}}
+            {url, conversations: [...], sections: {inbox: text}}
         """
         url = "https://www.linkedin.com/messaging/"
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
 
         try:
-            extracted = await self._extract_messaging_page(
-                url,
-                section_name="inbox",
-                scroll_fn=lambda: self._scroll_messaging_list(
-                    max_scrolls=max(1, limit // 5),
-                    pause_time=1.0,
-                ),
+            await self._goto_with_auth_checks(url)
+            await detect_rate_limit(self._page)
+
+            # Wait for conversation list to render
+            try:
+                await self._page.wait_for_function(
+                    """() => {
+                        const items = document.querySelectorAll(
+                            'a[href*="/messaging/thread/"]'
+                        );
+                        return items.length > 0;
+                    }""",
+                    timeout=15000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Conversation list did not render on %s", url)
+
+            await asyncio.sleep(1.5)
+            await handle_modal_close(self._page)
+
+            # Scroll the conversation list to load more
+            await self._scroll_messaging_list(
+                max_scrolls=max(1, limit // 5),
+                pause_time=1.0,
             )
 
-            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-                sections["inbox"] = extracted.text
-                if extracted.references:
-                    references["inbox"] = extracted.references
-            elif extracted.error:
-                section_errors["inbox"] = extracted.error
+            # Extract structured conversation data via JS
+            conversations = await self._page.evaluate(
+                """(maxItems) => {
+                    const items = document.querySelectorAll(
+                        'a[href*="/messaging/thread/"]'
+                    );
+                    const seen = new Set();
+                    const results = [];
+
+                    for (const item of items) {
+                        if (results.length >= maxItems) break;
+
+                        const href = item.getAttribute('href') || '';
+                        const threadMatch = href.match(
+                            /\\/messaging\\/thread\\/([^/]+)/
+                        );
+                        const threadId = threadMatch ? threadMatch[1] : '';
+                        if (!threadId || seen.has(threadId)) continue;
+                        seen.add(threadId);
+
+                        const text = (item.innerText || '').trim();
+                        const lines = text.split('\\n')
+                            .map(l => l.trim())
+                            .filter(l => l.length > 0);
+
+                        // Parse conversation item lines:
+                        // Typically: [name, timestamp, preview...]
+                        // or with unread badge: [name, timestamp, badge, preview...]
+                        const name = lines[0] || '';
+                        let timestamp = '';
+                        let preview = '';
+                        let unread = false;
+
+                        // Check for unread indicators
+                        const parent = item.closest('li') || item;
+                        const boldEls = parent.querySelectorAll(
+                            'strong, [class*="bold"], [class*="unread"]'
+                        );
+                        if (boldEls.length > 0) unread = true;
+
+                        // Check for notification badge
+                        const badge = parent.querySelector(
+                            '[class*="notification"], [class*="badge"], '
+                            + '[aria-label*="nowe"], [aria-label*="new"]'
+                        );
+                        if (badge) unread = true;
+
+                        // Extract timestamp and preview from remaining lines
+                        for (let i = 1; i < lines.length; i++) {
+                            const line = lines[i];
+                            // Timestamp patterns: "18:54", "12 mar", "2 godz."
+                            if (!timestamp && /^\\d{1,2}[:\\.]\\d{2}$|^\\d+\\s+(min|godz|h|d|w|m|sek|sec)|^\\d+\\s+\\w{3}$|^(wczoraj|yesterday|heute|ayer)/i.test(line)) {
+                                timestamp = line;
+                            } else if (line.match(/^\\d+$/) && parseInt(line) < 100) {
+                                // Notification count like "1", "2"
+                                unread = true;
+                            } else if (!preview && line.length > 2) {
+                                preview = line;
+                            }
+                        }
+
+                        // If no preview found, try joining remaining lines
+                        if (!preview && lines.length > 2) {
+                            preview = lines.slice(2).join(' ').substring(0, 200);
+                        }
+
+                        results.push({
+                            thread_id: threadId,
+                            name: name,
+                            timestamp: timestamp,
+                            preview: preview,
+                            unread: unread,
+                            url: 'https://www.linkedin.com' + href,
+                        });
+                    }
+
+                    return results;
+                }""",
+                limit,
+            )
+
+            # Also extract raw text for LLM parsing fallback
+            raw_result = await self._extract_root_content(["main"])
+            raw_text = strip_linkedin_noise(raw_result.get("text", ""))
+
+            result: dict[str, Any] = {
+                "url": url,
+                "conversations": conversations,
+                "sections": {"inbox": raw_text} if raw_text else {},
+            }
+            if raw_result.get("references"):
+                result["references"] = {
+                    "inbox": build_references(
+                        raw_result["references"], "inbox"
+                    )
+                }
+            return result
 
         except LinkedInScraperException:
             raise
         except Exception as e:
             logger.warning("Error scraping inbox: %s", e)
-            section_errors["inbox"] = build_issue_diagnostics(
-                e,
-                context="scrape_conversations",
-                target_url=url,
-                section_name="inbox",
-            )
-
-        result: dict[str, Any] = {
-            "url": url,
-            "sections": sections,
-        }
-        if references:
-            result["references"] = references
-        if section_errors:
-            result["section_errors"] = section_errors
-        return result
+            return {
+                "url": url,
+                "conversations": [],
+                "section_errors": {
+                    "inbox": build_issue_diagnostics(
+                        e,
+                        context="scrape_conversations",
+                        target_url=url,
+                        section_name="inbox",
+                    )
+                },
+            }
 
     async def scrape_conversation_messages(
         self,
@@ -1616,26 +1721,6 @@ class LinkedInExtractor:
             await asyncio.sleep(2.0)
             await handle_modal_close(self._page)
 
-            # Debug: log all buttons AND links on the page
-            button_debug = await self._page.evaluate(
-                """() => {
-                    const elements = document.querySelectorAll(
-                        'button, a[role="button"], a[href*="messaging"], '
-                        + 'a[href*="wiadomo"], [class*="message" i], '
-                        + '[aria-label*="message" i], [aria-label*="wiadomo" i]'
-                    );
-                    return Array.from(elements).slice(0, 40).map(el => ({
-                        tag: el.tagName,
-                        text: (el.innerText || '').trim().substring(0, 80),
-                        ariaLabel: el.getAttribute('aria-label') || '',
-                        href: el.getAttribute('href') || '',
-                        classes: el.className.substring(0, 120),
-                        visible: el.offsetParent !== null,
-                    }));
-                }"""
-            )
-            logger.info("Elements found on profile page: %s", button_debug)
-
             # Click "Message" button on the profile
             await self._click_profile_message_button()
 
@@ -1715,13 +1800,275 @@ class LinkedInExtractor:
                 "error": str(e),
             }
 
+    async def check_connection_status(
+        self, linkedin_username: str
+    ) -> dict[str, Any]:
+        """Check the connection status with a LinkedIn user.
+
+        Navigates to the profile and determines the relationship status
+        by inspecting available action buttons.
+
+        Returns:
+            {username, status, name?, headline?}
+            status is one of: connected, pending_sent, pending_received,
+            not_connected, follow_only, self, unknown
+        """
+        url = f"https://www.linkedin.com/in/{linkedin_username}/"
+
+        try:
+            await self._goto_with_auth_checks(url)
+            await detect_rate_limit(self._page)
+
+            try:
+                await self._page.wait_for_function(
+                    "() => (document.body?.innerText || '').length > 500",
+                    timeout=15000,
+                )
+            except PlaywrightTimeoutError:
+                pass
+
+            await asyncio.sleep(1.5)
+
+            status_info = await self._page.evaluate(
+                """() => {
+                    const body = document.body;
+                    if (!body) return { status: 'unknown' };
+
+                    const allElements = document.querySelectorAll(
+                        'button, a, [role="button"]'
+                    );
+                    const texts = [];
+                    const ariaLabels = [];
+
+                    for (const el of allElements) {
+                        const t = (el.innerText || '').trim().toLowerCase();
+                        const a = (el.getAttribute('aria-label') || '').toLowerCase();
+                        if (t) texts.push(t);
+                        if (a) ariaLabels.push(a);
+                    }
+
+                    const allText = texts.join(' ');
+                    const allAria = ariaLabels.join(' ');
+
+                    // Check for message link (= connected)
+                    const hasMessageLink = document.querySelector(
+                        'a[href*="messaging/compose"]'
+                    );
+
+                    // Check for pending indicators
+                    const hasPending = allText.includes('pending')
+                        || allText.includes('oczekuj')
+                        || allText.includes('anstehend')
+                        || allAria.includes('pending')
+                        || allAria.includes('oczekuj');
+
+                    // Check for connect button
+                    const connectTexts = [
+                        'connect', 'połącz', 'verbinden', 'conectar'
+                    ];
+                    const hasConnect = connectTexts.some(
+                        t => allText.includes(t) || allAria.includes(t)
+                    );
+
+                    // Check for withdraw/cancel invitation
+                    const withdrawTexts = [
+                        'withdraw', 'wycofaj', 'zurückziehen', 'cancel'
+                    ];
+                    const hasWithdraw = withdrawTexts.some(
+                        t => allText.includes(t) || allAria.includes(t)
+                    );
+
+                    // Check for accept/ignore (incoming request)
+                    const acceptTexts = [
+                        'accept', 'akceptuj', 'annehmen', 'aceptar'
+                    ];
+                    const hasAccept = acceptTexts.some(
+                        t => allText.includes(t) || allAria.includes(t)
+                    );
+
+                    // Extract name and headline
+                    const h1 = document.querySelector('h1');
+                    const name = h1 ? h1.innerText.trim() : '';
+
+                    // Headline is typically in a div after the name
+                    const headlineEl = document.querySelector(
+                        '[data-generated-suggestion-target]'
+                    ) || document.querySelector('.text-body-medium');
+                    const headline = headlineEl
+                        ? headlineEl.innerText.trim() : '';
+
+                    // Determine status
+                    let status = 'unknown';
+                    if (hasMessageLink) {
+                        status = 'connected';
+                    } else if (hasWithdraw || hasPending) {
+                        status = 'pending_sent';
+                    } else if (hasAccept) {
+                        status = 'pending_received';
+                    } else if (hasConnect) {
+                        status = 'not_connected';
+                    }
+
+                    return { status, name, headline };
+                }"""
+            )
+
+            return {
+                "username": linkedin_username,
+                "url": url,
+                **status_info,
+            }
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Failed to check connection status for %s: %s",
+                linkedin_username, e,
+            )
+            return {
+                "username": linkedin_username,
+                "url": url,
+                "status": "error",
+                "error": str(e),
+            }
+
+    async def scrape_pending_invitations(self) -> dict[str, Any]:
+        """Scrape the sent invitations page to list pending connection requests.
+
+        Returns:
+            {url, invitations: [{name, headline, sent_at?, profile_url}]}
+        """
+        url = "https://www.linkedin.com/mynetwork/invitation-manager/sent/"
+
+        try:
+            await self._goto_with_auth_checks(url)
+            await detect_rate_limit(self._page)
+
+            try:
+                await self._page.wait_for_function(
+                    "() => (document.body?.innerText || '').length > 300",
+                    timeout=15000,
+                )
+            except PlaywrightTimeoutError:
+                pass
+
+            await asyncio.sleep(2.0)
+            await handle_modal_close(self._page)
+
+            # Scroll to load more invitations
+            await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=5)
+
+            invitations = await self._page.evaluate(
+                """() => {
+                    const results = [];
+                    // Invitation cards contain links to profiles
+                    const cards = document.querySelectorAll(
+                        'li.invitation-card, [class*="invitation"], '
+                        + 'li[class*="mn-invitation"]'
+                    );
+
+                    if (cards.length > 0) {
+                        for (const card of cards) {
+                            const nameEl = card.querySelector('a[href*="/in/"]');
+                            const name = nameEl
+                                ? nameEl.innerText.trim() : '';
+                            const profileUrl = nameEl
+                                ? nameEl.getAttribute('href') || '' : '';
+                            const usernameMatch = profileUrl.match(
+                                /\\/in\\/([^/?]+)/
+                            );
+                            const username = usernameMatch
+                                ? usernameMatch[1] : '';
+
+                            const subtitleEl = card.querySelector(
+                                '[class*="subtitle"], [class*="headline"], '
+                                + '.invitation-card__subtitle'
+                            );
+                            const headline = subtitleEl
+                                ? subtitleEl.innerText.trim() : '';
+
+                            const timeEl = card.querySelector(
+                                'time, [class*="time-badge"], [class*="sent"]'
+                            );
+                            const sentAt = timeEl
+                                ? timeEl.innerText.trim() : '';
+
+                            if (name || username) {
+                                results.push({
+                                    name, username, headline, sent_at: sentAt,
+                                    profile_url: profileUrl
+                                        ? 'https://www.linkedin.com' + profileUrl
+                                        : '',
+                                });
+                            }
+                        }
+                    }
+
+                    // Fallback: extract from innerText if card selectors fail
+                    if (results.length === 0) {
+                        const links = document.querySelectorAll(
+                            'a[href*="/in/"]'
+                        );
+                        const seen = new Set();
+                        for (const link of links) {
+                            const href = link.getAttribute('href') || '';
+                            const match = href.match(/\\/in\\/([^/?]+)/);
+                            if (!match || seen.has(match[1])) continue;
+                            seen.add(match[1]);
+
+                            const text = link.innerText.trim();
+                            if (text && text.length > 1 && text.length < 100) {
+                                results.push({
+                                    name: text,
+                                    username: match[1],
+                                    headline: '',
+                                    sent_at: '',
+                                    profile_url: 'https://www.linkedin.com' + href,
+                                });
+                            }
+                        }
+                    }
+
+                    return results;
+                }"""
+            )
+
+            # Also get raw text for LLM fallback
+            raw_result = await self._extract_root_content(["main"])
+            raw_text = strip_linkedin_noise(raw_result.get("text", ""))
+
+            return {
+                "url": url,
+                "invitations": invitations,
+                "sections": {"sent_invitations": raw_text} if raw_text else {},
+            }
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to scrape pending invitations: %s", e)
+            return {
+                "url": url,
+                "invitations": [],
+                "section_errors": {
+                    "sent_invitations": build_issue_diagnostics(
+                        e,
+                        context="scrape_pending_invitations",
+                        target_url=url,
+                        section_name="sent_invitations",
+                    )
+                },
+            }
+
     async def send_connection_request(
         self, linkedin_username: str, message: str | None = None
     ) -> dict[str, Any]:
         """Send a connection request from the person's profile page.
 
         Navigates to the profile, clicks "Connect", optionally adds a note,
-        and sends the invitation.
+        and sends the invitation. Uses JS-based button discovery for
+        locale-agnostic operation.
 
         Returns:
             {status, url, recipient, note_preview?}
@@ -1731,71 +2078,119 @@ class LinkedInExtractor:
         try:
             await self._goto_with_auth_checks(url)
             await detect_rate_limit(self._page)
-            await asyncio.sleep(1.5)
+
+            try:
+                await self._page.wait_for_function(
+                    "() => (document.body?.innerText || '').length > 500",
+                    timeout=15000,
+                )
+            except PlaywrightTimeoutError:
+                pass
+
+            await asyncio.sleep(2.0)
             await handle_modal_close(self._page)
 
-            # Check if already connected (profile shows "Message" instead of "Connect")
-            page_text = await self._page.evaluate(
-                "() => document.body?.innerText || ''"
+            # Use JS to find and click the Connect button (language-agnostic)
+            connect_result = await self._page.evaluate(
+                """() => {
+                    const connectTexts = [
+                        'connect', 'połącz', 'verbinden', 'conectar',
+                        'se connecter',
+                    ];
+                    const messageTexts = [
+                        'message', 'wyślij wiadomość', 'nachricht',
+                    ];
+                    const pendingTexts = [
+                        'pending', 'oczekuj', 'anstehend',
+                        'withdraw', 'wycofaj',
+                    ];
+
+                    // Check for message link (= already connected)
+                    if (document.querySelector('a[href*="messaging/compose"]')) {
+                        return 'already_connected';
+                    }
+
+                    const allClickable = document.querySelectorAll(
+                        'button, a, [role="button"]'
+                    );
+
+                    // Check for pending
+                    for (const el of allClickable) {
+                        const t = (el.innerText || '').trim().toLowerCase();
+                        const a = (el.getAttribute('aria-label') || '').toLowerCase();
+                        if (pendingTexts.some(p => t.includes(p) || a.includes(p))) {
+                            return 'already_pending';
+                        }
+                    }
+
+                    // Try direct connect button
+                    for (const el of allClickable) {
+                        const t = (el.innerText || '').trim().toLowerCase();
+                        const a = (el.getAttribute('aria-label') || '').toLowerCase();
+                        if (connectTexts.some(c => t === c || a.includes(c))) {
+                            el.click();
+                            return 'clicked';
+                        }
+                    }
+
+                    // Try "More" dropdown
+                    for (const el of allClickable) {
+                        const t = (el.innerText || '').trim().toLowerCase();
+                        const a = (el.getAttribute('aria-label') || '').toLowerCase();
+                        if (t === 'more' || t === 'więcej' || t === 'mehr'
+                            || a.includes('more') || a.includes('więcej')) {
+                            el.click();
+                            return 'more_opened';
+                        }
+                    }
+
+                    return 'not_found';
+                }"""
             )
-            if not isinstance(page_text, str):
-                page_text = ""
 
-            # Look for the Connect button — LinkedIn uses several variants
-            connect_clicked = False
-            connect_selectors = [
-                # Primary "Connect" button on profile
-                'button:has-text("Connect")',
-                # "More" dropdown may contain Connect
-                'div.artdeco-dropdown__content button:has-text("Connect")',
-            ]
+            if connect_result == "already_connected":
+                return {
+                    "status": "already_connected",
+                    "url": url,
+                    "recipient": linkedin_username,
+                }
+            if connect_result == "already_pending":
+                return {
+                    "status": "already_pending",
+                    "url": url,
+                    "recipient": linkedin_username,
+                }
 
-            for selector in connect_selectors:
-                try:
-                    locator = self._page.locator(selector).first
-                    if await locator.is_visible(timeout=3000):
-                        await locator.click()
-                        connect_clicked = True
-                        break
-                except PlaywrightTimeoutError:
-                    continue
-                except Exception as e:
-                    logger.debug("Connect selector %s failed: %s", selector, e)
-                    continue
-
-            if not connect_clicked:
-                # Try the "More" button first, then look for Connect inside
-                try:
-                    more_btn = self._page.locator(
-                        'button:has-text("More")'
-                    ).first
-                    if await more_btn.is_visible(timeout=2000):
-                        await more_btn.click()
-                        await asyncio.sleep(0.5)
-                        connect_in_dropdown = self._page.locator(
-                            'div.artdeco-dropdown__content button:has-text("Connect"), '
-                            'div.artdeco-dropdown__content li:has-text("Connect")'
-                        ).first
-                        if await connect_in_dropdown.is_visible(timeout=2000):
-                            await connect_in_dropdown.click()
-                            connect_clicked = True
-                except (PlaywrightTimeoutError, Exception) as e:
-                    logger.debug("More dropdown fallback failed: %s", e)
-
-            if not connect_clicked:
-                # Possibly already connected or pending
-                if "Message" in page_text and "Connect" not in page_text:
+            if connect_result == "more_opened":
+                # Look for Connect in the dropdown
+                await asyncio.sleep(0.5)
+                dropdown_clicked = await self._page.evaluate(
+                    """() => {
+                        const connectTexts = [
+                            'connect', 'połącz', 'verbinden', 'conectar',
+                        ];
+                        const items = document.querySelectorAll(
+                            'button, a, li, [role="menuitem"]'
+                        );
+                        for (const el of items) {
+                            const t = (el.innerText || '').trim().toLowerCase();
+                            if (connectTexts.some(c => t.includes(c))) {
+                                el.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }"""
+                )
+                if not dropdown_clicked:
                     return {
-                        "status": "already_connected",
+                        "status": "error",
                         "url": url,
                         "recipient": linkedin_username,
+                        "error": "Opened More menu but Connect not found",
                     }
-                if "Pending" in page_text:
-                    return {
-                        "status": "already_pending",
-                        "url": url,
-                        "recipient": linkedin_username,
-                    }
+
+            elif connect_result == "not_found":
                 return {
                     "status": "error",
                     "url": url,
@@ -1804,97 +2199,74 @@ class LinkedInExtractor:
                 }
 
             # Wait for the connection modal to appear
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(1.5)
 
             if message:
-                # Click "Add a note" button in the modal
-                add_note_clicked = False
-                add_note_selectors = [
-                    'button:has-text("Add a note")',
-                    'button[aria-label="Add a note"]',
-                ]
-                for selector in add_note_selectors:
-                    try:
-                        locator = self._page.locator(selector).first
-                        if await locator.is_visible(timeout=3000):
-                            await locator.click()
-                            add_note_clicked = True
-                            break
-                    except PlaywrightTimeoutError:
-                        continue
-                    except Exception as e:
-                        logger.debug("Add note selector %s failed: %s", selector, e)
-                        continue
+                # Click "Add a note" button in the modal (language-agnostic)
+                add_note_clicked = await self._page.evaluate(
+                    """() => {
+                        const noteTexts = [
+                            'add a note', 'dodaj notatkę', 'notiz hinzufügen',
+                            'añadir nota', 'ajouter une note',
+                        ];
+                        const buttons = document.querySelectorAll('button');
+                        for (const btn of buttons) {
+                            const t = (btn.innerText || '').trim().toLowerCase();
+                            if (noteTexts.some(n => t.includes(n))) {
+                                btn.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }"""
+                )
 
                 if add_note_clicked:
                     await asyncio.sleep(0.5)
-
-                    # Fill in the note textarea
-                    note_selectors = [
-                        'textarea[name="message"]',
-                        'textarea#custom-message',
-                        'textarea.connect-button-send-invite__custom-message',
-                        'textarea',
-                    ]
-                    note_filled = False
-                    # Truncate to LinkedIn's 300 char limit
+                    # Fill the textarea
                     truncated_message = message[:300]
-                    for selector in note_selectors:
-                        try:
-                            locator = self._page.locator(selector).first
-                            if await locator.is_visible(timeout=2000):
-                                await locator.fill(truncated_message)
-                                note_filled = True
-                                break
-                        except PlaywrightTimeoutError:
-                            continue
-                        except Exception as e:
-                            logger.debug(
-                                "Note textarea selector %s failed: %s", selector, e
-                            )
-                            continue
-
-                    if not note_filled:
+                    try:
+                        textarea = self._page.locator("textarea").first
+                        if await textarea.is_visible(timeout=3000):
+                            await textarea.fill(truncated_message)
+                    except Exception as e:
                         logger.warning(
-                            "Could not fill note textarea for %s, "
-                            "sending without note",
-                            linkedin_username,
+                            "Could not fill note for %s: %s",
+                            linkedin_username, e,
                         )
                 else:
                     logger.warning(
-                        "Could not find 'Add a note' button for %s, "
-                        "sending without note",
+                        "Add a note button not found for %s, sending without note",
                         linkedin_username,
                     )
 
-            # Click Send / Send invitation
+            # Click Send (language-agnostic)
             await asyncio.sleep(0.5)
-            send_clicked = False
-            send_selectors = [
-                'button:has-text("Send")',
-                'button[aria-label="Send invitation"]',
-                'button[aria-label="Send now"]',
-                'button:has-text("Send invitation")',
-            ]
-            for selector in send_selectors:
-                try:
-                    locator = self._page.locator(selector).first
-                    if await locator.is_visible(timeout=2000):
-                        await locator.click()
-                        send_clicked = True
-                        break
-                except PlaywrightTimeoutError:
-                    continue
-                except Exception as e:
-                    logger.debug("Send selector %s failed: %s", selector, e)
-                    continue
+            send_clicked = await self._page.evaluate(
+                """() => {
+                    const sendTexts = [
+                        'send', 'wyślij', 'senden', 'enviar', 'envoyer',
+                        'send invitation', 'send now',
+                    ];
+                    const buttons = document.querySelectorAll('button');
+                    for (const btn of buttons) {
+                        const t = (btn.innerText || '').trim().toLowerCase();
+                        const a = (btn.getAttribute('aria-label') || '').toLowerCase();
+                        if (sendTexts.some(s => t === s || a.includes(s))) {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }"""
+            )
 
             if not send_clicked:
                 return {
                     "status": "error",
                     "url": url,
                     "recipient": linkedin_username,
-                    "error": "Connected clicked but could not find Send button in modal",
+                    "error": "Connect clicked but Send button not found in modal",
                 }
 
             await asyncio.sleep(1.5)
@@ -1915,8 +2287,7 @@ class LinkedInExtractor:
         except Exception as e:
             logger.warning(
                 "Failed to send connection request to %s: %s",
-                linkedin_username,
-                e,
+                linkedin_username, e,
             )
             return {
                 "status": "error",

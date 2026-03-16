@@ -174,8 +174,8 @@ def register_messaging_tools(mcp: FastMCP) -> None:
         List conversations from your LinkedIn messaging inbox.
 
         Navigates to the messaging inbox, scrolls to load conversations,
-        and extracts the conversation list with participant names, last
-        message previews, timestamps, and thread identifiers.
+        and extracts a structured conversation list with participant names,
+        timestamps, message previews, unread status, and thread IDs.
 
         Args:
             ctx: FastMCP context for progress reporting
@@ -183,10 +183,10 @@ def register_messaging_tools(mcp: FastMCP) -> None:
                    Controls how far the inbox is scrolled.
 
         Returns:
-            Dict with url, sections (inbox -> raw text), and optional references.
-            The LLM should parse the raw text to extract individual conversations,
-            participant names, message previews, and thread IDs from the URLs in
-            the references.
+            Dict with url, conversations (structured list), and sections
+            (inbox -> raw text fallback).
+            Each conversation has: thread_id, name, timestamp, preview,
+            unread (bool), url.
         """
         try:
             logger.info("Scraping messaging inbox (limit=%d)", limit)
@@ -300,3 +300,88 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
         except Exception as e:
             raise_tool_error(e, "search_conversations")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Check Connection Status",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"networking"},
+    )
+    async def check_connection_status(
+        linkedin_username: str,
+        ctx: Context,
+        extractor: LinkedInExtractor = Depends(get_extractor),
+    ) -> dict[str, Any]:
+        """
+        Check the connection status with a LinkedIn user.
+
+        Navigates to the person's profile and determines whether you are
+        connected, have a pending invitation, or are not connected.
+
+        Args:
+            linkedin_username: LinkedIn username to check
+                              (e.g., "stickerdaniel", "williamhgates")
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with username, url, status, name, headline.
+            Status is one of: connected, pending_sent, pending_received,
+            not_connected, unknown, error.
+        """
+        try:
+            logger.info("Checking connection status: %s", linkedin_username)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Checking profile"
+            )
+
+            result = await extractor.check_connection_status(linkedin_username)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except Exception as e:
+            raise_tool_error(e, "check_connection_status")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Pending Invitations",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"networking"},
+    )
+    async def get_pending_invitations(
+        ctx: Context,
+        extractor: LinkedInExtractor = Depends(get_extractor),
+    ) -> dict[str, Any]:
+        """
+        List sent connection invitations that are still pending.
+
+        Navigates to the sent invitations page and extracts all pending
+        connection requests with names, headlines, and profile URLs.
+
+        Useful for tracking which connection requests have not yet been
+        accepted and for cleaning up stale invitations.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url and invitations list. Each invitation has:
+            name, username, headline, sent_at, profile_url.
+        """
+        try:
+            logger.info("Scraping pending invitations")
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading sent invitations"
+            )
+
+            result = await extractor.scrape_pending_invitations()
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except Exception as e:
+            raise_tool_error(e, "get_pending_invitations")  # NoReturn
