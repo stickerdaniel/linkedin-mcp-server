@@ -192,34 +192,10 @@ Docker runs headless (no browser window), so you need to create a browser profil
 **Step 1: Create profile on the host (one-time setup)**
 
 ```bash
-# Installed package usage
 uvx linkedin-scraper-mcp --login
-
-# Local development from this repo
-uv run -m linkedin_mcp_server --login
 ```
 
-If you are debugging or verifying code changes in this repository, prefer `uv run -m linkedin_mcp_server ...` so the running process matches your workspace files. Use `uvx` when intentionally testing the packaged distribution.
-
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile is saved to `~/.linkedin-mcp/profile/`.
-
-After login, the host writes:
-
-- source profile: `~/.linkedin-mcp/profile/`
-- portable cookies: `~/.linkedin-mcp/cookies.json`
-- source session metadata: `~/.linkedin-mcp/source-state.json`
-
-Docker foreign runtimes derive a Linux runtime profile under:
-
-- `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/profile/`
-- `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/storage-state.json`
-- `~/.linkedin-mcp/runtime-profiles/linux-amd64-container/runtime-state.json`
-
-By default, Docker now creates a fresh bridged Linux session on every startup using the minimal working auth cookie subset (`li_at`, `JSESSIONID`, `bcookie`, `bscookie`, `lidc`) and keeps that session alive for the server lifetime. This currently works more reliably than reusing a checkpointed derived runtime profile across restarts.
-
-Runtime traces/logs are captured into an ephemeral run directory by default and are automatically preserved only when a scrape failure occurs. Set `LINKEDIN_TRACE_MODE=always` to keep every run or `LINKEDIN_TRACE_MODE=off` to disable trace persistence entirely.
-
-If you want to experiment with persistent derived runtime reuse anyway, set `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`. In that mode, the first Docker run performs an internal checkpoint restart after `/feed/` succeeds and later Docker runs try to reuse the committed Linux runtime profile directly.
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -239,7 +215,7 @@ If you want to experiment with persistent derived runtime reuse anyway, set `LIN
 ```
 
 > [!NOTE]
-> Docker now fresh-bridges by default on each startup. Persistent derived runtime reuse is still available behind `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION=1`, but it remains experimental.
+> Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx linkedin-scraper-mcp --login` again if you encounter authentication issues.
 
 > [!NOTE]
 > **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
@@ -505,7 +481,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 Built with [FastMCP](https://gofastmcp.com/) and [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python).
 
-⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
 
 ## License
 
