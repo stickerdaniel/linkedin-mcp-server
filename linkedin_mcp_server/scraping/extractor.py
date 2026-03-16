@@ -1617,3 +1617,213 @@ class LinkedInExtractor:
                 "thread_id": thread_id,
                 "error": str(e),
             }
+
+    async def send_connection_request(
+        self, linkedin_username: str, message: str | None = None
+    ) -> dict[str, Any]:
+        """Send a connection request from the person's profile page.
+
+        Navigates to the profile, clicks "Connect", optionally adds a note,
+        and sends the invitation.
+
+        Returns:
+            {status, url, recipient, note_preview?}
+        """
+        url = f"https://www.linkedin.com/in/{linkedin_username}/"
+
+        try:
+            await self._goto_with_auth_checks(url)
+            await detect_rate_limit(self._page)
+            await asyncio.sleep(1.5)
+            await handle_modal_close(self._page)
+
+            # Check if already connected (profile shows "Message" instead of "Connect")
+            page_text = await self._page.evaluate(
+                "() => document.body?.innerText || ''"
+            )
+            if not isinstance(page_text, str):
+                page_text = ""
+
+            # Look for the Connect button — LinkedIn uses several variants
+            connect_clicked = False
+            connect_selectors = [
+                # Primary "Connect" button on profile
+                'button:has-text("Connect")',
+                # "More" dropdown may contain Connect
+                'div.artdeco-dropdown__content button:has-text("Connect")',
+            ]
+
+            for selector in connect_selectors:
+                try:
+                    locator = self._page.locator(selector).first
+                    if await locator.is_visible(timeout=3000):
+                        await locator.click()
+                        connect_clicked = True
+                        break
+                except PlaywrightTimeoutError:
+                    continue
+                except Exception as e:
+                    logger.debug("Connect selector %s failed: %s", selector, e)
+                    continue
+
+            if not connect_clicked:
+                # Try the "More" button first, then look for Connect inside
+                try:
+                    more_btn = self._page.locator(
+                        'button:has-text("More")'
+                    ).first
+                    if await more_btn.is_visible(timeout=2000):
+                        await more_btn.click()
+                        await asyncio.sleep(0.5)
+                        connect_in_dropdown = self._page.locator(
+                            'div.artdeco-dropdown__content button:has-text("Connect"), '
+                            'div.artdeco-dropdown__content li:has-text("Connect")'
+                        ).first
+                        if await connect_in_dropdown.is_visible(timeout=2000):
+                            await connect_in_dropdown.click()
+                            connect_clicked = True
+                except (PlaywrightTimeoutError, Exception) as e:
+                    logger.debug("More dropdown fallback failed: %s", e)
+
+            if not connect_clicked:
+                # Possibly already connected or pending
+                if "Message" in page_text and "Connect" not in page_text:
+                    return {
+                        "status": "already_connected",
+                        "url": url,
+                        "recipient": linkedin_username,
+                    }
+                if "Pending" in page_text:
+                    return {
+                        "status": "already_pending",
+                        "url": url,
+                        "recipient": linkedin_username,
+                    }
+                return {
+                    "status": "error",
+                    "url": url,
+                    "recipient": linkedin_username,
+                    "error": "Could not find Connect button on profile",
+                }
+
+            # Wait for the connection modal to appear
+            await asyncio.sleep(1.0)
+
+            if message:
+                # Click "Add a note" button in the modal
+                add_note_clicked = False
+                add_note_selectors = [
+                    'button:has-text("Add a note")',
+                    'button[aria-label="Add a note"]',
+                ]
+                for selector in add_note_selectors:
+                    try:
+                        locator = self._page.locator(selector).first
+                        if await locator.is_visible(timeout=3000):
+                            await locator.click()
+                            add_note_clicked = True
+                            break
+                    except PlaywrightTimeoutError:
+                        continue
+                    except Exception as e:
+                        logger.debug("Add note selector %s failed: %s", selector, e)
+                        continue
+
+                if add_note_clicked:
+                    await asyncio.sleep(0.5)
+
+                    # Fill in the note textarea
+                    note_selectors = [
+                        'textarea[name="message"]',
+                        'textarea#custom-message',
+                        'textarea.connect-button-send-invite__custom-message',
+                        'textarea',
+                    ]
+                    note_filled = False
+                    # Truncate to LinkedIn's 300 char limit
+                    truncated_message = message[:300]
+                    for selector in note_selectors:
+                        try:
+                            locator = self._page.locator(selector).first
+                            if await locator.is_visible(timeout=2000):
+                                await locator.fill(truncated_message)
+                                note_filled = True
+                                break
+                        except PlaywrightTimeoutError:
+                            continue
+                        except Exception as e:
+                            logger.debug(
+                                "Note textarea selector %s failed: %s", selector, e
+                            )
+                            continue
+
+                    if not note_filled:
+                        logger.warning(
+                            "Could not fill note textarea for %s, "
+                            "sending without note",
+                            linkedin_username,
+                        )
+                else:
+                    logger.warning(
+                        "Could not find 'Add a note' button for %s, "
+                        "sending without note",
+                        linkedin_username,
+                    )
+
+            # Click Send / Send invitation
+            await asyncio.sleep(0.5)
+            send_clicked = False
+            send_selectors = [
+                'button:has-text("Send")',
+                'button[aria-label="Send invitation"]',
+                'button[aria-label="Send now"]',
+                'button:has-text("Send invitation")',
+            ]
+            for selector in send_selectors:
+                try:
+                    locator = self._page.locator(selector).first
+                    if await locator.is_visible(timeout=2000):
+                        await locator.click()
+                        send_clicked = True
+                        break
+                except PlaywrightTimeoutError:
+                    continue
+                except Exception as e:
+                    logger.debug("Send selector %s failed: %s", selector, e)
+                    continue
+
+            if not send_clicked:
+                return {
+                    "status": "error",
+                    "url": url,
+                    "recipient": linkedin_username,
+                    "error": "Connected clicked but could not find Send button in modal",
+                }
+
+            await asyncio.sleep(1.5)
+
+            result: dict[str, Any] = {
+                "status": "sent",
+                "url": url,
+                "recipient": linkedin_username,
+            }
+            if message:
+                result["note_preview"] = message[:100] + (
+                    "..." if len(message) > 100 else ""
+                )
+            return result
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Failed to send connection request to %s: %s",
+                linkedin_username,
+                e,
+            )
+            return {
+                "status": "error",
+                "url": url,
+                "recipient": linkedin_username,
+                "error": str(e),
+            }

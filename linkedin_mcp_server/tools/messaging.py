@@ -108,6 +108,59 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(
         timeout=TOOL_TIMEOUT_SECONDS,
+        title="Send Connection Request",
+        annotations={"readOnlyHint": False, "openWorldHint": True},
+        tags={"messaging", "networking"},
+    )
+    async def send_connection_request(
+        linkedin_username: str,
+        ctx: Context,
+        message: str | None = None,
+        extractor: LinkedInExtractor = Depends(get_extractor),
+    ) -> dict[str, Any]:
+        """
+        Send a LinkedIn connection request, optionally with a personalized note.
+
+        Navigates to the person's profile, clicks "Connect", optionally adds
+        a personal note, and sends the invitation.
+
+        Args:
+            linkedin_username: LinkedIn username of the person to connect with
+                              (e.g., "stickerdaniel", "williamhgates")
+            ctx: FastMCP context for progress reporting
+            message: Optional personalized note to include with the connection
+                     request (max 300 characters per LinkedIn's limit).
+                     If omitted, sends without a note.
+
+        Returns:
+            Dict with status, url, and confirmation details.
+            Status will be "sent" on success, "already_connected" if already
+            connected, or "error" with details on failure.
+        """
+        try:
+            logger.info(
+                "Sending connection request to: %s (with_note=%s)",
+                linkedin_username,
+                message is not None,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Navigating to profile"
+            )
+
+            result = await extractor.send_connection_request(
+                linkedin_username, message=message
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except Exception as e:
+            raise_tool_error(e, "send_connection_request")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
         title="Get Conversations",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"messaging"},
