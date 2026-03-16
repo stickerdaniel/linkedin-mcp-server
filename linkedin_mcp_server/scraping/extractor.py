@@ -1807,52 +1807,6 @@ class LinkedInExtractor:
                 "error": str(e),
             }
 
-    async def reply_to_conversation(
-        self, thread_id: str, message: str
-    ) -> dict[str, Any]:
-        """Reply to an existing LinkedIn conversation thread.
-
-        Navigates to the thread, types the reply, and clicks send.
-
-        Returns:
-            {status, url, thread_id, message_preview}
-        """
-        url = f"https://www.linkedin.com/messaging/thread/{thread_id}/"
-
-        try:
-            await self._goto_with_auth_checks(url)
-            await detect_rate_limit(self._page)
-
-            # Wait for thread and compose area to load
-            await asyncio.sleep(2.0)
-            await handle_modal_close(self._page)
-
-            await self._find_and_fill_message_input(message)
-            await asyncio.sleep(0.5)
-            await self._click_send_button()
-            await asyncio.sleep(1.5)
-
-            return {
-                "status": "sent",
-                "url": self._page.url,
-                "thread_id": thread_id,
-                "message_preview": message[:100]
-                + ("..." if len(message) > 100 else ""),
-            }
-
-        except LinkedInScraperException:
-            raise
-        except Exception as e:
-            logger.warning(
-                "Failed to reply to thread %s: %s", thread_id, e
-            )
-            return {
-                "status": "error",
-                "url": url,
-                "thread_id": thread_id,
-                "error": str(e),
-            }
-
     async def check_connection_status(
         self, linkedin_username: str
     ) -> dict[str, Any]:
