@@ -23,6 +23,91 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(
         timeout=TOOL_TIMEOUT_SECONDS,
+        title="Send Message",
+        annotations={"readOnlyHint": False, "openWorldHint": True},
+        tags={"messaging"},
+    )
+    async def send_message(
+        linkedin_username: str,
+        message: str,
+        ctx: Context,
+        extractor: LinkedInExtractor = Depends(get_extractor),
+    ) -> dict[str, Any]:
+        """
+        Send a new LinkedIn message to a person.
+
+        Opens a new conversation (or navigates to an existing one) with the
+        specified person and sends a message.
+
+        Args:
+            linkedin_username: LinkedIn username of the recipient
+                              (e.g., "stickerdaniel", "williamhgates")
+            message: The message text to send
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with status, url, and confirmation details.
+        """
+        try:
+            logger.info("Sending message to: %s", linkedin_username)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Navigating to conversation"
+            )
+
+            result = await extractor.send_message(linkedin_username, message)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except Exception as e:
+            raise_tool_error(e, "send_message")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Reply to Conversation",
+        annotations={"readOnlyHint": False, "openWorldHint": True},
+        tags={"messaging"},
+    )
+    async def reply_to_conversation(
+        thread_id: str,
+        message: str,
+        ctx: Context,
+        extractor: LinkedInExtractor = Depends(get_extractor),
+    ) -> dict[str, Any]:
+        """
+        Reply to an existing LinkedIn conversation thread.
+
+        Navigates to the specified thread and sends a reply message.
+
+        Args:
+            thread_id: LinkedIn messaging thread identifier.
+                       Found in conversation URLs or returned by get_conversations.
+            message: The reply message text to send
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with status, url, and confirmation details.
+        """
+        try:
+            logger.info("Replying to thread: %s", thread_id)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Navigating to thread"
+            )
+
+            result = await extractor.reply_to_conversation(thread_id, message)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except Exception as e:
+            raise_tool_error(e, "reply_to_conversation")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
         title="Get Conversations",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"messaging"},

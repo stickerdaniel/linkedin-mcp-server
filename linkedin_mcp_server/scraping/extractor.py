@@ -1467,3 +1467,153 @@ class LinkedInExtractor:
             text=cleaned,
             references=build_references(raw_result["references"], section_name),
         )
+
+    # ── Messaging: Send / Reply ────────────────────────────────────────
+
+    async def _find_and_fill_message_input(self, message: str) -> None:
+        """Locate the LinkedIn message input field and type the message.
+
+        LinkedIn uses a contenteditable div (not a standard <input>) for
+        the message compose box. We try multiple selectors.
+        """
+        input_selectors = [
+            'div.msg-form__contenteditable[contenteditable="true"]',
+            'div[role="textbox"][contenteditable="true"]',
+            'div.msg-form__msg-content-container div[contenteditable="true"]',
+        ]
+
+        for selector in input_selectors:
+            try:
+                locator = self._page.locator(selector).first
+                if await locator.is_visible(timeout=3000):
+                    await locator.click()
+                    await locator.fill(message)
+                    return
+            except PlaywrightTimeoutError:
+                continue
+            except Exception as e:
+                logger.debug("Input selector %s failed: %s", selector, e)
+                continue
+
+        raise LinkedInScraperException(
+            "Could not find the message input field. "
+            "The messaging UI may have changed or not loaded correctly."
+        )
+
+    async def _click_send_button(self) -> None:
+        """Click the send button in the LinkedIn messaging compose area."""
+        send_selectors = [
+            'button.msg-form__send-button',
+            'button[type="submit"].msg-form__send-button',
+            'button.msg-form__send-btn',
+            'button:has-text("Send")',
+        ]
+
+        for selector in send_selectors:
+            try:
+                locator = self._page.locator(selector).first
+                if await locator.is_visible(timeout=2000):
+                    await locator.click()
+                    return
+            except PlaywrightTimeoutError:
+                continue
+            except Exception as e:
+                logger.debug("Send button selector %s failed: %s", selector, e)
+                continue
+
+        # Fallback: press Enter as LinkedIn sometimes supports it
+        logger.info("Send button not found, attempting Enter key as fallback")
+        await self._page.keyboard.press("Enter")
+
+    async def send_message(
+        self, linkedin_username: str, message: str
+    ) -> dict[str, Any]:
+        """Send a new message to a LinkedIn user.
+
+        Navigates to the compose URL for the user, types the message,
+        and clicks send.
+
+        Returns:
+            {status, url, recipient, message_preview}
+        """
+        url = f"https://www.linkedin.com/messaging/compose/?to={linkedin_username}"
+
+        try:
+            await self._goto_with_auth_checks(url)
+            await detect_rate_limit(self._page)
+
+            # Wait for messaging UI to load
+            await asyncio.sleep(2.0)
+            await handle_modal_close(self._page)
+
+            await self._find_and_fill_message_input(message)
+            await asyncio.sleep(0.5)
+            await self._click_send_button()
+            await asyncio.sleep(1.5)
+
+            return {
+                "status": "sent",
+                "url": self._page.url,
+                "recipient": linkedin_username,
+                "message_preview": message[:100]
+                + ("..." if len(message) > 100 else ""),
+            }
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Failed to send message to %s: %s", linkedin_username, e
+            )
+            return {
+                "status": "error",
+                "url": url,
+                "recipient": linkedin_username,
+                "error": str(e),
+            }
+
+    async def reply_to_conversation(
+        self, thread_id: str, message: str
+    ) -> dict[str, Any]:
+        """Reply to an existing LinkedIn conversation thread.
+
+        Navigates to the thread, types the reply, and clicks send.
+
+        Returns:
+            {status, url, thread_id, message_preview}
+        """
+        url = f"https://www.linkedin.com/messaging/thread/{thread_id}/"
+
+        try:
+            await self._goto_with_auth_checks(url)
+            await detect_rate_limit(self._page)
+
+            # Wait for thread and compose area to load
+            await asyncio.sleep(2.0)
+            await handle_modal_close(self._page)
+
+            await self._find_and_fill_message_input(message)
+            await asyncio.sleep(0.5)
+            await self._click_send_button()
+            await asyncio.sleep(1.5)
+
+            return {
+                "status": "sent",
+                "url": self._page.url,
+                "thread_id": thread_id,
+                "message_preview": message[:100]
+                + ("..." if len(message) > 100 else ""),
+            }
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Failed to reply to thread %s: %s", thread_id, e
+            )
+            return {
+                "status": "error",
+                "url": url,
+                "thread_id": thread_id,
+                "error": str(e),
+            }
