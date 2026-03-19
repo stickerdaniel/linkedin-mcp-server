@@ -54,6 +54,17 @@ class BrowserConfig:
 
 
 @dataclass
+class OAuthConfig:
+    """OAuth 2.1 authentication configuration for remote deployments."""
+
+    enabled: bool = False
+    base_url: str | None = (
+        None  # Public URL of this server (e.g. https://my-mcp.example.com)
+    )
+    password: str | None = None  # Password for the OAuth login page
+
+
+@dataclass
 class ServerConfig:
     """MCP server configuration."""
 
@@ -67,6 +78,8 @@ class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8000
     path: str = "/mcp"
+    # OAuth authentication
+    oauth: OAuthConfig = field(default_factory=OAuthConfig)
 
 
 @dataclass
@@ -84,6 +97,7 @@ class AppConfig:
             self._validate_transport_config()
             self._validate_path_format()
         self._validate_port_range()
+        self._validate_oauth()
 
     def _validate_transport_config(self) -> None:
         """Validate transport configuration is consistent."""
@@ -108,4 +122,26 @@ class AppConfig:
         if len(self.server.path) < 2:
             raise ConfigurationError(
                 f"HTTP path '{self.server.path}' must be at least 2 characters"
+            )
+
+    def _validate_oauth(self) -> None:
+        """Validate OAuth configuration when enabled.
+
+        Skipped for command-only modes (--login, --status, --logout) that exit
+        before starting the server, so AUTH=oauth in the environment doesn't
+        break maintenance commands.
+        """
+        if not self.server.oauth.enabled:
+            return
+        if self.server.login or self.server.status or self.server.logout:
+            return
+        if self.server.transport != "streamable-http":
+            raise ConfigurationError("OAuth requires --transport streamable-http")
+        if not self.server.oauth.base_url:
+            raise ConfigurationError(
+                "OAuth requires OAUTH_BASE_URL (the public URL of this server)"
+            )
+        if not self.server.oauth.password:
+            raise ConfigurationError(
+                "OAuth requires OAUTH_PASSWORD (password for the login page)"
             )

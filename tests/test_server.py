@@ -5,6 +5,7 @@ import mcp.types as mt
 from fastmcp import FastMCP
 from fastmcp.server.middleware import MiddlewareContext
 
+from linkedin_mcp_server.config.schema import OAuthConfig
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -87,3 +88,20 @@ class TestSequentialToolExecutionMiddleware:
                 ),
             ]
         )
+
+
+class TestServerAuth:
+    async def test_create_mcp_server_no_auth_by_default(self):
+        mcp = create_mcp_server()
+        assert mcp.auth is None
+
+    async def test_create_mcp_server_with_oauth(self):
+        from linkedin_mcp_server.auth import PasswordOAuthProvider
+
+        oauth_config = OAuthConfig(
+            enabled=True,
+            base_url="https://example.com",
+            password="secret",
+        )
+        mcp = create_mcp_server(oauth_config=oauth_config)
+        assert isinstance(mcp.auth, PasswordOAuthProvider)

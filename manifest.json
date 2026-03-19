@@ -60,7 +60,20 @@
       "description": "Properly close browser session and clean up resources"
     }
   ],
-  "user_config": {},
+  "user_config": {
+    "AUTH": {
+      "description": "Set to 'oauth' to enable OAuth 2.1 authentication for remote deployments",
+      "required": false
+    },
+    "OAUTH_BASE_URL": {
+      "description": "Public URL of the server (required when AUTH=oauth)",
+      "required": false
+    },
+    "OAUTH_PASSWORD": {
+      "description": "Password for the OAuth login page (required when AUTH=oauth)",
+      "required": false
+    }
+  },
   "compatibility": {
     "claude_desktop": ">=0.10.0",
     "platforms": ["darwin", "linux", "win32"]

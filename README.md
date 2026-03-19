@@ -298,6 +298,53 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 
 </details>
 
+<details>
+<summary><b>🔐 Remote Deployment with OAuth</b></summary>
+
+When deploying the server remotely (e.g. on Cloud Run, Fly.io, Railway),
+enable OAuth 2.1 to protect the MCP endpoint.
+
+**Quick Start:**
+
+```bash
+docker run --rm -i \
+  -v ${HOME}/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+  -e TRANSPORT=streamable-http \
+  -e HOST=0.0.0.0 \
+  -e AUTH=oauth \
+  -e OAUTH_BASE_URL=https://your-server.example.com \
+  -e OAUTH_PASSWORD=your-secret-password \
+  -p 8000:8000 \
+  stickerdaniel/linkedin-mcp-server
+```
+
+**Adding as a Claude.ai Custom Connector:**
+
+1. Deploy the server with OAuth enabled
+2. In claude.ai, go to **Settings → Connectors → Add custom connector**
+3. Enter your server URL (e.g. `https://your-server.example.com/mcp`)
+4. Claude.ai will discover the OAuth endpoints automatically
+5. You'll be redirected to the login page — enter your `OAUTH_PASSWORD`
+6. The connection is now authenticated
+
+**Environment Variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `AUTH` | Set to `oauth` to enable OAuth 2.1 authentication |
+| `OAUTH_BASE_URL` | Public URL of your server (e.g. `https://my-mcp.example.com`) |
+| `OAUTH_PASSWORD` | Password for the OAuth login page |
+
+**CLI Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--auth oauth` | Enable OAuth 2.1 authentication |
+| `--oauth-base-url URL` | Public URL of your server |
+| `--oauth-password PASSWORD` | Password for the login page |
+
+</details>
+
 <br/>
 <br/>
 
