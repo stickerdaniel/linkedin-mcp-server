@@ -141,6 +141,10 @@ class AppConfig:
             raise ConfigurationError(
                 "OAuth requires OAUTH_BASE_URL (the public URL of this server)"
             )
+        if not self.server.oauth.base_url.startswith("https://"):
+            raise ConfigurationError(
+                "OAuth requires OAUTH_BASE_URL to use HTTPS (e.g. https://my-mcp.example.com)"
+            )
         if not self.server.oauth.password:
             raise ConfigurationError(
                 "OAuth requires OAUTH_PASSWORD (password for the login page)"
