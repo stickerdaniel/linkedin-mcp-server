@@ -179,6 +179,18 @@ class TestLoginRoutes:
         # Pending request NOT consumed
         assert "req123" in provider._pending_auth_requests
 
+    def test_get_login_expired_request_rejected(self, client, provider):
+        provider._pending_auth_requests["req-expired-get"] = {
+            "client_id": "test-client",
+            "params": None,
+            "created_at": time.time() - 700,  # 11+ minutes ago
+        }
+
+        response = client.get("/login?request_id=req-expired-get")
+        assert response.status_code == 400
+        assert "expired" in response.text.lower()
+        assert "req-expired-get" not in provider._pending_auth_requests
+
     def test_post_login_expired_request_rejected(self, client, provider):
         from mcp.server.auth.provider import AuthorizationParams
         from pydantic import AnyUrl

@@ -112,8 +112,16 @@ class PasswordOAuthProvider(InMemoryOAuthProvider):
 
     async def _render_login(self, request: Request) -> Response:
         request_id = request.query_params.get("request_id", "")
-        if not request_id or request_id not in self._pending_auth_requests:
+        pending = self._pending_auth_requests.get(request_id) if request_id else None
+        if not pending:
             return _html_response("Invalid or expired login request.", status_code=400)
+
+        if time.time() - pending["created_at"] > _PENDING_REQUEST_TTL_SECONDS:
+            del self._pending_auth_requests[request_id]
+            return _html_response(
+                "Login request expired. Please restart the authorization flow.",
+                status_code=400,
+            )
 
         return _html_response(self._login_html(request_id))
 
