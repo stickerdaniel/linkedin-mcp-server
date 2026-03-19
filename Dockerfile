@@ -1,9 +1,9 @@
 # Use slim Python base instead of full Playwright image (saves ~300-400 MB)
 # Only Chromium is installed, not Firefox/WebKit
-FROM python:3.14-slim-bookworm@sha256:5404df00cf00e6e7273375f415651837b4d192ac6859c44d3b740888ac798c99
+FROM python:3.14-slim-bookworm@sha256:55e465cb7e50cd1d7217fcb5386aa87d0356ca2cd790872142ef68d9ef6812b4
 
 # Install uv package manager
-COPY --from=ghcr.io/astral-sh/uv:latest@sha256:10902f58a1606787602f303954cea099626a4adb02acbac4c69920fe9d278f82 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:latest@sha256:3472e43b4e738cf911c99d41bb34331280efad54c73b1def654a6227bb59b2b4 /uv /uvx /bin/
 
 # Create non-root user first (matching original pwuser from Playwright image)
 RUN useradd -m -s /bin/bash pwuser
