@@ -46,6 +46,10 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `search_jobs` | Search for jobs with keywords and location filters | Working |
 | `search_people` | Search for people by keywords and location | Working |
 | `get_job_details` | Get detailed information about a specific job posting | Working |
+| `get_inbox` | List recent conversations from messaging inbox | Working |
+| `get_conversation` | Read a specific messaging conversation | Working |
+| `search_conversations` | Search messages by keyword | Working |
+| `send_message` | Send a message to a LinkedIn user | Working |
 | `close_session` | Close browser session and clean up resources | Working |
 
 Tool responses keep readable `sections` text and may also include a compact `references` map keyed by section. Each reference includes a typed target, a relative LinkedIn path (or absolute external URL), and a short label/context when available.

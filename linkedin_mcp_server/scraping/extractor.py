@@ -1048,6 +1048,265 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    # ------------------------------------------------------------------
+    # Messaging
+    # ------------------------------------------------------------------
+
+    async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
+        """List recent conversations from the messaging inbox.
+
+        Returns:
+            {url, sections: {"inbox": text}, references?, section_errors?}
+        """
+        url = "https://www.linkedin.com/messaging/"
+        await self._goto_with_auth_checks(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_function(
+                """() => {
+                    const main = document.querySelector('main');
+                    if (!main) return false;
+                    return main.innerText.length > 100;
+                }""",
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Messaging inbox content did not appear")
+
+        await handle_modal_close(self._page)
+
+        # Scroll the conversation list to load more entries
+        scrolls = max(1, limit // 10)
+        for _ in range(scrolls):
+            await self._page.evaluate(
+                """() => {
+                    const list = document.querySelector(
+                        '.msg-conversations-container__conversations-list'
+                    ) || document.querySelector('main');
+                    if (list) list.scrollTop = list.scrollHeight;
+                }"""
+            )
+            await asyncio.sleep(0.5)
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if cleaned:
+            sections["inbox"] = cleaned
+            refs = build_references(raw_result["references"], "inbox")
+            if refs:
+                references["inbox"] = refs
+
+        result: dict[str, Any] = {"url": self._page.url, "sections": sections}
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def get_conversation(
+        self,
+        linkedin_username: str | None = None,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Read a specific messaging conversation.
+
+        Provide either ``linkedin_username`` or ``thread_id``.
+
+        Returns:
+            {url, sections: {"conversation": text}, references?, section_errors?}
+        """
+        if not linkedin_username and not thread_id:
+            raise ValueError("Provide at least one of linkedin_username or thread_id")
+
+        if thread_id:
+            url = f"https://www.linkedin.com/messaging/thread/{thread_id}/"
+            await self._goto_with_auth_checks(url)
+        elif linkedin_username:
+            # Navigate to messaging and search for the user
+            await self._goto_with_auth_checks("https://www.linkedin.com/messaging/")
+            try:
+                search_input = self._page.get_by_role("searchbox").first
+                await search_input.wait_for(timeout=5000)
+                await search_input.click()
+                await self._page.keyboard.type(linkedin_username, delay=30)
+                await asyncio.sleep(1.5)
+                # Click the first matching conversation
+                first_result = self._page.locator(".msg-conversation-listitem").first
+                await first_result.click(timeout=5000)
+            except PlaywrightTimeoutError:
+                logger.warning("Could not find conversation for %s", linkedin_username)
+
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_function(
+                """() => {
+                    const main = document.querySelector('main');
+                    if (!main) return false;
+                    return main.innerText.length > 100;
+                }""",
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Conversation content did not appear")
+
+        await handle_modal_close(self._page)
+
+        # Scroll up in the thread to load older messages
+        for _ in range(3):
+            await self._page.evaluate(
+                """() => {
+                    const thread = document.querySelector(
+                        '.msg-s-message-list'
+                    ) || document.querySelector('main');
+                    if (thread) thread.scrollTop = 0;
+                }"""
+            )
+            await asyncio.sleep(0.5)
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if cleaned:
+            sections["conversation"] = cleaned
+            refs = build_references(raw_result["references"], "conversation")
+            if refs:
+                references["conversation"] = refs
+
+        result: dict[str, Any] = {"url": self._page.url, "sections": sections}
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def search_conversations(self, keywords: str) -> dict[str, Any]:
+        """Search messages by keyword.
+
+        Returns:
+            {url, sections: {"search_results": text}, references?, section_errors?}
+        """
+        url = "https://www.linkedin.com/messaging/"
+        await self._goto_with_auth_checks(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            search_input = self._page.get_by_role("searchbox").first
+            await search_input.wait_for(timeout=5000)
+            await search_input.click()
+            await self._page.keyboard.type(keywords, delay=30)
+            await asyncio.sleep(1.0)
+            await self._page.keyboard.press("Enter")
+            await asyncio.sleep(1.5)
+        except PlaywrightTimeoutError:
+            logger.warning("Messaging search input not found")
+
+        try:
+            await self._page.wait_for_function(
+                """() => {
+                    const main = document.querySelector('main');
+                    if (!main) return false;
+                    return main.innerText.length > 100;
+                }""",
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Search results content did not appear")
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if cleaned:
+            sections["search_results"] = cleaned
+            refs = build_references(raw_result["references"], "search_results")
+            if refs:
+                references["search_results"] = refs
+
+        result: dict[str, Any] = {"url": self._page.url, "sections": sections}
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def send_message(
+        self, linkedin_username: str, message: str
+    ) -> dict[str, Any]:
+        """Send a message to a LinkedIn user.
+
+        Navigates to the user's profile, opens the message compose box,
+        types the message, and clicks send.
+
+        Returns:
+            {url, sections: {"confirmation": text}}
+        """
+        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        await self._goto_with_auth_checks(profile_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=5000)
+        except PlaywrightTimeoutError:
+            logger.debug("Profile page did not load for %s", linkedin_username)
+
+        await handle_modal_close(self._page)
+
+        # Click the "Message" button on the profile
+        message_button = self._page.get_by_role("button", name="Message")
+        try:
+            await message_button.click(timeout=5000)
+        except PlaywrightTimeoutError:
+            raise LinkedInScraperException(
+                f"Message button not found on {linkedin_username}'s profile. "
+                "They may not be a 1st-degree connection."
+            )
+
+        # Wait for the compose box to appear
+        compose_box = self._page.locator(
+            'div[role="textbox"][contenteditable="true"]'
+        ).last
+        try:
+            await compose_box.wait_for(timeout=5000)
+        except PlaywrightTimeoutError:
+            raise LinkedInScraperException("Message compose box did not appear.")
+
+        # Type the message using page.type for contenteditable compatibility
+        await compose_box.focus()
+        await self._page.keyboard.type(message, delay=20)
+        await asyncio.sleep(0.5)
+
+        # Click the send button
+        send_button = self._page.locator(
+            'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]'
+        ).last
+        try:
+            await send_button.click(timeout=5000)
+        except PlaywrightTimeoutError:
+            raise LinkedInScraperException("Send button not found or not clickable.")
+
+        await asyncio.sleep(1.0)
+
+        return {
+            "url": self._page.url,
+            "sections": {
+                "confirmation": f"Message sent to {linkedin_username}: {message}"
+            },
+        }
+
     async def _extract_root_content(
         self,
         selectors: list[str],

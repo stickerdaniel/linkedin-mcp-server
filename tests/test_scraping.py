@@ -1773,3 +1773,229 @@ class TestSearchResultsExtraction:
             )
 
         assert result.text == placeholder
+
+
+class TestMessaging:
+    """Tests for messaging extractor methods."""
+
+    async def test_get_inbox_navigates_and_extracts(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Conversation with Alice\nConversation with Bob",
+                "references": [],
+            }
+        )
+        mock_page.url = "https://www.linkedin.com/messaging/"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_inbox(limit=20)
+
+        assert "inbox" in result["sections"]
+        assert "Alice" in result["sections"]["inbox"]
+        mock_page.goto.assert_awaited_once()
+        assert "messaging" in mock_page.goto.call_args[0][0]
+
+    async def test_get_inbox_empty_page(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "", "references": []}
+        )
+        mock_page.url = "https://www.linkedin.com/messaging/"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_inbox()
+
+        assert result["sections"] == {}
+
+    async def test_get_conversation_by_thread_id(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Alice: Hello\nBob: Hi there",
+                "references": [],
+            }
+        )
+        mock_page.url = "https://www.linkedin.com/messaging/thread/abc123/"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_conversation(thread_id="abc123")
+
+        assert "conversation" in result["sections"]
+        assert "abc123" in mock_page.goto.call_args[0][0]
+
+    async def test_get_conversation_requires_identifier(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="linkedin_username or thread_id"):
+            await extractor.get_conversation()
+
+    async def test_search_conversations_types_keywords(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Matching: project update discussion",
+                "references": [],
+            }
+        )
+        mock_page.url = "https://www.linkedin.com/messaging/"
+
+        mock_search_input = MagicMock()
+        mock_search_input.wait_for = AsyncMock()
+        mock_search_input.click = AsyncMock()
+        mock_page.get_by_role = MagicMock(
+            return_value=MagicMock(first=mock_search_input)
+        )
+
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_conversations("project update")
+
+        assert "search_results" in result["sections"]
+        mock_search_input.click.assert_awaited_once()
+        mock_keyboard.type.assert_awaited_once_with("project update", delay=30)
+        mock_keyboard.press.assert_awaited_once_with("Enter")
+
+    async def test_send_message_interaction_sequence(self, mock_page):
+        mock_page.url = "https://www.linkedin.com/in/testuser/"
+
+        mock_message_button = MagicMock()
+        mock_message_button.click = AsyncMock()
+
+        mock_compose_box = MagicMock()
+        mock_compose_box.wait_for = AsyncMock()
+        mock_compose_box.focus = AsyncMock()
+
+        mock_send_button = MagicMock()
+        mock_send_button.click = AsyncMock()
+
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+
+        mock_page.get_by_role = MagicMock(return_value=mock_message_button)
+
+        locator_call_count = 0
+
+        def locator_side_effect(selector):
+            nonlocal locator_call_count
+            locator_call_count += 1
+            if "textbox" in selector or "contenteditable" in selector:
+                m = MagicMock()
+                m.last = mock_compose_box
+                return m
+            m = MagicMock()
+            m.last = mock_send_button
+            return m
+
+        mock_page.locator = MagicMock(side_effect=locator_side_effect)
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.send_message("testuser", "Hello!")
+
+        assert "confirmation" in result["sections"]
+        assert "testuser" in result["sections"]["confirmation"]
+        mock_message_button.click.assert_awaited_once()
+        mock_compose_box.focus.assert_awaited_once()
+        mock_keyboard.type.assert_awaited_once_with("Hello!", delay=20)
+        mock_send_button.click.assert_awaited_once()
+
+    async def test_send_message_no_message_button(self, mock_page):
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        mock_page.url = "https://www.linkedin.com/in/stranger/"
+        mock_message_button = MagicMock()
+        mock_message_button.click = AsyncMock(
+            side_effect=PlaywrightTimeoutError("Timeout")
+        )
+        mock_page.get_by_role = MagicMock(return_value=mock_message_button)
+
+        from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(LinkedInScraperException, match="Message button not found"),
+        ):
+            await extractor.send_message("stranger", "Hi")
