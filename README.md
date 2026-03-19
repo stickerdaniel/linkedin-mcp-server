@@ -322,7 +322,9 @@ docker run --rm -i \
 
 1. Deploy the server with OAuth enabled
 2. In claude.ai, go to **Settings → Connectors → Add custom connector**
-3. Enter your server URL (e.g. `https://your-server.example.com/mcp`)
+3. Enter the **full MCP endpoint URL** including `/mcp`:
+   `https://your-server.example.com/mcp`
+   > **Important:** Use the `/mcp` path, not the base URL — claude.ai will return "no tools" if you omit it.
 4. Claude.ai will discover the OAuth endpoints automatically
 5. You'll be redirected to the login page — enter your `OAUTH_PASSWORD`
 6. The connection is now authenticated
