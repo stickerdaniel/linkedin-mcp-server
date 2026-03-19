@@ -300,7 +300,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
         type=str,
         default=None,
         metavar="PASSWORD",
-        help="Password for the OAuth login page",
+        help="Password for the OAuth login page (visible in process list; prefer OAUTH_PASSWORD env var)",
     )
 
     args = parser.parse_args()
