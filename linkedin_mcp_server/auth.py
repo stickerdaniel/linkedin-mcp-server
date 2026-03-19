@@ -25,6 +25,11 @@ from fastmcp.server.auth.providers.in_memory import (
 # Pending auth requests expire after 10 minutes
 _PENDING_REQUEST_TTL_SECONDS = 600
 
+# Global rate limiting: max failed attempts across all request_ids in a time window
+_GLOBAL_MAX_FAILED_ATTEMPTS = 20
+_GLOBAL_RATE_LIMIT_WINDOW_SECONDS = 300  # 5 minutes
+_GLOBAL_LOCKOUT_SECONDS = 60
+
 _LOGIN_SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
@@ -69,6 +74,8 @@ class PasswordOAuthProvider(InMemoryOAuthProvider):
         )
         self._password = password
         self._pending_auth_requests: dict[str, dict] = {}
+        self._global_failed_attempts: list[float] = []  # timestamps of failures
+        self._global_lockout_until: float = 0.0
 
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
@@ -119,10 +126,43 @@ class PasswordOAuthProvider(InMemoryOAuthProvider):
         if not pending:
             return _html_response("Invalid or expired login request.", status_code=400)
 
+        # Enforce TTL at submission time (not only during cleanup)
+        if time.time() - pending["created_at"] > _PENDING_REQUEST_TTL_SECONDS:
+            del self._pending_auth_requests[request_id]
+            return _html_response(
+                "Login request expired. Please restart the authorization flow.",
+                status_code=400,
+            )
+
+        # Global rate limit: reject if locked out
+        now = time.time()
+        if now < self._global_lockout_until:
+            return _html_response(
+                "Too many failed login attempts. Please try again later.",
+                status_code=429,
+            )
+
         if not secrets.compare_digest(password, self._password):
+            # Track per-request failures
             pending["failed_attempts"] = pending.get("failed_attempts", 0) + 1
             if pending["failed_attempts"] >= _MAX_FAILED_ATTEMPTS:
                 del self._pending_auth_requests[request_id]
+
+            # Track global failures and trigger lockout if threshold exceeded
+            self._global_failed_attempts = [
+                t
+                for t in self._global_failed_attempts
+                if now - t < _GLOBAL_RATE_LIMIT_WINDOW_SECONDS
+            ]
+            self._global_failed_attempts.append(now)
+            if len(self._global_failed_attempts) >= _GLOBAL_MAX_FAILED_ATTEMPTS:
+                self._global_lockout_until = now + _GLOBAL_LOCKOUT_SECONDS
+                return _html_response(
+                    "Too many failed login attempts. Please try again later.",
+                    status_code=429,
+                )
+
+            if pending.get("failed_attempts", 0) >= _MAX_FAILED_ATTEMPTS:
                 return _html_response(
                     "Too many failed attempts. Please restart the authorization flow.",
                     status_code=403,

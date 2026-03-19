@@ -57,8 +57,10 @@ def create_mcp_server(oauth_config: "OAuthConfig | None" = None) -> FastMCP:
     if oauth_config and oauth_config.enabled:
         from linkedin_mcp_server.auth import PasswordOAuthProvider
 
-        assert oauth_config.base_url is not None  # validated by AppConfig.validate()
-        assert oauth_config.password is not None
+        if oauth_config.base_url is None:
+            raise ValueError("oauth_config.base_url must be set when OAuth is enabled")
+        if oauth_config.password is None:
+            raise ValueError("oauth_config.password must be set when OAuth is enabled")
         auth = PasswordOAuthProvider(
             base_url=oauth_config.base_url,
             password=oauth_config.password,

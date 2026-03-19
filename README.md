@@ -351,6 +351,8 @@ gcloud secrets versions access latest --secret=linkedin-mcp-oauth-password --pro
 | `--oauth-base-url URL` | Public URL of your server |
 | `--oauth-password PASSWORD` | Password for the login page |
 
+> **Note:** OAuth state is stored in-memory. Deploy with a single instance (`--max-instances 1` on Cloud Run) — multi-instance setups will break the login flow because `/authorize` and `/login` may land on different instances.
+
 </details>
 
 <br/>

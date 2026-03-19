@@ -179,6 +179,74 @@ class TestLoginRoutes:
         # Pending request NOT consumed
         assert "req123" in provider._pending_auth_requests
 
+    def test_post_login_expired_request_rejected(self, client, provider):
+        from mcp.server.auth.provider import AuthorizationParams
+        from pydantic import AnyUrl
+
+        params = AuthorizationParams(
+            state="s",
+            scopes=[],
+            code_challenge="c",
+            redirect_uri=AnyUrl("https://example.com/callback"),
+            redirect_uri_provided_explicitly=True,
+        )
+        provider._pending_auth_requests["req-expired"] = {
+            "client_id": "test-client",
+            "params": params,
+            "created_at": time.time() - 700,  # 11+ minutes ago
+        }
+
+        response = client.post(
+            "/login",
+            data={"request_id": "req-expired", "password": "test-secret"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 400
+        assert "expired" in response.text.lower()
+        assert "req-expired" not in provider._pending_auth_requests
+
+    def test_post_login_global_rate_limit(self, client, provider):
+        from mcp.server.auth.provider import AuthorizationParams
+        from pydantic import AnyUrl
+
+        params = AuthorizationParams(
+            state="s",
+            scopes=[],
+            code_challenge="c",
+            redirect_uri=AnyUrl("https://example.com/callback"),
+            redirect_uri_provided_explicitly=True,
+        )
+
+        # Simulate 20 global failures (across different request_ids)
+        provider._global_failed_attempts = [time.time()] * 19
+        provider._pending_auth_requests["req-global"] = {
+            "client_id": "test-client",
+            "params": params,
+            "created_at": time.time(),
+        }
+
+        # This 20th failure should trigger global lockout
+        response = client.post(
+            "/login",
+            data={"request_id": "req-global", "password": "wrong"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 429
+        assert "try again later" in response.text.lower()
+
+        # Subsequent attempts also blocked even with new request_id
+        provider._pending_auth_requests["req-blocked"] = {
+            "client_id": "test-client",
+            "params": params,
+            "created_at": time.time(),
+        }
+        response = client.post(
+            "/login",
+            data={"request_id": "req-blocked", "password": "test-secret"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 429
+
     def test_post_login_lockout_after_max_attempts(self, client, provider):
         from mcp.server.auth.provider import AuthorizationParams
         from pydantic import AnyUrl
