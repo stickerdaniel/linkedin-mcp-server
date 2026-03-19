@@ -1,0 +1,56 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+
+env:
+  PROJECT_ID: job-tracker-vasudev
+  REGION: europe-west1
+  SERVICE: linkedin-mcp-server
+  REPO: europe-west1-docker.pkg.dev/job-tracker-vasudev/linkedin-mcp-server
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ env.REPO }}/${{ env.SERVICE }}:${{ github.sha }} .
+          docker push ${{ env.REPO }}/${{ env.SERVICE }}:${{ github.sha }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE }} \
+            --image ${{ env.REPO }}/${{ env.SERVICE }}:${{ github.sha }} \
+            --region ${{ env.REGION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --port 8000 \
+            --memory 2Gi \
+            --cpu 1 \
+            --max-instances 1 \
+            --min-instances 0 \
+            --allow-unauthenticated \
+            --cpu-boost \
+            --timeout 300 \
+            --set-env-vars "TRANSPORT=streamable-http,HOST=0.0.0.0,PORT=8000,LOG_LEVEL=WARNING,HEADLESS=true" \
+            --set-secrets "OAUTH_PASSWORD=OAUTH_PASSWORD:latest,OAUTH_BASE_URL=OAUTH_BASE_URL:latest,AUTH=AUTH:latest"
