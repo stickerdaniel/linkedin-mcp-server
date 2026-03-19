@@ -8,6 +8,7 @@ structure with type-safe configuration objects and default values.
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 
 class ConfigurationError(Exception):
@@ -144,6 +145,12 @@ class AppConfig:
         if not self.server.oauth.base_url.startswith("https://"):
             raise ConfigurationError(
                 "OAuth requires OAUTH_BASE_URL to use HTTPS (e.g. https://my-mcp.example.com)"
+            )
+        parsed = urlparse(self.server.oauth.base_url)
+        if parsed.path not in ("", "/"):
+            raise ConfigurationError(
+                "OAuth base URL must not contain a path component "
+                "(e.g. https://my-mcp.example.com, not https://my-mcp.example.com/api)"
             )
         if not self.server.oauth.password:
             raise ConfigurationError(

@@ -233,6 +233,7 @@ class TestLoginRoutes:
         )
         assert response.status_code == 429
         assert "try again later" in response.text.lower()
+        assert "restart" in response.text.lower()
 
         # Subsequent attempts also blocked even with new request_id
         provider._pending_auth_requests["req-blocked"] = {

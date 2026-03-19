@@ -81,6 +81,32 @@ class TestOAuthConfig:
         with pytest.raises(ConfigurationError, match="streamable-http"):
             config.validate()
 
+    def test_validate_rejects_http_base_url(self):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.oauth = OAuthConfig(
+            enabled=True, base_url="http://example.com", password="secret"
+        )
+        with pytest.raises(ConfigurationError, match="HTTPS"):
+            config.validate()
+
+    def test_validate_rejects_base_url_with_path(self):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.oauth = OAuthConfig(
+            enabled=True, base_url="https://example.com/api", password="secret"
+        )
+        with pytest.raises(ConfigurationError, match="path component"):
+            config.validate()
+
+    def test_validate_accepts_base_url_with_trailing_slash(self):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.oauth = OAuthConfig(
+            enabled=True, base_url="https://example.com/", password="secret"
+        )
+        config.validate()  # No error — trailing slash is fine
+
     def test_validate_passes_when_disabled(self):
         config = AppConfig()
         config.server.oauth = OAuthConfig(enabled=False)

@@ -158,7 +158,8 @@ class PasswordOAuthProvider(InMemoryOAuthProvider):
             if len(self._global_failed_attempts) >= _GLOBAL_MAX_FAILED_ATTEMPTS:
                 self._global_lockout_until = now + _GLOBAL_LOCKOUT_SECONDS
                 return _html_response(
-                    "Too many failed login attempts. Please try again later.",
+                    "Too many failed login attempts. Please try again later, "
+                    "then restart the authorization flow from your client.",
                     status_code=429,
                 )
 
@@ -181,7 +182,11 @@ class PasswordOAuthProvider(InMemoryOAuthProvider):
 
         client = await self.get_client(pending["client_id"])
         if not client:
-            return _html_response("Client not found.", status_code=400)
+            return _html_response(
+                "Client registration not found. "
+                "Please restart the authorization flow from your client.",
+                status_code=400,
+            )
 
         params: AuthorizationParams = pending["params"]
         scopes_list = params.scopes if params.scopes is not None else []
