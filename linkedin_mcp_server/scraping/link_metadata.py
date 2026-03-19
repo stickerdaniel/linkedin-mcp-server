@@ -14,6 +14,7 @@ ReferenceKind = Literal[
     "article",
     "newsletter",
     "school",
+    "messaging",
     "external",
 ]
 
@@ -94,6 +95,8 @@ _REFERENCE_CAPS = {
     "search_results": 15,
     "job_posting": 8,
     "contact_info": 8,
+    "inbox": 20,
+    "conversation": 12,
 }
 
 _URL_LIKE_RE = re.compile(r"^(?:https?://|/)\S+$", re.IGNORECASE)
@@ -107,6 +110,7 @@ _JOB_PATH_RE = re.compile(r"^/jobs/view/(\d+)")
 _NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
 _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
+_MESSAGING_PATH_RE = re.compile(r"^/messaging/thread/([^/?#]+)")
 _MAX_REDIRECT_UNWRAP_DEPTH = 5
 
 
@@ -229,6 +233,9 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
     if match := _FEED_PATH_RE.match(path):
         return "feed_post", f"/feed/update/{match.group(1)}/"
 
+    if match := _MESSAGING_PATH_RE.match(path):
+        return "messaging", f"/messaging/thread/{match.group(1)}/"
+
     return None
 
 
@@ -319,6 +326,12 @@ def derive_context(
         if kind == "feed_post":
             return "company post"
         return "post attachment"
+
+    if section_name == "inbox":
+        return "conversation" if kind == "messaging" else "participant"
+
+    if section_name == "conversation":
+        return "participant" if kind == "person" else "message link"
 
     if section_name in {"main_profile", "about"}:
         if heading in _CONTEXT_LABELS:

@@ -3,7 +3,7 @@
   "name": "linkedin-mcp-server",
   "display_name": "LinkedIn MCP Server",
   "version": "4.4.1",
-  "description": "Connect Claude to LinkedIn for profiles, companies, job details, and people search",
+  "description": "Connect Claude to LinkedIn for profiles, companies, job details, people search, and messaging",
   "long_description": "# LinkedIn MCP Server\n\nConnect Claude to your LinkedIn account. Access profiles, companies, and job postings through a Docker container on your machine.\n\n## Features\n- **Profile Access**: Get detailed LinkedIn profile information including work history, education, and skills\n- **Company Profiles**: Extract comprehensive company information and details\n- **Job Details**: Retrieve job posting information from LinkedIn URLs\n- **Job Search**: Search for jobs with keywords and location filters\n- **People Search**: Search for people by keywords and location\n- **Company Posts**: Get recent posts from a company's LinkedIn feed\n- **Person Posts**: Get recent activity and posts from a person's profile\n\n## First-Time Setup\n\n### 1. Pre-pull Docker Image (Required)\nRun this command first to avoid connection timeouts:\n```\ndocker pull stickerdaniel/linkedin-mcp-server:4.4.1",
   "author": {
     "name": "Daniel Sticker",
@@ -14,7 +14,7 @@
   "documentation": "https://github.com/stickerdaniel/linkedin-mcp-server#readme",
   "support": "https://github.com/stickerdaniel/linkedin-mcp-server/issues",
   "license": "MIT",
-  "keywords": ["linkedin", "scraping", "mcp", "profiles", "companies", "jobs", "people", "search", "posts"],
+  "keywords": ["linkedin", "scraping", "mcp", "profiles", "companies", "jobs", "people", "search", "posts", "messaging"],
   "icon": "assets/icons/linkedin.svg",
   "screenshots": ["assets/screenshots/screenshot.png"],
   "server": {
@@ -54,6 +54,22 @@
     {
       "name": "search_people",
       "description": "Search for people on LinkedIn by keywords and location"
+    },
+    {
+      "name": "get_inbox",
+      "description": "List recent conversations from the LinkedIn messaging inbox"
+    },
+    {
+      "name": "get_conversation",
+      "description": "Read a specific messaging conversation by username or thread ID"
+    },
+    {
+      "name": "search_conversations",
+      "description": "Search messages by keyword"
+    },
+    {
+      "name": "send_message",
+      "description": "Send a message to a LinkedIn user"
     },
     {
       "name": "close_session",

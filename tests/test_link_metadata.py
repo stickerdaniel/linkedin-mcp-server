@@ -5,6 +5,7 @@ from urllib.parse import quote
 from linkedin_mcp_server.scraping.link_metadata import (
     RawReference,
     build_references,
+    classify_link,
     dedupe_references,
     normalize_url,
 )
@@ -496,6 +497,74 @@ class TestBuildReferences:
                 "context": "top card",
             }
         ]
+
+    def test_classifies_messaging_thread_url(self):
+        result = classify_link("https://www.linkedin.com/messaging/thread/abc123/")
+        assert result == ("messaging", "/messaging/thread/abc123/")
+
+    def test_classifies_messaging_thread_without_trailing_slash(self):
+        result = classify_link("https://www.linkedin.com/messaging/thread/abc123")
+        assert result == ("messaging", "/messaging/thread/abc123/")
+
+    def test_messaging_reference_caps(self):
+        from linkedin_mcp_server.scraping.link_metadata import _REFERENCE_CAPS
+
+        assert _REFERENCE_CAPS["inbox"] == 20
+        assert _REFERENCE_CAPS["conversation"] == 12
+
+    def test_inbox_context_derivation(self):
+        refs = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/messaging/thread/t1/",
+                    "text": "Chat with Alice",
+                },
+            ],
+            "inbox",
+        )
+        assert len(refs) == 1
+        assert refs[0]["kind"] == "messaging"
+        assert refs[0]["context"] == "conversation"
+
+    def test_inbox_participant_context(self):
+        refs = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/alice/",
+                    "text": "Alice Smith",
+                },
+            ],
+            "inbox",
+        )
+        assert len(refs) == 1
+        assert refs[0]["kind"] == "person"
+        assert refs[0]["context"] == "participant"
+
+    def test_conversation_participant_context(self):
+        refs = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/bob/",
+                    "text": "Bob Jones",
+                },
+            ],
+            "conversation",
+        )
+        assert len(refs) == 1
+        assert refs[0]["context"] == "participant"
+
+    def test_conversation_message_link_context(self):
+        refs = build_references(
+            [
+                {
+                    "href": "https://example.com/shared-doc",
+                    "text": "Shared Document",
+                },
+            ],
+            "conversation",
+        )
+        assert len(refs) == 1
+        assert refs[0]["context"] == "message link"
 
     def test_cross_page_dedupe_keeps_better_reference(self):
         references = dedupe_references(
