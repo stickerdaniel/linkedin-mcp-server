@@ -103,6 +103,17 @@ class TestLoginRoutes:
         response = client.get("/login")
         assert response.status_code == 400
 
+    def test_login_page_has_security_headers(self, client, provider):
+        provider._pending_auth_requests["req-hdr"] = {
+            "client_id": "test",
+            "params": None,
+            "created_at": time.time(),
+        }
+        response = client.get("/login?request_id=req-hdr")
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+
     def test_post_login_correct_password(self, client, provider):
         from mcp.server.auth.provider import AuthorizationParams
         from mcp.shared.auth import OAuthClientInformationFull

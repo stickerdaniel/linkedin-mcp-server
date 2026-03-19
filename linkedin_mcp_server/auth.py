@@ -13,7 +13,7 @@ import time
 from mcp.server.auth.provider import AuthorizationParams
 from mcp.shared.auth import OAuthClientInformationFull
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route
 
 from fastmcp.server.auth.providers.in_memory import (
@@ -24,6 +24,22 @@ from fastmcp.server.auth.providers.in_memory import (
 
 # Pending auth requests expire after 10 minutes
 _PENDING_REQUEST_TTL_SECONDS = 600
+
+_LOGIN_SECURITY_HEADERS = {
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
+def _html_response(content: str, status_code: int = 200) -> Response:
+    """HTMLResponse with security headers to prevent clickjacking and XSS."""
+    from starlette.responses import HTMLResponse
+
+    return HTMLResponse(
+        content, status_code=status_code, headers=_LOGIN_SECURITY_HEADERS
+    )
+
 
 # Max failed password attempts before the request is invalidated
 _MAX_FAILED_ATTEMPTS = 5
@@ -90,9 +106,9 @@ class PasswordOAuthProvider(InMemoryOAuthProvider):
     async def _render_login(self, request: Request) -> Response:
         request_id = request.query_params.get("request_id", "")
         if not request_id or request_id not in self._pending_auth_requests:
-            return HTMLResponse("Invalid or expired login request.", status_code=400)
+            return _html_response("Invalid or expired login request.", status_code=400)
 
-        return HTMLResponse(self._login_html(request_id))
+        return _html_response(self._login_html(request_id))
 
     async def _process_login(self, request: Request) -> Response:
         form = await request.form()
@@ -101,18 +117,18 @@ class PasswordOAuthProvider(InMemoryOAuthProvider):
 
         pending = self._pending_auth_requests.get(request_id)
         if not pending:
-            return HTMLResponse("Invalid or expired login request.", status_code=400)
+            return _html_response("Invalid or expired login request.", status_code=400)
 
         if not secrets.compare_digest(password, self._password):
             pending["failed_attempts"] = pending.get("failed_attempts", 0) + 1
             if pending["failed_attempts"] >= _MAX_FAILED_ATTEMPTS:
                 del self._pending_auth_requests[request_id]
-                return HTMLResponse(
+                return _html_response(
                     "Too many failed attempts. Please restart the authorization flow.",
                     status_code=403,
                 )
             remaining = _MAX_FAILED_ATTEMPTS - pending["failed_attempts"]
-            return HTMLResponse(
+            return _html_response(
                 self._login_html(
                     request_id,
                     error=f"Invalid password. {remaining} attempt(s) remaining.",
@@ -125,7 +141,7 @@ class PasswordOAuthProvider(InMemoryOAuthProvider):
 
         client = await self.get_client(pending["client_id"])
         if not client:
-            return HTMLResponse("Client not found.", status_code=400)
+            return _html_response("Client not found.", status_code=400)
 
         params: AuthorizationParams = pending["params"]
         scopes_list = params.scopes if params.scopes is not None else []
