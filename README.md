@@ -329,6 +329,12 @@ docker run --rm -i \
 5. You'll be redirected to the login page — enter your `OAUTH_PASSWORD`
 6. The connection is now authenticated
 
+**Retrieving the OAuth password (if stored in GCP Secret Manager):**
+
+```bash
+gcloud secrets versions access latest --secret=linkedin-mcp-oauth-password --project=YOUR_PROJECT
+```
+
 **Environment Variables:**
 
 | Variable | Description |
