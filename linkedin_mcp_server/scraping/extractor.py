@@ -25,6 +25,7 @@ from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
+    humanized_delay,
     scroll_job_sidebar,
     scroll_to_bottom,
 )
@@ -40,8 +41,8 @@ logger = logging.getLogger(__name__)
 
 WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
 
-# Delay between page navigations to avoid rate limiting
-_NAV_DELAY = 2.0
+# Delay between page navigations to avoid rate limiting (now randomized)
+_NAV_DELAY = humanized_delay  # callable: returns random float in [1.5, 4.0]
 
 # Backoff before retrying a rate-limited page
 _RATE_LIMIT_RETRY_DELAY = 5.0
@@ -596,7 +597,7 @@ class LinkedInExtractor:
                 continue
 
             if not first:
-                await asyncio.sleep(_NAV_DELAY)
+                await asyncio.sleep(_NAV_DELAY())
             first = False
 
             url = base_url + suffix
@@ -673,7 +674,7 @@ class LinkedInExtractor:
                 continue
 
             if not first:
-                await asyncio.sleep(_NAV_DELAY)
+                await asyncio.sleep(_NAV_DELAY())
             first = False
 
             url = base_url + suffix
@@ -988,7 +989,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await asyncio.sleep(_NAV_DELAY())
 
             url = (
                 base_url

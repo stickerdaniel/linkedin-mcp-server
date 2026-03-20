@@ -985,6 +985,43 @@ async def test_hard_reset_browser_calls_close_and_clear_profile():
 
 
 @pytest.mark.asyncio
+async def test_bridge_warms_up_browser_before_feed_validation(tmp_path):
+    """Bridge must warm up the browser (visit neutral sites) after cookie
+    injection and before feed validation to reduce CAPTCHA probability."""
+    _write_source_state(
+        tmp_path,
+        runtime_id="macos-arm64-host",
+        login_generation="gen-2",
+        with_source_storage_state=True,
+    )
+    first_browser = _make_mock_browser()
+    first_browser.materialize_storage_state_auth = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=first_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.warm_up_browser",
+            new_callable=AsyncMock,
+        ) as warm_up_mock,
+    ):
+        await get_or_create_browser()
+
+    warm_up_mock.assert_awaited_once_with(first_browser.page)
+
+
+@pytest.mark.asyncio
 async def test_bridge_does_not_navigate_before_cookie_injection(tmp_path):
     """Pre-import navigation generates fresh bcookie/JSESSIONID that conflict
     with macOS cookies injected later, causing blank feed in Docker.
@@ -1012,12 +1049,17 @@ async def test_bridge_does_not_navigate_before_cookie_injection(tmp_path):
             new_callable=AsyncMock,
             return_value=None,
         ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.warm_up_browser",
+            new_callable=AsyncMock,
+        ),
     ):
         await get_or_create_browser()
 
     # page.goto must be called ONCE — only for post-import feed validation.
     # A pre-import navigation would call it twice and generate conflicting
     # bcookie/JSESSIONID that prevent the injected macOS cookies from working.
+    # (warm_up_browser is mocked out to isolate this assertion)
     first_browser.page.goto.assert_awaited_once_with(
         "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
     )

@@ -17,6 +17,7 @@ from linkedin_mcp_server.core import (
     detect_rate_limit,
     is_logged_in,
     resolve_remember_me_prompt,
+    warm_up_browser,
 )
 
 from linkedin_mcp_server.common_utils import utcnow_iso
@@ -290,6 +291,7 @@ async def _bridge_runtime_profile(
             )
         await stabilize_navigation("post-import feed validation", logger)
         await record_page_trace(browser.page, "bridge-after-feed-validation")
+        await warm_up_browser(browser.page)
         if not persist_runtime:
             logger.info(
                 "Foreign runtime %s authenticated via fresh bridge "
