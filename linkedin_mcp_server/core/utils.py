@@ -15,8 +15,7 @@ async def detect_rate_limit(page: Page) -> None:
 
     Checks (in order):
     1. URL contains /checkpoint or /authwall (security challenge)
-    2. Page contains CAPTCHA iframe (bot detection)
-    3. Body text contains rate-limit phrases on error-shaped pages (throttling)
+    2. Body text contains rate-limit phrases on error-shaped pages (throttling)
 
     The body-text heuristic only runs on pages without a ``<main>`` element
     and with short body text (<2000 chars), since real rate-limit pages are
@@ -34,44 +33,6 @@ async def detect_rate_limit(page: Page) -> None:
             "You may need to verify your identity or wait before continuing.",
             suggested_wait_time=30,
         )
-
-    # Check for CAPTCHA.
-    # LinkedIn embeds hidden/invisible reCAPTCHA support iframes on normal pages,
-    # so only treat a CAPTCHA iframe as a challenge when it is actually visible.
-    try:
-        captcha_frames = page.locator(
-            'iframe[title*="captcha" i], iframe[src*="captcha" i]'
-        )
-        captcha_count = await captcha_frames.count()
-        for index in range(captcha_count):
-            frame = captcha_frames.nth(index)
-            frame_info = await frame.evaluate(
-                """el => {
-                    const style = window.getComputedStyle(el);
-                    const rect = el.getBoundingClientRect();
-                    const src = el.getAttribute('src') || '';
-                    return {
-                        src,
-                        visible:
-                            rect.width > 0 &&
-                            rect.height > 0 &&
-                            style.display !== 'none' &&
-                            style.visibility !== 'hidden' &&
-                            style.opacity !== '0',
-                    };
-                }"""
-            )
-            if frame_info["visible"] and "size=invisible" not in frame_info["src"]:
-                raise RateLimitError(
-                    "CAPTCHA challenge detected. Manual intervention required.",
-                    suggested_wait_time=30,
-                )
-    except RateLimitError:
-        raise
-    except PlaywrightTimeoutError:
-        pass
-    except Exception as e:
-        logger.debug("Error checking for CAPTCHA: %s", e)
 
     # Check for rate limit messages — only on error-shaped pages.
     # Real rate-limit pages have no <main> element and short body text.
