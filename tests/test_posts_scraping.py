@@ -1,15 +1,12 @@
 """Tests for scraping/posts.py: normalize URL, get_post_content, get_my_recent_posts, get_post_comments, find_unreplied_comments."""
 
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from linkedin_mcp_server.scraping.extractor import ExtractedSection, _RATE_LIMITED_MSG
+from linkedin_mcp_server.scraping.cache import scraping_cache
 from linkedin_mcp_server.scraping.posts import (
-    _cache_get,
-    _cache_put,
-    _comment_cache,
     _extract_author_info,
     _extract_engagement_metrics,
     _detect_post_type,
@@ -239,7 +236,7 @@ class TestGetPostComments:
     ):
         from linkedin_mcp_server.core.exceptions import RateLimitError
 
-        _comment_cache.clear()
+        scraping_cache.clear()
         mock_rate_limit.side_effect = RateLimitError(
             "Rate limited", suggested_wait_time=60
         )
@@ -558,28 +555,29 @@ class TestGetNotifications:
 
 
 class TestCache:
-    """Tests for inline TTL cache functions."""
+    """Tests for ScrapingCache used by post comments."""
 
     def setup_method(self):
-        _comment_cache.clear()
+        scraping_cache.clear()
 
     def test_cache_put_and_get(self):
         data = [{"comment_id": "c1"}]
-        _cache_put("key1", data)
-        assert _cache_get("key1") == data
+        scraping_cache.put("key1", data)
+        assert scraping_cache.get("key1") == data
 
     def test_cache_get_missing_key(self):
-        assert _cache_get("nonexistent") is None
+        assert scraping_cache.get("nonexistent") is None
 
     def test_cache_expired_entry(self):
-        _comment_cache["expired"] = (time.monotonic() - 400, [{"id": "old"}])
-        assert _cache_get("expired") is None
-        assert "expired" not in _comment_cache
+        scraping_cache.put("expired", [{"id": "old"}], ttl=0.0)
+        import time as _time
+        _time.sleep(0.01)
+        assert scraping_cache.get("expired") is None
 
     def test_cache_not_expired(self):
         data = [{"id": "fresh"}]
-        _comment_cache["fresh"] = (time.monotonic() - 100, data)
-        assert _cache_get("fresh") == data
+        scraping_cache.put("fresh", data, ttl=600.0)
+        assert scraping_cache.get("fresh") == data
 
 
 class TestExtractEngagementMetrics:
@@ -1053,13 +1051,13 @@ class TestGetPostCommentsCache:
     """Tests for cache integration in get_post_comments."""
 
     def setup_method(self):
-        _comment_cache.clear()
+        scraping_cache.clear()
 
     async def test_returns_cached_comments(
         self, mock_scroll, mock_modal, mock_rate_limit, mock_page
     ):
         cached_data = [{"comment_id": "c1", "author_name": "Cached", "text": "cached"}]
-        _cache_put("comments:https://www.linkedin.com/feed/update/urn:li:activity:111/:user=", cached_data)
+        scraping_cache.put("comments:https://www.linkedin.com/feed/update/urn:li:activity:111/:user=", cached_data)
         result = await get_post_comments(mock_page, "111")
         assert result == cached_data
         mock_page.goto.assert_not_awaited()
@@ -1082,7 +1080,7 @@ class TestGetPostCommentsCache:
         await get_post_comments(mock_page, "222")
         url = "https://www.linkedin.com/feed/update/urn:li:activity:222/"
         key = f"comments:{url}:user="
-        assert _cache_get(key) is not None
+        assert scraping_cache.get(key) is not None
 
 
 @patch("linkedin_mcp_server.scraping.posts.detect_rate_limit", new_callable=AsyncMock)

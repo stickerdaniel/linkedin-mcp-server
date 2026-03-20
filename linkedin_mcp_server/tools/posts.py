@@ -6,10 +6,11 @@ person posts, feed posts, and unreplied comment detection.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
+from pydantic import Field
 
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_extractor
@@ -40,7 +41,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
     )
     async def get_my_recent_posts(
         ctx: Context,
-        limit: int = 20,
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
         extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
@@ -141,7 +142,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
     )
     async def get_notifications(
         ctx: Context,
-        limit: int = 20,
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
         extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
@@ -183,7 +184,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
     async def get_person_posts(
         linkedin_username: str,
         ctx: Context,
-        limit: int = 20,
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
         extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
@@ -226,7 +227,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
     )
     async def get_feed_posts(
         ctx: Context,
-        limit: int = 20,
+        limit: Annotated[int, Field(ge=1, le=100)] = 20,
         extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """

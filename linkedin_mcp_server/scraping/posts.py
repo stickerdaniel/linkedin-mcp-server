@@ -22,28 +22,8 @@ from linkedin_mcp_server.core.utils import (
     scroll_to_bottom,
     wait_for_cooldown,
 )
+from linkedin_mcp_server.scraping.cache import scraping_cache
 from linkedin_mcp_server.scraping.extractor import LinkedInExtractor, _RATE_LIMITED_MSG
-
-# Simple TTL cache for post comments (replaces removed scraping.cache module)
-_comment_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-_CACHE_TTL = 300.0  # 5 minutes
-
-
-def _cache_get(key: str) -> list[dict[str, Any]] | None:
-    entry = _comment_cache.get(key)
-    if entry is None:
-        return None
-    ts, data = entry
-    import time
-    if time.monotonic() - ts > _CACHE_TTL:
-        del _comment_cache[key]
-        return None
-    return data
-
-
-def _cache_put(key: str, data: list[dict[str, Any]]) -> None:
-    import time
-    _comment_cache[key] = (time.monotonic(), data)
 
 logger = logging.getLogger(__name__)
 _FEED_URL = "https://www.linkedin.com/feed/"
@@ -83,12 +63,12 @@ async def _extract_engagement_metrics(page: Page) -> dict[str, Any]:
             // Helper: parse "1,234" or "1.234" or "1K" or "1.2K" to int
             function parseCount(s) {
                 if (!s) return null;
-                s = s.trim().replace(/,/g, '').replace(/\\./g, '');
+                s = s.trim().replace(/,/g, '');
                 const kMatch = s.match(/([\\d.]+)\\s*[kK]/);
                 if (kMatch) return Math.round(parseFloat(kMatch[1]) * 1000);
                 const mMatch = s.match(/([\\d.]+)\\s*[mM]/);
                 if (mMatch) return Math.round(parseFloat(mMatch[1]) * 1000000);
-                const num = parseInt(s.replace(/\\D/g, ''), 10);
+                const num = parseInt(s.replace(/[.,]/g, '').replace(/\\D/g, ''), 10);
                 return isNaN(num) ? null : num;
             }
 
@@ -798,7 +778,7 @@ async def get_post_comments(
     url = _normalize_post_url(post_url_or_id)
     user_tag = current_user_name or ""
     cache_key = f"comments:{url}:user={user_tag}"
-    cached = _cache_get(cache_key)
+    cached = scraping_cache.get(cache_key)
     if cached is not None:
         return cached
 
@@ -928,7 +908,7 @@ async def get_post_comments(
     except Exception as e:
         logger.warning("get_post_comments extraction failed for %s: %s", url, e)
     if comments:
-        _cache_put(cache_key, comments)
+        scraping_cache.put(cache_key, comments)
     return comments
 
 
