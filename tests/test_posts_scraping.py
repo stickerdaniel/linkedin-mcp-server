@@ -33,11 +33,10 @@ class TestNormalizePostUrl:
         url = "https://www.linkedin.com/feed/update/urn:li:activity:123456/"
         assert _normalize_post_url(url) == url
 
-    def test_full_url_without_trailing_slash(self):
+    def test_full_url_without_trailing_slash_gets_normalized(self):
         url = "https://www.linkedin.com/feed/update/urn:li:activity:123456"
         result = _normalize_post_url(url)
-        assert "urn:li:activity:123456" in result
-        assert result.startswith("https://")
+        assert result == "https://www.linkedin.com/feed/update/urn:li:activity:123456/"
 
     def test_numeric_id_normalized_to_full_url(self):
         result = _normalize_post_url("987654321")

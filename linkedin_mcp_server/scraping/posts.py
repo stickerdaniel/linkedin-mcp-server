@@ -37,7 +37,7 @@ def _normalize_post_url(post_url_or_id: str) -> str:
     """Return canonical post URL from post_url or post_id."""
     s = post_url_or_id.strip()
     if s.startswith("http"):
-        return s
+        return s.rstrip("/") + "/"
     # Allow raw numeric id or urn
     match = _ACTIVITY_URN_PATTERN.search(s)
     if match:
@@ -910,8 +910,7 @@ async def get_post_comments(
         raise
     except Exception as e:
         logger.warning("get_post_comments extraction failed for %s: %s", url, e)
-    if comments:
-        scraping_cache.put(cache_key, comments)
+    scraping_cache.put(cache_key, comments, ttl=60.0 if not comments else None)
     return comments
 
 
@@ -1072,7 +1071,8 @@ async def _unreplied_via_notifications(
                 const fullUrl = href.startsWith('http') ? href : 'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
                 if (seen.has(fullUrl)) continue;
                 seen.add(fullUrl);
-                const text = (a.closest('li') || a.closest('div')).innerText || '';
+                const container = a.closest('li') || a.closest('div') || a.closest('section') || a;
+                const text = (container?.innerText || '').trim();
                 const textLower = text.toLowerCase();
                 const isCommentNotif = commentTerms.some(t => textLower.includes(t)) || href.includes('comment');
                 if (!isCommentNotif) continue;
