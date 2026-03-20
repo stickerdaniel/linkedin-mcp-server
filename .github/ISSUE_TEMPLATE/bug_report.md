@@ -1,44 +1,27 @@
 ---
 name: Bug Report
-about: Create a report to help us improve the LinkedIn MCP server
+about: Something is broken or not working as expected
 title: '[BUG] '
 labels: ['bug']
 assignees: ''
 
 ---
 
-## Installation Method
-- [ ] Docker (specify docker image version/tag): _._._
-- [ ] Claude Desktop DXT extension (specify docker image version/tag): _._._
-- [ ] Local Python setup
+## Setup
 
-## When does the error occur?
-- [ ] At startup
-- [ ] During tool call (specify which tool):
-  - [ ] get_person_profile
-  - [ ] get_company_profile
-  - [ ] get_job_details
-  - [ ] search_jobs
-  - [ ] close_session
+<!-- How you run the server (uvx, Docker, local dev, DXT extension, etc.), which MCP client, and what OS. -->
 
-## MCP Client Configuration
+## What Happened
 
-**Claude Desktop Config** (`/Users/[username]/Library/Application Support/Claude/claude_desktop_config.json`):
-```json
-{
-  "mcpServers": {
-    "linkedin": {
-      // Your configuration here (remove sensitive credentials)
-    }
-  }
-}
+<!-- What broke and what you expected instead. -->
+
+## Steps to Reproduce
+
+<!-- Minimal steps to trigger the bug. Include the tool name and arguments if relevant. -->
+
+## Logs
+
+<!-- Paste relevant log output. Remove credentials. -->
+
 ```
-
-## MCP Client Logs
-**Claude Desktop Logs** (`/Users/[username]/Library/Logs/Claude/mcp-server-LinkedIn MCP Server.log`):
 ```
-Paste relevant log entries here
-```
-
-## Error Description
-What went wrong and what did you expect to happen?
