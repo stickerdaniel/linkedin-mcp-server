@@ -34,6 +34,7 @@ from linkedin_mcp_server.session_state import (
     profile_exists as session_profile_exists,
     runtime_profile_dir,
     runtime_storage_state_path,
+    source_storage_state_path,
     write_runtime_state,
 )
 
@@ -246,6 +247,7 @@ async def _bridge_runtime_profile(
     profile_dir: Path,
     *,
     cookie_path: Path,
+    source_storage_path: Path,
     source_state: SourceState,
     runtime_id: str,
     launch_options: dict[str, str],
@@ -267,12 +269,12 @@ async def _bridge_runtime_profile(
             "bridge-browser-started",
             extra={"profile_dir": str(profile_dir)},
         )
-        await browser.page.goto(
-            "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
-        )
-        await stabilize_navigation("pre-import feed navigation", logger)
-        await record_page_trace(browser.page, "bridge-after-pre-import-feed")
-        if not await browser.import_cookies(cookie_path):
+        imported = False
+        if source_storage_path.exists():
+            imported = await browser.materialize_storage_state_auth(source_storage_path)
+        if not imported:
+            imported = await browser.import_cookies(cookie_path)
+        if not imported:
             raise AuthenticationError(
                 "Portable authentication could not be imported. Run with --login to create a fresh source session."
             )
@@ -381,6 +383,7 @@ async def get_or_create_browser(
     launch_options, viewport = _launch_options()
     source_profile_dir = get_profile_dir()
     cookie_path = portable_cookie_path(source_profile_dir)
+    source_storage_path = source_storage_state_path(source_profile_dir)
     source_state = load_source_state(source_profile_dir)
     if (
         not source_state
@@ -421,6 +424,7 @@ async def get_or_create_browser(
         browser = await _bridge_runtime_profile(
             runtime_profile_dir(current_runtime_id, source_profile_dir),
             cookie_path=cookie_path,
+            source_storage_path=source_storage_path,
             source_state=source_state,
             runtime_id=current_runtime_id,
             launch_options=launch_options,
@@ -482,6 +486,7 @@ async def get_or_create_browser(
     browser = await _bridge_runtime_profile(
         derived_profile_dir,
         cookie_path=cookie_path,
+        source_storage_path=source_storage_path,
         source_state=source_state,
         runtime_id=current_runtime_id,
         launch_options=launch_options,

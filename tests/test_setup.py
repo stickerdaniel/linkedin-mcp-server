@@ -27,6 +27,7 @@ def _make_browser(*, export_cookies: bool) -> MagicMock:
         return_value=[{"name": "li_at", "domain": ".linkedin.com"}]
     )
     browser.export_cookies = AsyncMock(return_value=export_cookies)
+    browser.export_storage_state = AsyncMock(return_value=True)
     return browser
 
 

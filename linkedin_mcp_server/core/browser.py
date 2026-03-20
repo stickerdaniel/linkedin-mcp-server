@@ -218,6 +218,131 @@ class BrowserManager:
             logger.exception("Failed to export storage state to %s", storage_path)
             return False
 
+    async def import_storage_state(self, path: str | Path) -> bool:
+        """Import LinkedIn cookies from a Playwright storage-state snapshot."""
+        if not self._context:
+            logger.warning("Cannot import storage state: no browser context")
+            return False
+
+        storage_path = Path(path)
+        if not storage_path.exists():
+            logger.debug("No source storage-state file at %s", storage_path)
+            return False
+
+        try:
+            payload = json.loads(storage_path.read_text())
+            all_cookies = payload.get("cookies") or []
+            cookies = [
+                self._normalize_cookie_domain(c)
+                for c in all_cookies
+                if "linkedin.com" in c.get("domain", "")
+            ]
+
+            has_li_at = any(c.get("name") == "li_at" for c in cookies)
+            if not has_li_at:
+                logger.warning("No li_at cookie found in storage-state %s", path)
+                return False
+
+            await self._context.add_cookies(cookies)  # type: ignore[arg-type]
+            logger.info(
+                "Imported %d LinkedIn cookies from storage-state %s (li_at=%s): %s",
+                len(cookies),
+                storage_path,
+                has_li_at,
+                ", ".join(c["name"] for c in cookies),
+            )
+            return True
+        except Exception:
+            logger.exception("Failed to import storage state from %s", storage_path)
+            return False
+
+    async def materialize_storage_state_auth(self, path: str | Path) -> bool:
+        """Warm an authenticated Linux-native cookie jar from source storage state.
+
+        LinkedIn accepts source ``storage_state`` reliably when it is applied as
+        part of a fresh non-persistent context creation. The warmed cookies from
+        that context can then be copied into the persistent runtime profile.
+        """
+        if not self._context or not self._playwright:
+            logger.warning(
+                "Cannot materialize storage state auth: browser context not ready"
+            )
+            return False
+
+        storage_path = Path(path)
+        if not storage_path.exists():
+            logger.debug("No source storage-state file at %s", storage_path)
+            return False
+
+        try:
+            payload = json.loads(storage_path.read_text())
+            source_cookies = payload.get("cookies") or []
+            has_li_at = any(
+                c.get("name") == "li_at"
+                and "linkedin.com" in c.get("domain", "")
+                for c in source_cookies
+            )
+            if not has_li_at:
+                logger.warning("No li_at cookie found in storage-state %s", path)
+                return False
+        except Exception:
+            logger.exception("Failed to read storage state from %s", storage_path)
+            return False
+
+        temp_browser = None
+        temp_context = None
+        try:
+            temp_browser = await self._playwright.chromium.launch(**self.launch_options)
+            context_options: dict[str, Any] = {
+                "storage_state": storage_path,
+                "viewport": self.viewport,
+            }
+            if self.user_agent:
+                context_options["user_agent"] = self.user_agent
+            temp_context = await temp_browser.new_context(**context_options)
+            page = await temp_context.new_page()
+            await page.goto(
+                "https://www.linkedin.com/feed/",
+                wait_until="domcontentloaded",
+            )
+            cookies = [
+                self._normalize_cookie_domain(c)
+                for c in await temp_context.cookies()
+                if "linkedin.com" in c.get("domain", "")
+            ]
+            has_li_at = any(c.get("name") == "li_at" for c in cookies)
+            if not has_li_at:
+                logger.warning(
+                    "No li_at cookie remained after warming storage-state %s",
+                    storage_path,
+                )
+                return False
+            await self._context.add_cookies(cookies)  # type: ignore[arg-type]
+            logger.info(
+                "Materialized %d LinkedIn cookies from source storage-state %s "
+                "into persistent context",
+                len(cookies),
+                storage_path,
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "Failed to materialize persistent auth from storage-state %s",
+                storage_path,
+            )
+            return False
+        finally:
+            if temp_context is not None:
+                try:
+                    await temp_context.close()
+                except Exception:
+                    logger.debug("Failed to close temporary warm-up context")
+            if temp_browser is not None:
+                try:
+                    await temp_browser.close()
+                except Exception:
+                    logger.debug("Failed to close temporary warm-up browser")
+
     _BRIDGE_COOKIE_PRESETS = {
         "bridge_core": frozenset(
             {

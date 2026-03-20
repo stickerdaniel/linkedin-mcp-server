@@ -14,7 +14,11 @@ from linkedin_mcp_server.core import (
     wait_for_manual_login,
     warm_up_browser,
 )
-from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
+from linkedin_mcp_server.session_state import (
+    portable_cookie_path,
+    source_storage_state_path,
+    write_source_state,
+)
 
 from linkedin_mcp_server.drivers.browser import get_profile_dir
 
@@ -84,6 +88,14 @@ async def interactive_login(
             print("   Cookies exported for Docker portability")
             source_state = write_source_state(user_data_dir)
             print(f"   Source session generation: {source_state.login_generation}")
+            if await browser.export_storage_state(
+                source_storage_state_path(user_data_dir), indexed_db=True
+            ):
+                print("   Storage state exported for Docker portability")
+            else:
+                print(
+                    "   Warning: storage-state export failed; bridge will fall back to cookies only."
+                )
         else:
             print(
                 "   Warning: cookie export failed; Docker bridge may not work. "

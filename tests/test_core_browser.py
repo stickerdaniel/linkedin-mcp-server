@@ -120,6 +120,138 @@ async def test_import_cookies_preserves_existing_cookies(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_import_storage_state_imports_all_linkedin_cookies(tmp_path):
+    browser, context = _make_browser_manager(tmp_path)
+    storage_state_path = tmp_path / "source-storage-state.json"
+    payload = {
+        "cookies": [
+            _make_cookie("li_at", domain=".www.linkedin.com"),
+            _make_cookie("JSESSIONID", domain="www.linkedin.com"),
+            _make_cookie("_px3", domain="www.linkedin.com"),
+            _make_cookie("li_theme", domain=".www.linkedin.com"),
+            _make_cookie("session", domain=".example.com"),
+        ],
+        "origins": [],
+    }
+    storage_state_path.write_text(json.dumps(payload))
+
+    imported = await browser.import_storage_state(storage_state_path)
+
+    assert imported is True
+    context.add_cookies.assert_awaited_once_with(
+        [
+            _make_cookie("li_at"),
+            _make_cookie("JSESSIONID"),
+            _make_cookie("_px3"),
+            _make_cookie("li_theme"),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_import_storage_state_requires_li_at(tmp_path):
+    browser, context = _make_browser_manager(tmp_path)
+    storage_state_path = tmp_path / "source-storage-state.json"
+    storage_state_path.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    _make_cookie("JSESSIONID", domain=".www.linkedin.com"),
+                    _make_cookie("bcookie"),
+                ],
+                "origins": [],
+            }
+        )
+    )
+
+    imported = await browser.import_storage_state(storage_state_path)
+
+    assert imported is False
+    context.add_cookies.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_materialize_storage_state_auth_warms_cookies_via_temporary_context(
+    tmp_path,
+):
+    browser, context = _make_browser_manager(tmp_path)
+    storage_state_path = tmp_path / "source-storage-state.json"
+    storage_state_path.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    _make_cookie("li_at", domain=".www.linkedin.com"),
+                    _make_cookie("JSESSIONID", domain="www.linkedin.com"),
+                ],
+                "origins": [],
+            }
+        )
+    )
+
+    temp_page = MagicMock()
+    temp_page.goto = AsyncMock()
+    temp_context = MagicMock()
+    temp_context.new_page = AsyncMock(return_value=temp_page)
+    temp_context.cookies = AsyncMock(
+        return_value=[
+            _make_cookie("li_at", domain=".www.linkedin.com"),
+            _make_cookie("JSESSIONID", domain="www.linkedin.com"),
+            _make_cookie("_px3", domain=".www.linkedin.com"),
+        ]
+    )
+    temp_context.close = AsyncMock()
+    temp_browser = MagicMock()
+    temp_browser.new_context = AsyncMock(return_value=temp_context)
+    temp_browser.close = AsyncMock()
+    playwright = MagicMock()
+    playwright.chromium.launch = AsyncMock(return_value=temp_browser)
+    browser._playwright = playwright
+
+    imported = await browser.materialize_storage_state_auth(storage_state_path)
+
+    assert imported is True
+    playwright.chromium.launch.assert_awaited_once_with(**browser.launch_options)
+    temp_browser.new_context.assert_awaited_once_with(
+        storage_state=storage_state_path,
+        viewport=browser.viewport,
+    )
+    temp_page.goto.assert_awaited_once_with(
+        "https://www.linkedin.com/feed/",
+        wait_until="domcontentloaded",
+    )
+    context.add_cookies.assert_awaited_once_with(
+        [
+            _make_cookie("li_at"),
+            _make_cookie("JSESSIONID"),
+            _make_cookie("_px3"),
+        ]
+    )
+    temp_context.close.assert_awaited_once()
+    temp_browser.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_materialize_storage_state_auth_requires_li_at_in_source_state(tmp_path):
+    browser, context = _make_browser_manager(tmp_path)
+    storage_state_path = tmp_path / "source-storage-state.json"
+    storage_state_path.write_text(
+        json.dumps(
+            {
+                "cookies": [_make_cookie("JSESSIONID", domain=".www.linkedin.com")],
+                "origins": [],
+            }
+        )
+    )
+    browser._playwright = MagicMock()
+
+    imported = await browser.materialize_storage_state_auth(storage_state_path)
+
+    assert imported is False
+    context.add_cookies.assert_not_awaited()
+    browser._playwright.chromium.launch.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_export_storage_state_calls_context_storage_state(tmp_path):
     browser, context = _make_browser_manager(tmp_path)
     storage_state_path = tmp_path / "storage-state.json"
