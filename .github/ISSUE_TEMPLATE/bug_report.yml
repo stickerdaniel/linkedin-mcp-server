@@ -1,0 +1,35 @@
+name: Bug Report
+description: Something is broken or not working as expected
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: input
+    id: setup
+    attributes:
+      label: Setup
+      description: How you run the server, which MCP client, and what OS.
+      placeholder: "e.g. uvx on macOS, Claude Desktop"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What Happened
+      description: What broke and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to trigger the bug. Include the tool name and arguments if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant log output. Remove credentials.
+      render: shell
+    validations:
+      required: false
