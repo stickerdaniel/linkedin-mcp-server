@@ -1,20 +1,20 @@
 ---
 name: Feature Request
-about: Suggest an idea for the LinkedIn MCP server
+about: Suggest an improvement or new capability
 title: '[FEATURE] '
 labels: ['enhancement']
 assignees: ''
 
 ---
 
-## Feature description
-Describe what you want to happen.
+## Feature Description
 
-## Use case
-Why this feature is useful.
+<!-- What you want to happen. -->
 
-## Suggested implementation
-If you have a specific idea for how to implement this feature, please describe it here.
+## Use Case
 
-## Additional context
-Add any other details that would help.
+<!-- Why this is useful. -->
+
+## Suggested Approach
+
+<!-- Optional. Delete this section if you don't have a specific idea. -->
