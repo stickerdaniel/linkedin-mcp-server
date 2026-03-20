@@ -1,6 +1,5 @@
 """Tests for scraping/posts.py: normalize URL, get_post_content, get_my_recent_posts, get_post_comments, find_unreplied_comments."""
 
-import math
 import re
 from unittest.mock import AsyncMock, MagicMock, patch
 

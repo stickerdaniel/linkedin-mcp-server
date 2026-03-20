@@ -217,6 +217,7 @@ def _make_browser(
         headless=_headless,
         slow_mo=config.browser.slow_mo,
         user_agent=config.browser.user_agent,
+        channel=config.browser.channel,
         viewport=viewport,
         **launch_options,
     )

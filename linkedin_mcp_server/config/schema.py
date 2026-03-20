@@ -24,6 +24,7 @@ class BrowserConfig:
     viewport_width: int = 1280
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
+    channel: str | None = "chrome"  # Browser channel ("chrome" for real Chrome)
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
     user_data_dir: str = "~/.linkedin-mcp/profile"  # Persistent browser profile
 

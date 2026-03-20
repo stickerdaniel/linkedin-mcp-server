@@ -210,7 +210,10 @@ async def test_materialize_storage_state_auth_warms_cookies_via_temporary_contex
     imported = await browser.materialize_storage_state_auth(storage_state_path)
 
     assert imported is True
-    playwright.chromium.launch.assert_awaited_once_with(**browser.launch_options)
+    expected_launch = {**browser.launch_options}
+    if browser.channel:
+        expected_launch["channel"] = browser.channel
+    playwright.chromium.launch.assert_awaited_once_with(**expected_launch)
     temp_browser.new_context.assert_awaited_once_with(
         storage_state=storage_state_path,
         viewport=browser.viewport,

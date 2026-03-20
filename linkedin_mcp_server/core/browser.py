@@ -35,6 +35,7 @@ class BrowserManager:
         slow_mo: int = 0,
         viewport: dict[str, int] | None = None,
         user_agent: str | None = None,
+        channel: str | None = "chrome",
         **launch_options: Any,
     ):
         self.user_data_dir = str(Path(user_data_dir).expanduser())
@@ -42,6 +43,7 @@ class BrowserManager:
         self.slow_mo = slow_mo
         self.viewport = viewport or {"width": 1280, "height": 720}
         self.user_agent = user_agent
+        self.channel = channel
         self.launch_options = launch_options
 
         self._playwright: Playwright | None = None
@@ -74,6 +76,8 @@ class BrowserManager:
                 **self.launch_options,
             }
 
+            if self.channel:
+                context_options["channel"] = self.channel
             if self.user_agent:
                 context_options["user_agent"] = self.user_agent
 
@@ -292,7 +296,10 @@ class BrowserManager:
         temp_browser = None
         temp_context = None
         try:
-            temp_browser = await self._playwright.chromium.launch(**self.launch_options)
+            launch_opts = {**self.launch_options}
+            if self.channel:
+                launch_opts["channel"] = self.channel
+            temp_browser = await self._playwright.chromium.launch(**launch_opts)
             context_options: dict[str, Any] = {
                 "storage_state": storage_path,
                 "viewport": self.viewport,
