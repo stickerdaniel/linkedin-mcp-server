@@ -40,7 +40,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 | Tool | Description | Status |
 |------|-------------|--------|
-| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, contact_info) | Working |
+| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, contact_info, posts) | Working |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | Working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | Working |
 | `get_my_recent_posts` | List recent posts from the logged-in user's feed (post_url, post_id, text_preview, created_at) | Working |
@@ -48,10 +48,16 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `get_post_content` | Get the full text content of a specific post (by post_url or post_id) | Working |
 | `find_unreplied_comments` | Find comments on your posts that you have not replied to (uses notifications when possible) | Working |
 | `get_notifications` | Get recent notifications (comments, reactions, connections, mentions, jobs, etc.) | Working |
+| `get_person_posts` | Get recent posts from a specific person's profile | Working |
+| `get_feed_posts` | Get posts from the logged-in user's home feed (algorithmically-surfaced) | Working |
 | `search_jobs` | Search for jobs with keywords and location filters | Working |
 | `search_people` | Search for people by keywords and location | Working |
 | `get_job_details` | Get detailed information about a specific job posting | Working |
 | `close_session` | Close browser session and clean up resources | Working |
+
+Tool responses keep readable `sections` text and may also include a compact `references` map keyed by section. Each reference includes a typed target, a relative LinkedIn path (or absolute external URL), and a short label/context when available.
+
+When one section fails but the overall tool call still completes, responses may also include `section_errors`. Each entry contains structured diagnostics for that section, including the error type/message, a compact runtime summary, trace/log locations, matching-open-issue hints when available, and the path to a generated issue-ready markdown report with the full session details.
 
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
@@ -105,7 +111,7 @@ flowchart LR
 
 ## 🚀 uvx Setup (Recommended - Universal)
 
-**Prerequisites:** Install uv and run `uvx patchright install chromium` to set up the browser.
+**Prerequisites:** [Install uv](https://docs.astral.sh/uv/getting-started/installation/) and run `uvx patchright install chromium` to set up the browser.
 
 ### Installation
 
@@ -177,6 +183,10 @@ uvx linkedin-scraper-mcp --transport streamable-http --host 127.0.0.1 --port 808
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
+Tool calls are serialized within a single server process to protect the shared
+LinkedIn browser session. Concurrent client requests queue instead of running in
+parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
+
 **Test with mcp inspector:**
 
 1. Install and run mcp inspector ```bunx @modelcontextprotocol/inspector```
@@ -230,13 +240,13 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 
 Docker runs headless (no browser window), so you need to create a browser profile locally first and mount it into the container.
 
-**Step 1: Create profile using uvx (one-time setup)**
+**Step 1: Create profile on the host (one-time setup)**
 
 ```bash
 uvx linkedin-scraper-mcp --login
 ```
 
-This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile is saved to `~/.linkedin-mcp/profile/`.
+This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. If you experience stability issues with Docker, consider using the [uvx setup](#-uvx-setup-recommended---universal) instead.
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -256,7 +266,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```
 
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again locally.
+> Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx linkedin-scraper-mcp --login` again if you encounter authentication issues.
 
 > [!NOTE]
 > **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
@@ -280,7 +290,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--logout` - Clear stored LinkedIn browser profile
+- `--logout` - Clear all stored LinkedIn auth state, including source and derived runtime profiles
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (rarely needed in Docker)
@@ -324,6 +334,7 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
+- If Docker auth becomes stale after you re-login on the host, restart Docker once so it can fresh-bridge from the new source session generation.
 
 **Timeout issues:**
 
@@ -395,7 +406,7 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 
 ## 🐍 Local Setup (Develop & Contribute)
 
-Contributions are welcome! Please [open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) first to discuss the feature or bug fix before submitting a PR. This helps align on the approach before any code is written.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture guidelines and checklists. Please [open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) first to discuss the feature or bug fix before submitting a PR.
 
 **Prerequisites:** [Git](https://git-scm.com/downloads) and [uv](https://docs.astral.sh/uv/) installed
 
@@ -521,7 +532,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 Built with [FastMCP](https://gofastmcp.com/) and [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python).
 
-⚠️ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
 
 ## License
 

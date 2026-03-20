@@ -22,8 +22,28 @@ from linkedin_mcp_server.core.utils import (
     scroll_to_bottom,
     wait_for_cooldown,
 )
-from linkedin_mcp_server.scraping.cache import scraping_cache
-from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor, _RATE_LIMITED_MSG
+
+# Simple TTL cache for post comments (replaces removed scraping.cache module)
+_comment_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_CACHE_TTL = 300.0  # 5 minutes
+
+
+def _cache_get(key: str) -> list[dict[str, Any]] | None:
+    entry = _comment_cache.get(key)
+    if entry is None:
+        return None
+    ts, data = entry
+    import time
+    if time.monotonic() - ts > _CACHE_TTL:
+        del _comment_cache[key]
+        return None
+    return data
+
+
+def _cache_put(key: str, data: list[dict[str, Any]]) -> None:
+    import time
+    _comment_cache[key] = (time.monotonic(), data)
 
 logger = logging.getLogger(__name__)
 _FEED_URL = "https://www.linkedin.com/feed/"
@@ -243,18 +263,24 @@ async def get_post_content(
     """
     url = _normalize_post_url(post_url_or_id)
     extractor = LinkedInExtractor(page)
-    text = await extractor.extract_page(url)
+    extracted = await extractor.extract_page(url, section_name="post_content")
 
     sections: dict[str, str] = {}
-    if text:
-        sections["post_content"] = text
+    references: dict[str, list] = {}
+    section_errors: dict[str, dict[str, Any]] = {}
+    if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+        sections["post_content"] = extracted.text
+        if extracted.references:
+            references["post_content"] = extracted.references
+    elif extracted.error:
+        section_errors["post_content"] = extracted.error
 
     # Extract engagement metrics, post type, and author from the loaded page
     engagement = await _extract_engagement_metrics(page)
     post_type = await _detect_post_type(page)
     author = await _extract_author_info(page)
 
-    return {
+    result: dict[str, Any] = {
         "url": url,
         "sections": sections,
         "pages_visited": [url],
@@ -263,6 +289,11 @@ async def get_post_content(
         "post_type": post_type,
         "author": author,
     }
+    if references:
+        result["references"] = references
+    if section_errors:
+        result["section_errors"] = section_errors
+    return result
 
 
 async def _get_current_user_name(page: Page) -> str | None:
@@ -767,7 +798,7 @@ async def get_post_comments(
     url = _normalize_post_url(post_url_or_id)
     user_tag = current_user_name or ""
     cache_key = f"comments:{url}:user={user_tag}"
-    cached = scraping_cache.get(cache_key)
+    cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -897,7 +928,7 @@ async def get_post_comments(
     except Exception as e:
         logger.warning("get_post_comments extraction failed for %s: %s", url, e)
     if comments:
-        scraping_cache.put(cache_key, comments)
+        _cache_put(cache_key, comments)
     return comments
 
 
@@ -1028,6 +1059,11 @@ async def _unreplied_via_notifications(
     """
     Try to get unreplied comments from notifications page.
     Returns list of unreplied comment items or None if notifications path failed.
+
+    Note: since_days is accepted for interface consistency but is NOT enforced
+    in the notifications fast path. LinkedIn notifications lack reliable
+    machine-readable timestamps, so filtering by age is best-effort only.
+    The fallback path (scanning posts) does honor since_days.
     """
     try:
         await wait_for_cooldown()
