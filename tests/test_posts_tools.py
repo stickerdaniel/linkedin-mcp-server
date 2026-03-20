@@ -295,6 +295,115 @@ class TestFindUnrepliedComments:
                 )
 
 
+class TestStripNoneIntegration:
+    """Verify strip_none is applied at tool boundary with None-heavy payloads."""
+
+    async def test_my_recent_posts_strips_none_fields(self, mock_context):
+        mock_extractor = _make_extractor_with_page()
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_my_recent_posts")
+
+        with patch(
+            "linkedin_mcp_server.tools.posts.scrape_get_my_recent_posts",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "post_url": "https://linkedin.com/post/1",
+                    "post_id": "1",
+                    "text_preview": "Hello",
+                    "created_at": None,
+                }
+            ],
+        ):
+            result = await tool_fn(mock_context, limit=5, extractor=mock_extractor)
+
+        post = result["posts"][0]
+        assert "created_at" not in post
+        assert post["post_url"] == "https://linkedin.com/post/1"
+        assert post["post_id"] == "1"
+
+    async def test_post_comments_strips_none_fields(self, mock_context):
+        mock_extractor = _make_extractor_with_page()
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+
+        with patch(
+            "linkedin_mcp_server.tools.posts.scrape_get_post_comments",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "comment_id": "c1",
+                    "author_name": "Alice",
+                    "text": "Nice!",
+                    "created_at": None,
+                    "comment_permalink": None,
+                }
+            ],
+        ):
+            result = await tool_fn(
+                "https://linkedin.com/feed/update/urn:li:activity:1/",
+                mock_context,
+                extractor=mock_extractor,
+            )
+
+        comment = result["comments"][0]
+        assert "created_at" not in comment
+        assert "comment_permalink" not in comment
+        assert comment["text"] == "Nice!"
+
+    async def test_post_content_preserves_non_none_fields(self, mock_context):
+        mock_extractor = _make_extractor_with_page()
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_post_content")
+
+        with patch(
+            "linkedin_mcp_server.tools.posts.scrape_get_post_content",
+            new_callable=AsyncMock,
+            return_value={
+                "url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "sections": {"post_content": "Hello world"},
+                "engagement": {"reactions": 5, "comments": 0},
+                "author": None,
+            },
+        ):
+            result = await tool_fn(
+                "https://linkedin.com/feed/update/urn:li:activity:1/",
+                mock_context,
+                extractor=mock_extractor,
+            )
+
+        assert "author" not in result
+        assert result["sections"]["post_content"] == "Hello world"
+        assert result["engagement"]["comments"] == 0  # falsy but preserved
+
+    async def test_notifications_strips_none_fields(self, mock_context):
+        mock_extractor = _make_extractor_with_page()
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_notifications")
+
+        with patch(
+            "linkedin_mcp_server.tools.posts.scrape_get_notifications",
+            new_callable=AsyncMock,
+            return_value=[
+                {
+                    "text": "Alice commented",
+                    "link": "https://linkedin.com/n/1",
+                    "type": "comment",
+                    "created_at": None,
+                }
+            ],
+        ):
+            result = await tool_fn(mock_context, limit=10, extractor=mock_extractor)
+
+        notif = result["notifications"][0]
+        assert "created_at" not in notif
+        assert notif["type"] == "comment"
+
+
 class TestPostsToolRegistration:
     async def test_all_tools_registered(self):
         mcp = FastMCP("test")

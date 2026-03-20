@@ -40,7 +40,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 | Tool | Description | Status |
 |------|-------------|--------|
-| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, contact_info, posts) | Working |
+| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, contact_info, posts, recommendations, skills, certifications, projects, volunteer, publications) | Working |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | Working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | Working |
 | `get_my_recent_posts` | List recent posts from the logged-in user's feed (post_url, post_id, text_preview, created_at) | Working |
