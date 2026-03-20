@@ -35,6 +35,14 @@ class TestDetectRateLimit:
     async def test_captcha_iframe_raises(self, mock_page):
         captcha_locator = MagicMock()
         captcha_locator.count = AsyncMock(return_value=1)
+        captcha_frame = MagicMock()
+        captcha_frame.evaluate = AsyncMock(
+            return_value={
+                "src": "https://example.com/captcha",
+                "visible": True,
+            }
+        )
+        captcha_locator.nth = MagicMock(return_value=captcha_frame)
 
         main_locator = MagicMock()
         main_locator.count = AsyncMock(return_value=0)
@@ -47,6 +55,31 @@ class TestDetectRateLimit:
         mock_page.locator = MagicMock(side_effect=locator_side_effect)
         with pytest.raises(RateLimitError, match="CAPTCHA"):
             await detect_rate_limit(mock_page)
+
+    async def test_hidden_invisible_recaptcha_does_not_raise(self, mock_page):
+        captcha_locator = MagicMock()
+        captcha_locator.count = AsyncMock(return_value=1)
+        captcha_frame = MagicMock()
+        captcha_frame.evaluate = AsyncMock(
+            return_value={
+                "src": "https://www.google.com/recaptcha/enterprise/anchor?size=invisible",
+                "visible": False,
+            }
+        )
+        captcha_locator.nth = MagicMock(return_value=captcha_frame)
+
+        main_locator = MagicMock()
+        main_locator.count = AsyncMock(return_value=1)
+
+        def locator_side_effect(selector):
+            if "captcha" in selector:
+                return captcha_locator
+            if selector == "main":
+                return main_locator
+            return MagicMock(count=AsyncMock(return_value=0))
+
+        mock_page.locator = MagicMock(side_effect=locator_side_effect)
+        await detect_rate_limit(mock_page)
 
     async def test_normal_page_with_main_skips_body_heuristic(self, mock_page):
         """A normal page with <main> should NOT trigger body text checks."""
