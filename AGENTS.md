@@ -25,6 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 All scraping tools return: `{url, sections: {name: raw_text}}`.
 
 Optional additional keys:
+
 - `references: {section_name: [{kind, url, text?, context?}]}` — LinkedIn URLs are relative paths
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
@@ -79,7 +80,7 @@ Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or worki
 - Include the model used for code generation in PR descriptions (e.g. "Generated with Claude Opus 4.6")
 - Include a short prompt from the user messages that reproduces the PR diff. This tells the maintainer what was intended, which is often more useful than reviewing the full diff.
 - When implementing a new feature/fix:
-  1. Check open issues. If no issue exists, create one following the issue template.
+  1. Check open issues. If no issue exists, create one following the templates in `.github/ISSUE_TEMPLATE/`. Fill in every section. Use "N/A" if not applicable.
   2. Branch from `main`: `feature/issue-number-short-description`
   3. Implement and test
   4. Update README.md and docs/docker-hub.md if relevant
