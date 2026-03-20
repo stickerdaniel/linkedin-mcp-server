@@ -35,16 +35,37 @@ async def detect_rate_limit(page: Page) -> None:
             suggested_wait_time=30,
         )
 
-    # Check for CAPTCHA
+    # Check for CAPTCHA.
+    # LinkedIn embeds hidden/invisible reCAPTCHA support iframes on normal pages,
+    # so only treat a CAPTCHA iframe as a challenge when it is actually visible.
     try:
-        captcha = await page.locator(
+        captcha_frames = page.locator(
             'iframe[title*="captcha" i], iframe[src*="captcha" i]'
-        ).count()
-        if captcha > 0:
-            raise RateLimitError(
-                "CAPTCHA challenge detected. Manual intervention required.",
-                suggested_wait_time=30,
+        )
+        captcha_count = await captcha_frames.count()
+        for index in range(captcha_count):
+            frame = captcha_frames.nth(index)
+            frame_info = await frame.evaluate(
+                """el => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    const src = el.getAttribute('src') || '';
+                    return {
+                        src,
+                        visible:
+                            rect.width > 0 &&
+                            rect.height > 0 &&
+                            style.display !== 'none' &&
+                            style.visibility !== 'hidden' &&
+                            style.opacity !== '0',
+                    };
+                }"""
             )
+            if frame_info["visible"] and "size=invisible" not in frame_info["src"]:
+                raise RateLimitError(
+                    "CAPTCHA challenge detected. Manual intervention required.",
+                    suggested_wait_time=30,
+                )
     except RateLimitError:
         raise
     except PlaywrightTimeoutError:
