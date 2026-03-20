@@ -158,6 +158,17 @@ async def _feed_auth_succeeds(
             )
             await _log_feed_failure_context(browser, barrier)
             return False
+        if not await is_logged_in(browser.page):
+            await record_page_trace(
+                browser.page,
+                "feed-auth-empty",
+                extra={"reason": "feed page is not authenticated"},
+            )
+            await _log_feed_failure_context(
+                browser,
+                "feed page is not authenticated",
+            )
+            return False
         return True
     except Exception as exc:
         if allow_remember_me and await resolve_remember_me_prompt(browser.page):

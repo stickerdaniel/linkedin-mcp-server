@@ -236,6 +236,23 @@ async def test_feed_auth_records_single_post_recovery_trace():
 
 
 @pytest.mark.asyncio
+async def test_feed_auth_rejects_blank_feed_page_without_nav():
+    browser = _make_mock_browser()
+    browser.page.url = "https://www.linkedin.com/feed/"
+    browser.page.title = AsyncMock(return_value="")
+    browser.page.evaluate = AsyncMock(return_value="")
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        assert await _feed_auth_succeeds(browser) is False
+
+
+@pytest.mark.asyncio
 async def test_experimental_derived_runtime_reuses_matching_committed_profile(
     tmp_path, monkeypatch
 ):
