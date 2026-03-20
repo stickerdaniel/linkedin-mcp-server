@@ -93,7 +93,7 @@ async def detect_rate_limit(page: Page) -> None:
         raise RateLimitError(
             "LinkedIn security checkpoint detected. "
             "You may need to verify your identity or wait before continuing.",
-            suggested_wait_time=3600,
+            suggested_wait_time=30,
         )
 
     # Check for CAPTCHA
@@ -105,7 +105,7 @@ async def detect_rate_limit(page: Page) -> None:
             rate_limit_state.record_rate_limit()
             raise RateLimitError(
                 "CAPTCHA challenge detected. Manual intervention required.",
-                suggested_wait_time=3600,
+                suggested_wait_time=30,
             )
     except RateLimitError:
         raise
@@ -138,7 +138,7 @@ async def detect_rate_limit(page: Page) -> None:
                 rate_limit_state.record_rate_limit()
                 raise RateLimitError(
                     "Rate limit message detected on page.",
-                    suggested_wait_time=1800,
+                    suggested_wait_time=30,
                 )
     except RateLimitError:
         raise
@@ -165,6 +165,70 @@ async def scroll_to_bottom(
         if new_height == previous_height:
             logger.debug("Reached bottom after %d scrolls", i + 1)
             break
+
+
+async def scroll_job_sidebar(
+    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
+) -> None:
+    """Scroll the job search sidebar to load all job cards.
+
+    LinkedIn renders job search results in a scrollable sidebar container,
+    not the main page body. This function finds that container by locating
+    a job card link and walking up to its scrollable ancestor, then scrolls
+    it iteratively until no new content loads.
+
+    Args:
+        page: Patchright page object
+        pause_time: Time to pause between scrolls (seconds)
+        max_scrolls: Maximum number of scroll attempts
+    """
+    # Wait for at least one job card link to render before scrolling
+    try:
+        await page.wait_for_selector('a[href*="/jobs/view/"]', timeout=5000)
+    except PlaywrightTimeoutError:
+        logger.debug("No job card links found, skipping sidebar scroll")
+        return
+
+    scrolled = await page.evaluate(
+        """async ({pauseTime, maxScrolls}) => {
+            const link = document.querySelector('a[href*="/jobs/view/"]');
+            if (!link) return -2;
+
+            let container = link.parentElement;
+            while (container && container !== document.body) {
+                const style = window.getComputedStyle(container);
+                const overflowY = style.overflowY;
+                if ((overflowY === 'auto' || overflowY === 'scroll')
+                    && container.scrollHeight > container.clientHeight) {
+                    break;
+                }
+                container = container.parentElement;
+            }
+
+            if (!container || container === document.body) {
+                return -1;
+            }
+
+            let scrollCount = 0;
+            for (let i = 0; i < maxScrolls; i++) {
+                const prevHeight = container.scrollHeight;
+                container.scrollTop = container.scrollHeight;
+                await new Promise(r => setTimeout(r, pauseTime * 1000));
+                if (container.scrollHeight === prevHeight) break;
+                scrollCount++;
+            }
+            return scrollCount;
+        }""",
+        {"pauseTime": pause_time, "maxScrolls": max_scrolls},
+    )
+    if scrolled == -2:
+        logger.debug("Job card link disappeared before evaluate, skipping scroll")
+    elif scrolled == -1:
+        logger.debug("No scrollable container found for job sidebar")
+    elif scrolled:
+        logger.debug("Scrolled job sidebar %d times", scrolled)
+    else:
+        logger.debug("Job sidebar container found but no new content loaded")
 
 
 async def handle_modal_close(page: Page) -> bool:

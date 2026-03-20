@@ -1,178 +1,147 @@
-"""Tests for scraping field flag enums and section parsers."""
+"""Tests for scraping section config dicts and section parsers."""
 
 from linkedin_mcp_server.scraping.fields import (
-    COMPANY_SECTION_MAP,
-    PERSON_SECTION_MAP,
-    CompanyScrapingFields,
-    PersonScrapingFields,
+    COMPANY_SECTIONS,
+    PERSON_SECTIONS,
     parse_company_sections,
     parse_person_sections,
 )
 
 
-class TestPersonScrapingFields:
-    def test_atomic_flags_are_distinct(self):
-        flags = [
-            PersonScrapingFields.BASIC_INFO,
-            PersonScrapingFields.EXPERIENCE,
-            PersonScrapingFields.EDUCATION,
-            PersonScrapingFields.INTERESTS,
-            PersonScrapingFields.HONORS,
-            PersonScrapingFields.LANGUAGES,
-            PersonScrapingFields.CONTACT_INFO,
-        ]
-        for i, a in enumerate(flags):
-            for b in flags[i + 1 :]:
-                assert a & b == PersonScrapingFields(0)
+class TestPersonSections:
+    def test_expected_keys(self):
+        expected = {
+            "main_profile",
+            "experience",
+            "education",
+            "interests",
+            "honors",
+            "languages",
+            "contact_info",
+            "posts",
+        }
+        assert set(PERSON_SECTIONS) == expected
 
-    def test_flag_bitwise_or(self):
-        combined = PersonScrapingFields.BASIC_INFO | PersonScrapingFields.CONTACT_INFO
-        assert PersonScrapingFields.BASIC_INFO in combined
-        assert PersonScrapingFields.CONTACT_INFO in combined
-        assert PersonScrapingFields.EXPERIENCE not in combined
+    def test_contact_info_is_overlay(self):
+        _suffix, is_overlay = PERSON_SECTIONS["contact_info"]
+        assert is_overlay is True
+
+    def test_non_overlay_sections(self):
+        for name, (_suffix, is_overlay) in PERSON_SECTIONS.items():
+            if name != "contact_info":
+                assert is_overlay is False, f"{name} should not be an overlay"
+
+    def test_all_suffixes_start_with_slash(self):
+        for name, (suffix, _) in PERSON_SECTIONS.items():
+            assert suffix.startswith("/"), f"{name} suffix should start with /"
 
 
-class TestCompanyScrapingFields:
-    def test_atomic_flags_are_distinct(self):
-        flags = [
-            CompanyScrapingFields.ABOUT,
-            CompanyScrapingFields.POSTS,
-            CompanyScrapingFields.JOBS,
-        ]
-        for i, a in enumerate(flags):
-            for b in flags[i + 1 :]:
-                assert a & b == CompanyScrapingFields(0)
+class TestCompanySections:
+    def test_expected_keys(self):
+        assert set(COMPANY_SECTIONS) == {"about", "posts", "jobs"}
+
+    def test_no_overlays(self):
+        for name, (_suffix, is_overlay) in COMPANY_SECTIONS.items():
+            assert is_overlay is False, f"{name} should not be an overlay"
 
 
 class TestParsePersonSections:
-    def test_none_returns_basic_info_only(self):
-        flags, unknown = parse_person_sections(None)
-        assert flags == PersonScrapingFields.BASIC_INFO
+    def test_none_returns_baseline_only(self):
+        requested, unknown = parse_person_sections(None)
+        assert requested == {"main_profile"}
         assert unknown == []
 
-    def test_empty_string_returns_basic_info_only(self):
-        flags, unknown = parse_person_sections("")
-        assert flags == PersonScrapingFields.BASIC_INFO
+    def test_empty_string_returns_baseline_only(self):
+        requested, unknown = parse_person_sections("")
+        assert requested == {"main_profile"}
         assert unknown == []
 
     def test_single_section(self):
-        flags, unknown = parse_person_sections("contact_info")
-        assert (
-            flags == PersonScrapingFields.BASIC_INFO | PersonScrapingFields.CONTACT_INFO
-        )
+        requested, unknown = parse_person_sections("contact_info")
+        assert requested == {"main_profile", "contact_info"}
         assert unknown == []
 
     def test_multiple_sections(self):
-        flags, unknown = parse_person_sections("experience,education")
-        expected = (
-            PersonScrapingFields.BASIC_INFO
-            | PersonScrapingFields.EXPERIENCE
-            | PersonScrapingFields.EDUCATION
-        )
-        assert flags == expected
+        requested, unknown = parse_person_sections("experience,education")
+        assert requested == {"main_profile", "experience", "education"}
         assert unknown == []
 
     def test_invalid_names_returned(self):
-        flags, unknown = parse_person_sections("experience,bogus,education")
-        expected = (
-            PersonScrapingFields.BASIC_INFO
-            | PersonScrapingFields.EXPERIENCE
-            | PersonScrapingFields.EDUCATION
-        )
-        assert flags == expected
+        requested, unknown = parse_person_sections("experience,bogus,education")
+        assert requested == {"main_profile", "experience", "education"}
         assert unknown == ["bogus"]
 
     def test_multiple_invalid_names(self):
-        flags, unknown = parse_person_sections("experience,foo,bar")
-        assert (
-            flags == PersonScrapingFields.BASIC_INFO | PersonScrapingFields.EXPERIENCE
-        )
+        requested, unknown = parse_person_sections("experience,foo,bar")
+        assert requested == {"main_profile", "experience"}
         assert unknown == ["foo", "bar"]
 
     def test_whitespace_and_case_handling(self):
-        flags, unknown = parse_person_sections(" Experience , EDUCATION ")
-        expected = (
-            PersonScrapingFields.BASIC_INFO
-            | PersonScrapingFields.EXPERIENCE
-            | PersonScrapingFields.EDUCATION
-        )
-        assert flags == expected
+        requested, unknown = parse_person_sections(" Experience , EDUCATION ")
+        assert requested == {"main_profile", "experience", "education"}
+        assert unknown == []
+
+    def test_baseline_passed_explicitly_not_unknown(self):
+        requested, unknown = parse_person_sections("main_profile,experience")
+        assert requested == {"main_profile", "experience"}
         assert unknown == []
 
     def test_all_sections(self):
-        flags, unknown = parse_person_sections(
-            "experience,education,interests,honors,languages,contact_info"
+        requested, unknown = parse_person_sections(
+            "experience,education,interests,honors,languages,contact_info,posts"
         )
-        expected = (
-            PersonScrapingFields.BASIC_INFO
-            | PersonScrapingFields.EXPERIENCE
-            | PersonScrapingFields.EDUCATION
-            | PersonScrapingFields.INTERESTS
-            | PersonScrapingFields.HONORS
-            | PersonScrapingFields.LANGUAGES
-            | PersonScrapingFields.CONTACT_INFO
-        )
-        assert flags == expected
+        assert requested == set(PERSON_SECTIONS)
         assert unknown == []
 
 
 class TestParseCompanySections:
-    def test_none_returns_about_only(self):
-        flags, unknown = parse_company_sections(None)
-        assert flags == CompanyScrapingFields.ABOUT
+    def test_none_returns_baseline_only(self):
+        requested, unknown = parse_company_sections(None)
+        assert requested == {"about"}
         assert unknown == []
 
-    def test_empty_string_returns_about_only(self):
-        flags, unknown = parse_company_sections("")
-        assert flags == CompanyScrapingFields.ABOUT
+    def test_empty_string_returns_baseline_only(self):
+        requested, unknown = parse_company_sections("")
+        assert requested == {"about"}
         assert unknown == []
 
     def test_single_section(self):
-        flags, unknown = parse_company_sections("posts")
-        assert flags == CompanyScrapingFields.ABOUT | CompanyScrapingFields.POSTS
+        requested, unknown = parse_company_sections("posts")
+        assert requested == {"about", "posts"}
         assert unknown == []
 
     def test_multiple_sections(self):
-        flags, unknown = parse_company_sections("posts,jobs")
-        expected = (
-            CompanyScrapingFields.ABOUT
-            | CompanyScrapingFields.POSTS
-            | CompanyScrapingFields.JOBS
-        )
-        assert flags == expected
+        requested, unknown = parse_company_sections("posts,jobs")
+        assert requested == {"about", "posts", "jobs"}
         assert unknown == []
 
     def test_invalid_names_returned(self):
-        flags, unknown = parse_company_sections("posts,bogus")
-        assert flags == CompanyScrapingFields.ABOUT | CompanyScrapingFields.POSTS
+        requested, unknown = parse_company_sections("posts,bogus")
+        assert requested == {"about", "posts"}
         assert unknown == ["bogus"]
 
+    def test_baseline_passed_explicitly_not_unknown(self):
+        requested, unknown = parse_company_sections("about,posts")
+        assert requested == {"about", "posts"}
+        assert unknown == []
+
     def test_whitespace_and_case_handling(self):
-        flags, unknown = parse_company_sections(" Posts , JOBS ")
-        expected = (
-            CompanyScrapingFields.ABOUT
-            | CompanyScrapingFields.POSTS
-            | CompanyScrapingFields.JOBS
-        )
-        assert flags == expected
+        requested, unknown = parse_company_sections(" Posts , JOBS ")
+        assert requested == {"about", "posts", "jobs"}
         assert unknown == []
 
 
-class TestSectionMapCoverage:
-    """Ensure every non-baseline flag has a section map entry (drift risk)."""
+class TestConfigCompleteness:
+    """Ensure every config dict section has a valid suffix."""
 
-    def test_person_section_map_covers_all_flags(self):
-        baseline = PersonScrapingFields.BASIC_INFO
-        mapped_flags = set(PERSON_SECTION_MAP.values())
-        for flag in PersonScrapingFields:
-            if flag is baseline:
-                continue
-            assert flag in mapped_flags, f"{flag.name} missing from PERSON_SECTION_MAP"
+    def test_person_sections_all_have_suffixes(self):
+        for name, (suffix, _) in PERSON_SECTIONS.items():
+            assert isinstance(suffix, str) and len(suffix) > 0, (
+                f"{name} has empty suffix"
+            )
 
-    def test_company_section_map_covers_all_flags(self):
-        baseline = CompanyScrapingFields.ABOUT
-        mapped_flags = set(COMPANY_SECTION_MAP.values())
-        for flag in CompanyScrapingFields:
-            if flag is baseline:
-                continue
-            assert flag in mapped_flags, f"{flag.name} missing from COMPANY_SECTION_MAP"
+    def test_company_sections_all_have_suffixes(self):
+        for name, (suffix, _) in COMPANY_SECTIONS.items():
+            assert isinstance(suffix, str) and len(suffix) > 0, (
+                f"{name} has empty suffix"
+            )

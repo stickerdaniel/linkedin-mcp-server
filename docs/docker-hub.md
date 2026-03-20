@@ -9,21 +9,21 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Job Details**: Retrieve job posting information
 - **Job Search**: Search for jobs with keywords and location filters
 - **People Search**: Search for people by keywords and location
+- **Person Posts**: Get recent activity/posts from a person's profile
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
-- **My Recent Posts**: List recent posts from the logged-in user's feed
-- **Post Comments**: Get top-level comments for any post (by URL or post ID)
-- **Unreplied Comments**: Find comments on your posts that you have not replied to (notifications or scan)
-- **Notifications**: Get recent notifications (comments, reactions, connections, mentions, endorsements, jobs, etc.)
+- **Compact References**: Return typed per-section links alongside readable text without shipping full-page markdown
 
 ## Quick Start
 
 Create a browser profile locally, then mount it into Docker.
 
-**Step 1: Create profile using uvx (one-time setup)**
+**Step 1: Create profile on the host (one-time setup)**
 
 ```bash
 uvx linkedin-scraper-mcp --login
 ```
+
+This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. For better stability, consider the [uvx setup](https://github.com/stickerdaniel/linkedin-mcp-server#-uvx-setup-recommended---universal).
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -42,9 +42,13 @@ uvx linkedin-scraper-mcp --login
 }
 ```
 
-> **Note:** Docker containers don't have a display server, so you can't use the `--login` command in Docker. Create a profile on your host first.
+> **Note:** Docker containers don't have a display server, so you can't use the `--login` command in Docker. Create a source profile on your host first.
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
+>
+> **Note:** Tool calls are serialized within one server process to protect the
+> shared LinkedIn browser session. Concurrent client requests queue instead of
+> running in parallel. Use `LOG_LEVEL=DEBUG` to see scraper lock logs.
 
 ## Environment Variables
 
@@ -61,6 +65,8 @@ uvx linkedin-scraper-mcp --login
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
+| `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: reuse checkpointed derived Linux runtime profiles across Docker restarts instead of fresh-bridging each startup |
+| `LINKEDIN_TRACE_MODE` | `on_error` | Trace/log retention mode: `on_error` keeps ephemeral artifacts only when a failure occurs, `always` keeps every run, `off` disables trace persistence |
 
 **Example with custom timeout:**
 

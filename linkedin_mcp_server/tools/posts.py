@@ -1,18 +1,20 @@
 """
-LinkedIn posts and comments tools (my recent posts, post comments, unreplied comments).
+LinkedIn posts, comments, notifications, and feed tools.
+
+Provides tools for scraping user posts, post comments, notifications,
+person posts, feed posts, and unreplied comment detection.
 """
 
 import logging
 from typing import Any
 
 from fastmcp import Context, FastMCP
-from mcp.types import ToolAnnotations
+from fastmcp.dependencies import Depends
 
-from linkedin_mcp_server.drivers.browser import (
-    ensure_authenticated,
-    get_or_create_browser,
-)
-from linkedin_mcp_server.error_handler import handle_tool_error
+from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.dependencies import get_extractor
+from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.scraping import LinkedInExtractor
 from linkedin_mcp_server.scraping.posts import (
     find_unreplied_comments as scrape_find_unreplied_comments,
     get_feed_posts as scrape_get_feed_posts,
@@ -30,16 +32,15 @@ def register_posts_tools(mcp: FastMCP) -> None:
     """Register all posts-related tools with the MCP server."""
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get My Recent Posts",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get My Recent Posts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"posts", "scraping"},
     )
     async def get_my_recent_posts(
         ctx: Context,
         limit: int = 20,
+        extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         List recent posts from the logged-in user's LinkedIn feed.
@@ -53,29 +54,26 @@ def register_posts_tools(mcp: FastMCP) -> None:
             post_id/urn and created_at are best-effort.
         """
         try:
-            await ensure_authenticated()
             logger.info("Scraping my recent posts (limit=%s)", limit)
-            browser = await get_or_create_browser()
             await ctx.report_progress(
                 progress=0, total=100, message="Fetching your recent posts"
             )
-            posts = await scrape_get_my_recent_posts(browser.page, limit=limit)
+            posts = await scrape_get_my_recent_posts(extractor._page, limit=limit)
             await ctx.report_progress(progress=100, total=100, message="Complete")
             return {"posts": posts}
         except Exception as e:
-            return handle_tool_error(e, "get_my_recent_posts")
+            raise_tool_error(e, "get_my_recent_posts")
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Post Comments",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Post Comments",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"posts", "scraping"},
     )
     async def get_post_comments(
         post_url: str,
         ctx: Context,
+        extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         Get top-level comments for a LinkedIn post.
@@ -90,29 +88,26 @@ def register_posts_tools(mcp: FastMCP) -> None:
             created_at and comment_permalink are best-effort.
         """
         try:
-            await ensure_authenticated()
             logger.info("Scraping post comments: %s", post_url[:80])
-            browser = await get_or_create_browser()
             await ctx.report_progress(
                 progress=0, total=100, message="Loading post comments"
             )
-            comments = await scrape_get_post_comments(browser.page, post_url)
+            comments = await scrape_get_post_comments(extractor._page, post_url)
             await ctx.report_progress(progress=100, total=100, message="Complete")
             return {"comments": comments}
         except Exception as e:
-            return handle_tool_error(e, "get_post_comments")
+            raise_tool_error(e, "get_post_comments")
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Post Content",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Post Content",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"posts", "scraping"},
     )
     async def get_post_content(
         post_url: str,
         ctx: Context,
+        extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         Get the text content of a specific LinkedIn post.
@@ -124,32 +119,29 @@ def register_posts_tools(mcp: FastMCP) -> None:
 
         Returns:
             Dict with url, sections: {"post_content": raw_text}, pages_visited,
-            sections_requested.
+            sections_requested, engagement, post_type, author.
         """
         try:
-            await ensure_authenticated()
             logger.info("Scraping post content: %s", post_url[:80])
-            browser = await get_or_create_browser()
             await ctx.report_progress(
                 progress=0, total=100, message="Loading post content"
             )
-            result = await scrape_get_post_content(browser.page, post_url)
+            result = await scrape_get_post_content(extractor._page, post_url)
             await ctx.report_progress(progress=100, total=100, message="Complete")
             return result
         except Exception as e:
-            return handle_tool_error(e, "get_post_content")
+            raise_tool_error(e, "get_post_content")
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Notifications",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Notifications",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"posts", "scraping"},
     )
     async def get_notifications(
         ctx: Context,
         limit: int = 20,
+        extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         Get recent notifications from your LinkedIn notifications page.
@@ -169,30 +161,29 @@ def register_posts_tools(mcp: FastMCP) -> None:
             created_at is best-effort.
         """
         try:
-            await ensure_authenticated()
             logger.info("Scraping notifications (limit=%s)", limit)
-            browser = await get_or_create_browser()
             await ctx.report_progress(
                 progress=0, total=100, message="Fetching your notifications"
             )
-            notifications = await scrape_get_notifications(browser.page, limit=limit)
+            notifications = await scrape_get_notifications(
+                extractor._page, limit=limit
+            )
             await ctx.report_progress(progress=100, total=100, message="Complete")
             return {"notifications": notifications}
         except Exception as e:
-            return handle_tool_error(e, "get_notifications")
+            raise_tool_error(e, "get_notifications")
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Person Posts",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Person Posts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"posts", "person", "scraping"},
     )
     async def get_person_posts(
         linkedin_username: str,
         ctx: Context,
         limit: int = 20,
+        extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         Get recent posts from a specific person's LinkedIn profile.
@@ -210,31 +201,32 @@ def register_posts_tools(mcp: FastMCP) -> None:
             post_id and created_at are best-effort.
         """
         try:
-            await ensure_authenticated()
-            logger.info("Scraping person posts: %s (limit=%s)", linkedin_username, limit)
-            browser = await get_or_create_browser()
+            logger.info(
+                "Scraping person posts: %s (limit=%s)", linkedin_username, limit
+            )
             await ctx.report_progress(
-                progress=0, total=100, message=f"Fetching posts for {linkedin_username}"
+                progress=0,
+                total=100,
+                message=f"Fetching posts for {linkedin_username}",
             )
             posts = await scrape_get_profile_recent_posts(
-                browser.page, linkedin_username, limit=limit
+                extractor._page, linkedin_username, limit=limit
             )
             await ctx.report_progress(progress=100, total=100, message="Complete")
             return {"posts": posts}
         except Exception as e:
-            return handle_tool_error(e, "get_person_posts")
+            raise_tool_error(e, "get_person_posts")
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Feed Posts",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Feed Posts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"posts", "scraping"},
     )
     async def get_feed_posts(
         ctx: Context,
         limit: int = 20,
+        extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         Get posts from the logged-in user's LinkedIn home feed.
@@ -252,30 +244,27 @@ def register_posts_tools(mcp: FastMCP) -> None:
             All fields are best-effort.
         """
         try:
-            await ensure_authenticated()
             logger.info("Scraping feed posts (limit=%s)", limit)
-            browser = await get_or_create_browser()
             await ctx.report_progress(
                 progress=0, total=100, message="Fetching feed posts"
             )
-            posts = await scrape_get_feed_posts(browser.page, limit=limit)
+            posts = await scrape_get_feed_posts(extractor._page, limit=limit)
             await ctx.report_progress(progress=100, total=100, message="Complete")
             return {"posts": posts}
         except Exception as e:
-            return handle_tool_error(e, "get_feed_posts")
+            raise_tool_error(e, "get_feed_posts")
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Find Unreplied Comments",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Find Unreplied Comments",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"posts", "scraping"},
     )
     async def find_unreplied_comments(
         ctx: Context,
         since_days: int = 7,
         max_posts: int = 20,
+        extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
         Find comments on your posts that you have not replied to.
@@ -293,22 +282,20 @@ def register_posts_tools(mcp: FastMCP) -> None:
             author_name, text/snippet for each comment pending a reply.
         """
         try:
-            await ensure_authenticated()
             logger.info(
                 "Finding unreplied comments (since_days=%s, max_posts=%s)",
                 since_days,
                 max_posts,
             )
-            browser = await get_or_create_browser()
             await ctx.report_progress(
                 progress=0, total=100, message="Finding unreplied comments"
             )
             unreplied = await scrape_find_unreplied_comments(
-                browser.page,
+                extractor._page,
                 since_days=since_days,
                 max_posts=max_posts,
             )
             await ctx.report_progress(progress=100, total=100, message="Complete")
             return {"unreplied_comments": unreplied}
         except Exception as e:
-            return handle_tool_error(e, "find_unreplied_comments")
+            raise_tool_error(e, "find_unreplied_comments")

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from linkedin_mcp_server.scraping.extractor import ExtractedSection
 from linkedin_mcp_server.scraping.posts import (
     _normalize_post_url,
     find_unreplied_comments,
@@ -374,7 +375,7 @@ class TestGetPostContent:
     ):
         mock_instance = MagicMock()
         mock_instance.extract_page = AsyncMock(
-            return_value="Hello, this is my post content!"
+            return_value=ExtractedSection(text="Hello, this is my post content!", references=[])
         )
         mock_extractor_cls.return_value = mock_instance
 
@@ -387,21 +388,21 @@ class TestGetPostContent:
         assert result["sections"]["post_content"] == "Hello, this is my post content!"
         assert result["pages_visited"] == [result["url"]]
         assert result["sections_requested"] == ["post_content"]
-        mock_instance.extract_page.assert_awaited_once_with(result["url"])
+        mock_instance.extract_page.assert_awaited_once_with(result["url"], section_name="post_content")
 
     @patch(
         "linkedin_mcp_server.scraping.posts.LinkedInExtractor",
     )
     async def test_normalizes_full_url(self, mock_extractor_cls, mock_page):
         mock_instance = MagicMock()
-        mock_instance.extract_page = AsyncMock(return_value="Content")
+        mock_instance.extract_page = AsyncMock(return_value=ExtractedSection(text="Content", references=[]))
         mock_extractor_cls.return_value = mock_instance
 
         url = "https://www.linkedin.com/feed/update/urn:li:activity:999/"
         result = await get_post_content(mock_page, url)
 
         assert result["url"] == url
-        mock_instance.extract_page.assert_awaited_once_with(url)
+        mock_instance.extract_page.assert_awaited_once_with(url, section_name="post_content")
 
     @patch(
         "linkedin_mcp_server.scraping.posts.LinkedInExtractor",
@@ -410,7 +411,7 @@ class TestGetPostContent:
         self, mock_extractor_cls, mock_page
     ):
         mock_instance = MagicMock()
-        mock_instance.extract_page = AsyncMock(return_value="")
+        mock_instance.extract_page = AsyncMock(return_value=ExtractedSection(text="", references=[]))
         mock_extractor_cls.return_value = mock_instance
 
         result = await get_post_content(mock_page, "12345")
@@ -423,7 +424,7 @@ class TestGetPostContent:
     )
     async def test_normalizes_urn_input(self, mock_extractor_cls, mock_page):
         mock_instance = MagicMock()
-        mock_instance.extract_page = AsyncMock(return_value="Post text")
+        mock_instance.extract_page = AsyncMock(return_value=ExtractedSection(text="Post text", references=[]))
         mock_extractor_cls.return_value = mock_instance
 
         result = await get_post_content(mock_page, "urn:li:activity:777")

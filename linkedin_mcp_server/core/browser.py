@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -100,20 +101,28 @@ class BrowserManager:
 
     async def close(self) -> None:
         """Close persistent context and cleanup resources."""
-        try:
-            if self._context:
-                await self._context.close()
-                self._context = None
-                self._page = None
+        context = self._context
+        playwright = self._playwright
+        self._context = None
+        self._page = None
+        self._playwright = None
 
-            if self._playwright:
-                await self._playwright.stop()
-                self._playwright = None
+        if context is None and playwright is None:
+            return
 
-            logger.info("Browser closed")
+        if context is not None:
+            try:
+                await context.close()
+            except Exception as exc:
+                logger.error("Error closing browser context: %s", exc)
 
-        except Exception as e:
-            logger.error("Error closing browser: %s", e)
+        if playwright is not None:
+            try:
+                await playwright.stop()
+            except Exception as exc:
+                logger.error("Error stopping playwright: %s", exc)
+
+        logger.info("Browser closed")
 
     @property
     def page(self) -> Page:
@@ -184,14 +193,91 @@ class BrowserManager:
             logger.exception("Failed to export cookies")
             return False
 
-    _AUTH_COOKIE_NAMES = frozenset({"li_at", "li_rm"})
+    async def export_storage_state(
+        self, path: str | Path, *, indexed_db: bool = True
+    ) -> bool:
+        """Export the current browser storage state for diagnostics and recovery."""
+        if not self._context:
+            logger.warning("Cannot export storage state: no browser context")
+            return False
 
-    async def import_cookies(self, cookie_path: str | Path | None = None) -> bool:
-        """Import auth cookies (li_at, li_rm) from a portable JSON file.
+        storage_path = Path(path)
+        storage_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await self._context.storage_state(
+                path=storage_path,
+                indexed_db=indexed_db,
+            )
+            logger.info(
+                "Exported runtime storage snapshot to %s (indexed_db=%s)",
+                storage_path,
+                indexed_db,
+            )
+            return True
+        except Exception:
+            logger.exception("Failed to export storage state to %s", storage_path)
+            return False
 
-        Clears all existing browser cookies before importing to avoid
-        undecryptable cookie conflicts in the persistent store.
-        Only li_at and li_rm cookies are imported; others are ignored.
+    _BRIDGE_COOKIE_PRESETS = {
+        "bridge_core": frozenset(
+            {
+                "li_at",
+                "li_rm",
+                "JSESSIONID",
+                "bcookie",
+                "bscookie",
+                "liap",
+                "lidc",
+                "li_gc",
+                "lang",
+                "timezone",
+                "li_mc",
+            }
+        ),
+        "auth_minimal": frozenset(
+            {
+                "li_at",
+                "JSESSIONID",
+                "bcookie",
+                "bscookie",
+                "lidc",
+            }
+        ),
+    }
+
+    @classmethod
+    def _bridge_cookie_names(
+        cls, preset_name: str | None = None
+    ) -> tuple[str, frozenset[str]]:
+        preset_name = (
+            preset_name
+            or os.getenv(
+                "LINKEDIN_DEBUG_BRIDGE_COOKIE_SET",
+                "auth_minimal",
+            ).strip()
+            or "auth_minimal"
+        )
+        preset = cls._BRIDGE_COOKIE_PRESETS.get(preset_name)
+        if preset is None:
+            logger.warning(
+                "Unknown LINKEDIN_DEBUG_BRIDGE_COOKIE_SET=%r, falling back to auth_minimal",
+                preset_name,
+            )
+            preset_name = "auth_minimal"
+            preset = cls._BRIDGE_COOKIE_PRESETS[preset_name]
+        return preset_name, preset
+
+    async def import_cookies(
+        self,
+        cookie_path: str | Path | None = None,
+        *,
+        preset_name: str | None = None,
+    ) -> bool:
+        """Import the portable LinkedIn bridge cookie subset.
+
+        Fresh browser-side cookies are preserved. The imported subset is the
+        smallest known set that can reconstruct a usable authenticated page in
+        a fresh profile.
         """
         if not self._context:
             logger.warning("Cannot import cookies: no browser context")
@@ -208,22 +294,29 @@ class BrowserManager:
                 logger.debug("Cookie file is empty")
                 return False
 
+            resolved_preset_name, bridge_cookie_names = self._bridge_cookie_names(
+                preset_name
+            )
+
             cookies = [
                 self._normalize_cookie_domain(c)
                 for c in all_cookies
-                if c.get("name") in self._AUTH_COOKIE_NAMES
+                if "linkedin.com" in c.get("domain", "")
+                and c.get("name") in bridge_cookie_names
             ]
-            if not cookies:
-                logger.warning("No auth cookies (li_at/li_rm) found in %s", path)
+
+            has_li_at = any(c.get("name") == "li_at" for c in cookies)
+            if not has_li_at:
+                logger.warning("No li_at cookie found in %s", path)
                 return False
 
-            # Clear undecryptable cookies from the persistent store first.
-            await self._context.clear_cookies()
             await self._context.add_cookies(cookies)  # type: ignore[arg-type]
             logger.info(
-                "Imported %d auth cookies from %s: %s",
+                "Imported %d LinkedIn bridge cookies from %s (preset=%s, li_at=%s): %s",
                 len(cookies),
                 path,
+                resolved_preset_name,
+                has_li_at,
                 ", ".join(c["name"] for c in cookies),
             )
             return True
