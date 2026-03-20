@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 import re
 from urllib.parse import urlparse
 
@@ -34,30 +35,49 @@ _REMEMBER_ME_BUTTON_SELECTOR = "#rememberme-div button"
 
 
 async def warm_up_browser(page: Page) -> None:
-    """Visit normal sites to appear more human-like before LinkedIn access."""
-    sites = [
+    """Visit neutral sites then LinkedIn public pages to build a human-like browsing history.
+
+    The two-phase approach reduces CAPTCHA probability on bridged Docker sessions:
+    phase 1 visits external sites (Google, Wikipedia, GitHub) so the browser
+    has non-LinkedIn history; phase 2 visits LinkedIn public pages (help,
+    about, learning) so LinkedIn sees organic navigation before the first
+    scrape.
+    """
+    external_sites = [
         "https://www.google.com",
         "https://www.wikipedia.org",
         "https://www.github.com",
     ]
+    linkedin_public = [
+        "https://www.linkedin.com/help/linkedin",
+        "https://www.linkedin.com/about",
+        "https://www.linkedin.com/learning",
+        "https://www.linkedin.com/feed/",
+    ]
 
-    logger.info("Warming up browser by visiting normal sites...")
+    logger.info("Warming up browser (external + LinkedIn public pages + feed)...")
 
     failures = 0
-    for site in sites:
+    total = len(external_sites) + len(linkedin_public)
+    for site in external_sites + linkedin_public:
         try:
             await page.goto(site, wait_until="domcontentloaded", timeout=10000)
-            await asyncio.sleep(1)
+            # Scroll the feed like a real user would
+            if "/feed" in site:
+                for _ in range(random.randint(2, 4)):
+                    await page.mouse.wheel(0, random.randint(300, 700))
+                    await asyncio.sleep(random.uniform(1.0, 2.5))
+            await asyncio.sleep(random.uniform(1.5, 4.0))
             logger.debug("Visited %s", site)
         except Exception as e:
             failures += 1
             logger.debug("Could not visit %s: %s", site, e)
             continue
 
-    if failures == len(sites):
-        logger.warning("Browser warm-up failed: none of %d sites reachable", len(sites))
+    if failures == total:
+        logger.warning("Browser warm-up failed: none of %d sites reachable", total)
     else:
-        logger.info("Browser warm-up complete")
+        logger.info("Browser warm-up complete (%d/%d sites visited)", total - failures, total)
 
 
 async def is_logged_in(page: Page) -> bool:
