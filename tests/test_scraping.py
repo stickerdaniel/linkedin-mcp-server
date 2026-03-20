@@ -1548,7 +1548,7 @@ class TestSearchJobs:
     async def test_rate_limited_search_results_surfaced_in_section_errors(
         self, mock_page
     ):
-        """_RATE_LIMITED_MSG on search_results populates section_errors as SessionBlockedError."""
+        """_RATE_LIMITED_MSG on search_results populates section_errors as RateLimitedError."""
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
@@ -1579,7 +1579,7 @@ class TestSearchJobs:
         assert result["sections"] == {}
         assert (
             result["section_errors"]["search_results"]["error_type"]
-            == "SessionBlockedError"
+            == "RateLimitedError"
         )
 
 
@@ -1868,12 +1868,12 @@ class TestSearchResultsExtraction:
 
 
 class TestScrapePersonSessionStatus:
-    """Tests for session_status field and _SESSION_BLOCKED_ERROR surfacing in scrape_person."""
+    """Tests for session_status field and _RATE_LIMITED_ERROR surfacing in scrape_person."""
 
     async def test_rate_limited_main_profile_surfaced_in_section_errors(
         self, mock_page
     ):
-        """_RATE_LIMITED_MSG on main_profile appears in section_errors as SessionBlockedError."""
+        """_RATE_LIMITED_MSG on main_profile appears in section_errors as RateLimitedError."""
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
@@ -1898,13 +1898,13 @@ class TestScrapePersonSessionStatus:
         assert "main_profile" not in result["sections"]
         assert (
             result["section_errors"]["main_profile"]["error_type"]
-            == "SessionBlockedError"
+            == "RateLimitedError"
         )
 
     async def test_session_blocked_status_on_rate_limited_main_profile(
         self, mock_page
     ):
-        """session_status='session_blocked' when main_profile returns _RATE_LIMITED_MSG."""
+        """Rate-limited main_profile must NOT set session_status=session_blocked."""
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
@@ -1926,7 +1926,8 @@ class TestScrapePersonSessionStatus:
         ):
             result = await extractor.scrape_person("testuser", {"main_profile"})
 
-        assert result.get("session_status") == "session_blocked"
+        assert "session_status" not in result
+        assert result["section_errors"]["main_profile"]["error_type"] == "RateLimitedError"
         assert result["sections"] == {}
 
     async def test_profile_not_found_status_on_url_mismatch(self, mock_page):
@@ -2050,10 +2051,10 @@ class TestScrapePersonSessionStatus:
 
 
 class TestScrapeCompanySessionStatus:
-    """Tests for session_status field and _SESSION_BLOCKED_ERROR surfacing in scrape_company."""
+    """Tests for session_status field and _RATE_LIMITED_ERROR surfacing in scrape_company."""
 
     async def test_rate_limited_about_surfaced_in_section_errors(self, mock_page):
-        """_RATE_LIMITED_MSG on about section appears in section_errors as SessionBlockedError."""
+        """_RATE_LIMITED_MSG on about section appears in section_errors as RateLimitedError."""
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
@@ -2071,11 +2072,11 @@ class TestScrapeCompanySessionStatus:
 
         assert "about" not in result["sections"]
         assert (
-            result["section_errors"]["about"]["error_type"] == "SessionBlockedError"
+            result["section_errors"]["about"]["error_type"] == "RateLimitedError"
         )
 
     async def test_session_blocked_status_on_rate_limited_about(self, mock_page):
-        """session_status='session_blocked' when about section returns _RATE_LIMITED_MSG."""
+        """Rate-limited about section must NOT set session_status=session_blocked."""
         extractor = LinkedInExtractor(mock_page)
         with (
             patch.object(
@@ -2091,5 +2092,6 @@ class TestScrapeCompanySessionStatus:
         ):
             result = await extractor.scrape_company("testcorp", {"about"})
 
-        assert result.get("session_status") == "session_blocked"
+        assert "session_status" not in result
+        assert result["section_errors"]["about"]["error_type"] == "RateLimitedError"
         assert result["sections"] == {}

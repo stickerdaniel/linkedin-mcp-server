@@ -304,6 +304,7 @@ class BrowserManager:
             await page.goto(
                 "https://www.linkedin.com/feed/",
                 wait_until="domcontentloaded",
+                timeout=15000,
             )
             cookies = [
                 self._normalize_cookie_domain(c)

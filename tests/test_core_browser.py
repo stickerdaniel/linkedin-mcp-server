@@ -218,6 +218,7 @@ async def test_materialize_storage_state_auth_warms_cookies_via_temporary_contex
     temp_page.goto.assert_awaited_once_with(
         "https://www.linkedin.com/feed/",
         wait_until="domcontentloaded",
+        timeout=15000,
     )
     context.add_cookies.assert_awaited_once_with(
         [

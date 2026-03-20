@@ -56,6 +56,11 @@ _SESSION_BLOCKED_ERROR: dict[str, str] = {
     "error_message": "Session silently blocked by LinkedIn (page loaded but no content extracted).",
 }
 
+_RATE_LIMITED_ERROR: dict[str, str] = {
+    "error_type": "RateLimitedError",
+    "error_message": "LinkedIn rate-limited this section. Try again later.",
+}
+
 def _url_matches_profile(url: str, expected_path_prefix: str) -> bool:
     """Return True when the URL's path matches the expected profile path prefix.
 
@@ -617,7 +622,7 @@ class LinkedInExtractor:
                     if extracted.references:
                         references[section_name] = extracted.references
                 elif extracted.text == _RATE_LIMITED_MSG:
-                    section_errors[section_name] = _SESSION_BLOCKED_ERROR
+                    section_errors[section_name] = _RATE_LIMITED_ERROR
                 elif extracted.error:
                     section_errors[section_name] = extracted.error
             except LinkedInScraperException:
@@ -694,7 +699,7 @@ class LinkedInExtractor:
                     if extracted.references:
                         references[section_name] = extracted.references
                 elif extracted.text == _RATE_LIMITED_MSG:
-                    section_errors[section_name] = _SESSION_BLOCKED_ERROR
+                    section_errors[section_name] = _RATE_LIMITED_ERROR
                 elif extracted.error:
                     section_errors[section_name] = extracted.error
             except LinkedInScraperException:
@@ -747,7 +752,7 @@ class LinkedInExtractor:
             if extracted.references:
                 references["job_posting"] = extracted.references
         elif extracted.text == _RATE_LIMITED_MSG:
-            section_errors["job_posting"] = _SESSION_BLOCKED_ERROR
+            section_errors["job_posting"] = _RATE_LIMITED_ERROR
         elif extracted.error:
             section_errors["job_posting"] = extracted.error
 
@@ -1004,7 +1009,7 @@ class LinkedInExtractor:
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
                     if extracted.text == _RATE_LIMITED_MSG:
-                        section_errors["search_results"] = _SESSION_BLOCKED_ERROR
+                        section_errors["search_results"] = _RATE_LIMITED_ERROR
                     elif extracted.error:
                         section_errors["search_results"] = extracted.error
                     # Navigation failed or rate-limited; skip ID extraction
@@ -1104,7 +1109,7 @@ class LinkedInExtractor:
             if extracted.references:
                 references["search_results"] = extracted.references
         elif extracted.text == _RATE_LIMITED_MSG:
-            section_errors["search_results"] = _SESSION_BLOCKED_ERROR
+            section_errors["search_results"] = _RATE_LIMITED_ERROR
         elif extracted.error:
             section_errors["search_results"] = extracted.error
 

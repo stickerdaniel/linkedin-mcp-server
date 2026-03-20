@@ -1,6 +1,7 @@
 services:
   linkedin-mcp:
-    image: stickerdaniel/linkedin-mcp-server:4.4.1
+    image: linkedin-mcp-server:local
+    restart: unless-stopped
     volumes:
       - ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp
     environment:
