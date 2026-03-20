@@ -234,6 +234,39 @@ class TestExtractPage:
         assert result.references == []
         assert result.error == {"issue_template_path": "/tmp/issue.md"}
 
+    async def test_extract_page_returns_error_on_empty_page_without_main(
+        self, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "", "references": []}
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
+            )
+
+        assert result.text == ""
+        assert result.references == []
+        assert result.error is not None
+        assert result.error["error_type"] == "ScrapingError"
+
     async def test_extract_page_raises_auth_error_for_account_picker(self, mock_page):
         mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
         extractor = LinkedInExtractor(mock_page)
@@ -1961,6 +1994,41 @@ class TestScrapePersonSessionStatus:
                     error={
                         "error_type": "NavigationError",
                         "error_message": "timeout",
+                    },
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"main_profile"})
+
+        assert "session_status" not in result
+        assert result["section_errors"]["main_profile"]["error_type"] == "NavigationError"
+
+    async def test_no_session_status_on_navigation_error_with_mismatched_url(
+        self, mock_page
+    ):
+        """Navigation errors must not be reclassified as profile_not_found."""
+        mock_page.url = "chrome-error://chromewebdata/"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(
+                    "",
+                    error={
+                        "error_type": "NavigationError",
+                        "error_message": "ERR_TOO_MANY_REDIRECTS",
                     },
                 ),
             ),

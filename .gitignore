@@ -208,3 +208,6 @@ scripts/snapshot_dumps/
 
 # Debug artifacts
 .debug/
+
+# Local git worktrees
+.worktrees/

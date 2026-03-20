@@ -62,7 +62,7 @@ When one section fails but the overall tool call still completes, responses may 
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
 
-**Testing posts and comments tools (Claude Desktop):** Run the server via Docker as usual (e.g. `docker run --rm -i -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp stickerdaniel/linkedin-mcp-server:latest`). Then ask Claude to: (1) call `get_my_recent_posts` and pick a `post_url`; (2) call `get_post_comments` with that URL; (3) call `find_unreplied_comments(since_days=7, max_posts=20)` and check that returned links open correctly.
+**Testing posts and comments tools (Claude Desktop):** Run the server via Docker as usual (see [Docker setup](#-docker-setup)). Then ask Claude to: (1) call `get_my_recent_posts` and pick a `post_url`; (2) call `get_post_comments` with that URL; (3) call `find_unreplied_comments(since_days=7, max_posts=20)` and check that returned links open correctly.
 
 ## Architecture and flows
 
@@ -265,8 +265,33 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 }
 ```
 
+> [!TIP]
+> **Long-running container (recommended):** Keeping the container alive avoids re-creating the browser session on every tool call, which reduces CAPTCHA challenges and authentication failures. Start the container once and point Claude Desktop at it:
+>
+> ```bash
+> docker run -d --restart unless-stopped \
+>   --name linkedin-mcp \
+>   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+>   -p 8080:8080 \
+>   stickerdaniel/linkedin-mcp-server:latest \
+>   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
+> ```
+>
+> Then configure Claude Desktop with streamable-http:
+>
+> ```json
+> {
+>   "mcpServers": {
+>     "linkedin": {
+>       "type": "streamable-http",
+>       "url": "http://localhost:8080/mcp"
+>     }
+>   }
+> }
+> ```
+
 > [!NOTE]
-> Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx linkedin-scraper-mcp --login` again if you encounter authentication issues.
+> Sessions may expire over time — run `uvx linkedin-scraper-mcp --login` again if you encounter authentication issues.
 
 > [!NOTE]
 > **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
@@ -301,7 +326,8 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 **HTTP Mode Example (for web-based MCP clients):**
 
 ```bash
-docker run -it --rm \
+docker run -d --restart unless-stopped \
+  --name linkedin-mcp \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \

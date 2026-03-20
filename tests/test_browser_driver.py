@@ -17,6 +17,7 @@ from linkedin_mcp_server.session_state import (
     runtime_state_path,
     runtime_storage_state_path,
     source_state_path,
+    source_storage_state_path,
 )
 
 
@@ -49,13 +50,21 @@ def _make_mock_browser() -> MagicMock:
     locator = MagicMock()
     locator.count = AsyncMock(return_value=0)
     browser.page.locator = MagicMock(return_value=locator)
+    browser.materialize_storage_state_auth = AsyncMock(return_value=False)
+    browser.import_storage_state = AsyncMock(return_value=False)
     browser.import_cookies = AsyncMock(return_value=False)
     browser.export_cookies = AsyncMock(return_value=False)
     browser.export_storage_state = AsyncMock(return_value=True)
     return browser
 
 
-def _write_source_state(tmp_path, *, runtime_id: str, login_generation: str = "gen-1"):
+def _write_source_state(
+    tmp_path,
+    *,
+    runtime_id: str,
+    login_generation: str = "gen-1",
+    with_source_storage_state: bool = False,
+):
     profile_dir = tmp_path / "profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
     (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
@@ -63,6 +72,15 @@ def _write_source_state(tmp_path, *, runtime_id: str, login_generation: str = "g
     portable_cookie_path(profile_dir).write_text(
         json.dumps([{"name": "li_at", "domain": ".linkedin.com"}])
     )
+    if with_source_storage_state:
+        source_storage_state_path(profile_dir).write_text(
+            json.dumps(
+                {
+                    "cookies": [{"name": "li_at", "domain": ".linkedin.com"}],
+                    "origins": [],
+                }
+            )
+        )
     source_state_path(profile_dir).write_text(
         json.dumps(
             {
@@ -236,6 +254,23 @@ async def test_feed_auth_records_single_post_recovery_trace():
 
 
 @pytest.mark.asyncio
+async def test_feed_auth_rejects_blank_feed_page_without_nav():
+    browser = _make_mock_browser()
+    browser.page.url = "https://www.linkedin.com/feed/"
+    browser.page.title = AsyncMock(return_value="")
+    browser.page.evaluate = AsyncMock(return_value="")
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        assert await _feed_auth_succeeds(browser) is False
+
+
+@pytest.mark.asyncio
 async def test_experimental_derived_runtime_reuses_matching_committed_profile(
     tmp_path, monkeypatch
 ):
@@ -311,6 +346,83 @@ async def test_default_foreign_runtime_bridges_fresh_each_startup(tmp_path):
     assert not runtime_state_path(
         "linux-amd64-container", tmp_path / "profile"
     ).exists()
+
+
+@pytest.mark.asyncio
+async def test_default_foreign_runtime_prefers_source_storage_state(tmp_path):
+    _write_source_state(
+        tmp_path,
+        runtime_id="macos-arm64-host",
+        login_generation="gen-2",
+        with_source_storage_state=True,
+    )
+    first_browser = _make_mock_browser()
+    first_browser.materialize_storage_state_auth = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=first_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        result = await get_or_create_browser()
+
+    assert result is first_browser
+    first_browser.materialize_storage_state_auth.assert_awaited_once_with(
+        source_storage_state_path(tmp_path / "profile")
+    )
+    first_browser.import_storage_state.assert_not_awaited()
+    first_browser.import_cookies.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_default_foreign_runtime_falls_back_to_cookies_when_source_storage_state_fails(
+    tmp_path,
+):
+    _write_source_state(
+        tmp_path,
+        runtime_id="macos-arm64-host",
+        login_generation="gen-2",
+        with_source_storage_state=True,
+    )
+    first_browser = _make_mock_browser()
+    first_browser.materialize_storage_state_auth = AsyncMock(return_value=False)
+    first_browser.import_cookies = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=first_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        result = await get_or_create_browser()
+
+    assert result is first_browser
+    first_browser.materialize_storage_state_auth.assert_awaited_once_with(
+        source_storage_state_path(tmp_path / "profile")
+    )
+    first_browser.import_storage_state.assert_not_awaited()
+    first_browser.import_cookies.assert_awaited_once_with(
+        portable_cookie_path(tmp_path / "profile")
+    )
 
 
 @pytest.mark.asyncio
@@ -870,3 +982,84 @@ async def test_hard_reset_browser_calls_close_and_clear_profile():
 
     close_mock.assert_awaited_once()
     clear_mock.assert_called_once_with("test-runtime", "/fake/profile")
+
+
+@pytest.mark.asyncio
+async def test_bridge_warms_up_browser_before_feed_validation(tmp_path):
+    """Bridge must warm up the browser (visit neutral sites) after cookie
+    injection and before feed validation to reduce CAPTCHA probability."""
+    _write_source_state(
+        tmp_path,
+        runtime_id="macos-arm64-host",
+        login_generation="gen-2",
+        with_source_storage_state=True,
+    )
+    first_browser = _make_mock_browser()
+    first_browser.materialize_storage_state_auth = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=first_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.warm_up_browser",
+            new_callable=AsyncMock,
+        ) as warm_up_mock,
+    ):
+        await get_or_create_browser()
+
+    warm_up_mock.assert_awaited_once_with(first_browser.page)
+
+
+@pytest.mark.asyncio
+async def test_bridge_does_not_navigate_before_cookie_injection(tmp_path):
+    """Pre-import navigation generates fresh bcookie/JSESSIONID that conflict
+    with macOS cookies injected later, causing blank feed in Docker.
+    The bridge must inject cookies BEFORE any page navigation."""
+    _write_source_state(
+        tmp_path,
+        runtime_id="macos-arm64-host",
+        login_generation="gen-2",
+        with_source_storage_state=True,
+    )
+    first_browser = _make_mock_browser()
+    first_browser.materialize_storage_state_auth = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=first_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.warm_up_browser",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await get_or_create_browser()
+
+    # page.goto must be called ONCE — only for post-import feed validation.
+    # A pre-import navigation would call it twice and generate conflicting
+    # bcookie/JSESSIONID that prevent the injected macOS cookies from working.
+    # (warm_up_browser is mocked out to isolate this assertion)
+    first_browser.page.goto.assert_awaited_once_with(
+        "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
+    )

@@ -17,6 +17,7 @@ from linkedin_mcp_server.core import (
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+    ScrapingError,
 )
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
@@ -24,6 +25,7 @@ from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
+    humanized_delay,
     scroll_job_sidebar,
     scroll_to_bottom,
 )
@@ -39,8 +41,8 @@ logger = logging.getLogger(__name__)
 
 WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
 
-# Delay between page navigations to avoid rate limiting
-_NAV_DELAY = 2.0
+# Delay between page navigations to avoid rate limiting (now randomized)
+_NAV_DELAY = humanized_delay  # callable: returns random float in [1.5, 4.0]
 
 # Backoff before retrying a rate-limited page
 _RATE_LIMIT_RETRY_DELAY = 5.0
@@ -472,7 +474,16 @@ class LinkedInExtractor:
         raw = raw_result["text"]
 
         if not raw:
-            return ExtractedSection(text="", references=[])
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    ScrapingError("Page loaded without extractable main content."),
+                    context="extract_page",
+                    target_url=url,
+                    section_name=section_name,
+                ),
+            )
         truncated = _truncate_linkedin_noise(raw)
         if not truncated and raw.strip():
             logger.warning(
@@ -586,7 +597,7 @@ class LinkedInExtractor:
                 continue
 
             if not first:
-                await asyncio.sleep(_NAV_DELAY)
+                await asyncio.sleep(_NAV_DELAY())
             first = False
 
             url = base_url + suffix
@@ -632,8 +643,12 @@ class LinkedInExtractor:
             mp_error = section_errors.get("main_profile", {})
             if mp_error.get("error_type") == "SessionBlockedError":
                 result["session_status"] = "session_blocked"
-            elif main_profile_final_url and not _url_matches_profile(
-                main_profile_final_url, f"/in/{username}"
+            elif (
+                not mp_error
+                and main_profile_final_url
+                and not _url_matches_profile(
+                    main_profile_final_url, f"/in/{username}"
+                )
             ):
                 result["session_status"] = "profile_not_found"
         return result
@@ -659,7 +674,7 @@ class LinkedInExtractor:
                 continue
 
             if not first:
-                await asyncio.sleep(_NAV_DELAY)
+                await asyncio.sleep(_NAV_DELAY())
             first = False
 
             url = base_url + suffix
@@ -705,8 +720,12 @@ class LinkedInExtractor:
             about_error = section_errors.get("about", {})
             if about_error.get("error_type") == "SessionBlockedError":
                 result["session_status"] = "session_blocked"
-            elif about_final_url and not _url_matches_profile(
-                about_final_url, f"/company/{company_name}"
+            elif (
+                not about_error
+                and about_final_url
+                and not _url_matches_profile(
+                    about_final_url, f"/company/{company_name}"
+                )
             ):
                 result["session_status"] = "profile_not_found"
         return result
@@ -970,7 +989,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await asyncio.sleep(_NAV_DELAY())
 
             url = (
                 base_url

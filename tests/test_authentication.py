@@ -15,6 +15,7 @@ from linkedin_mcp_server.session_state import (
     runtime_storage_state_path,
     runtime_state_path,
     source_state_path,
+    source_storage_state_path,
 )
 
 
@@ -103,8 +104,12 @@ def test_clear_auth_state_removes_source_and_runtime_files(profile_dir):
         )
     )
 
+    source_ss = source_storage_state_path(profile_dir)
+    source_ss.write_text('{"cookies": [], "origins": []}')
+
     assert clear_auth_state(profile_dir) is True
     assert not profile_dir.exists()
     assert not portable_cookie_path(profile_dir).exists()
+    assert not source_ss.exists()
     assert not source_state_path(profile_dir).exists()
     assert not runtime_profile_dir("linux-amd64-container", profile_dir).exists()

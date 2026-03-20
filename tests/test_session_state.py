@@ -2,6 +2,7 @@ from linkedin_mcp_server.session_state import (
     get_runtime_id,
     load_runtime_state,
     load_source_state,
+    source_storage_state_path,
     runtime_profile_dir,
     runtime_state_path,
     runtime_storage_state_path,
@@ -140,6 +141,12 @@ def test_runtime_storage_state_path_uses_runtime_dir(isolate_profile_dir):
         / "runtime-profiles"
         / "linux-amd64-container"
         / "storage-state.json"
+    )
+
+
+def test_source_storage_state_path_uses_auth_root(isolate_profile_dir):
+    assert source_storage_state_path(isolate_profile_dir) == (
+        isolate_profile_dir.parent / "source-storage-state.json"
     )
 
 

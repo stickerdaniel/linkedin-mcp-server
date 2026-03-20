@@ -64,6 +64,11 @@ def portable_cookie_path(source_profile_dir: Path | None = None) -> Path:
     return auth_root_dir(source_profile_dir) / "cookies.json"
 
 
+def source_storage_state_path(source_profile_dir: Path | None = None) -> Path:
+    """Return the portable source storage-state export path."""
+    return auth_root_dir(source_profile_dir) / "source-storage-state.json"
+
+
 def source_state_path(source_profile_dir: Path | None = None) -> Path:
     """Return the source session metadata path."""
     return auth_root_dir(source_profile_dir) / _SOURCE_STATE_FILE
@@ -293,6 +298,7 @@ def clear_auth_state(source_profile_dir: Path | None = None) -> bool:
     targets = [
         profile_dir,
         portable_cookie_path(profile_dir),
+        source_storage_state_path(profile_dir),
         source_state_path(profile_dir),
         runtime_profiles_root(profile_dir),
     ]
