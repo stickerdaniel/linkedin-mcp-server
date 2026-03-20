@@ -298,6 +298,7 @@ def clear_auth_state(source_profile_dir: Path | None = None) -> bool:
     targets = [
         profile_dir,
         portable_cookie_path(profile_dir),
+        source_storage_state_path(profile_dir),
         source_state_path(profile_dir),
         runtime_profiles_root(profile_dir),
     ]
