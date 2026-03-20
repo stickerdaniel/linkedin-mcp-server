@@ -736,3 +736,137 @@ async def test_experimental_bridge_validation_failure_before_commit_clears_runti
     assert not runtime_profile_dir(
         "linux-amd64-container", tmp_path / "profile"
     ).exists()
+
+
+# ---------------------------------------------------------------------------
+# Rotation counter tests
+# ---------------------------------------------------------------------------
+
+
+def test_record_scrape_increments_count():
+    from linkedin_mcp_server.drivers import browser as _b
+    from linkedin_mcp_server.drivers.browser import record_scrape, reset_scrape_count
+
+    reset_scrape_count()
+    assert _b._scrape_count == 0
+
+    record_scrape()
+    assert _b._scrape_count == 1
+
+    record_scrape()
+    assert _b._scrape_count == 2
+
+
+def test_should_rotate_at_threshold(monkeypatch):
+    from linkedin_mcp_server.drivers import browser as _b
+    from linkedin_mcp_server.drivers.browser import record_scrape, reset_scrape_count
+
+    monkeypatch.setenv("LINKEDIN_CONTEXT_ROTATION_THRESHOLD", "3")
+    reset_scrape_count()
+
+    record_scrape()
+    record_scrape()
+    assert not _b.should_rotate()  # count=2, threshold=3 → False
+
+    record_scrape()
+    assert _b.should_rotate()  # count=3 → True
+
+    record_scrape()
+    record_scrape()
+    assert not _b.should_rotate()  # count=5 → False
+
+    record_scrape()
+    assert _b.should_rotate()  # count=6 → True
+
+
+def test_should_rotate_not_at_zero(monkeypatch):
+    from linkedin_mcp_server.drivers import browser as _b
+    from linkedin_mcp_server.drivers.browser import reset_scrape_count
+
+    monkeypatch.setenv("LINKEDIN_CONTEXT_ROTATION_THRESHOLD", "3")
+    reset_scrape_count()
+    assert not _b.should_rotate()  # count=0 → False
+
+
+def test_should_rotate_disabled_when_threshold_zero(monkeypatch):
+    from linkedin_mcp_server.drivers import browser as _b
+    from linkedin_mcp_server.drivers.browser import record_scrape, reset_scrape_count
+
+    monkeypatch.setenv("LINKEDIN_CONTEXT_ROTATION_THRESHOLD", "0")
+    reset_scrape_count()
+    record_scrape()
+    record_scrape()
+    record_scrape()
+    assert not _b.should_rotate()  # threshold=0 → disabled
+
+
+@pytest.mark.asyncio
+async def test_hard_reset_browser_resets_scrape_count():
+    from linkedin_mcp_server.drivers import browser as _b
+    from linkedin_mcp_server.drivers.browser import hard_reset_browser, record_scrape
+
+    record_scrape()
+    record_scrape()
+    assert _b._scrape_count == 2
+
+    # Don't mock close_browser — let it run with _browser=None so reset_scrape_count() fires.
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="test-runtime",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_source_profile_dir",
+            return_value="/fake/profile",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.clear_runtime_profile",
+            return_value=True,
+        ),
+    ):
+        await hard_reset_browser()
+
+    assert _b._scrape_count == 0
+
+
+@pytest.mark.asyncio
+async def test_close_browser_resets_scrape_count():
+    from linkedin_mcp_server.drivers import browser as _b
+    from linkedin_mcp_server.drivers.browser import close_browser, record_scrape
+
+    record_scrape()
+    assert _b._scrape_count == 1
+
+    # close_browser with no active browser just resets state
+    await close_browser()
+
+    assert _b._scrape_count == 0
+
+
+@pytest.mark.asyncio
+async def test_hard_reset_browser_calls_close_and_clear_profile():
+    """hard_reset_browser() must call close_browser() and clear_runtime_profile()."""
+    close_mock = AsyncMock()
+    clear_mock = MagicMock(return_value=True)
+
+    with (
+        patch("linkedin_mcp_server.drivers.browser.close_browser", close_mock),
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="test-runtime",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_source_profile_dir",
+            return_value="/fake/profile",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.clear_runtime_profile",
+            clear_mock,
+        ),
+    ):
+        from linkedin_mcp_server.drivers.browser import hard_reset_browser
+
+        await hard_reset_browser()
+
+    close_mock.assert_awaited_once()
+    clear_mock.assert_called_once_with("test-runtime", "/fake/profile")

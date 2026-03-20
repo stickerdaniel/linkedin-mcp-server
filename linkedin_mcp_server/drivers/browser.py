@@ -491,6 +491,7 @@ async def close_browser() -> None:
     cookie_export_path = _browser_cookie_export_path
     _browser = None
     _browser_cookie_export_path = None
+    reset_scrape_count()
 
     if browser is None:
         return
@@ -503,6 +504,59 @@ async def close_browser() -> None:
             logger.debug("Cookie export on close skipped", exc_info=True)
     await browser.close()
     logger.info("Browser closed")
+
+
+async def hard_reset_browser() -> None:
+    """Close the browser and wipe the derived runtime profile.
+
+    The next call to get_or_create_browser() will re-bridge from source cookies,
+    giving a completely fresh session context.
+
+    Note: most effective in containerized (Docker) environments where scraping
+    uses a derived runtime profile. On local host runs where the server uses the
+    source profile directly, this closes the browser but cannot wipe the source
+    profile — re-run with --login to create a fresh source session in that case.
+    """
+    await close_browser()
+    runtime_id = get_runtime_id()
+    source_profile_dir = get_source_profile_dir()
+    cleared = clear_runtime_profile(runtime_id, source_profile_dir)
+    if cleared:
+        logger.info("Hard reset complete: runtime profile wiped for %s", runtime_id)
+    else:
+        logger.warning(
+            "Hard reset: could not clear runtime profile for %s (may not exist)", runtime_id
+        )
+
+
+_ROTATION_THRESHOLD_DEFAULT = 3
+_scrape_count: int = 0
+
+
+def _rotation_threshold() -> int:
+    """Return the context rotation threshold from env or default."""
+    try:
+        return int(os.getenv("LINKEDIN_CONTEXT_ROTATION_THRESHOLD", _ROTATION_THRESHOLD_DEFAULT))
+    except (ValueError, TypeError):
+        return _ROTATION_THRESHOLD_DEFAULT
+
+
+def record_scrape() -> None:
+    """Increment the scrape counter after each tool invocation."""
+    global _scrape_count
+    _scrape_count += 1
+
+
+def should_rotate() -> bool:
+    """Return True when the scrape counter has reached the rotation threshold."""
+    t = _rotation_threshold()
+    return t > 0 and _scrape_count > 0 and _scrape_count % t == 0
+
+
+def reset_scrape_count() -> None:
+    """Reset the scrape counter (called on browser reset)."""
+    global _scrape_count
+    _scrape_count = 0
 
 
 def get_profile_dir() -> Path:
@@ -567,3 +621,4 @@ def reset_browser_for_testing() -> None:
     _browser = None
     _browser_cookie_export_path = None
     _headless = True
+    reset_scrape_count()

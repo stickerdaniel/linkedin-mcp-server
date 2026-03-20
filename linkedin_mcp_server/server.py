@@ -13,7 +13,7 @@ from fastmcp.server.lifespan import lifespan
 
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.authentication import get_authentication_source
-from linkedin_mcp_server.drivers.browser import close_browser
+from linkedin_mcp_server.drivers.browser import close_browser, hard_reset_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
@@ -62,7 +62,7 @@ def create_mcp_server() -> FastMCP:
     register_job_tools(mcp)
     register_posts_tools(mcp)
 
-    # Register session management tool
+    # Register session management tools
     @mcp.tool(
         timeout=TOOL_TIMEOUT_SECONDS,
         title="Close Session",
@@ -79,5 +79,34 @@ def create_mcp_server() -> FastMCP:
             }
         except Exception as e:
             raise_tool_error(e, "close_session")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Reset Session",
+        annotations={"destructiveHint": True},
+        tags={"session"},
+    )
+    async def reset_session() -> dict[str, Any]:
+        """Hard-reset the browser session: close and wipe the derived runtime profile.
+
+        Use this when get_person_profile or get_company_profile returns
+        session_status='session_blocked' and subsequent calls also return empty sections.
+        The next scrape will re-bridge from source cookies with a completely fresh context.
+
+        Note: most effective in containerized (Docker) environments. On local host runs
+        where the server uses the source profile directly, this closes the browser but
+        cannot wipe the source profile — re-run with --login to create a fresh session.
+        """
+        try:
+            await hard_reset_browser()
+            return {
+                "status": "success",
+                "message": (
+                    "Browser closed and runtime profile wiped. "
+                    "Next scrape will re-bridge from source cookies."
+                ),
+            }
+        except Exception as e:
+            raise_tool_error(e, "reset_session")  # NoReturn
 
     return mcp

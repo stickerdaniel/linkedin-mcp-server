@@ -1773,3 +1773,196 @@ class TestSearchResultsExtraction:
             )
 
         assert result.text == placeholder
+
+
+class TestScrapePersonSessionStatus:
+    """Tests for session_status field and _SESSION_BLOCKED_ERROR surfacing in scrape_person."""
+
+    async def test_rate_limited_main_profile_surfaced_in_section_errors(
+        self, mock_page
+    ):
+        """_RATE_LIMITED_MSG on main_profile appears in section_errors as SessionBlockedError."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(_RATE_LIMITED_MSG),
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"main_profile"})
+
+        assert "main_profile" not in result["sections"]
+        assert (
+            result["section_errors"]["main_profile"]["error_type"]
+            == "SessionBlockedError"
+        )
+
+    async def test_session_blocked_status_on_rate_limited_main_profile(
+        self, mock_page
+    ):
+        """session_status='session_blocked' when main_profile returns _RATE_LIMITED_MSG."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(_RATE_LIMITED_MSG),
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"main_profile"})
+
+        assert result.get("session_status") == "session_blocked"
+        assert result["sections"] == {}
+
+    async def test_profile_not_found_status_on_url_mismatch(self, mock_page):
+        """session_status='profile_not_found' when final URL doesn't contain /in/username."""
+        mock_page.url = "https://www.linkedin.com/login"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(""),  # empty text, no error
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"main_profile"})
+
+        assert result.get("session_status") == "profile_not_found"
+
+    async def test_no_session_status_on_success(self, mock_page):
+        """session_status is absent when main_profile is extracted successfully."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("John Doe\nSoftware Engineer"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"main_profile"})
+
+        assert "session_status" not in result
+        assert "main_profile" in result["sections"]
+
+    async def test_no_session_status_on_navigation_error(self, mock_page):
+        """Navigation/timeout errors set section_errors but do NOT set session_status."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(
+                    "",
+                    error={
+                        "error_type": "NavigationError",
+                        "error_message": "timeout",
+                    },
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"main_profile"})
+
+        assert "session_status" not in result
+        assert result["section_errors"]["main_profile"]["error_type"] == "NavigationError"
+
+
+class TestScrapeCompanySessionStatus:
+    """Tests for session_status field and _SESSION_BLOCKED_ERROR surfacing in scrape_company."""
+
+    async def test_rate_limited_about_surfaced_in_section_errors(self, mock_page):
+        """_RATE_LIMITED_MSG on about section appears in section_errors as SessionBlockedError."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(_RATE_LIMITED_MSG),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_company("testcorp", {"about"})
+
+        assert "about" not in result["sections"]
+        assert (
+            result["section_errors"]["about"]["error_type"] == "SessionBlockedError"
+        )
+
+    async def test_session_blocked_status_on_rate_limited_about(self, mock_page):
+        """session_status='session_blocked' when about section returns _RATE_LIMITED_MSG."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(_RATE_LIMITED_MSG),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_company("testcorp", {"about"})
+
+        assert result.get("session_status") == "session_blocked"
+        assert result["sections"] == {}

@@ -48,6 +48,12 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 # Returned as section text when LinkedIn rate-limits the page
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
+# Structured error inserted into section_errors when the sentinel is detected
+_SESSION_BLOCKED_ERROR: dict[str, str] = {
+    "error_type": "SessionBlockedError",
+    "error_message": "Session silently blocked by LinkedIn (page loaded but no content extracted).",
+}
+
 # LinkedIn shows 25 results per page
 _PAGE_SIZE = 25
 
@@ -561,6 +567,7 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
+        main_profile_final_url: str | None = None
 
         first = True
         for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
@@ -580,10 +587,15 @@ class LinkedInExtractor:
                 else:
                     extracted = await self.extract_page(url, section_name=section_name)
 
+                if section_name == "main_profile":
+                    main_profile_final_url = self._page.url
+
                 if extracted.text and extracted.text != _RATE_LIMITED_MSG:
                     sections[section_name] = extracted.text
                     if extracted.references:
                         references[section_name] = extracted.references
+                elif extracted.text == _RATE_LIMITED_MSG:
+                    section_errors[section_name] = _SESSION_BLOCKED_ERROR
                 elif extracted.error:
                     section_errors[section_name] = extracted.error
             except LinkedInScraperException:
@@ -605,6 +617,12 @@ class LinkedInExtractor:
             result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
+        if "main_profile" not in sections:
+            mp_error = section_errors.get("main_profile", {})
+            if mp_error.get("error_type") == "SessionBlockedError":
+                result["session_status"] = "session_blocked"
+            elif main_profile_final_url and f"/in/{username}" not in main_profile_final_url:
+                result["session_status"] = "profile_not_found"
         return result
 
     async def scrape_company(
@@ -620,6 +638,7 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
+        about_final_url: str | None = None
 
         first = True
         for section_name, (suffix, is_overlay) in COMPANY_SECTIONS.items():
@@ -639,10 +658,15 @@ class LinkedInExtractor:
                 else:
                     extracted = await self.extract_page(url, section_name=section_name)
 
+                if section_name == "about":
+                    about_final_url = self._page.url
+
                 if extracted.text and extracted.text != _RATE_LIMITED_MSG:
                     sections[section_name] = extracted.text
                     if extracted.references:
                         references[section_name] = extracted.references
+                elif extracted.text == _RATE_LIMITED_MSG:
+                    section_errors[section_name] = _SESSION_BLOCKED_ERROR
                 elif extracted.error:
                     section_errors[section_name] = extracted.error
             except LinkedInScraperException:
@@ -664,6 +688,12 @@ class LinkedInExtractor:
             result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
+        if "about" not in sections:
+            about_error = section_errors.get("about", {})
+            if about_error.get("error_type") == "SessionBlockedError":
+                result["session_status"] = "session_blocked"
+            elif about_final_url and f"/company/{company_name}" not in about_final_url:
+                result["session_status"] = "profile_not_found"
         return result
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
@@ -682,6 +712,8 @@ class LinkedInExtractor:
             sections["job_posting"] = extracted.text
             if extracted.references:
                 references["job_posting"] = extracted.references
+        elif extracted.text == _RATE_LIMITED_MSG:
+            section_errors["job_posting"] = _SESSION_BLOCKED_ERROR
         elif extracted.error:
             section_errors["job_posting"] = extracted.error
 
@@ -1035,6 +1067,8 @@ class LinkedInExtractor:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references
+        elif extracted.text == _RATE_LIMITED_MSG:
+            section_errors["search_results"] = _SESSION_BLOCKED_ERROR
         elif extracted.error:
             section_errors["search_results"] = extracted.error
 

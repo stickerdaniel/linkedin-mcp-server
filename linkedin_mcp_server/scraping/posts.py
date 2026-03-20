@@ -255,6 +255,11 @@ async def get_post_content(
         sections["post_content"] = extracted.text
         if extracted.references:
             references["post_content"] = extracted.references
+    elif extracted.text == _RATE_LIMITED_MSG:
+        section_errors["post_content"] = {
+            "error_type": "SessionBlockedError",
+            "error_message": "Session silently blocked by LinkedIn (page loaded but no content extracted).",
+        }
     elif extracted.error:
         section_errors["post_content"] = extracted.error
 

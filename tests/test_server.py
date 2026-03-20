@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import mcp.types as mt
 from fastmcp import FastMCP
@@ -87,3 +87,29 @@ class TestSequentialToolExecutionMiddleware:
                 ),
             ]
         )
+
+
+class TestSessionTools:
+    async def test_reset_session_tool_registered(self):
+        mcp = create_mcp_server()
+        tool = await mcp.get_tool("reset_session")
+        assert tool is not None
+
+    async def test_reset_session_calls_hard_reset_browser(self):
+        mcp = create_mcp_server()
+        tool = await mcp.get_tool("reset_session")
+        assert tool is not None
+
+        with patch(
+            "linkedin_mcp_server.server.hard_reset_browser",
+            new_callable=AsyncMock,
+        ) as mock_reset:
+            result = await tool.fn()
+
+        mock_reset.assert_awaited_once()
+        assert result["status"] == "success"
+
+    async def test_close_session_tool_registered(self):
+        mcp = create_mcp_server()
+        tool = await mcp.get_tool("close_session")
+        assert tool is not None
