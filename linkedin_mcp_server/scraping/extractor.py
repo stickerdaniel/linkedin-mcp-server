@@ -17,6 +17,7 @@ from linkedin_mcp_server.core import (
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+    ScrapingError,
 )
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
@@ -472,7 +473,16 @@ class LinkedInExtractor:
         raw = raw_result["text"]
 
         if not raw:
-            return ExtractedSection(text="", references=[])
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    ScrapingError("Page loaded without extractable main content."),
+                    context="extract_page",
+                    target_url=url,
+                    section_name=section_name,
+                ),
+            )
         truncated = _truncate_linkedin_noise(raw)
         if not truncated and raw.strip():
             logger.warning(
@@ -632,8 +642,12 @@ class LinkedInExtractor:
             mp_error = section_errors.get("main_profile", {})
             if mp_error.get("error_type") == "SessionBlockedError":
                 result["session_status"] = "session_blocked"
-            elif main_profile_final_url and not _url_matches_profile(
-                main_profile_final_url, f"/in/{username}"
+            elif (
+                not mp_error
+                and main_profile_final_url
+                and not _url_matches_profile(
+                    main_profile_final_url, f"/in/{username}"
+                )
             ):
                 result["session_status"] = "profile_not_found"
         return result
@@ -705,8 +719,12 @@ class LinkedInExtractor:
             about_error = section_errors.get("about", {})
             if about_error.get("error_type") == "SessionBlockedError":
                 result["session_status"] = "session_blocked"
-            elif about_final_url and not _url_matches_profile(
-                about_final_url, f"/company/{company_name}"
+            elif (
+                not about_error
+                and about_final_url
+                and not _url_matches_profile(
+                    about_final_url, f"/company/{company_name}"
+                )
             ):
                 result["session_status"] = "profile_not_found"
         return result
