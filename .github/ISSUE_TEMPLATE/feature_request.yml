@@ -1,0 +1,26 @@
+name: Feature Request
+description: Suggest an improvement or new capability
+title: "[FEATURE] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: feature-description
+    attributes:
+      label: Feature Description
+      description: What you want to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: Why this is useful.
+    validations:
+      required: true
+  - type: textarea
+    id: suggested-approach
+    attributes:
+      label: Suggested Approach
+      description: How you'd implement it. Leave blank if unsure.
+    validations:
+      required: false
