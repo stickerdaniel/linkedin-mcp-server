@@ -1,5 +1,7 @@
 """Tests for scraping/posts.py: normalize URL, get_post_content, get_my_recent_posts, get_post_comments, find_unreplied_comments."""
 
+import math
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -578,6 +580,84 @@ class TestCache:
         data = [{"id": "fresh"}]
         scraping_cache.put("fresh", data, ttl=600.0)
         assert scraping_cache.get("fresh") == data
+
+
+def _parse_count_py(s: str | None) -> int | None:
+    """Python mirror of the parseCount JS in scraping/posts.py for testing."""
+    if not s:
+        return None
+    s = s.strip()
+    norm = s.replace(",", ".")
+    k_match = re.match(r"([\d.]+)\s*[kK]", norm)
+    if k_match:
+        return round(float(k_match.group(1)) * 1000)
+    m_match = re.match(r"([\d.]+)\s*[mM]", norm)
+    if m_match:
+        return round(float(m_match.group(1)) * 1000000)
+    cleaned = re.sub(r"[.,]", "", s)
+    cleaned = re.sub(r"\D", "", cleaned)
+    if not cleaned:
+        return None
+    return int(cleaned)
+
+
+class TestParseCountLogic:
+    """Test the parseCount logic that lives inside the JS evaluate.
+
+    Uses a Python mirror to validate all locale/format edge cases.
+    The JS and Python implementations must stay in sync.
+    """
+
+    def test_simple_integer(self):
+        assert _parse_count_py("42") == 42
+
+    def test_thousands_with_comma(self):
+        assert _parse_count_py("1,234") == 1234
+
+    def test_thousands_with_dot(self):
+        assert _parse_count_py("1.234") == 1234
+
+    def test_k_with_dot_decimal(self):
+        assert _parse_count_py("1.2K") == 1200
+
+    def test_k_with_comma_decimal(self):
+        assert _parse_count_py("1,2K") == 1200
+
+    def test_k_integer(self):
+        assert _parse_count_py("5K") == 5000
+
+    def test_k_lowercase(self):
+        assert _parse_count_py("3.5k") == 3500
+
+    def test_m_with_dot_decimal(self):
+        assert _parse_count_py("1.5M") == 1500000
+
+    def test_m_with_comma_decimal(self):
+        assert _parse_count_py("2,3M") == 2300000
+
+    def test_m_integer(self):
+        assert _parse_count_py("1M") == 1000000
+
+    def test_empty_string(self):
+        assert _parse_count_py("") is None
+
+    def test_none(self):
+        assert _parse_count_py(None) is None
+
+    def test_whitespace_padding(self):
+        assert _parse_count_py("  1.2K  ") == 1200
+
+    def test_non_numeric(self):
+        assert _parse_count_py("abc") is None
+
+    def test_k_with_space(self):
+        assert _parse_count_py("1.2 K") == 1200
+
+    def test_plain_large_number_with_comma(self):
+        assert _parse_count_py("12,345") == 12345
+
+    def test_plain_large_number_with_dot(self):
+        assert _parse_count_py("12.345") == 12345
 
 
 class TestExtractEngagementMetrics:

@@ -60,14 +60,17 @@ async def _extract_engagement_metrics(page: Page) -> dict[str, Any]:
             const main = document.querySelector('main') || document.body;
             if (!main) return metrics;
 
-            // Helper: parse "1,234" or "1.234" or "1K" or "1.2K" to int
+            // Helper: parse "1,234" or "1.234" or "1K" or "1.2K" or "1,2K" to int
             function parseCount(s) {
                 if (!s) return null;
-                s = s.trim().replace(/,/g, '');
-                const kMatch = s.match(/([\\d.]+)\\s*[kK]/);
+                s = s.trim();
+                // Normalize comma to dot for K/M decimal (e.g. "1,2K" → "1.2K")
+                const norm = s.replace(/,/g, '.');
+                const kMatch = norm.match(/([\\d.]+)\\s*[kK]/);
                 if (kMatch) return Math.round(parseFloat(kMatch[1]) * 1000);
-                const mMatch = s.match(/([\\d.]+)\\s*[mM]/);
+                const mMatch = norm.match(/([\\d.]+)\\s*[mM]/);
                 if (mMatch) return Math.round(parseFloat(mMatch[1]) * 1000000);
+                // Plain integer: strip all separators
                 const num = parseInt(s.replace(/[.,]/g, '').replace(/\\D/g, ''), 10);
                 return isNaN(num) ? null : num;
             }

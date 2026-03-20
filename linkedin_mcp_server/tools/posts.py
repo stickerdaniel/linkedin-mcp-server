@@ -265,7 +265,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
     async def find_unreplied_comments(
         ctx: Context,
         since_days: int = 7,
-        max_posts: int = 20,
+        max_posts: Annotated[int, Field(ge=1, le=100)] = 20,
         extractor: LinkedInExtractor = Depends(get_extractor),
     ) -> dict[str, Any]:
         """
