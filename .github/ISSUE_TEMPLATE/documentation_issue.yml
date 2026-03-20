@@ -1,0 +1,27 @@
+name: Documentation Issue
+description: Report incorrect, missing, or confusing documentation
+title: "[DOCS] "
+labels: ["documentation"]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Location
+      description: File path, section name, or URL.
+      placeholder: "e.g. README.md, Docker setup section"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What's wrong or confusing.
+    validations:
+      required: true
+  - type: textarea
+    id: suggested-fix
+    attributes:
+      label: Suggested Fix
+      description: What it should say instead. Leave blank if unsure.
+    validations:
+      required: false
