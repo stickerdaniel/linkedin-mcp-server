@@ -32,62 +32,10 @@ class TestDetectRateLimit:
         with pytest.raises(RateLimitError, match="security checkpoint"):
             await detect_rate_limit(mock_page)
 
-    async def test_captcha_iframe_raises(self, mock_page):
-        captcha_locator = MagicMock()
-        captcha_locator.count = AsyncMock(return_value=1)
-        captcha_frame = MagicMock()
-        captcha_frame.evaluate = AsyncMock(
-            return_value={
-                "src": "https://example.com/captcha",
-                "visible": True,
-            }
-        )
-        captcha_locator.nth = MagicMock(return_value=captcha_frame)
-
-        main_locator = MagicMock()
-        main_locator.count = AsyncMock(return_value=0)
-
-        def locator_side_effect(selector):
-            if "captcha" in selector:
-                return captcha_locator
-            return main_locator
-
-        mock_page.locator = MagicMock(side_effect=locator_side_effect)
-        with pytest.raises(RateLimitError, match="CAPTCHA"):
-            await detect_rate_limit(mock_page)
-
-    async def test_hidden_invisible_recaptcha_does_not_raise(self, mock_page):
-        captcha_locator = MagicMock()
-        captcha_locator.count = AsyncMock(return_value=1)
-        captcha_frame = MagicMock()
-        captcha_frame.evaluate = AsyncMock(
-            return_value={
-                "src": "https://www.google.com/recaptcha/enterprise/anchor?size=invisible",
-                "visible": False,
-            }
-        )
-        captcha_locator.nth = MagicMock(return_value=captcha_frame)
-
-        main_locator = MagicMock()
-        main_locator.count = AsyncMock(return_value=1)
-
-        def locator_side_effect(selector):
-            if "captcha" in selector:
-                return captcha_locator
-            if selector == "main":
-                return main_locator
-            return MagicMock(count=AsyncMock(return_value=0))
-
-        mock_page.locator = MagicMock(side_effect=locator_side_effect)
-        await detect_rate_limit(mock_page)
-
     async def test_normal_page_with_main_skips_body_heuristic(self, mock_page):
         """A normal page with <main> should NOT trigger body text checks."""
         main_locator = MagicMock()
         main_locator.count = AsyncMock(return_value=1)
-
-        captcha_locator = MagicMock()
-        captcha_locator.count = AsyncMock(return_value=0)
 
         body_locator = MagicMock()
         # Body contains a phrase that would false-positive
@@ -96,8 +44,6 @@ class TestDetectRateLimit:
         )
 
         def locator_side_effect(selector):
-            if "captcha" in selector:
-                return captcha_locator
             if selector == "main":
                 return main_locator
             if selector == "body":
@@ -113,17 +59,12 @@ class TestDetectRateLimit:
         main_locator = MagicMock()
         main_locator.count = AsyncMock(return_value=0)
 
-        captcha_locator = MagicMock()
-        captcha_locator.count = AsyncMock(return_value=0)
-
         body_locator = MagicMock()
         body_locator.inner_text = AsyncMock(
             return_value="Too many requests. Slow down."
         )
 
         def locator_side_effect(selector):
-            if "captcha" in selector:
-                return captcha_locator
             if selector == "main":
                 return main_locator
             if selector == "body":
@@ -139,9 +80,6 @@ class TestDetectRateLimit:
         main_locator = MagicMock()
         main_locator.count = AsyncMock(return_value=0)
 
-        captcha_locator = MagicMock()
-        captcha_locator.count = AsyncMock(return_value=0)
-
         body_locator = MagicMock()
         # Long body with a matching phrase buried in content
         body_locator.inner_text = AsyncMock(
@@ -149,8 +87,6 @@ class TestDetectRateLimit:
         )
 
         def locator_side_effect(selector):
-            if "captcha" in selector:
-                return captcha_locator
             if selector == "main":
                 return main_locator
             if selector == "body":
@@ -161,17 +97,12 @@ class TestDetectRateLimit:
         # Should NOT raise — body is too long to be an error page
         await detect_rate_limit(mock_page)
 
-    async def test_normal_url_no_captcha_no_error_passes(self, mock_page):
+    async def test_normal_url_no_error_passes(self, mock_page):
         """A clean normal page passes all checks without raising."""
         main_locator = MagicMock()
         main_locator.count = AsyncMock(return_value=1)
 
-        captcha_locator = MagicMock()
-        captcha_locator.count = AsyncMock(return_value=0)
-
         def locator_side_effect(selector):
-            if "captcha" in selector:
-                return captcha_locator
             if selector == "main":
                 return main_locator
             return MagicMock(count=AsyncMock(return_value=0))
