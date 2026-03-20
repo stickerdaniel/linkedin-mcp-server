@@ -536,7 +536,7 @@ _scrape_count: int = 0
 def _rotation_threshold() -> int:
     """Return the context rotation threshold from env or default."""
     try:
-        return int(os.getenv("LINKEDIN_CONTEXT_ROTATION_THRESHOLD", _ROTATION_THRESHOLD_DEFAULT))
+        return int(os.getenv("LINKEDIN_CONTEXT_ROTATION_THRESHOLD", str(_ROTATION_THRESHOLD_DEFAULT)))
     except (ValueError, TypeError):
         return _ROTATION_THRESHOLD_DEFAULT
 

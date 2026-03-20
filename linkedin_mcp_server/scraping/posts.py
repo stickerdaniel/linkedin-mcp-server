@@ -23,7 +23,7 @@ from linkedin_mcp_server.core.utils import (
     wait_for_cooldown,
 )
 from linkedin_mcp_server.scraping.cache import scraping_cache
-from linkedin_mcp_server.scraping.extractor import LinkedInExtractor, _RATE_LIMITED_MSG
+from linkedin_mcp_server.scraping.extractor import LinkedInExtractor, _RATE_LIMITED_MSG, _SESSION_BLOCKED_ERROR
 
 logger = logging.getLogger(__name__)
 _FEED_URL = "https://www.linkedin.com/feed/"
@@ -256,10 +256,7 @@ async def get_post_content(
         if extracted.references:
             references["post_content"] = extracted.references
     elif extracted.text == _RATE_LIMITED_MSG:
-        section_errors["post_content"] = {
-            "error_type": "SessionBlockedError",
-            "error_message": "Session silently blocked by LinkedIn (page loaded but no content extracted).",
-        }
+        section_errors["post_content"] = _SESSION_BLOCKED_ERROR
     elif extracted.error:
         section_errors["post_content"] = extracted.error
 

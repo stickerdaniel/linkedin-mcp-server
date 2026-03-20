@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import logging
 import re
 from typing import Any, Literal
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -53,6 +53,17 @@ _SESSION_BLOCKED_ERROR: dict[str, str] = {
     "error_type": "SessionBlockedError",
     "error_message": "Session silently blocked by LinkedIn (page loaded but no content extracted).",
 }
+
+def _url_matches_profile(url: str, expected_path_prefix: str) -> bool:
+    """Return True when the URL's path matches the expected profile path prefix.
+
+    Uses exact path-segment comparison to avoid false matches where one slug is
+    a substring of another (e.g. "/in/dan" vs "/in/daniel").
+    """
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    return path == expected_path_prefix or path.startswith(expected_path_prefix + "/")
+
 
 # LinkedIn shows 25 results per page
 _PAGE_SIZE = 25
@@ -621,7 +632,9 @@ class LinkedInExtractor:
             mp_error = section_errors.get("main_profile", {})
             if mp_error.get("error_type") == "SessionBlockedError":
                 result["session_status"] = "session_blocked"
-            elif main_profile_final_url and f"/in/{username}" not in main_profile_final_url:
+            elif main_profile_final_url and not _url_matches_profile(
+                main_profile_final_url, f"/in/{username}"
+            ):
                 result["session_status"] = "profile_not_found"
         return result
 
@@ -692,7 +705,9 @@ class LinkedInExtractor:
             about_error = section_errors.get("about", {})
             if about_error.get("error_type") == "SessionBlockedError":
                 result["session_status"] = "session_blocked"
-            elif about_final_url and f"/company/{company_name}" not in about_final_url:
+            elif about_final_url and not _url_matches_profile(
+                about_final_url, f"/company/{company_name}"
+            ):
                 result["session_status"] = "profile_not_found"
         return result
 
@@ -969,7 +984,9 @@ class LinkedInExtractor:
                 )
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
-                    if extracted.error:
+                    if extracted.text == _RATE_LIMITED_MSG:
+                        section_errors["search_results"] = _SESSION_BLOCKED_ERROR
+                    elif extracted.error:
                         section_errors["search_results"] = extracted.error
                     # Navigation failed or rate-limited; skip ID extraction
                     break

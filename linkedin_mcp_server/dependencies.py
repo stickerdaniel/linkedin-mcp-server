@@ -36,9 +36,9 @@ async def get_extractor() -> AsyncGenerator[LinkedInExtractor, None]:
         browser = await get_or_create_browser()
         await ensure_authenticated()
         extractor = LinkedInExtractor(browser.page)
+        try:
+            yield extractor
+        finally:
+            record_scrape()
     except Exception as e:
         raise_tool_error(e, "get_extractor")  # NoReturn
-    try:
-        yield extractor
-    finally:
-        record_scrape()

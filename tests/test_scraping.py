@@ -10,9 +10,31 @@ from linkedin_mcp_server.scraping.extractor import (
     LinkedInExtractor,
     _RATE_LIMITED_MSG,
     _truncate_linkedin_noise,
+    _url_matches_profile,
     strip_linkedin_noise,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
+
+
+class TestUrlMatchesProfile:
+    def test_exact_match(self):
+        assert _url_matches_profile("https://www.linkedin.com/in/testuser", "/in/testuser")
+
+    def test_trailing_slash(self):
+        assert _url_matches_profile("https://www.linkedin.com/in/testuser/", "/in/testuser")
+
+    def test_sub_path(self):
+        assert _url_matches_profile("https://www.linkedin.com/in/testuser/details/", "/in/testuser")
+
+    def test_prefix_mismatch_no_false_positive(self):
+        # "/in/dan" must NOT match "/in/daniel"
+        assert not _url_matches_profile("https://www.linkedin.com/in/daniel/", "/in/dan")
+
+    def test_redirect_url(self):
+        assert not _url_matches_profile("https://www.linkedin.com/login", "/in/testuser")
+
+    def test_authwall_redirect(self):
+        assert not _url_matches_profile("https://www.linkedin.com/authwall", "/in/testuser")
 
 
 def extracted(
@@ -1489,6 +1511,43 @@ class TestSearchJobs:
 
         assert result["sections"] == {}
         assert "references" not in result
+
+    async def test_rate_limited_search_results_surfaced_in_section_errors(
+        self, mock_page
+    ):
+        """_RATE_LIMITED_MSG on search_results populates section_errors as SessionBlockedError."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted(_RATE_LIMITED_MSG),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["sections"] == {}
+        assert (
+            result["section_errors"]["search_results"]["error_type"]
+            == "SessionBlockedError"
+        )
 
 
 class TestStripLinkedInNoise:

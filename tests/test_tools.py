@@ -223,7 +223,9 @@ class TestCompanyTools:
         assert "pages_visited" not in result
         assert "sections_requested" not in result
 
-    async def test_get_company_posts_omits_rate_limited_sentinel(self, mock_context):
+    async def test_get_company_posts_rate_limited_surfaced_in_section_errors(
+        self, mock_context
+    ):
         mock_extractor = MagicMock()
         mock_extractor.extract_page = AsyncMock(
             return_value=ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
@@ -237,6 +239,7 @@ class TestCompanyTools:
         tool_fn = await get_tool_fn(mcp, "get_company_posts")
         result = await tool_fn("testcorp", mock_context, extractor=mock_extractor)
         assert result["sections"] == {}
+        assert result["section_errors"]["posts"]["error_type"] == "SessionBlockedError"
 
     async def test_get_company_posts_returns_section_errors(self, mock_context):
         mock_extractor = MagicMock()
@@ -339,6 +342,7 @@ class TestToolTimeouts:
             "get_job_details",
             "search_jobs",
             "close_session",
+            "reset_session",
         )
 
         for name in tool_names:
