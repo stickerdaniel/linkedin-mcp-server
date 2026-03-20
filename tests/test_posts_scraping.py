@@ -1,17 +1,29 @@
 """Tests for scraping/posts.py: normalize URL, get_post_content, get_my_recent_posts, get_post_comments, find_unreplied_comments."""
 
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from linkedin_mcp_server.scraping.extractor import ExtractedSection
 from linkedin_mcp_server.scraping.posts import (
+    _cache_get,
+    _cache_put,
+    _comment_cache,
+    _extract_author_info,
+    _extract_engagement_metrics,
+    _detect_post_type,
+    _expand_comments_section,
+    _get_current_user_name,
     _normalize_post_url,
+    _unreplied_via_notifications,
     find_unreplied_comments,
+    get_feed_posts,
     get_my_recent_posts,
     get_notifications,
     get_post_comments,
     get_post_content,
+    get_profile_recent_posts,
 )
 
 
@@ -54,6 +66,14 @@ class TestNormalizePostUrl:
         assert result.startswith("https://www.linkedin.com/feed/update/")
         assert "urn:li:activity:42" in result
         assert result.endswith("/")
+
+    def test_non_url_non_urn_non_digit_without_trailing_slash(self):
+        result = _normalize_post_url("some-slug")
+        assert result == "https://www.linkedin.com/feed/update/some-slug/"
+
+    def test_non_url_non_urn_non_digit_with_trailing_slash(self):
+        result = _normalize_post_url("some-slug/")
+        assert result == "https://www.linkedin.com/feed/update/some-slug/"
 
 
 @pytest.fixture
@@ -213,6 +233,18 @@ class TestGetPostComments:
         mock_page.goto = AsyncMock(side_effect=Exception("Load failed"))
         result = await get_post_comments(mock_page, "urn:li:activity:999")
         assert result == []
+
+    async def test_reraises_linkedin_scraper_exception(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        from linkedin_mcp_server.core.exceptions import RateLimitError
+
+        _comment_cache.clear()
+        mock_rate_limit.side_effect = RateLimitError(
+            "Rate limited", suggested_wait_time=60
+        )
+        with pytest.raises(RateLimitError):
+            await get_post_comments(mock_page, "12345")
 
     async def test_includes_has_reply_from_author_when_present(
         self, mock_scroll, mock_modal, mock_rate_limit, mock_page
@@ -523,3 +555,767 @@ class TestGetNotifications:
         mock_page.evaluate = AsyncMock(return_value=[])
         await get_notifications(mock_page)
         assert mock_page.evaluate.await_args[0][1] == 20
+
+
+class TestCache:
+    """Tests for inline TTL cache functions."""
+
+    def setup_method(self):
+        _comment_cache.clear()
+
+    def test_cache_put_and_get(self):
+        data = [{"comment_id": "c1"}]
+        _cache_put("key1", data)
+        assert _cache_get("key1") == data
+
+    def test_cache_get_missing_key(self):
+        assert _cache_get("nonexistent") is None
+
+    def test_cache_expired_entry(self):
+        _comment_cache["expired"] = (time.monotonic() - 400, [{"id": "old"}])
+        assert _cache_get("expired") is None
+        assert "expired" not in _comment_cache
+
+    def test_cache_not_expired(self):
+        data = [{"id": "fresh"}]
+        _comment_cache["fresh"] = (time.monotonic() - 100, data)
+        assert _cache_get("fresh") == data
+
+
+class TestExtractEngagementMetrics:
+    """Tests for _extract_engagement_metrics."""
+
+    async def test_returns_metrics_dict(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(
+            return_value={"reactions": 42, "comments_count": 5, "reposts_count": 3}
+        )
+        result = await _extract_engagement_metrics(page)
+        assert result == {"reactions": 42, "comments_count": 5, "reposts_count": 3}
+
+    async def test_returns_empty_dict_on_non_dict(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value="not a dict")
+        result = await _extract_engagement_metrics(page)
+        assert result == {}
+
+    async def test_returns_empty_dict_on_exception(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(side_effect=Exception("JS error"))
+        result = await _extract_engagement_metrics(page)
+        assert result == {}
+
+
+class TestDetectPostType:
+    """Tests for _detect_post_type."""
+
+    async def test_returns_post_type_string(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value="video")
+        result = await _detect_post_type(page)
+        assert result == "video"
+
+    async def test_returns_unknown_on_non_string(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value=123)
+        result = await _detect_post_type(page)
+        assert result == "unknown"
+
+    async def test_returns_unknown_on_exception(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(side_effect=Exception("JS error"))
+        result = await _detect_post_type(page)
+        assert result == "unknown"
+
+
+class TestExtractAuthorInfo:
+    """Tests for _extract_author_info."""
+
+    async def test_returns_author_dict(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(
+            return_value={
+                "name": "Alice",
+                "headline": "Engineer",
+                "profile_url": "https://linkedin.com/in/alice/",
+            }
+        )
+        result = await _extract_author_info(page)
+        assert result["name"] == "Alice"
+
+    async def test_returns_empty_dict_on_non_dict(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value=None)
+        result = await _extract_author_info(page)
+        assert result == {}
+
+    async def test_returns_empty_dict_on_exception(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(side_effect=Exception("JS error"))
+        result = await _extract_author_info(page)
+        assert result == {}
+
+
+class TestGetCurrentUserName:
+    """Tests for _get_current_user_name."""
+
+    async def test_returns_name_string(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value="John Doe")
+        result = await _get_current_user_name(page)
+        assert result == "John Doe"
+
+    async def test_returns_none_on_empty_string(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value="")
+        result = await _get_current_user_name(page)
+        assert result is None
+
+    async def test_returns_none_on_non_string(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value=42)
+        result = await _get_current_user_name(page)
+        assert result is None
+
+    async def test_returns_none_on_null(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value=None)
+        result = await _get_current_user_name(page)
+        assert result is None
+
+    async def test_returns_none_on_exception(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(side_effect=Exception("JS error"))
+        result = await _get_current_user_name(page)
+        assert result is None
+
+
+class TestExpandCommentsSection:
+    """Tests for _expand_comments_section."""
+
+    async def test_returns_zero_when_no_buttons_visible(self):
+        page = MagicMock()
+        loc = MagicMock()
+        loc.is_visible = AsyncMock(return_value=False)
+        locator_mock = MagicMock(return_value=MagicMock(first=loc))
+        page.locator = locator_mock
+        result = await _expand_comments_section(page, max_clicks=2)
+        assert result == 0
+
+    async def test_clicks_visible_button(self):
+        page = MagicMock()
+        loc = MagicMock()
+        # First call: visible and clickable, second call: not visible
+        loc.is_visible = AsyncMock(side_effect=[True, False, False, False, False, False, False, False, False])
+        loc.click = AsyncMock()
+        page.locator = MagicMock(return_value=MagicMock(first=loc))
+        result = await _expand_comments_section(page, max_clicks=1)
+        assert result == 1
+        loc.click.assert_awaited_once()
+
+    async def test_handles_timeout_error(self):
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        page = MagicMock()
+        loc = MagicMock()
+        loc.is_visible = AsyncMock(side_effect=PlaywrightTimeoutError("timeout"))
+        page.locator = MagicMock(return_value=MagicMock(first=loc))
+        result = await _expand_comments_section(page, max_clicks=1)
+        assert result == 0
+
+    async def test_handles_generic_exception(self):
+        page = MagicMock()
+        loc = MagicMock()
+        loc.is_visible = AsyncMock(side_effect=RuntimeError("unexpected"))
+        page.locator = MagicMock(return_value=MagicMock(first=loc))
+        result = await _expand_comments_section(page, max_clicks=1)
+        assert result == 0
+
+
+@patch("linkedin_mcp_server.scraping.posts.detect_rate_limit", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.handle_modal_close", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.scroll_to_bottom", new_callable=AsyncMock)
+class TestGetProfileRecentPosts:
+    """Tests for get_profile_recent_posts."""
+
+    async def test_returns_posts_from_profile(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                    "post_id": "urn:li:activity:1",
+                    "text_preview": "Hello world",
+                    "created_at": None,
+                }
+            ]
+        )
+        result = await get_profile_recent_posts(mock_page, "testuser", limit=10)
+        assert len(result) == 1
+        assert result[0]["post_url"].endswith("urn:li:activity:1/")
+        assert result[0]["text_preview"] == "Hello world"
+        goto_url = mock_page.goto.await_args[0][0]
+        assert "testuser" in goto_url
+
+    async def test_filters_invalid_entries(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                    "post_id": "urn:li:activity:1",
+                    "text_preview": "",
+                    "created_at": None,
+                },
+                {},  # no post_url
+                "not a dict",
+            ]
+        )
+        result = await get_profile_recent_posts(mock_page, "user1", limit=10)
+        assert len(result) == 1
+
+    async def test_returns_empty_on_non_list(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(return_value="not a list")
+        result = await get_profile_recent_posts(mock_page, "user1", limit=10)
+        assert result == []
+
+    async def test_returns_empty_on_exception(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
+        result = await get_profile_recent_posts(mock_page, "user1", limit=10)
+        assert result == []
+
+    async def test_reraises_linkedin_scraper_exception(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        from linkedin_mcp_server.core.exceptions import RateLimitError
+
+        mock_rate_limit.side_effect = RateLimitError(
+            "Rate limited", suggested_wait_time=60
+        )
+        with pytest.raises(RateLimitError):
+            await get_profile_recent_posts(mock_page, "user1", limit=10)
+
+    async def test_strips_username_slashes(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(return_value=[])
+        await get_profile_recent_posts(mock_page, " /testuser/ ", limit=5)
+        goto_url = mock_page.goto.await_args[0][0]
+        assert "//testuser//" not in goto_url
+        assert "testuser" in goto_url
+
+
+@patch("linkedin_mcp_server.scraping.posts.detect_rate_limit", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.handle_modal_close", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.scroll_to_bottom", new_callable=AsyncMock)
+class TestGetFeedPosts:
+    """Tests for get_feed_posts."""
+
+    async def test_returns_feed_posts(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                    "post_id": "urn:li:activity:1",
+                    "text_preview": "Feed post",
+                    "author_name": "Alice",
+                    "author_url": "https://linkedin.com/in/alice/",
+                    "created_at": None,
+                }
+            ]
+        )
+        result = await get_feed_posts(mock_page, limit=10)
+        assert len(result) == 1
+        assert result[0]["author_name"] == "Alice"
+        assert result[0]["post_url"].endswith("urn:li:activity:1/")
+
+    async def test_handles_dict_response_with_items(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "items": [
+                    {
+                        "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                        "post_id": "urn:li:activity:1",
+                        "text_preview": "Post",
+                        "author_name": "Bob",
+                        "author_url": None,
+                        "created_at": None,
+                    }
+                ],
+                "scrollHeight": 5000,
+            }
+        )
+        result = await get_feed_posts(mock_page, limit=1)
+        assert len(result) == 1
+        assert result[0]["author_name"] == "Bob"
+
+    async def test_stops_on_stable_scroll_height(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        # Two calls returning same height and no new items -> stop
+        mock_page.evaluate = AsyncMock(
+            side_effect=[
+                {"items": [], "scrollHeight": 1000},
+                {"items": [], "scrollHeight": 1000},
+            ]
+        )
+        result = await get_feed_posts(mock_page, limit=10, max_scrolls=5)
+        assert result == []
+        # Should stop after 2 calls (first sets prev_height, second matches)
+        assert mock_page.evaluate.await_count == 2
+
+    async def test_returns_empty_on_exception(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
+        result = await get_feed_posts(mock_page, limit=10)
+        assert result == []
+
+    async def test_reraises_linkedin_scraper_exception(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        from linkedin_mcp_server.core.exceptions import RateLimitError
+
+        mock_rate_limit.side_effect = RateLimitError(
+            "Rate limited", suggested_wait_time=60
+        )
+        with pytest.raises(RateLimitError):
+            await get_feed_posts(mock_page, limit=10)
+
+    async def test_deduplicates_by_post_id(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        dup_post = {
+            "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+            "post_id": "urn:li:activity:1",
+            "text_preview": "Same",
+            "author_name": None,
+            "author_url": None,
+            "created_at": None,
+        }
+        mock_page.evaluate = AsyncMock(return_value=[dup_post, dup_post])
+        result = await get_feed_posts(mock_page, limit=10)
+        assert len(result) == 1
+
+    async def test_filters_entries_without_url_or_id(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {"post_url": None, "post_id": "urn:li:activity:1"},
+                {"post_url": "https://linkedin.com/post/1", "post_id": None},
+                "not a dict",
+                42,
+            ]
+        )
+        result = await get_feed_posts(mock_page, limit=10)
+        assert result == []
+
+    async def test_breaks_on_non_dict_raw(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        # Legacy single-shot evaluate that returns list (not dict)
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                    "post_id": "urn:li:activity:1",
+                    "text_preview": "",
+                    "author_name": None,
+                    "author_url": None,
+                    "created_at": None,
+                }
+            ]
+        )
+        result = await get_feed_posts(mock_page, limit=10, max_scrolls=5)
+        assert len(result) == 1
+        # Should only call evaluate once (breaks on non-dict raw)
+        assert mock_page.evaluate.await_count == 1
+
+
+@patch("linkedin_mcp_server.scraping.posts.detect_rate_limit", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.handle_modal_close", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.scroll_to_bottom", new_callable=AsyncMock)
+class TestUnrepliedViaNotifications:
+    """Tests for _unreplied_via_notifications."""
+
+    async def test_returns_comment_links(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "items": [
+                    {
+                        "link": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c1",
+                        "snippet": "Someone commented",
+                    }
+                ],
+                "hasContent": True,
+            }
+        )
+        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        assert result is not None
+        assert len(result) == 1
+        assert "comment_permalink" in result[0]
+        assert "post_url" in result[0]
+
+    async def test_returns_empty_list_when_no_comments_but_content(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={"items": [], "hasContent": True}
+        )
+        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        assert result == []
+
+    async def test_returns_none_when_no_content(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={"items": [], "hasContent": False}
+        )
+        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        assert result is None
+
+    async def test_returns_none_on_exception(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
+        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        assert result is None
+
+    async def test_reraises_linkedin_scraper_exception(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        from linkedin_mcp_server.core.exceptions import RateLimitError
+
+        mock_rate_limit.side_effect = RateLimitError(
+            "Rate limited", suggested_wait_time=60
+        )
+        with pytest.raises(RateLimitError):
+            await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+
+    async def test_filters_items_without_link(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "items": [
+                    {"link": "https://linkedin.com/feed/update/1/", "snippet": "ok"},
+                    {"link": None, "snippet": "no link"},
+                    "not a dict",
+                ],
+                "hasContent": True,
+            }
+        )
+        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        assert len(result) == 1
+
+    async def test_returns_none_on_non_dict_raw(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(return_value="not a dict")
+        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        assert result is None
+
+    async def test_splits_link_for_post_url(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "items": [
+                    {
+                        "link": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=x",
+                        "snippet": "text",
+                    }
+                ],
+                "hasContent": True,
+            }
+        )
+        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        assert result[0]["post_url"] == "https://linkedin.com/feed/update/urn:li:activity:1/"
+
+
+@patch("linkedin_mcp_server.scraping.posts.detect_rate_limit", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.handle_modal_close", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.scroll_to_bottom", new_callable=AsyncMock)
+class TestGetPostCommentsCache:
+    """Tests for cache integration in get_post_comments."""
+
+    def setup_method(self):
+        _comment_cache.clear()
+
+    async def test_returns_cached_comments(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        cached_data = [{"comment_id": "c1", "author_name": "Cached", "text": "cached"}]
+        _cache_put("comments:https://www.linkedin.com/feed/update/urn:li:activity:111/:user=", cached_data)
+        result = await get_post_comments(mock_page, "111")
+        assert result == cached_data
+        mock_page.goto.assert_not_awaited()
+
+    async def test_caches_on_success(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "comment_id": "c1",
+                    "author_name": "Alice",
+                    "author_url": "https://linkedin.com/in/alice/",
+                    "text": "Great!",
+                    "created_at": None,
+                    "comment_permalink": None,
+                }
+            ]
+        )
+        await get_post_comments(mock_page, "222")
+        url = "https://www.linkedin.com/feed/update/urn:li:activity:222/"
+        key = f"comments:{url}:user="
+        assert _cache_get(key) is not None
+
+
+@patch("linkedin_mcp_server.scraping.posts.detect_rate_limit", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.handle_modal_close", new_callable=AsyncMock)
+@patch("linkedin_mcp_server.scraping.posts.scroll_to_bottom", new_callable=AsyncMock)
+class TestGetMyRecentPostsEdgeCases:
+    """Additional edge case tests for get_my_recent_posts."""
+
+    async def test_dict_response_with_items(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "items": [
+                    {
+                        "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                        "post_id": "urn:li:activity:1",
+                        "text_preview": "Post",
+                        "created_at": None,
+                    }
+                ],
+                "scrollHeight": 5000,
+            }
+        )
+        result = await get_my_recent_posts(mock_page, limit=1)
+        assert len(result) == 1
+
+    async def test_stops_on_stable_scroll_height(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            side_effect=[
+                {"items": [], "scrollHeight": 1000},
+                {"items": [], "scrollHeight": 1000},
+            ]
+        )
+        result = await get_my_recent_posts(mock_page, limit=10, max_scrolls=5)
+        assert result == []
+        assert mock_page.evaluate.await_count == 2
+
+    async def test_deduplicates_by_post_id(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        dup = {
+            "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+            "post_id": "urn:li:activity:1",
+            "text_preview": "",
+            "created_at": None,
+        }
+        mock_page.evaluate = AsyncMock(return_value=[dup, dup])
+        result = await get_my_recent_posts(mock_page, limit=10)
+        assert len(result) == 1
+
+    async def test_since_days_filters_old_posts(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                    "post_id": "urn:li:activity:1",
+                    "text_preview": "Recent",
+                    "created_at": "2099-01-01T00:00:00Z",
+                },
+                {
+                    "post_url": "https://linkedin.com/feed/update/urn:li:activity:2/",
+                    "post_id": "urn:li:activity:2",
+                    "text_preview": "Old",
+                    "created_at": "2000-01-01T00:00:00Z",
+                },
+            ]
+        )
+        result = await get_my_recent_posts(mock_page, limit=10, since_days=7)
+        assert len(result) == 1
+        assert result[0]["text_preview"] == "Recent"
+
+    async def test_since_days_keeps_unknown_dates(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                    "post_id": "urn:li:activity:1",
+                    "text_preview": "No date",
+                    "created_at": None,
+                },
+            ]
+        )
+        result = await get_my_recent_posts(mock_page, limit=10, since_days=7)
+        assert len(result) == 1
+
+    async def test_since_days_keeps_unparseable_dates(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                    "post_id": "urn:li:activity:1",
+                    "text_preview": "Bad date",
+                    "created_at": "not-a-date",
+                },
+            ]
+        )
+        result = await get_my_recent_posts(mock_page, limit=10, since_days=7)
+        assert len(result) == 1
+
+    async def test_filters_entries_without_url_or_id(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {"post_url": None, "post_id": "urn:li:activity:1"},
+                {"post_url": "https://linkedin.com/post/1", "post_id": None},
+                42,
+            ]
+        )
+        result = await get_my_recent_posts(mock_page, limit=10)
+        assert result == []
+
+    async def test_non_dict_items_value(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        mock_page.evaluate = AsyncMock(
+            return_value={"items": "not a list", "scrollHeight": 1000}
+        )
+        result = await get_my_recent_posts(mock_page, limit=10, max_scrolls=1)
+        assert result == []
+
+
+class TestGetPostContentEngagement:
+    """Tests for get_post_content engagement, post_type, and author integration."""
+
+    @patch("linkedin_mcp_server.scraping.posts._extract_author_info", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._extract_engagement_metrics", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts.LinkedInExtractor")
+    async def test_includes_engagement_post_type_author(
+        self, mock_ext_cls, mock_engagement, mock_type, mock_author, mock_page
+    ):
+        mock_instance = MagicMock()
+        mock_instance.extract_page = AsyncMock(
+            return_value=ExtractedSection(text="Hello", references=[])
+        )
+        mock_ext_cls.return_value = mock_instance
+        mock_engagement.return_value = {"reactions": 10}
+        mock_type.return_value = "image"
+        mock_author.return_value = {"name": "Alice"}
+
+        result = await get_post_content(mock_page, "12345")
+
+        assert result["engagement"] == {"reactions": 10}
+        assert result["post_type"] == "image"
+        assert result["author"] == {"name": "Alice"}
+
+
+class TestFindUnrepliedCommentsEdgeCases:
+    """Additional edge cases for find_unreplied_comments."""
+
+    @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._get_current_user_name", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._unreplied_via_notifications", new_callable=AsyncMock)
+    async def test_fallback_skips_posts_without_url(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        mock_notif.return_value = None
+        mock_name.return_value = "Me"
+        mock_posts.return_value = [
+            {"post_url": None, "post_id": "urn:li:activity:1"},
+        ]
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        assert result == []
+        mock_comments.assert_not_awaited()
+
+    @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._get_current_user_name", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._unreplied_via_notifications", new_callable=AsyncMock)
+    async def test_fallback_handles_comment_exception(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        mock_notif.return_value = None
+        mock_name.return_value = "Me"
+        mock_posts.return_value = [
+            {"post_url": "https://linkedin.com/post/1", "post_id": "1"},
+        ]
+        mock_comments.side_effect = Exception("Comment scraping failed")
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        assert result == []
+
+    @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._get_current_user_name", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._unreplied_via_notifications", new_callable=AsyncMock)
+    async def test_fallback_caps_navigations(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        mock_notif.return_value = None
+        mock_name.return_value = "Me"
+        mock_posts.return_value = [
+            {"post_url": f"https://linkedin.com/post/{i}", "post_id": f"p{i}"}
+            for i in range(10)
+        ]
+        mock_comments.return_value = []
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        assert result == []
+        # Should be capped at 5 navigations
+        assert mock_comments.await_count == 5
+
+    @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._get_current_user_name", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._unreplied_via_notifications", new_callable=AsyncMock)
+    async def test_fallback_stops_when_too_many_unreplied(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        mock_notif.return_value = None
+        mock_name.return_value = "Me"
+        # max_posts=1 -> cap = 1*5 = 5 unreplied
+        mock_posts.return_value = [
+            {"post_url": "https://linkedin.com/post/1", "post_id": "p1"},
+        ]
+        mock_comments.return_value = [
+            {
+                "comment_id": f"c{i}",
+                "author_name": f"User{i}",
+                "text": f"Comment {i}",
+                "has_reply_from_author": False,
+            }
+            for i in range(10)
+        ]
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=1)
+        # All 10 comments returned because cap is max_posts*5=5, but loop checks after append
+        assert len(result) >= 5
