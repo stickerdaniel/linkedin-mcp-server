@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from linkedin_mcp_server.scraping.extractor import ExtractedSection
+from linkedin_mcp_server.scraping.extractor import ExtractedSection, _RATE_LIMITED_MSG
 from linkedin_mcp_server.scraping.posts import (
     _cache_get,
     _cache_put,
@@ -1238,6 +1238,73 @@ class TestGetPostContentEngagement:
         assert result["engagement"] == {"reactions": 10}
         assert result["post_type"] == "image"
         assert result["author"] == {"name": "Alice"}
+
+    @patch("linkedin_mcp_server.scraping.posts._extract_author_info", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._extract_engagement_metrics", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts.LinkedInExtractor")
+    async def test_preserves_references_when_present(
+        self, mock_ext_cls, mock_engagement, mock_type, mock_author, mock_page
+    ):
+        refs = [{"url": "https://example.com", "type": "link"}]
+        mock_instance = MagicMock()
+        mock_instance.extract_page = AsyncMock(
+            return_value=ExtractedSection(text="Post text", references=refs)
+        )
+        mock_ext_cls.return_value = mock_instance
+        mock_engagement.return_value = {}
+        mock_type.return_value = "text"
+        mock_author.return_value = {}
+
+        result = await get_post_content(mock_page, "12345")
+
+        assert result["sections"]["post_content"] == "Post text"
+        assert result["references"] == {"post_content": refs}
+        assert "section_errors" not in result
+
+    @patch("linkedin_mcp_server.scraping.posts._extract_author_info", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._extract_engagement_metrics", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts.LinkedInExtractor")
+    async def test_surfaces_section_errors_on_failure(
+        self, mock_ext_cls, mock_engagement, mock_type, mock_author, mock_page
+    ):
+        error_info = {"context": "extract_page", "error": "something failed"}
+        mock_instance = MagicMock()
+        mock_instance.extract_page = AsyncMock(
+            return_value=ExtractedSection(text="", references=[], error=error_info)
+        )
+        mock_ext_cls.return_value = mock_instance
+        mock_engagement.return_value = {}
+        mock_type.return_value = "unknown"
+        mock_author.return_value = {}
+
+        result = await get_post_content(mock_page, "12345")
+
+        assert result["sections"] == {}
+        assert result["section_errors"] == {"post_content": error_info}
+        assert "references" not in result
+
+    @patch("linkedin_mcp_server.scraping.posts._extract_author_info", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts._extract_engagement_metrics", new_callable=AsyncMock)
+    @patch("linkedin_mcp_server.scraping.posts.LinkedInExtractor")
+    async def test_suppresses_rate_limited_msg(
+        self, mock_ext_cls, mock_engagement, mock_type, mock_author, mock_page
+    ):
+        mock_instance = MagicMock()
+        mock_instance.extract_page = AsyncMock(
+            return_value=ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        )
+        mock_ext_cls.return_value = mock_instance
+        mock_engagement.return_value = {}
+        mock_type.return_value = "unknown"
+        mock_author.return_value = {}
+
+        result = await get_post_content(mock_page, "12345")
+
+        assert result["sections"] == {}
+        assert "references" not in result
 
 
 class TestFindUnrepliedCommentsEdgeCases:

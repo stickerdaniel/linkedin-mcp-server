@@ -272,9 +272,13 @@ def register_posts_tools(mcp: FastMCP) -> None:
         Uses notifications when possible; otherwise scans your recent posts.
         Results are ordered by most recent first (best-effort).
 
+        Note: when using the notifications fast path, since_days filtering is
+        best-effort only (LinkedIn notifications lack reliable timestamps).
+        The fallback path (post scanning) enforces since_days strictly.
+
         Args:
             ctx: FastMCP context for progress reporting
-            since_days: Consider activity from the last N days (used to limit scope).
+            since_days: Consider activity from the last N days (best-effort on notifications path).
             max_posts: Maximum number of posts to scan in fallback mode.
 
         Returns:
