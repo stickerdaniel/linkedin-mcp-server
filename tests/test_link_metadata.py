@@ -4,6 +4,8 @@ from urllib.parse import quote
 
 from linkedin_mcp_server.scraping.link_metadata import (
     RawReference,
+    _REFERENCE_CAPS,
+    _SECTION_CONTEXTS,
     build_references,
     dedupe_references,
     normalize_url,
@@ -522,3 +524,50 @@ class TestBuildReferences:
                 "context": "job result",
             }
         ]
+
+
+NEW_PERSON_SECTIONS = [
+    "recommendations",
+    "skills",
+    "certifications",
+    "projects",
+    "volunteer",
+    "publications",
+]
+
+
+class TestNewSectionMetadata:
+    """Ensure new person sections have entries in _REFERENCE_CAPS and _SECTION_CONTEXTS."""
+
+    def test_reference_caps_has_all_new_sections(self):
+        for section in NEW_PERSON_SECTIONS:
+            assert section in _REFERENCE_CAPS, (
+                f"{section} missing from _REFERENCE_CAPS"
+            )
+
+    def test_section_contexts_has_all_new_sections(self):
+        for section in NEW_PERSON_SECTIONS:
+            assert section in _SECTION_CONTEXTS, (
+                f"{section} missing from _SECTION_CONTEXTS"
+            )
+
+    def test_reference_caps_are_positive_ints(self):
+        for section in NEW_PERSON_SECTIONS:
+            cap = _REFERENCE_CAPS[section]
+            assert isinstance(cap, int) and cap > 0, (
+                f"{section} cap should be positive int, got {cap}"
+            )
+
+    def test_new_sections_use_correct_context_in_references(self):
+        for section in NEW_PERSON_SECTIONS:
+            refs = build_references(
+                [
+                    {
+                        "href": "https://www.linkedin.com/in/testuser/",
+                        "text": "Test User",
+                    }
+                ],
+                section,
+            )
+            assert len(refs) == 1
+            assert refs[0]["context"] == _SECTION_CONTEXTS[section]

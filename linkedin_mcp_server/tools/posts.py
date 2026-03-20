@@ -15,6 +15,7 @@ from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor
+from linkedin_mcp_server.serialization import strip_none
 from linkedin_mcp_server.scraping.posts import (
     find_unreplied_comments as scrape_find_unreplied_comments,
     get_feed_posts as scrape_get_feed_posts,
@@ -60,7 +61,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
             )
             posts = await scrape_get_my_recent_posts(extractor._page, limit=limit)
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return {"posts": posts}
+            return strip_none({"posts": posts})
         except Exception as e:
             raise_tool_error(e, "get_my_recent_posts")
 
@@ -94,7 +95,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
             )
             comments = await scrape_get_post_comments(extractor._page, post_url)
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return {"comments": comments}
+            return strip_none({"comments": comments})
         except Exception as e:
             raise_tool_error(e, "get_post_comments")
 
@@ -128,7 +129,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
             )
             result = await scrape_get_post_content(extractor._page, post_url)
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return result
+            return strip_none(result)
         except Exception as e:
             raise_tool_error(e, "get_post_content")
 
@@ -169,7 +170,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
                 extractor._page, limit=limit
             )
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return {"notifications": notifications}
+            return strip_none({"notifications": notifications})
         except Exception as e:
             raise_tool_error(e, "get_notifications")
 
@@ -213,7 +214,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
                 extractor._page, linkedin_username, limit=limit
             )
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return {"posts": posts}
+            return strip_none({"posts": posts})
         except Exception as e:
             raise_tool_error(e, "get_person_posts")
 
@@ -250,7 +251,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
             )
             posts = await scrape_get_feed_posts(extractor._page, limit=limit)
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return {"posts": posts}
+            return strip_none({"posts": posts})
         except Exception as e:
             raise_tool_error(e, "get_feed_posts")
 
@@ -300,6 +301,6 @@ def register_posts_tools(mcp: FastMCP) -> None:
                 max_posts=max_posts,
             )
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return {"unreplied_comments": unreplied}
+            return strip_none({"unreplied_comments": unreplied})
         except Exception as e:
             raise_tool_error(e, "find_unreplied_comments")

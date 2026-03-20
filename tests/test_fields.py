@@ -19,6 +19,12 @@ class TestPersonSections:
             "languages",
             "contact_info",
             "posts",
+            "recommendations",
+            "skills",
+            "certifications",
+            "projects",
+            "volunteer",
+            "publications",
         }
         assert set(PERSON_SECTIONS) == expected
 
@@ -87,10 +93,48 @@ class TestParsePersonSections:
         assert unknown == []
 
     def test_all_sections(self):
-        requested, unknown = parse_person_sections(
-            "experience,education,interests,honors,languages,contact_info,posts"
+        all_names = ",".join(
+            name for name in PERSON_SECTIONS if name != "main_profile"
         )
+        requested, unknown = parse_person_sections(all_names)
         assert requested == set(PERSON_SECTIONS)
+        assert unknown == []
+
+    def test_new_section_recommendations(self):
+        requested, unknown = parse_person_sections("recommendations")
+        assert "recommendations" in requested
+        assert unknown == []
+
+    def test_new_section_skills(self):
+        requested, unknown = parse_person_sections("skills")
+        assert "skills" in requested
+        assert unknown == []
+
+    def test_new_section_certifications(self):
+        requested, unknown = parse_person_sections("certifications")
+        assert "certifications" in requested
+        assert unknown == []
+
+    def test_new_section_projects(self):
+        requested, unknown = parse_person_sections("projects")
+        assert "projects" in requested
+        assert unknown == []
+
+    def test_new_section_volunteer(self):
+        requested, unknown = parse_person_sections("volunteer")
+        assert "volunteer" in requested
+        assert unknown == []
+
+    def test_new_section_publications(self):
+        requested, unknown = parse_person_sections("publications")
+        assert "publications" in requested
+        assert unknown == []
+
+    def test_combined_new_and_existing_sections(self):
+        requested, unknown = parse_person_sections(
+            "experience,skills,recommendations"
+        )
+        assert requested == {"main_profile", "experience", "skills", "recommendations"}
         assert unknown == []
 
 
@@ -129,6 +173,35 @@ class TestParseCompanySections:
         requested, unknown = parse_company_sections(" Posts , JOBS ")
         assert requested == {"about", "posts", "jobs"}
         assert unknown == []
+
+
+class TestNewSectionURLSuffixes:
+    """Verify new person sections have correct LinkedIn URL suffixes."""
+
+    def test_recommendations_url(self):
+        suffix, is_overlay = PERSON_SECTIONS["recommendations"]
+        assert suffix == "/details/recommendations/"
+        assert is_overlay is False
+
+    def test_skills_url(self):
+        suffix, _ = PERSON_SECTIONS["skills"]
+        assert suffix == "/details/skills/"
+
+    def test_certifications_url(self):
+        suffix, _ = PERSON_SECTIONS["certifications"]
+        assert suffix == "/details/certifications/"
+
+    def test_projects_url(self):
+        suffix, _ = PERSON_SECTIONS["projects"]
+        assert suffix == "/details/projects/"
+
+    def test_volunteer_url(self):
+        suffix, _ = PERSON_SECTIONS["volunteer"]
+        assert suffix == "/details/volunteering-experiences/"
+
+    def test_publications_url(self):
+        suffix, _ = PERSON_SECTIONS["publications"]
+        assert suffix == "/details/publications/"
 
 
 class TestConfigCompleteness:

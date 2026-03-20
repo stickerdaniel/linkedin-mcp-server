@@ -68,6 +68,12 @@ _CONTEXT_LABELS = {
     "languages",
     "featured",
     "contact info",
+    "recommendations",
+    "skills",
+    "certifications",
+    "projects",
+    "volunteer",
+    "publications",
 }
 
 _SECTION_CONTEXTS = {
@@ -78,6 +84,12 @@ _SECTION_CONTEXTS = {
     "languages": "languages",
     "contact_info": "contact info",
     "job_posting": "job posting",
+    "recommendations": "recommendations",
+    "skills": "skills",
+    "certifications": "certifications",
+    "projects": "projects",
+    "volunteer": "volunteer",
+    "publications": "publications",
 }
 
 _DEFAULT_REFERENCE_CAP = 12
@@ -94,6 +106,12 @@ _REFERENCE_CAPS = {
     "search_results": 15,
     "job_posting": 8,
     "contact_info": 8,
+    "recommendations": 12,
+    "skills": 12,
+    "certifications": 12,
+    "projects": 12,
+    "volunteer": 12,
+    "publications": 12,
 }
 
 _URL_LIKE_RE = re.compile(r"^(?:https?://|/)\S+$", re.IGNORECASE)

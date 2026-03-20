@@ -15,6 +15,7 @@ from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor, parse_person_sections
+from linkedin_mcp_server.serialization import strip_none
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +43,8 @@ def register_person_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The main profile page is always included.
-                Available sections: experience, education, interests, honors, languages, contact_info, posts
-                Examples: "experience,education", "contact_info", "honors,languages", "posts"
+                Available sections: experience, education, interests, honors, languages, contact_info, posts, recommendations, skills, certifications, projects, volunteer, publications
+                Examples: "experience,education", "contact_info", "skills,certifications", "recommendations"
                 Default (None) scrapes only the main profile page.
 
         Returns:
@@ -72,7 +73,7 @@ def register_person_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return strip_none(result)
 
         except Exception as e:
             raise_tool_error(e, "get_person_profile")  # NoReturn
@@ -116,7 +117,7 @@ def register_person_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return strip_none(result)
 
         except Exception as e:
             raise_tool_error(e, "search_people")  # NoReturn

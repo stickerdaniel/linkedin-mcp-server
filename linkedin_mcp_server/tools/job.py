@@ -15,6 +15,7 @@ from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor
+from linkedin_mcp_server.serialization import strip_none
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ def register_job_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return strip_none(result)
 
         except Exception as e:
             raise_tool_error(e, "get_job_details")  # NoReturn
@@ -126,7 +127,7 @@ def register_job_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return strip_none(result)
 
         except Exception as e:
             raise_tool_error(e, "search_jobs")  # NoReturn

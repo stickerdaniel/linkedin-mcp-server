@@ -17,6 +17,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor, parse_company_sections
 from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG
 from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.serialization import strip_none
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ def register_company_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return strip_none(result)
 
         except Exception as e:
             raise_tool_error(e, "get_company_profile")  # NoReturn
@@ -130,7 +131,7 @@ def register_company_tools(mcp: FastMCP) -> None:
                 result["references"] = references
             if section_errors:
                 result["section_errors"] = section_errors
-            return result
+            return strip_none(result)
 
         except Exception as e:
             raise_tool_error(e, "get_company_posts")  # NoReturn
