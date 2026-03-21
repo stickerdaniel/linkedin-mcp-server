@@ -175,7 +175,7 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 
 ## 🐳 Docker Setup
 
-**Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running.
+**Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running, and [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on the host for the one-time `--login` step.
 
 ### Authentication
 
