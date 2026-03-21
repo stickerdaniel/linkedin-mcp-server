@@ -12,7 +12,10 @@ def _required_issue_form_labels() -> list[str]:
     labels: list[str] = []
     current_label: str | None = None
     in_body = False
-    lines = Path(".github/ISSUE_TEMPLATE/bug_report.yml").read_text().splitlines()
+    issue_form_path = (
+        Path(__file__).resolve().parents[1] / ".github/ISSUE_TEMPLATE/bug_report.yml"
+    )
+    lines = issue_form_path.read_text().splitlines()
     for line in lines:
         stripped = line.strip()
         if stripped == "body:":
