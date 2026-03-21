@@ -47,6 +47,9 @@ class EnvironmentKeys:
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
     USER_DATA_DIR = "USER_DATA_DIR"
+    AUTH = "AUTH"
+    OAUTH_BASE_URL = "OAUTH_BASE_URL"
+    OAUTH_PASSWORD = "OAUTH_PASSWORD"
 
 
 def is_interactive_environment() -> bool:
@@ -146,6 +149,19 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Custom Chrome/Chromium executable path
     if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
+
+    # OAuth authentication
+    if auth_env := os.environ.get(EnvironmentKeys.AUTH):
+        if auth_env == "oauth":
+            config.server.oauth.enabled = True
+        else:
+            raise ConfigurationError(f"Invalid AUTH: '{auth_env}'. Must be 'oauth'.")
+
+    if oauth_base_url := os.environ.get(EnvironmentKeys.OAUTH_BASE_URL):
+        config.server.oauth.base_url = oauth_base_url
+
+    if oauth_password := os.environ.get(EnvironmentKeys.OAUTH_PASSWORD):
+        config.server.oauth.password = oauth_password
 
     return config
 
@@ -263,6 +279,30 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)",
     )
 
+    # OAuth authentication
+    parser.add_argument(
+        "--auth",
+        choices=["oauth"],
+        default=None,
+        help="Enable authentication (oauth for OAuth 2.1)",
+    )
+
+    parser.add_argument(
+        "--oauth-base-url",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="Public URL of this server for OAuth (e.g. https://my-mcp.example.com)",
+    )
+
+    parser.add_argument(
+        "--oauth-password",
+        type=str,
+        default=None,
+        metavar="PASSWORD",
+        help="Password for the OAuth login page (visible in process list; prefer OAUTH_PASSWORD env var)",
+    )
+
     args = parser.parse_args()
 
     # Update configuration with parsed arguments
@@ -321,6 +361,16 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.user_data_dir:
         config.browser.user_data_dir = args.user_data_dir
+
+    # OAuth authentication
+    if args.auth == "oauth":
+        config.server.oauth.enabled = True
+
+    if args.oauth_base_url:
+        config.server.oauth.base_url = args.oauth_base_url
+
+    if args.oauth_password:
+        config.server.oauth.password = args.oauth_password
 
     return config
 

@@ -380,7 +380,7 @@ def main() -> None:
                 transport = choose_transport_interactive()
 
             # Create and run the MCP server
-            mcp = create_mcp_server()
+            mcp = create_mcp_server(oauth_config=config.server.oauth)
 
             if transport == "streamable-http":
                 mcp.run(

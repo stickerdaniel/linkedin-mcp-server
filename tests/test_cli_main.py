@@ -47,7 +47,9 @@ def test_main_non_interactive_stdio_has_no_human_stdout(
     )
     _patch_main_dependencies(monkeypatch, config)
     mcp = MagicMock()
-    monkeypatch.setattr("linkedin_mcp_server.cli_main.create_mcp_server", lambda: mcp)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_: mcp
+    )
 
     cli_main.main()
 
@@ -68,7 +70,9 @@ def test_main_interactive_prompts_when_transport_not_explicit(
         "linkedin_mcp_server.cli_main.choose_transport_interactive", choose_transport
     )
     mcp = MagicMock()
-    monkeypatch.setattr("linkedin_mcp_server.cli_main.create_mcp_server", lambda: mcp)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_: mcp
+    )
 
     cli_main.main()
 
@@ -95,7 +99,9 @@ def test_main_explicit_transport_skips_prompt(
         "linkedin_mcp_server.cli_main.choose_transport_interactive", choose_transport
     )
     mcp = MagicMock()
-    monkeypatch.setattr("linkedin_mcp_server.cli_main.create_mcp_server", lambda: mcp)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_: mcp
+    )
 
     cli_main.main()
 
@@ -118,7 +124,9 @@ def test_main_streamable_http_passes_host_port_path(
     config.server.path = "/custom-mcp"
     _patch_main_dependencies(monkeypatch, config)
     mcp = MagicMock()
-    monkeypatch.setattr("linkedin_mcp_server.cli_main.create_mcp_server", lambda: mcp)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_: mcp
+    )
 
     cli_main.main()
 

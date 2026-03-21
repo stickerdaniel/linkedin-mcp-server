@@ -5,10 +5,15 @@ Creates and configures the MCP server with comprehensive LinkedIn tool suite inc
 person profiles, company data, job information, and session management capabilities.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from fastmcp import FastMCP
+
+if TYPE_CHECKING:
+    from linkedin_mcp_server.config.schema import OAuthConfig
 from fastmcp.server.lifespan import lifespan
 
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
@@ -46,12 +51,26 @@ async def auth_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     yield {}
 
 
-def create_mcp_server() -> FastMCP:
+def create_mcp_server(oauth_config: "OAuthConfig | None" = None) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools."""
+    auth = None
+    if oauth_config and oauth_config.enabled:
+        from linkedin_mcp_server.auth import PasswordOAuthProvider
+
+        if oauth_config.base_url is None:
+            raise ValueError("oauth_config.base_url must be set when OAuth is enabled")
+        if oauth_config.password is None:
+            raise ValueError("oauth_config.password must be set when OAuth is enabled")
+        auth = PasswordOAuthProvider(
+            base_url=oauth_config.base_url,
+            password=oauth_config.password,
+        )
+
     mcp = FastMCP(
         "linkedin_scraper",
         lifespan=auth_lifespan | browser_lifespan,
         mask_error_details=True,
+        auth=auth,
     )
     mcp.add_middleware(SequentialToolExecutionMiddleware())
 
