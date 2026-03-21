@@ -9,12 +9,11 @@ import logging
 from typing import Any
 
 from fastmcp import Context, FastMCP
-from fastmcp.dependencies import Depends
 
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.dependencies import get_extractor
+from linkedin_mcp_server.dependencies import get_ready_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping import LinkedInExtractor, parse_company_sections
+from linkedin_mcp_server.scraping import parse_company_sections
 from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
@@ -29,12 +28,13 @@ def register_company_tools(mcp: FastMCP) -> None:
         title="Get Company Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
+        exclude_args=["extractor"],
     )
     async def get_company_profile(
         company_name: str,
         ctx: Context,
         sections: str | None = None,
-        extractor: LinkedInExtractor = Depends(get_extractor),
+        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Get a specific company's LinkedIn profile.
@@ -54,6 +54,9 @@ def register_company_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text in each section.
         """
         try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_company_profile"
+            )
             requested, unknown = parse_company_sections(sections)
 
             logger.info(
@@ -83,11 +86,12 @@ def register_company_tools(mcp: FastMCP) -> None:
         title="Get Company Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
+        exclude_args=["extractor"],
     )
     async def get_company_posts(
         company_name: str,
         ctx: Context,
-        extractor: LinkedInExtractor = Depends(get_extractor),
+        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Get recent posts from a company's LinkedIn feed.
@@ -101,6 +105,9 @@ def register_company_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text to extract individual posts.
         """
         try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_company_posts"
+            )
             logger.info("Scraping company posts: %s", company_name)
 
             await ctx.report_progress(

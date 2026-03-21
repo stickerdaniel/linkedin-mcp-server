@@ -74,7 +74,6 @@ jobs:
         run: |
           set -e
           sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
-          sed -i 's/stickerdaniel\/linkedin-mcp-server:[^"]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' manifest.json
           sed -i 's/stickerdaniel\/linkedin-mcp-server:[^ ]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' docker-compose.yml
           echo "✅ Updated manifest.json and docker-compose.yml to version $VERSION"
 
@@ -171,10 +170,11 @@ jobs:
       - name: Optimize uv cache for CI
         run: uv cache prune --ci
 
-      - name: Build DXT extension
+      - name: Validate and build MCP bundle
         run: |
-          bunx @anthropic-ai/dxt pack
-          mv linkedin-mcp-server.dxt linkedin-mcp-server-v$VERSION.dxt
+          bunx @anthropic-ai/mcpb validate
+          bunx @anthropic-ai/mcpb pack
+          mv linkedin-mcp-server.mcpb linkedin-mcp-server-v$VERSION.mcpb
 
       - name: Generate release notes
         run: |
@@ -188,7 +188,7 @@ jobs:
         with:
           tag_name: v${{ env.VERSION }}
           files: |
-            *.dxt
+            *.mcpb
           generate_release_notes: true
           draft: false
           prerelease: false

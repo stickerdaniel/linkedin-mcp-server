@@ -9,7 +9,6 @@ import pytest
 
 import linkedin_mcp_server.cli_main as cli_main
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 
 
 def _make_config(
@@ -33,9 +32,6 @@ def _patch_main_dependencies(
         "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
     )
     monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
-    monkeypatch.setattr(
-        "linkedin_mcp_server.cli_main.ensure_authentication_ready", lambda: None
-    )
     monkeypatch.setattr("linkedin_mcp_server.cli_main.set_headless", lambda _x: None)
 
 
@@ -149,22 +145,19 @@ def test_get_version_prefers_installed_metadata(
     assert calls == ["linkedin-scraper-mcp"]
 
 
-def test_main_non_interactive_auth_failure_has_no_stdout(
+def test_main_non_interactive_no_auth_still_starts_server(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = _make_config(
         is_interactive=False, transport="stdio", transport_explicitly_set=False
     )
     _patch_main_dependencies(monkeypatch, config)
-    monkeypatch.setattr(
-        "linkedin_mcp_server.cli_main.ensure_authentication_ready",
-        lambda: (_ for _ in ()).throw(CredentialsNotFoundError("missing profile")),
-    )
+    mcp = MagicMock()
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.create_mcp_server", lambda: mcp)
 
-    with pytest.raises(SystemExit) as exit_info:
-        cli_main.main()
+    cli_main.main()
 
-    assert exit_info.value.code == 1
+    mcp.run.assert_called_once_with(transport="stdio")
     captured = capsys.readouterr()
     assert captured.out == ""
 

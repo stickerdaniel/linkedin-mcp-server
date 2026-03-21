@@ -13,7 +13,7 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 
 [![uvx](https://img.shields.io/badge/uvx-Quick_Install-de5fe9?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDEiIGhlaWdodD0iNDEiIHZpZXdCb3g9IjAgMCA0MSA0MSIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTS01LjI4NjE5ZS0wNiAwLjE2ODYyOUwwLjA4NDMwOTggMjAuMTY4NUwwLjE1MTc2MiAzNi4xNjgzQzAuMTYxMDc1IDM4LjM3NzQgMS45NTk0NyA0MC4xNjA3IDQuMTY4NTkgNDAuMTUxNEwyMC4xNjg0IDQwLjA4NEwzMC4xNjg0IDQwLjA0MThMMzEuMTg1MiA0MC4wMzc1QzMzLjM4NzcgNDAuMDI4MiAzNS4xNjgzIDM4LjIwMjYgMzUuMTY4MyAzNlYzNkwzNy4wMDAzIDM2TDM3LjAwMDMgMzkuOTk5Mkw0MC4xNjgzIDM5Ljk5OTZMMzkuOTk5NiAtOS45NDY1M2UtMDdMMjEuNTk5OCAwLjA3NzU2ODlMMjEuNjc3NCAxNi4wMTg1TDIxLjY3NzQgMjUuOTk5OEwyMC4wNzc0IDI1Ljk5OThMMTguMzk5OCAyNS45OTk4TDE4LjQ3NzQgMTYuMDMyTDE4LjM5OTggMC4wOTEwNTkzTC01LjI4NjE5ZS0wNiAwLjE2ODYyOVoiIGZpbGw9IiNERTVGRTkiLz4KPC9zdmc+Cg==)](#-uvx-setup-recommended---universal)
 [![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup)
-[![Install DXT Extension](https://img.shields.io/badge/Claude_Desktop_DXT-d97757?style=for-the-badge&logo=anthropic)](#-claude-desktop-dxt-extension)
+[![Install MCP Bundle](https://img.shields.io/badge/Claude_Desktop_MCPB-d97757?style=for-the-badge&logo=anthropic)](#-claude-desktop-mcp-bundle-formerly-dxt)
 [![Development](https://img.shields.io/badge/Development-Local-ffdc53?style=for-the-badge&logo=python&logoColor=ffdc53)](#-local-setup-develop--contribute)
 
 <https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680>
@@ -60,19 +60,11 @@ When one section fails but the overall tool call still completes, responses may 
 
 ## 🚀 uvx Setup (Recommended - Universal)
 
-**Prerequisites:** [Install uv](https://docs.astral.sh/uv/getting-started/installation/) and run `uvx patchright install chromium` to set up the browser.
+**Prerequisites:** [Install uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ### Installation
 
-**Step 1: Create a session (first time only)**
-
-```bash
-uvx linkedin-scraper-mcp --login
-```
-
-This opens a browser for you to log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile is saved to `~/.linkedin-mcp/profile/`.
-
-**Step 2: Client Configuration:**
+**Client Configuration**
 
 ```json
 {
@@ -85,8 +77,10 @@ This opens a browser for you to log in manually (5 minute timeout for 2FA, captc
 }
 ```
 
+The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
+
 > [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again
+> Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx linkedin-scraper-mcp --login`.
 
 ### uvx Setup Help
 
@@ -117,9 +111,6 @@ This opens a browser for you to log in manually (5 minute timeout for 2FA, captc
 **Basic Usage Examples:**
 
 ```bash
-# Create a session interactively
-uvx linkedin-scraper-mcp --login
-
 # Run with debug logging
 uvx linkedin-scraper-mcp --log-level DEBUG
 ```
@@ -158,6 +149,7 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 **Session issues:**
 
 - Browser profile is stored at `~/.linkedin-mcp/profile/`
+- Managed browser downloads are cached at `~/.linkedin-mcp/patchright-browsers/`
 - Make sure you have only one active LinkedIn session at a time
 
 **Login issues:**
@@ -301,40 +293,29 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 <br/>
 <br/>
 
-## 📦 Claude Desktop (DXT Extension)
+## 📦 Claude Desktop MCP Bundle (formerly DXT)
 
-**Prerequisites:** [Claude Desktop](https://claude.ai/download) and [Docker](https://www.docker.com/get-started/) installed & running
+**Prerequisites:** [Claude Desktop](https://claude.ai/download).
 
 **One-click installation** for Claude Desktop users:
 
-1. Download the [DXT extension](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
-2. Double-click to install into Claude Desktop
-3. Create a session: `uvx linkedin-scraper-mcp --login`
+1. Download the latest `.mcpb` artifact from [releases](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
+2. Double-click to install it into Claude Desktop
+3. Restart Claude Desktop
+4. Call any LinkedIn tool
 
-> [!NOTE]
-> Sessions may expire over time. If you encounter authentication issues, run `uvx linkedin-scraper-mcp --login` again.
+On startup, the MCP Bundle starts preparing the shared Patchright Chromium browser cache in the background. If you call a tool too early, Claude will surface a setup-in-progress error. On the first tool call that needs authentication, the server opens a LinkedIn login browser window and asks you to retry after sign-in.
 
-### DXT Extension Setup Help
+### MCP Bundle Setup Help
 
 <details>
 <summary><b>❗ Troubleshooting</b></summary>
 
-**First-time setup timeout:**
+**First-time setup behavior:**
 
-- Claude Desktop has a ~60 second connection timeout
-- If the Docker image isn't cached, the pull may exceed this timeout
-- **Fix:** Pre-pull the image before first use:
-
-  ```bash
-  docker pull stickerdaniel/linkedin-mcp-server:2.3.0
-  ```
-
-- Then restart Claude Desktop
-
-**Docker issues:**
-
-- Make sure [Docker](https://www.docker.com/get-started/) is installed
-- Check if Docker is running: `docker ps`
+- Claude Desktop starts the bundle immediately; browser setup continues in the background
+- If the Patchright Chromium browser is still downloading, retry the tool after a short wait
+- Managed browser downloads are shared under `~/.linkedin-mcp/patchright-browsers/`
 
 **Login issues:**
 
@@ -373,18 +354,14 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 uv sync --group dev
 
-# 4. Install Patchright browser
-uv run patchright install chromium
-
-# 5. Install pre-commit hooks
+# 4. Install pre-commit hooks
 uv run pre-commit install
 
-# 6. Create a session (first time only)
-uv run -m linkedin_mcp_server --login
-
-# 7. Start the server
+# 5. Start the server
 uv run -m linkedin_mcp_server
 ```
+
+The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepares the Patchright Chromium browser cache in the background and opens LinkedIn login on the first auth-requiring tool call. You can still run `uv run -m linkedin_mcp_server --login` when you want to create the session explicitly.
 
 ### Local Setup Help
 
