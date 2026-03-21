@@ -177,8 +177,7 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 
 1. Download the latest `.mcpb` artifact from [releases](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
 2. Double-click to install it into Claude Desktop
-3. Restart Claude Desktop
-4. Call any LinkedIn tool
+3. Call any LinkedIn tool
 
 On startup, the MCP Bundle starts preparing the shared Patchright Chromium browser cache in the background. If you call a tool too early, Claude will surface a setup-in-progress error. On the first tool call that needs authentication, the server opens a LinkedIn login browser window and asks you to retry after sign-in.
 
