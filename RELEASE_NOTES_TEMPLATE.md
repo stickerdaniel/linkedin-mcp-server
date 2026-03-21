@@ -11,14 +11,10 @@ To pull this specific version, run:
 docker pull stickerdaniel/linkedin-mcp-server:${VERSION}
 ```
 
-## 📦 Update DXT Extension Installation
+## 📦 Update MCP Bundle Installation
 **For Claude Desktop users:**
-1. Download the `.dxt` file below
-2. Pre-pull the Docker image to avoid timeout issues:
-   ```bash
-   docker pull stickerdaniel/linkedin-mcp-server:${VERSION}
-   ```
-3. Double-click the `.dxt` file to install in Claude Desktop
-4. Restart Claude Desktop
+1. Download the `.mcpb` file below
+2. Double-click the `.mcpb` file to install in Claude Desktop
+3. Restart Claude Desktop
 
-> **Note:** The pre-pull step is important because Claude Desktop has a ~60 second connection timeout. Without pre-pulling, the initial image download may exceed this limit.
+> **Note:** MCP Bundles (MCPB) are the renamed successor to DXT/Desktop Extensions.

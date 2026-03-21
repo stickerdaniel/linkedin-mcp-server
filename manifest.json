@@ -1,10 +1,10 @@
 {
-  "dxt_version": "0.1",
+  "manifest_version": "0.4",
   "name": "linkedin-mcp-server",
   "display_name": "LinkedIn MCP Server",
   "version": "4.4.2",
   "description": "Connect Claude to LinkedIn for profiles, companies, job details, and people search",
-  "long_description": "# LinkedIn MCP Server\n\nConnect Claude to your LinkedIn account. Access profiles, companies, and job postings through a Docker container on your machine.\n\n## Features\n- **Profile Access**: Get detailed LinkedIn profile information including work history, education, and skills\n- **Company Profiles**: Extract comprehensive company information and details\n- **Job Details**: Retrieve job posting information from LinkedIn URLs\n- **Job Search**: Search for jobs with keywords and location filters\n- **People Search**: Search for people by keywords and location\n- **Company Posts**: Get recent posts from a company's LinkedIn feed\n- **Person Posts**: Get recent activity and posts from a person's profile\n\n## First-Time Setup\n\n### 1. Pre-pull Docker Image (Required)\nRun this command first to avoid connection timeouts:\n```\ndocker pull stickerdaniel/linkedin-mcp-server:4.4.2",
+  "long_description": "# LinkedIn MCP Server\n\nConnect Claude to your LinkedIn account with an MCP Bundle (MCPB, formerly DXT). The bundle starts quickly, downloads the Patchright Chromium browser in the background when needed, and opens LinkedIn login on the first auth-requiring tool call.\n\n## First-time managed runtime flow\n\n1. Install the `.mcpb` bundle in Claude Desktop.\n2. Start Claude Desktop; the MCP server starts and begins preparing the Patchright Chromium browser cache under `~/.linkedin-mcp/patchright-browsers`.\n3. If you call a tool before setup finishes, the tool returns a setup-in-progress error.\n4. On the first tool call that needs authentication, a browser window opens so you can sign into LinkedIn.\n5. Retry the tool after login completes.\n\nDocker remains available as a separate runtime path, but it still requires host-side `--login`.",
   "author": {
     "name": "Daniel Sticker",
     "email": "daniel@sticker.name",
@@ -14,19 +14,33 @@
   "documentation": "https://github.com/stickerdaniel/linkedin-mcp-server#readme",
   "support": "https://github.com/stickerdaniel/linkedin-mcp-server/issues",
   "license": "MIT",
-  "keywords": ["linkedin", "scraping", "mcp", "profiles", "companies", "jobs", "people", "search", "posts"],
-  "icon": "assets/icons/linkedin.svg",
-  "screenshots": ["assets/screenshots/screenshot.png"],
+  "keywords": [
+    "linkedin",
+    "scraping",
+    "mcp",
+    "mcpb",
+    "profiles",
+    "companies",
+    "jobs",
+    "people",
+    "search",
+    "posts"
+  ],
+  "icon": "assets/icons/linkedin.png",
+  "screenshots": [
+    "assets/screenshots/screenshot.png"
+  ],
   "server": {
-    "type": "binary",
-    "entry_point": "docker",
+    "type": "uv",
+    "entry_point": "linkedin_mcp_server/__main__.py",
     "mcp_config": {
-      "command": "docker",
+      "command": "uv",
       "args": [
-        "run", "--rm", "-i",
-        "-v", "${HOME}/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
-        "-e", "LOG_LEVEL=DEBUG",
-        "stickerdaniel/linkedin-mcp-server:4.4.2"
+        "run",
+        "--project",
+        "${__dirname}",
+        "-m",
+        "linkedin_mcp_server"
       ]
     }
   },
@@ -63,6 +77,10 @@
   "user_config": {},
   "compatibility": {
     "claude_desktop": ">=0.10.0",
-    "platforms": ["darwin", "linux", "win32"]
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ]
   }
 }

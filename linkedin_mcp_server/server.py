@@ -11,8 +11,12 @@ from typing import Any, AsyncIterator
 from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan
 
+from linkedin_mcp_server.bootstrap import (
+    get_runtime_policy,
+    initialize_bootstrap,
+    start_background_browser_setup_if_needed,
+)
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.authentication import get_authentication_source
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
@@ -32,25 +36,20 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     Derived runtime durability must not depend on this hook. Docker runtime
     sessions are checkpoint-committed when they are created.
     """
+    del app
     logger.info("LinkedIn MCP Server starting...")
+    initialize_bootstrap(get_runtime_policy())
+    await start_background_browser_setup_if_needed()
     yield {}
     logger.info("LinkedIn MCP Server shutting down...")
     await close_browser()
-
-
-@lifespan
-async def auth_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """Validate authentication profile exists at startup."""
-    logger.info("Validating LinkedIn authentication...")
-    get_authentication_source()
-    yield {}
 
 
 def create_mcp_server() -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools."""
     mcp = FastMCP(
         "linkedin_scraper",
-        lifespan=auth_lifespan | browser_lifespan,
+        lifespan=browser_lifespan,
         mask_error_details=True,
     )
     mcp.add_middleware(SequentialToolExecutionMiddleware())
