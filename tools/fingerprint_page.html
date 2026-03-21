@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Fingerprint Audit</title>
+  <style>
+    body { font-family: monospace; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    pre { background: #f4f4f4; padding: 16px; overflow-x: auto; }
+    .status { font-size: 1.2em; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <h1>Browser Fingerprint Audit</h1>
+  <div class="status" id="status">Collecting fingerprint...</div>
+  <pre id="result"></pre>
+  <script>
+    (async function() {
+      const fp = {};
+
+      // Navigator properties
+      fp.webdriver = navigator.webdriver;
+      fp.userAgent = navigator.userAgent;
+      fp.platform = navigator.platform;
+      fp.languages = navigator.languages ? [...navigator.languages] : null;
+      fp.language = navigator.language;
+      fp.hardwareConcurrency = navigator.hardwareConcurrency;
+      fp.deviceMemory = navigator.deviceMemory || null;
+      fp.maxTouchPoints = navigator.maxTouchPoints;
+      fp.cookieEnabled = navigator.cookieEnabled;
+      fp.doNotTrack = navigator.doNotTrack;
+      fp.pdfViewerEnabled = navigator.pdfViewerEnabled;
+
+      // Plugins
+      fp.pluginCount = navigator.plugins.length;
+      fp.plugins = [];
+      for (let i = 0; i < navigator.plugins.length; i++) {
+        fp.plugins.push({
+          name: navigator.plugins[i].name,
+          filename: navigator.plugins[i].filename,
+          description: navigator.plugins[i].description,
+        });
+      }
+
+      // Screen
+      fp.screen = {
+        width: screen.width,
+        height: screen.height,
+        availWidth: screen.availWidth,
+        availHeight: screen.availHeight,
+        colorDepth: screen.colorDepth,
+        pixelDepth: screen.pixelDepth,
+      };
+      fp.innerWidth = window.innerWidth;
+      fp.innerHeight = window.innerHeight;
+      fp.outerWidth = window.outerWidth;
+      fp.outerHeight = window.outerHeight;
+      fp.devicePixelRatio = window.devicePixelRatio;
+
+      // window.chrome
+      fp.hasWindowChrome = typeof window.chrome !== 'undefined';
+      fp.windowChromeKeys = typeof window.chrome === 'object' && window.chrome !== null
+        ? Object.keys(window.chrome) : null;
+
+      // Performance.memory
+      fp.hasPerformanceMemory = typeof performance.memory !== 'undefined';
+      fp.performanceMemory = performance.memory ? {
+        jsHeapSizeLimit: performance.memory.jsHeapSizeLimit,
+        totalJSHeapSize: performance.memory.totalJSHeapSize,
+        usedJSHeapSize: performance.memory.usedJSHeapSize,
+      } : null;
+
+      // Notification
+      fp.notificationPermission = typeof Notification !== 'undefined'
+        ? Notification.permission : null;
+
+      // WebGL
+      try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (gl) {
+          const ext = gl.getExtension('WEBGL_debug_renderer_info');
+          fp.webgl = {
+            vendor: gl.getParameter(gl.VENDOR),
+            renderer: gl.getParameter(gl.RENDERER),
+            unmaskedVendor: ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : null,
+            unmaskedRenderer: ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null,
+          };
+        } else {
+          fp.webgl = null;
+        }
+      } catch (e) {
+        fp.webgl = { error: e.message };
+      }
+
+      // Canvas fingerprint
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 200;
+        canvas.height = 50;
+        const ctx = canvas.getContext('2d');
+        ctx.textBaseline = 'top';
+        ctx.font = '14px Arial';
+        ctx.fillStyle = '#f60';
+        ctx.fillRect(125, 1, 62, 20);
+        ctx.fillStyle = '#069';
+        ctx.fillText('Fingerprint', 2, 15);
+        ctx.fillStyle = 'rgba(102, 204, 0, 0.7)';
+        ctx.fillText('Fingerprint', 4, 17);
+        fp.canvasHash = canvas.toDataURL().length;  // hash by length for simplicity
+      } catch (e) {
+        fp.canvasHash = null;
+      }
+
+      // Timezone
+      fp.timezoneOffset = new Date().getTimezoneOffset();
+      fp.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+      // Connection
+      fp.connection = navigator.connection ? {
+        effectiveType: navigator.connection.effectiveType,
+        downlink: navigator.connection.downlink,
+        rtt: navigator.connection.rtt,
+      } : null;
+
+      // Post to server
+      document.getElementById('result').textContent = JSON.stringify(fp, null, 2);
+      try {
+        const resp = await fetch('/collect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fp),
+        });
+        const data = await resp.json();
+        document.getElementById('status').textContent =
+          'Fingerprint collected and saved as: ' + data.source;
+      } catch (e) {
+        document.getElementById('status').textContent =
+          'Fingerprint collected (could not POST to server: ' + e.message + ')';
+      }
+    })();
+  </script>
+</body>
+</html>
