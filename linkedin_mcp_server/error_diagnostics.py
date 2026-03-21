@@ -135,16 +135,45 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
     has_existing_issues = bool(existing_issues)
     issue_search_skipped = bool(payload.get("issue_search_skipped"))
     installation_lines = _installation_method_lines(runtime)
-    tool_lines = _tool_lines(payload)
+    tool_name = _tool_name_for_context(payload) or "unknown"
+    setup_lines = [
+        f"- Installation method: {_installation_method_summary(runtime)}",
+        "- MCP client: Local curl-based MCP HTTP client against the server's streamable-http transport",
+        f"- Operating system / runtime: {runtime['current_runtime_id']}",
+    ]
+    if runtime.get("trace_dir"):
+        setup_lines.append(f"- Trace artifacts directory: {runtime['trace_dir']}")
+    if runtime.get("log_path"):
+        setup_lines.append(f"- Server log path: {runtime['log_path']}")
+
+    what_happened_lines = [
+        f"- Suggested title: {payload['suggested_issue_title']}",
+        f"- Context: {payload['context']}",
+        f"- Tool: {tool_name}",
+        f"- Section: {payload.get('section_name') or 'n/a'}",
+        f"- Target URL: {payload.get('target_url') or 'n/a'}",
+        f"- Error: {payload['error_type']}: {payload['error_message']}",
+        "- Expected behavior: The MCP tool call should complete and return structured scraping output.",
+    ]
+
+    reproduction_lines = [
+        "1. Run a fresh local `uv run -m linkedin_mcp_server --login`.",
+        "2. Start the server again using the same installation method and debug env vars used for this run.",
+        f"3. Call `{tool_name}` again with the same target URL and section selection.",
+        (
+            "4. If one of the listed open issues matches, post the gist as a comment there as additional information."
+            if has_existing_issues
+            else "4. If no existing issue matches, open a new GitHub bug report with the information above."
+        ),
+    ]
     return (
         "\n".join(
             [
                 "# LinkedIn MCP scrape failure",
                 "",
                 "## File This Issue",
-                f"- Suggested title: {payload['suggested_issue_title']}",
                 "- Read this generated file before posting.",
-                "- Copy the sections below into the GitHub bug report template.",
+                "- Copy the `Setup`, `What Happened`, `Steps to Reproduce`, and `Logs` sections below into the matching GitHub bug report fields.",
                 "- Attach this generated markdown file, the server log, and the trace artifacts directory.",
                 (
                     "- Review the existing open issues below first. If one matches, post the gist as a comment there instead of opening a new issue."
@@ -168,33 +197,26 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                     )
                 ),
                 "",
-                "## Installation Method",
-                *installation_lines,
+                "## Setup",
+                *setup_lines,
                 "",
-                "## When does the error occur?",
-                "- [ ] At startup",
-                "- [x] During tool call (specify which tool):",
-                *tool_lines,
+                "## What Happened",
+                *what_happened_lines,
                 "",
-                "## MCP Client Configuration",
+                "## Steps to Reproduce",
+                *reproduction_lines,
                 "",
-                "**Client used for reproduction**:",
-                "```text",
-                "Local curl-based MCP HTTP client against the server's streamable-http transport",
-                "```",
-                "",
-                "## MCP Client Logs",
+                "## Logs",
                 "```text",
                 "See attached server log and trace artifacts.",
                 "```",
                 "",
-                "## Error Description",
-                f"Context: {payload['context']}",
-                f"Section: {payload.get('section_name') or 'n/a'}",
-                f"Target URL: {payload.get('target_url') or 'n/a'}",
-                f"Error: {payload['error_type']}: {payload['error_message']}",
+                "## Additional Diagnostics",
                 "",
-                "## Runtime Diagnostics",
+                "### Installation Method Details",
+                *installation_lines,
+                "",
+                "### Runtime Diagnostics",
                 f"- Hostname: {runtime['hostname']}",
                 f"- Current runtime: {runtime['current_runtime_id']}",
                 f"- Source profile: {runtime['source_profile_dir']}",
@@ -205,7 +227,7 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                 f"- Server log: {runtime['log_path'] or 'not enabled'}",
                 f"- Suggested gist command: {runtime['suggested_gist_command'] or 'not available'}",
                 "",
-                "## Session State",
+                "### Session State",
                 "```json",
                 json.dumps(
                     {
@@ -217,27 +239,17 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                 ),
                 "```",
                 "",
-                "## Attachment Checklist",
+                "### Attachment Checklist",
                 "- Read this generated markdown file and use it as the issue body/context.",
                 "- Attach this generated markdown file itself.",
                 "- Attach the server log if available.",
                 "- Attach the trace screenshots/trace.jsonl if available.",
                 "- Optional: run the suggested gist command below to upload the text artifacts as a single shareable bundle.",
                 "",
-                "## Suggested Gist Command",
+                "### Suggested Gist Command",
                 "```bash",
                 runtime["suggested_gist_command"] or "# gist command unavailable",
                 "```",
-                "",
-                "## Reproduction",
-                "1. Run a fresh local `uv run -m linkedin_mcp_server --login`.",
-                "2. Start the server again using the same installation method and debug env vars used for this run.",
-                "3. Re-run the failing MCP tool call.",
-                (
-                    "4. If one of the listed open issues matches, post the gist as a comment there as additional information."
-                    if has_existing_issues
-                    else "4. If no existing issue matches, open a new GitHub bug report with the information above."
-                ),
             ]
         )
         + "\n"
@@ -352,6 +364,16 @@ def _installation_method_lines(runtime: dict[str, Any]) -> list[str]:
         "- [ ] Claude Desktop DXT extension (specify docker image version/tag): _._._",
         "- [ ] Local Python setup",
     ]
+
+
+def _installation_method_summary(runtime: dict[str, Any]) -> str:
+    current_runtime_id = str(runtime.get("current_runtime_id") or "")
+    if "container" in current_runtime_id:
+        return (
+            "Docker using `stickerdaniel/linkedin-mcp-server:latest` with "
+            "`~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`"
+        )
+    return "Local Python setup"
 
 
 def _tool_lines(payload: dict[str, Any]) -> list[str]:
