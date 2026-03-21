@@ -15,7 +15,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-Create a browser profile locally, then mount it into Docker.
+Create a browser profile locally, then mount it into Docker. Docker already includes its own Chromium runtime, so the managed Patchright Chromium browser download used by MCPB/`uvx` is not needed here.
 
 **Step 1: Create profile on the host (one-time setup)**
 

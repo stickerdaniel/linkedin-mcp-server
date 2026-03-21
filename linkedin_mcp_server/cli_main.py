@@ -1,10 +1,4 @@
-"""
-LinkedIn MCP Server - Main CLI application entry point.
-
-Implements a simplified two-phase startup:
-1. Authentication Check - Verify browser profile is available
-2. Server Runtime - MCP server startup with transport selection
-"""
+"""LinkedIn MCP Server main CLI application entry point."""
 
 import asyncio
 import logging
@@ -13,12 +7,9 @@ from typing import Literal
 
 import inquirer
 
-from linkedin_mcp_server.core import AuthenticationError, RateLimitError
-
-from linkedin_mcp_server.authentication import (
-    clear_auth_state,
-    get_authentication_source,
-)
+from linkedin_mcp_server.bootstrap import configure_browser_environment
+from linkedin_mcp_server.core import AuthenticationError
+from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.drivers.browser import (
     experimental_persist_derived_runtime,
@@ -29,7 +20,6 @@ from linkedin_mcp_server.drivers.browser import (
     set_headless,
 )
 from linkedin_mcp_server.debug_trace import should_keep_traces
-from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 from linkedin_mcp_server.logging_config import configure_logging, teardown_trace_logging
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
@@ -41,7 +31,7 @@ from linkedin_mcp_server.session_state import (
     source_state_path,
 )
 from linkedin_mcp_server.server import create_mcp_server
-from linkedin_mcp_server.setup import run_interactive_setup, run_profile_creation
+from linkedin_mcp_server.setup import run_profile_creation
 
 logger = logging.getLogger(__name__)
 
@@ -238,43 +228,6 @@ def profile_info_and_exit() -> None:
     sys.exit(1)
 
 
-def ensure_authentication_ready() -> None:
-    """
-    Phase 1: Ensure authentication is ready.
-
-    Checks for existing browser profile.
-    If not found, runs interactive setup in interactive mode.
-
-    Raises:
-        CredentialsNotFoundError: If authentication setup fails
-    """
-    config = get_config()
-
-    # Check for existing profile
-    try:
-        get_authentication_source()
-        return
-
-    except CredentialsNotFoundError:
-        pass
-
-    # No authentication found - try interactive setup if possible
-    if not config.is_interactive:
-        raise CredentialsNotFoundError(
-            "No LinkedIn profile found.\n"
-            "Options:\n"
-            "  1. Run with --login to create a profile\n"
-            "  2. Run with --no-headless to login interactively"
-        )
-
-    # Run interactive setup
-    logger.info("No authentication found, starting interactive setup...")
-    success = run_interactive_setup()
-
-    if not success:
-        raise CredentialsNotFoundError("Interactive setup was cancelled or failed")
-
-
 def get_version() -> str:
     """Get version from installed metadata with a source fallback."""
     try:
@@ -322,6 +275,8 @@ def main() -> None:
     logger.info(f"LinkedIn MCP Server v{version}")
 
     try:
+        configure_browser_environment()
+
         # Set headless mode from config
         set_headless(config.browser.headless)
 
@@ -339,38 +294,7 @@ def main() -> None:
 
         logger.debug(f"Server configuration: {config}")
 
-        # Phase 1: Ensure Authentication is Ready
-        try:
-            ensure_authentication_ready()
-            if config.is_interactive:
-                print("✅ Authentication ready")
-            logger.info("Authentication ready")
-
-        except CredentialsNotFoundError as e:
-            logger.error(f"Authentication setup failed: {e}")
-            if config.is_interactive:
-                print("\n❌ Authentication required")
-                print(str(e))
-            sys.exit(1)
-
-        except KeyboardInterrupt:
-            if config.is_interactive:
-                print("\n\n👋 Setup cancelled by user")
-            sys.exit(0)
-
-        except (AuthenticationError, RateLimitError) as e:
-            logger.error(f"LinkedIn error during setup: {e}")
-            if config.is_interactive:
-                print(f"\n❌ {str(e)}")
-            sys.exit(1)
-
-        except Exception as e:
-            logger.exception(f"Unexpected error during authentication setup: {e}")
-            if config.is_interactive:
-                print(f"\n❌ Setup failed: {e}")
-            sys.exit(1)
-
-        # Phase 2: Server Runtime
+        # Phase 1: Server Runtime
         try:
             transport = config.server.transport
 
