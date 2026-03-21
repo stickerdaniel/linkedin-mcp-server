@@ -12,8 +12,8 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 ## Installation Methods
 
 [![uvx](https://img.shields.io/badge/uvx-Quick_Install-de5fe9?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDEiIGhlaWdodD0iNDEiIHZpZXdCb3g9IjAgMCA0MSA0MSIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTS01LjI4NjE5ZS0wNiAwLjE2ODYyOUwwLjA4NDMwOTggMjAuMTY4NUwwLjE1MTc2MiAzNi4xNjgzQzAuMTYxMDc1IDM4LjM3NzQgMS45NTk0NyA0MC4xNjA3IDQuMTY4NTkgNDAuMTUxNEwyMC4xNjg0IDQwLjA4NEwzMC4xNjg0IDQwLjA0MThMMzEuMTg1MiA0MC4wMzc1QzMzLjM4NzcgNDAuMDI4MiAzNS4xNjgzIDM4LjIwMjYgMzUuMTY4MyAzNlYzNkwzNy4wMDAzIDM2TDM3LjAwMDMgMzkuOTk5Mkw0MC4xNjgzIDM5Ljk5OTZMMzkuOTk5NiAtOS45NDY1M2UtMDdMMjEuNTk5OCAwLjA3NzU2ODlMMjEuNjc3NCAxNi4wMTg1TDIxLjY3NzQgMjUuOTk5OEwyMC4wNzc0IDI1Ljk5OThMMTguMzk5OCAyNS45OTk4TDE4LjQ3NzQgMTYuMDMyTDE4LjM5OTggMC4wOTEwNTkzTC01LjI4NjE5ZS0wNiAwLjE2ODYyOVoiIGZpbGw9IiNERTVGRTkiLz4KPC9zdmc+Cg==)](#-uvx-setup-recommended---universal)
-[![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup)
 [![Install MCP Bundle](https://img.shields.io/badge/Claude_Desktop_MCPB-d97757?style=for-the-badge&logo=anthropic)](#-claude-desktop-mcp-bundle-formerly-dxt)
+[![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup)
 [![Development](https://img.shields.io/badge/Development-Local-ffdc53?style=for-the-badge&logo=python&logoColor=ffdc53)](#-local-setup-develop--contribute)
 
 <https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680>
@@ -47,10 +47,6 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `search_people` | Search for people by keywords and location | Working |
 | `get_job_details` | Get detailed information about a specific job posting | Working |
 | `close_session` | Close browser session and clean up resources | Working |
-
-Tool responses keep readable `sections` text and may also include a compact `references` map keyed by section. Each reference includes a typed target, a relative LinkedIn path (or absolute external URL), and a short label/context when available.
-
-When one section fails but the overall tool call still completes, responses may also include `section_errors`. Each entry contains structured diagnostics for that section, including the error type/message, a compact runtime summary, trace/log locations, matching-open-issue hints when available, and the path to a generated issue-ready markdown report with the full session details.
 
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
@@ -173,6 +169,47 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 <br/>
 <br/>
 
+## 📦 Claude Desktop MCP Bundle (formerly DXT)
+
+**Prerequisites:** [Claude Desktop](https://claude.ai/download).
+
+**One-click installation** for Claude Desktop users:
+
+1. Download the latest `.mcpb` artifact from [releases](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
+2. Double-click to install it into Claude Desktop
+3. Restart Claude Desktop
+4. Call any LinkedIn tool
+
+On startup, the MCP Bundle starts preparing the shared Patchright Chromium browser cache in the background. If you call a tool too early, Claude will surface a setup-in-progress error. On the first tool call that needs authentication, the server opens a LinkedIn login browser window and asks you to retry after sign-in.
+
+### MCP Bundle Setup Help
+
+<details>
+<summary><b>❗ Troubleshooting</b></summary>
+
+**First-time setup behavior:**
+
+- Claude Desktop starts the bundle immediately; browser setup continues in the background
+- If the Patchright Chromium browser is still downloading, retry the tool after a short wait
+- Managed browser downloads are shared under `~/.linkedin-mcp/patchright-browsers/`
+
+**Login issues:**
+
+- Make sure you have only one active LinkedIn session at a time
+- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
+- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
+
+**Timeout issues:**
+
+- If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
+- Users on slow connections may need higher values (e.g., 15000-30000ms)
+- Can also set via environment variable: `TIMEOUT=10000`
+
+</details>
+
+<br/>
+<br/>
+
 ## 🐳 Docker Setup
 
 **Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running, and [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on the host for the one-time `--login` step.
@@ -287,47 +324,6 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 
 - If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
 - Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
-
-</details>
-
-<br/>
-<br/>
-
-## 📦 Claude Desktop MCP Bundle (formerly DXT)
-
-**Prerequisites:** [Claude Desktop](https://claude.ai/download).
-
-**One-click installation** for Claude Desktop users:
-
-1. Download the latest `.mcpb` artifact from [releases](https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest)
-2. Double-click to install it into Claude Desktop
-3. Restart Claude Desktop
-4. Call any LinkedIn tool
-
-On startup, the MCP Bundle starts preparing the shared Patchright Chromium browser cache in the background. If you call a tool too early, Claude will surface a setup-in-progress error. On the first tool call that needs authentication, the server opens a LinkedIn login browser window and asks you to retry after sign-in.
-
-### MCP Bundle Setup Help
-
-<details>
-<summary><b>❗ Troubleshooting</b></summary>
-
-**First-time setup behavior:**
-
-- Claude Desktop starts the bundle immediately; browser setup continues in the background
-- If the Patchright Chromium browser is still downloading, retry the tool after a short wait
-- Managed browser downloads are shared under `~/.linkedin-mcp/patchright-browsers/`
-
-**Login issues:**
-
-- Make sure you have only one active LinkedIn session at a time
-- LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
-- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
-
-**Timeout issues:**
-
-- If pages fail to load or elements aren't found, try increasing the timeout: `--timeout 10000`
-- Users on slow connections may need higher values (e.g., 15000-30000ms)
-- Can also set via environment variable: `TIMEOUT=10000`
 
 </details>
 
