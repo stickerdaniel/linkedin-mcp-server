@@ -4,12 +4,15 @@ import pytest
 @pytest.fixture(autouse=True)
 def reset_singletons():
     """Reset global state for test isolation."""
+    from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
 
+    reset_bootstrap_for_testing()
     reset_browser_for_testing()
     reset_config()
     yield
+    reset_bootstrap_for_testing()
     reset_browser_for_testing()
     reset_config()
 

@@ -359,10 +359,10 @@ def _inside_running_event_loop() -> bool:
 def _installation_method_lines(runtime: dict[str, Any]) -> list[str]:
     current_runtime_id = str(runtime.get("current_runtime_id") or "")
     docker_checked = "x" if "container" in current_runtime_id else " "
+    managed_checked = " " if "container" in current_runtime_id else "x"
     return [
         f"- [{docker_checked}] Docker (specify docker image version/tag): `stickerdaniel/linkedin-mcp-server:<version-or-latest>` with `~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`",
-        "- [ ] Claude Desktop DXT extension (specify docker image version/tag): _._._",
-        "- [ ] Local Python setup",
+        f"- [{managed_checked}] Managed runtime (Claude Desktop MCP Bundle, `uvx`, or local `uv run` setup)",
     ]
 
 
@@ -373,7 +373,7 @@ def _installation_method_summary(runtime: dict[str, Any]) -> str:
             "Docker using `stickerdaniel/linkedin-mcp-server:<version-or-latest>` with "
             "`~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`"
         )
-    return "Local Python setup"
+    return "Managed runtime (Claude Desktop MCP Bundle, `uvx`, or local `uv run` setup)"
 
 
 def _tool_name_for_context(payload: dict[str, Any]) -> str | None:

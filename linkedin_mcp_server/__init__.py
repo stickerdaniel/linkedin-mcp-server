@@ -13,7 +13,7 @@ Key Features:
 - Playwright browser automation with session persistence
 - Layered configuration system with secure credential storage
 - Docker containerization for easy deployment
-- Claude Desktop DXT extension support
+- Claude Desktop MCP Bundle (MCPB, formerly DXT) support
 
 Architecture:
 - Clean separation between authentication, driver management, and MCP server

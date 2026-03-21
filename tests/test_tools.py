@@ -132,6 +132,10 @@ class TestPersonTool:
         mock_browser = MagicMock()
         mock_browser.page = MagicMock()
         monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.get_or_create_browser",
             AsyncMock(return_value=mock_browser),
         )
