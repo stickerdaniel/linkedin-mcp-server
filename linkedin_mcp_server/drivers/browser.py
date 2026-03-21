@@ -6,6 +6,7 @@ context. Implements a singleton pattern for browser reuse across tool calls with
 automatic profile persistence.
 """
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -52,6 +53,57 @@ DEFAULT_PROFILE_DIR = Path.home() / ".linkedin-mcp" / "profile"
 _browser: BrowserManager | None = None
 _browser_cookie_export_path: Path | None = None
 _headless: bool = True
+
+# Warm-up completion gate
+_warmup_event: asyncio.Event | None = None
+_warmup_completed: bool = False
+_WARMUP_TIMEOUT = 120  # seconds
+
+
+def _get_warmup_event() -> asyncio.Event:
+    """Return the warmup event, creating it lazily on the running loop."""
+    global _warmup_event
+    if _warmup_event is None:
+        _warmup_event = asyncio.Event()
+        if _warmup_completed:
+            _warmup_event.set()
+    return _warmup_event
+
+
+def mark_warmup_complete() -> None:
+    """Signal that browser warm-up has finished."""
+    global _warmup_completed
+    _warmup_completed = True
+    if _warmup_event is not None:
+        _warmup_event.set()
+    logger.info("Warm-up gate opened — tool calls may proceed")
+
+
+async def ensure_warmup_complete() -> None:
+    """Block until warm-up is complete or timeout (120s) expires.
+
+    On timeout, logs a warning and allows tool calls in degraded mode.
+    """
+    if _warmup_completed:
+        return
+    event = _get_warmup_event()
+    if event.is_set():
+        return
+    logger.info("Tool call waiting for warm-up to complete...")
+    try:
+        await asyncio.wait_for(event.wait(), timeout=_WARMUP_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Warm-up gate timeout (%ds) — proceeding in degraded mode",
+            _WARMUP_TIMEOUT,
+        )
+
+
+def reset_warmup_gate() -> None:
+    """Reset the warm-up gate (for testing or browser reset)."""
+    global _warmup_event, _warmup_completed
+    _warmup_completed = False
+    _warmup_event = None
 
 
 def _debug_skip_checkpoint_restart() -> bool:
@@ -426,6 +478,7 @@ async def get_or_create_browser(
         _apply_browser_settings(browser)
         _browser = browser
         _browser_cookie_export_path = cookie_path
+        mark_warmup_complete()
         await start_background_navigation(browser.page)
         return _browser
 
@@ -451,6 +504,7 @@ async def get_or_create_browser(
         _apply_browser_settings(browser)
         _browser = browser
         _browser_cookie_export_path = None
+        mark_warmup_complete()
         await start_background_navigation(browser.page)
         return _browser
 
@@ -483,6 +537,7 @@ async def get_or_create_browser(
             _apply_browser_settings(browser)
             _browser = browser
             _browser_cookie_export_path = None
+            mark_warmup_complete()
             await start_background_navigation(browser.page)
             return _browser
         except AuthenticationError:
@@ -515,6 +570,7 @@ async def get_or_create_browser(
     _apply_browser_settings(browser)
     _browser = browser
     _browser_cookie_export_path = None
+    mark_warmup_complete()
     await start_background_navigation(browser.page)
     return _browser
 
@@ -557,6 +613,7 @@ async def hard_reset_browser() -> None:
     profile — re-run with --login to create a fresh source session in that case.
     """
     await close_browser()
+    reset_warmup_gate()  # Gate will re-open on next get_or_create_browser
     runtime_id = get_runtime_id()
     source_profile_dir = get_source_profile_dir()
     cleared = clear_runtime_profile(runtime_id, source_profile_dir)
