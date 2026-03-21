@@ -36,6 +36,9 @@ class BrowserManager:
         viewport: dict[str, int] | None = None,
         user_agent: str | None = None,
         channel: str | None = "chrome",
+        locale: str = "pt-BR",
+        timezone_id: str = "America/Sao_Paulo",
+        accept_language: str = "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         **launch_options: Any,
     ):
         self.user_data_dir = str(Path(user_data_dir).expanduser())
@@ -44,12 +47,28 @@ class BrowserManager:
         self.viewport = viewport or {"width": 1280, "height": 720}
         self.user_agent = user_agent
         self.channel = channel
+        self.locale = locale
+        self.timezone_id = timezone_id
+        self.accept_language = accept_language
         self.launch_options = launch_options
 
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._is_authenticated = False
+
+    def _build_context_options(self) -> dict[str, Any]:
+        """Build shared context options dict for both persistent and temp contexts."""
+        options: dict[str, Any] = {
+            "viewport": self.viewport,
+            "locale": self.locale,
+            "timezone_id": self.timezone_id,
+        }
+        if self.channel:
+            options["channel"] = self.channel
+        if self.user_agent:
+            options["user_agent"] = self.user_agent
+        return options
 
     async def __aenter__(self) -> "BrowserManager":
         await self.start()
@@ -69,27 +88,38 @@ class BrowserManager:
 
             Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
 
-            context_options: dict[str, Any] = {
-                "headless": self.headless,
-                "slow_mo": self.slow_mo,
-                "viewport": self.viewport,
-                **self.launch_options,
-            }
+            context_options = self._build_context_options()
+            context_options["headless"] = self.headless
+            context_options["slow_mo"] = self.slow_mo
+            context_options.update(self.launch_options)
 
-            if self.channel:
-                context_options["channel"] = self.channel
-            if self.user_agent:
-                context_options["user_agent"] = self.user_agent
+            # Stealth browser args (extensible list)
+            existing_args = list(context_options.get("args", []))
+            existing_args.append("--disable-blink-features=AutomationControlled")
+            context_options["args"] = existing_args
 
             self._context = await self._playwright.chromium.launch_persistent_context(
                 self.user_data_dir,
                 **context_options,
             )
 
+            # Set extra HTTP headers (not a context option — separate API call)
+            await self._context.set_extra_http_headers(
+                {"Accept-Language": self.accept_language}
+            )
+
+            # Apply stealth init scripts before any navigation
+            from .stealth import get_stealth_init_scripts
+
+            for script in get_stealth_init_scripts():
+                await self._context.add_init_script(script)
+
             logger.info(
-                "Persistent browser launched (headless=%s, user_data_dir=%s)",
+                "Persistent browser launched (headless=%s, user_data_dir=%s, locale=%s, tz=%s)",
                 self.headless,
                 self.user_data_dir,
+                self.locale,
+                self.timezone_id,
             )
 
             if self._context.pages:
@@ -282,8 +312,7 @@ class BrowserManager:
             payload = json.loads(storage_path.read_text())
             source_cookies = payload.get("cookies") or []
             has_li_at = any(
-                c.get("name") == "li_at"
-                and "linkedin.com" in c.get("domain", "")
+                c.get("name") == "li_at" and "linkedin.com" in c.get("domain", "")
                 for c in source_cookies
             )
             if not has_li_at:
@@ -300,13 +329,14 @@ class BrowserManager:
             if self.channel:
                 launch_opts["channel"] = self.channel
             temp_browser = await self._playwright.chromium.launch(**launch_opts)
-            context_options: dict[str, Any] = {
-                "storage_state": storage_path,
-                "viewport": self.viewport,
-            }
-            if self.user_agent:
-                context_options["user_agent"] = self.user_agent
-            temp_context = await temp_browser.new_context(**context_options)
+            temp_ctx_options = self._build_context_options()
+            # Remove channel — it's a launch option, not a context option for new_context
+            temp_ctx_options.pop("channel", None)
+            temp_ctx_options["storage_state"] = storage_path
+            temp_context = await temp_browser.new_context(**temp_ctx_options)
+            await temp_context.set_extra_http_headers(
+                {"Accept-Language": self.accept_language}
+            )
             page = await temp_context.new_page()
             await page.goto(
                 "https://www.linkedin.com/feed/",

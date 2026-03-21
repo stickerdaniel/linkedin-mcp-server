@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
@@ -11,6 +10,8 @@ import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.tool import ToolResult
 
+from linkedin_mcp_server.core.browser_lock import browser_lock
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,7 +19,7 @@ class SequentialToolExecutionMiddleware(Middleware):
     """Ensure only one MCP tool call executes at a time per server process."""
 
     def __init__(self) -> None:
-        self._lock = asyncio.Lock()
+        self._lock = browser_lock
 
     async def _report_progress(
         self,

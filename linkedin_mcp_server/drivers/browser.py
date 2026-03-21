@@ -19,6 +19,10 @@ from linkedin_mcp_server.core import (
     resolve_remember_me_prompt,
     warm_up_browser,
 )
+from linkedin_mcp_server.core.background_nav import (
+    start_background_navigation,
+    stop_background_navigation,
+)
 
 from linkedin_mcp_server.common_utils import utcnow_iso
 from linkedin_mcp_server.config import get_config
@@ -219,6 +223,9 @@ def _make_browser(
         user_agent=config.browser.user_agent,
         channel=config.browser.channel,
         viewport=viewport,
+        locale=config.browser.locale,
+        timezone_id=config.browser.timezone_id,
+        accept_language=config.browser.accept_language,
         **launch_options,
     )
 
@@ -413,6 +420,7 @@ async def get_or_create_browser(
         _apply_browser_settings(browser)
         _browser = browser
         _browser_cookie_export_path = cookie_path
+        await start_background_navigation(browser.page)
         return _browser
 
     persist_runtime = experimental_persist_derived_runtime()
@@ -437,6 +445,7 @@ async def get_or_create_browser(
         _apply_browser_settings(browser)
         _browser = browser
         _browser_cookie_export_path = None
+        await start_background_navigation(browser.page)
         return _browser
 
     runtime_state = load_runtime_state(current_runtime_id, source_profile_dir)
@@ -468,6 +477,7 @@ async def get_or_create_browser(
             _apply_browser_settings(browser)
             _browser = browser
             _browser_cookie_export_path = None
+            await start_background_navigation(browser.page)
             return _browser
         except AuthenticationError:
             logger.warning(
@@ -499,12 +509,16 @@ async def get_or_create_browser(
     _apply_browser_settings(browser)
     _browser = browser
     _browser_cookie_export_path = None
+    await start_background_navigation(browser.page)
     return _browser
 
 
 async def close_browser() -> None:
     """Close the browser and cleanup resources."""
     global _browser, _browser_cookie_export_path
+
+    # Stop background navigation BEFORE closing browser (Council: Codex)
+    await stop_background_navigation()
 
     browser = _browser
     cookie_export_path = _browser_cookie_export_path
@@ -544,7 +558,8 @@ async def hard_reset_browser() -> None:
         logger.info("Hard reset complete: runtime profile wiped for %s", runtime_id)
     else:
         logger.warning(
-            "Hard reset: could not clear runtime profile for %s (may not exist)", runtime_id
+            "Hard reset: could not clear runtime profile for %s (may not exist)",
+            runtime_id,
         )
 
 
@@ -555,7 +570,11 @@ _scrape_count: int = 0
 def _rotation_threshold() -> int:
     """Return the context rotation threshold from env or default."""
     try:
-        return int(os.getenv("LINKEDIN_CONTEXT_ROTATION_THRESHOLD", str(_ROTATION_THRESHOLD_DEFAULT)))
+        return int(
+            os.getenv(
+                "LINKEDIN_CONTEXT_ROTATION_THRESHOLD", str(_ROTATION_THRESHOLD_DEFAULT)
+            )
+        )
     except (ValueError, TypeError):
         return _ROTATION_THRESHOLD_DEFAULT
 

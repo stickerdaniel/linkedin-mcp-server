@@ -200,6 +200,7 @@ async def test_materialize_storage_state_auth_warms_cookies_via_temporary_contex
         ]
     )
     temp_context.close = AsyncMock()
+    temp_context.set_extra_http_headers = AsyncMock()
     temp_browser = MagicMock()
     temp_browser.new_context = AsyncMock(return_value=temp_context)
     temp_browser.close = AsyncMock()
@@ -214,9 +215,12 @@ async def test_materialize_storage_state_auth_warms_cookies_via_temporary_contex
     if browser.channel:
         expected_launch["channel"] = browser.channel
     playwright.chromium.launch.assert_awaited_once_with(**expected_launch)
+    # _build_context_options returns viewport, locale, timezone_id (no channel for new_context, no user_agent when None)
     temp_browser.new_context.assert_awaited_once_with(
-        storage_state=storage_state_path,
         viewport=browser.viewport,
+        locale=browser.locale,
+        timezone_id=browser.timezone_id,
+        storage_state=storage_state_path,
     )
     temp_page.goto.assert_awaited_once_with(
         "https://www.linkedin.com/feed/",

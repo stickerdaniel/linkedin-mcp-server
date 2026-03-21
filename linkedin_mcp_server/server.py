@@ -13,6 +13,7 @@ from fastmcp.server.lifespan import lifespan
 
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.authentication import get_authentication_source
+from linkedin_mcp_server.core.background_nav import stop_background_navigation
 from linkedin_mcp_server.drivers.browser import close_browser, hard_reset_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
@@ -36,6 +37,7 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     logger.info("LinkedIn MCP Server starting...")
     yield {}
     logger.info("LinkedIn MCP Server shutting down...")
+    await stop_background_navigation()  # safety net
     await close_browser()
 
 

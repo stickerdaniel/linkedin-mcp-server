@@ -47,6 +47,9 @@ class EnvironmentKeys:
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
     USER_DATA_DIR = "USER_DATA_DIR"
+    LOCALE = "LOCALE"
+    TIMEZONE_ID = "TIMEZONE_ID"
+    ACCEPT_LANGUAGE = "ACCEPT_LANGUAGE"
 
 
 def is_interactive_environment() -> bool:
@@ -146,6 +149,18 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Custom Chrome/Chromium executable path
     if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
+
+    # Browser locale
+    if locale_env := os.environ.get(EnvironmentKeys.LOCALE):
+        config.browser.locale = locale_env
+
+    # Browser timezone
+    if timezone_env := os.environ.get(EnvironmentKeys.TIMEZONE_ID):
+        config.browser.timezone_id = timezone_env
+
+    # HTTP Accept-Language header
+    if accept_language_env := os.environ.get(EnvironmentKeys.ACCEPT_LANGUAGE):
+        config.browser.accept_language = accept_language_env
 
     return config
 
