@@ -58,7 +58,7 @@ def _get_random_sites(count: int = 2) -> list[str]:
 
 
 async def _visit_site(page: Page, url: str) -> None:
-    """Visit a site with human-like interactions. Max 15s time budget per site."""
+    """Visit a site with human-like interactions. Worst-case ~33s per site."""
     from .stealth import random_mouse_move, hover_random_links
 
     try:
@@ -102,20 +102,33 @@ async def _background_navigation_loop(page: Page) -> None:
             continue
 
         try:
-            async with browser_lock:
-                sites = _get_random_sites(count=random.randint(1, 3))
-                for url in sites:
-                    # Abort mid-cycle if someone else wants the lock
-                    # (can't check perfectly, but we keep visits short)
+            sites = _get_random_sites(count=random.randint(1, 3))
+            visited = 0
+            for url in sites:
+                # Yield to pending tool calls between visits
+                if browser_lock.locked():
+                    logger.debug(
+                        "Background nav aborting cycle — browser lock contended"
+                    )
+                    break
+                async with browser_lock:
                     await _visit_site(page, url)
+                    visited += 1
 
-                # Return to blank page after background navigation
-                try:
-                    await page.goto("about:blank", timeout=5000)
-                except Exception:
-                    pass
+            # Return to blank page after cycle
+            if visited > 0:
+                if browser_lock.locked():
+                    logger.debug("Background nav skipping about:blank — lock contended")
+                else:
+                    async with browser_lock:
+                        try:
+                            await page.goto("about:blank", timeout=5000)
+                        except Exception:
+                            pass
 
-                logger.debug("Background nav cycle complete (%d sites)", len(sites))
+            logger.debug(
+                "Background nav cycle complete (%d/%d sites)", visited, len(sites)
+            )
         except Exception:
             logger.debug("Background nav cycle error", exc_info=True)
 

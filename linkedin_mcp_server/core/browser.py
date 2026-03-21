@@ -36,9 +36,9 @@ class BrowserManager:
         viewport: dict[str, int] | None = None,
         user_agent: str | None = None,
         channel: str | None = "chrome",
-        locale: str = "pt-BR",
+        locale: str = "en-US",
         timezone_id: str = "America/Sao_Paulo",
-        accept_language: str = "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        accept_language: str = "en-US,en;q=0.9",
         **launch_options: Any,
     ):
         self.user_data_dir = str(Path(user_data_dir).expanduser())

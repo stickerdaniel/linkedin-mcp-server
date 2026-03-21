@@ -27,11 +27,9 @@ class BrowserConfig:
     channel: str | None = "chrome"  # Browser channel ("chrome" for real Chrome)
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
     user_data_dir: str = "~/.linkedin-mcp/profile"  # Persistent browser profile
-    locale: str = "pt-BR"  # Browser locale (navigator.language)
+    locale: str = "en-US"  # Browser locale (navigator.language)
     timezone_id: str = "America/Sao_Paulo"  # Browser timezone (Date.toString())
-    accept_language: str = (
-        "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"  # HTTP Accept-Language header
-    )
+    accept_language: str = "en-US,en;q=0.9"  # HTTP Accept-Language header
 
     def validate(self) -> None:
         """Validate browser configuration values."""

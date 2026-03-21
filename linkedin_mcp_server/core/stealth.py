@@ -8,6 +8,10 @@ from patchright.async_api import Page
 
 logger = logging.getLogger(__name__)
 
+# Defense-in-depth: Patchright already patches navigator.webdriver, but the
+# guard (!== undefined) ensures this is a no-op when already patched — no
+# double-define risk.  Kept as a safety net for edge cases where Patchright's
+# patch may not apply (e.g. certain page navigations or iframes).
 _WEBDRIVER_SCRIPT = """\
 if (navigator.webdriver !== undefined) {
   Object.defineProperty(navigator, 'webdriver', { get: () => undefined });

@@ -6,5 +6,6 @@ services:
       - ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp
     environment:
       - LOG_LEVEL=WARNING
+      - TZ=America/Sao_Paulo
     stdin_open: true
     tty: true
