@@ -172,8 +172,8 @@ jobs:
 
       - name: Validate and build MCP bundle
         run: |
-          bunx @anthropic-ai/mcpb validate
-          bunx @anthropic-ai/mcpb pack
+          bunx @anthropic-ai/mcpb validate manifest.json
+          bunx @anthropic-ai/mcpb pack .
           mv linkedin-mcp-server.mcpb linkedin-mcp-server-v$VERSION.mcpb
 
       - name: Generate release notes
