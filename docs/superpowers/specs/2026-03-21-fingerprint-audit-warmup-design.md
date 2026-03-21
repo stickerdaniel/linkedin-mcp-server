@@ -78,6 +78,8 @@ Behavior:
 
 **4. AdGuard Isolation**
 
+The fingerprint audit is intended to run locally (outside Docker). The diagnostic server port (8765) is hardcoded for simplicity since this is a one-off diagnostic tool, not production code.
+
 The user runs the audit twice:
 - Once with AdGuard active (normal network)
 - Once with AdGuard bypassed (direct DNS)
@@ -128,7 +130,7 @@ async def ensure_warmup_complete():
         ...
 ```
 
-Tool calls block until warm-up completes. If warm-up fails entirely (0 sites reachable), log a warning but don't block indefinitely.
+Tool calls block until warm-up completes with a 120s timeout. On timeout or total failure (0 sites reachable), log a warning and allow tool calls to proceed (degraded mode) rather than blocking indefinitely.
 
 **5. Explicit success logging**
 
@@ -154,7 +156,7 @@ This gives the user clear feedback in logs about warm-up status.
 
 - **Multi-profile rotation** — deferred until audit results reveal whether the problem is fingerprint-level (affects all profiles equally) or session-level (rotation would help)
 - **Changes to stealth.py init scripts** — the audit will reveal if they need adjustment; that's a follow-up
-- **Changes to background_nav.py** — the 30-60min loop is fine; the problem is the initial warm-up
+- **Changes to background_nav.py** — the 30-60min loop is fine; the problem is the initial warm-up. Note: background nav's first cycle runs 30-60min after startup, so there's no race with the warm-up or first tool call.
 - **Changes to context rotation threshold** — orthogonal to this issue
 
 ## Success Criteria
