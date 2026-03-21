@@ -360,7 +360,7 @@ def _installation_method_lines(runtime: dict[str, Any]) -> list[str]:
     current_runtime_id = str(runtime.get("current_runtime_id") or "")
     docker_checked = "x" if "container" in current_runtime_id else " "
     return [
-        f"- [{docker_checked}] Docker (specify docker image version/tag): `stickerdaniel/linkedin-mcp-server:latest` with `~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`",
+        f"- [{docker_checked}] Docker (specify docker image version/tag): `stickerdaniel/linkedin-mcp-server:<version-or-latest>` with `~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`",
         "- [ ] Claude Desktop DXT extension (specify docker image version/tag): _._._",
         "- [ ] Local Python setup",
     ]
@@ -370,27 +370,10 @@ def _installation_method_summary(runtime: dict[str, Any]) -> str:
     current_runtime_id = str(runtime.get("current_runtime_id") or "")
     if "container" in current_runtime_id:
         return (
-            "Docker using `stickerdaniel/linkedin-mcp-server:latest` with "
+            "Docker using `stickerdaniel/linkedin-mcp-server:<version-or-latest>` with "
             "`~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`"
         )
     return "Local Python setup"
-
-
-def _tool_lines(payload: dict[str, Any]) -> list[str]:
-    selected_tool = _tool_name_for_context(payload)
-    tool_names = [
-        "get_person_profile",
-        "get_company_profile",
-        "get_company_posts",
-        "get_job_details",
-        "search_jobs",
-        "search_people",
-        "close_session",
-    ]
-    return [
-        f"  - [{'x' if tool_name == selected_tool else ' '}] {tool_name}"
-        for tool_name in tool_names
-    ]
 
 
 def _tool_name_for_context(payload: dict[str, Any]) -> str | None:
