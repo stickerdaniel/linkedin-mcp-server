@@ -9,12 +9,11 @@ import logging
 from typing import Any
 
 from fastmcp import Context, FastMCP
-from fastmcp.dependencies import Depends
 
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.dependencies import get_extractor
+from linkedin_mcp_server.dependencies import get_ready_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping import LinkedInExtractor, parse_person_sections
+from linkedin_mcp_server.scraping import parse_person_sections
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +26,13 @@ def register_person_tools(mcp: FastMCP) -> None:
         title="Get Person Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},
+        exclude_args=["extractor"],
     )
     async def get_person_profile(
         linkedin_username: str,
         ctx: Context,
         sections: str | None = None,
-        extractor: LinkedInExtractor = Depends(get_extractor),
+        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Get a specific person's LinkedIn profile.
@@ -53,6 +53,9 @@ def register_person_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text in each section.
         """
         try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_person_profile"
+            )
             requested, unknown = parse_person_sections(sections)
 
             logger.info(
@@ -82,12 +85,13 @@ def register_person_tools(mcp: FastMCP) -> None:
         title="Search People",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "search"},
+        exclude_args=["extractor"],
     )
     async def search_people(
         keywords: str,
         ctx: Context,
         location: str | None = None,
-        extractor: LinkedInExtractor = Depends(get_extractor),
+        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
@@ -102,6 +106,9 @@ def register_person_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text to extract individual people and their profiles.
         """
         try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="search_people"
+            )
             logger.info(
                 "Searching people: keywords='%s', location='%s'",
                 keywords,
