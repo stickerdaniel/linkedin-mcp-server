@@ -73,6 +73,6 @@
       "specialNotes": "Framework for managing pre-commit hooks."
     }
   ],
-  "model": "claude-haiku-4.5",
-  "provider": "github-copilot"
+  "model": "gpt-5.4-mini",
+  "provider": "openai"
 }
