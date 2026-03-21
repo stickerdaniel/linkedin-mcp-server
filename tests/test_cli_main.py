@@ -294,6 +294,38 @@ def test_profile_info_reports_committed_derived_runtime(
     assert str(storage_state) in captured.out
 
 
+def test_fingerprint_audit_flag_calls_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--fingerprint-audit calls fingerprint_audit_and_exit()."""
+    config = _make_config(
+        is_interactive=False, transport="stdio", transport_explicitly_set=False
+    )
+    config.server.fingerprint_audit = True
+    config.server.logout = False
+    config.server.login = False
+    config.server.status = False
+
+    _patch_main_dependencies(monkeypatch, config)
+
+    called = {}
+
+    def fake_fingerprint_audit_and_exit() -> None:
+        called["invoked"] = True
+        raise SystemExit(0)
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.fingerprint_audit_and_exit",
+        fake_fingerprint_audit_and_exit,
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.main()
+
+    assert exit_info.value.code == 0
+    assert called.get("invoked") is True
+
+
 def test_clear_profile_and_exit_clears_all_auth_state(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

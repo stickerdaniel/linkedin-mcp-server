@@ -238,6 +238,124 @@ def profile_info_and_exit() -> None:
     sys.exit(1)
 
 
+def fingerprint_audit_and_exit() -> None:
+    """Run fingerprint audit: launch diagnostic server, then Playwright, compare results."""
+    import subprocess
+    import time
+    import json
+    from pathlib import Path
+    from urllib.request import urlopen
+    from urllib.error import URLError
+
+    config = get_config()
+    configure_logging(log_level="INFO", json_format=False)
+
+    version = get_version()
+    logger.info(f"LinkedIn MCP Server v{version} - Fingerprint Audit mode")
+
+    tools_dir = Path(__file__).parent.parent / "tools"
+    server_script = tools_dir / "fingerprint_server.py"
+
+    if not server_script.exists():
+        print(f"Error: {server_script} not found")
+        print("Make sure you're running from the project root directory")
+        sys.exit(1)
+
+    # Start the diagnostic server in a subprocess
+    server_proc = subprocess.Popen(
+        [sys.executable, str(server_script)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    port = 8765
+    url = f"http://localhost:{port}"
+
+    # Wait for server to be ready
+    for _ in range(20):
+        try:
+            urlopen(f"{url}/status", timeout=1)
+            break
+        except (URLError, OSError):
+            time.sleep(0.25)
+    else:
+        print("Error: Diagnostic server failed to start")
+        server_proc.terminate()
+        sys.exit(1)
+
+    print(f"\nFingerprint audit server running on {url}")
+    print(f"\nStep 1: Open {url} in real Chrome to capture baseline fingerprint")
+    print("        (waiting for baseline...)")
+
+    # Wait for baseline
+    while True:
+        try:
+            resp = urlopen(f"{url}/status", timeout=2)
+            status = json.loads(resp.read())
+            if status.get("baseline"):
+                print("Baseline captured!")
+                break
+        except (URLError, OSError):
+            pass
+        time.sleep(1)
+
+    print("\nStep 2: Launching Playwright to capture automated fingerprint...")
+
+    # Launch Playwright with production config
+    import asyncio
+
+    async def capture_playwright_fingerprint() -> None:
+        from linkedin_mcp_server.core.browser import BrowserManager
+
+        browser_config = config.browser
+        async with BrowserManager(
+            user_data_dir=Path.home() / ".linkedin-mcp" / "audit-profile",
+            headless=browser_config.headless,
+            channel=browser_config.channel,
+            viewport={
+                "width": browser_config.viewport_width,
+                "height": browser_config.viewport_height,
+            },
+            locale=browser_config.locale,
+            timezone_id=browser_config.timezone_id,
+            accept_language=browser_config.accept_language,
+        ) as browser:
+            page = browser.page
+            # Add source header so server knows it's Playwright
+            await page.set_extra_http_headers({"X-Source": "playwright"})
+            await page.goto(f"{url}/", wait_until="networkidle", timeout=15000)
+            # Wait for the POST to complete
+            await page.wait_for_function(
+                "document.getElementById('status').textContent.includes('collected')",
+                timeout=10000,
+            )
+            print("Playwright fingerprint captured!")
+
+    try:
+        asyncio.run(capture_playwright_fingerprint())
+    except Exception as e:
+        print(f"Error capturing Playwright fingerprint: {e}")
+        server_proc.terminate()
+        sys.exit(1)
+
+    # Give server a moment to process and print diff
+    time.sleep(1)
+
+    # Clean up
+    server_proc.terminate()
+    server_proc.wait(timeout=5)
+
+    # Clean up audit profile
+    import shutil
+
+    audit_profile = Path.home() / ".linkedin-mcp" / "audit-profile"
+    if audit_profile.exists():
+        shutil.rmtree(audit_profile, ignore_errors=True)
+
+    print("\nAudit complete. Check the diff above and results in tools/fingerprint_results/")
+    sys.exit(0)
+
+
 def ensure_authentication_ready() -> None:
     """
     Phase 1: Ensure authentication is ready.
@@ -336,6 +454,10 @@ def main() -> None:
         # Handle --status flag
         if config.server.status:
             profile_info_and_exit()
+
+        # Handle --fingerprint-audit flag
+        if config.server.fingerprint_audit:
+            fingerprint_audit_and_exit()
 
         logger.debug(f"Server configuration: {config}")
 
