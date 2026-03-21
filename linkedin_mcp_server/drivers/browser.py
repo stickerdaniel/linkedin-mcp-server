@@ -299,7 +299,13 @@ async def _bridge_runtime_profile(
             )
         await stabilize_navigation("post-import feed validation", logger)
         await record_page_trace(browser.page, "bridge-after-feed-validation")
-        await warm_up_browser(browser.page)
+        warmup_result = await warm_up_browser(browser.page)
+        logger.info(
+            "Bridge warm-up: %d/%d sites in %.0fs",
+            warmup_result.sites_visited,
+            warmup_result.total_sites,
+            warmup_result.elapsed_seconds,
+        )
         if not persist_runtime:
             logger.info(
                 "Foreign runtime %s authenticated via fresh bridge "

@@ -4,6 +4,8 @@ import asyncio
 import logging
 import random
 import re
+import time
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
@@ -34,17 +36,27 @@ _REMEMBER_ME_CONTAINER_SELECTOR = "#rememberme-div"
 _REMEMBER_ME_BUTTON_SELECTOR = "#rememberme-div button"
 
 
-async def warm_up_browser(page: Page) -> None:
-    """Visit neutral sites then LinkedIn public pages to build a human-like browsing history.
+@dataclass
+class WarmUpResult:
+    """Result of browser warm-up."""
 
-    The two-phase approach reduces CAPTCHA probability on bridged Docker sessions:
-    phase 1 visits external sites (Google, Wikipedia, GitHub) so the browser
-    has non-LinkedIn history; phase 2 visits LinkedIn public pages (help,
-    about, learning) so LinkedIn sees organic navigation before the first
-    scrape.
+    sites_visited: int
+    total_sites: int
+    elapsed_seconds: float
 
-    Enhanced with mouse movements, hover interactions, and networkidle loading
-    for more realistic browser fingerprint.
+    @property
+    def success(self) -> bool:
+        return self.sites_visited > 0
+
+
+async def warm_up_browser(page: Page) -> WarmUpResult:
+    """Visit external sites to build a human-like browsing history before LinkedIn.
+
+    Only visits non-LinkedIn sites (Google, Wikipedia, GitHub) with realistic
+    dwell times, scrolling, and mouse movements. LinkedIn is intentionally excluded
+    — the first LinkedIn contact should be the natural authenticated navigation.
+
+    Returns a WarmUpResult with visit statistics.
     """
     from .stealth import hover_random_links, random_mouse_move
 
@@ -53,51 +65,59 @@ async def warm_up_browser(page: Page) -> None:
         "https://www.wikipedia.org",
         "https://www.github.com",
     ]
-    linkedin_public = [
-        "https://www.linkedin.com/help/linkedin",
-        "https://www.linkedin.com/about",
-        "https://www.linkedin.com/learning",
-        "https://www.linkedin.com/feed/",
-    ]
 
-    logger.info("Warming up browser (external + LinkedIn public pages + feed)...")
+    logger.info("Warming up browser (external sites only)...")
+    start = time.monotonic()
 
     failures = 0
-    total = len(external_sites) + len(linkedin_public)
-    for site in external_sites + linkedin_public:
+    total = len(external_sites)
+    for site in external_sites:
         try:
-            # Use networkidle for fuller resource loading (8s timeout, graceful fallback)
+            # Navigate with networkidle for full resource loading
             try:
                 await page.goto(site, wait_until="networkidle", timeout=8000)
             except PlaywrightTimeoutError:
                 await page.goto(site, wait_until="domcontentloaded", timeout=10000)
 
-            # Random mouse movements after each page
-            await random_mouse_move(page, count=random.randint(2, 4))
+            # Random mouse movements (3-5)
+            await random_mouse_move(page, count=random.randint(3, 5))
 
-            # Scroll the feed like a real user would
-            if "/feed" in site:
-                for _ in range(random.randint(5, 10)):
-                    await page.mouse.wheel(0, random.randint(300, 700))
-                    await asyncio.sleep(random.uniform(1.0, 2.5))
+            # Scroll like a real user (3-6 times)
+            for _ in range(random.randint(3, 6)):
+                await page.mouse.wheel(0, random.randint(300, 700))
+                await asyncio.sleep(random.uniform(1.0, 3.0))
 
-            # Hover over random links on LinkedIn pages
-            if "linkedin.com" in site:
-                await hover_random_links(page, max_links=2)
+            # Hover over random links
+            await hover_random_links(page, max_links=random.randint(1, 3))
 
-            await asyncio.sleep(random.uniform(2.0, 6.0))
-            logger.debug("Visited %s", site)
+            # Dwell on page (5-12s)
+            await asyncio.sleep(random.uniform(5.0, 12.0))
+
+            logger.debug("Warm-up visited %s", site)
         except Exception as e:
             failures += 1
-            logger.debug("Could not visit %s: %s", site, e)
+            logger.debug("Warm-up: could not visit %s: %s", site, e)
             continue
 
-    if failures == total:
-        logger.warning("Browser warm-up failed: none of %d sites reachable", total)
+    elapsed = time.monotonic() - start
+    visited = total - failures
+    result = WarmUpResult(
+        sites_visited=visited,
+        total_sites=total,
+        elapsed_seconds=round(elapsed, 1),
+    )
+
+    if visited == 0:
+        logger.warning("Warm-up failed: none of %d sites reachable", total)
     else:
         logger.info(
-            "Browser warm-up complete (%d/%d sites visited)", total - failures, total
+            "Warm-up complete: %d/%d external sites visited in %.0fs",
+            visited,
+            total,
+            elapsed,
         )
+
+    return result
 
 
 async def is_logged_in(page: Page) -> bool:

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.core.auth import WarmUpResult
 from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
     get_or_create_browser,
@@ -1014,6 +1015,7 @@ async def test_bridge_warms_up_browser_before_feed_validation(tmp_path):
         patch(
             "linkedin_mcp_server.drivers.browser.warm_up_browser",
             new_callable=AsyncMock,
+            return_value=WarmUpResult(sites_visited=3, total_sites=3, elapsed_seconds=1.0),
         ) as warm_up_mock,
     ):
         await get_or_create_browser()
@@ -1052,6 +1054,7 @@ async def test_bridge_does_not_navigate_before_cookie_injection(tmp_path):
         patch(
             "linkedin_mcp_server.drivers.browser.warm_up_browser",
             new_callable=AsyncMock,
+            return_value=WarmUpResult(sites_visited=3, total_sites=3, elapsed_seconds=1.0),
         ),
     ):
         await get_or_create_browser()
