@@ -8,6 +8,29 @@ from linkedin_mcp_server.error_diagnostics import (
 )
 
 
+def _required_issue_form_labels() -> list[str]:
+    labels: list[str] = []
+    current_label: str | None = None
+    in_body = False
+    lines = Path(".github/ISSUE_TEMPLATE/bug_report.yml").read_text().splitlines()
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "body:":
+            in_body = True
+            continue
+        if not in_body:
+            continue
+        if stripped.startswith("- type:"):
+            current_label = None
+            continue
+        if stripped.startswith("label:"):
+            current_label = stripped.removeprefix("label:").strip().strip('"')
+            continue
+        if stripped == "required: true" and current_label:
+            labels.append(current_label)
+    return labels
+
+
 def test_build_issue_diagnostics_includes_existing_issues(monkeypatch, tmp_path):
     monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
     monkeypatch.setattr(
@@ -38,6 +61,10 @@ def test_build_issue_diagnostics_includes_existing_issues(monkeypatch, tmp_path)
     assert "## Existing Open Issues" in issue_body
     assert "#220" in issue_body
     assert "post the gist as a comment there" in issue_body
+    assert "## Setup" in issue_body
+    assert "## What Happened" in issue_body
+    assert "## Steps to Reproduce" in issue_body
+    assert "## Logs" in issue_body
 
 
 def test_format_tool_error_with_diagnostics_prefers_existing_issue_comment_flow():
@@ -136,6 +163,37 @@ async def test_build_issue_diagnostics_skips_network_search_in_event_loop(
     assert "search was skipped in async server context" in issue_body
 
 
+def test_build_issue_diagnostics_covers_required_bug_report_fields(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics._find_existing_issues",
+        lambda payload: [],
+    )
+
+    diagnostics = build_issue_diagnostics(
+        RuntimeError("boom"),
+        context="search_jobs",
+        target_url="https://www.linkedin.com/jobs/search/?keywords=python",
+        section_name="search_results",
+    )
+
+    issue_body = Path(diagnostics["issue_template_path"]).read_text()
+
+    for label in _required_issue_form_labels():
+        assert f"## {label}" in issue_body
+
+    assert "- Installation method:" in issue_body
+    assert "- MCP client:" in issue_body
+    assert "- Error:" in issue_body
+    assert "- Expected behavior:" in issue_body
+    assert "1. Run a fresh local `uv run -m linkedin_mcp_server --login`." in issue_body
+    assert "Call `search_jobs` again" in issue_body
+    assert "## Additional Diagnostics" in issue_body
+    assert "### Session State" in issue_body
+
+
 def test_build_issue_diagnostics_marks_inferred_tool_and_container_runtime(
     monkeypatch, tmp_path
 ):
@@ -157,9 +215,10 @@ def test_build_issue_diagnostics_marks_inferred_tool_and_container_runtime(
     )
 
     issue_body = Path(diagnostics["issue_template_path"]).read_text()
+    assert "- Installation method: Docker using" in issue_body
     assert "`~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`" in issue_body
     assert "- [x] Docker" in issue_body
-    assert "  - [x] search_jobs" in issue_body
+    assert "- Tool: search_jobs" in issue_body
 
 
 def test_build_issue_diagnostics_keeps_sensitive_runtime_details_out_of_mcp_payload(
@@ -184,5 +243,5 @@ def test_build_issue_diagnostics_keeps_sensitive_runtime_details_out_of_mcp_payl
     assert "source_profile_dir" not in diagnostics["runtime"]
     assert diagnostics["issue_search_skipped"] is False
     issue_body = Path(diagnostics["issue_template_path"]).read_text()
-    assert "## Runtime Diagnostics" in issue_body
+    assert "### Runtime Diagnostics" in issue_body
     assert "Source profile:" in issue_body
