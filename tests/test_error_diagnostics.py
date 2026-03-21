@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 
 from linkedin_mcp_server.error_diagnostics import (
+    _installation_method_lines,
+    _installation_method_summary,
     build_issue_diagnostics,
     format_tool_error_with_diagnostics,
 )
@@ -222,6 +224,35 @@ def test_build_issue_diagnostics_marks_inferred_tool_and_container_runtime(
     assert "`~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`" in issue_body
     assert "- [x] Docker" in issue_body
     assert "- Tool: search_jobs" in issue_body
+
+
+def test_installation_method_lines_marks_managed_runtime() -> None:
+    lines = _installation_method_lines(
+        {
+            "current_runtime_id": "macos-arm64-host",
+        }
+    )
+
+    assert lines[0].startswith("- [ ] Docker")
+    assert (
+        lines[1]
+        == "- [x] Managed runtime (Claude Desktop MCP Bundle, `uvx`, or local `uv run` setup)"
+    )
+
+
+def test_installation_method_summary_returns_managed_runtime_for_non_container() -> (
+    None
+):
+    summary = _installation_method_summary(
+        {
+            "current_runtime_id": "macos-arm64-host",
+        }
+    )
+
+    assert (
+        summary
+        == "Managed runtime (Claude Desktop MCP Bundle, `uvx`, or local `uv run` setup)"
+    )
 
 
 def test_build_issue_diagnostics_keeps_sensitive_runtime_details_out_of_mcp_payload(

@@ -22,7 +22,14 @@ from linkedin_mcp_server.core.exceptions import (
 )
 
 from linkedin_mcp_server.exceptions import (
+    AuthenticationBootstrapFailedError,
+    AuthenticationInProgressError,
+    AuthenticationStartedError,
+    BrowserSetupFailedError,
+    BrowserSetupInProgressError,
     CredentialsNotFoundError,
+    DockerHostLoginRequiredError,
+    LinuxBrowserDependencyError,
     LinkedInMCPError,
     SessionExpiredError,
 )
@@ -75,6 +82,36 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             "Authentication not found. Run with --login to create a browser profile.",
             context=context,
         )
+
+    elif isinstance(exception, BrowserSetupInProgressError):
+        logger.info("Browser setup in progress%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    elif isinstance(exception, BrowserSetupFailedError):
+        logger.warning("Browser setup failed%s: %s", ctx, exception)
+        raise ToolError(
+            "LinkedIn browser setup was not ready. A fresh setup attempt has started in the background. Retry this tool in a few minutes."
+        ) from exception
+
+    elif isinstance(exception, AuthenticationStartedError):
+        logger.info("Authentication started%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    elif isinstance(exception, AuthenticationInProgressError):
+        logger.info("Authentication in progress%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    elif isinstance(exception, AuthenticationBootstrapFailedError):
+        logger.warning("Authentication bootstrap failed%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    elif isinstance(exception, DockerHostLoginRequiredError):
+        logger.warning("Docker host login required%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    elif isinstance(exception, LinuxBrowserDependencyError):
+        logger.warning("Linux browser dependency missing%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, SessionExpiredError):
         logger.warning("Session expired%s: %s", ctx, exception)
