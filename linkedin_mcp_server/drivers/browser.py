@@ -351,13 +351,19 @@ async def _bridge_runtime_profile(
             )
         await stabilize_navigation("post-import feed validation", logger)
         await record_page_trace(browser.page, "bridge-after-feed-validation")
-        warmup_result = await warm_up_browser(browser.page)
-        logger.info(
-            "Bridge warm-up: %d/%d sites in %.0fs",
-            warmup_result.sites_visited,
-            warmup_result.total_sites,
-            warmup_result.elapsed_seconds,
-        )
+        # Warm-up visits external sites with human-like dwell time (~60s total).
+        # In Docker containers, FastMCP's 90s tool timeout is too tight for
+        # warm-up + the actual scrape, so we skip it.  Patchright's built-in
+        # stealth patches are sufficient for the first navigation.
+        is_docker = os.environ.get("container") or Path("/.dockerenv").exists()
+        if not is_docker:
+            warmup_result = await warm_up_browser(browser.page)
+            logger.info(
+                "Bridge warm-up: %d/%d sites in %.0fs",
+                warmup_result.sites_visited,
+                warmup_result.total_sites,
+                warmup_result.elapsed_seconds,
+            )
         if not persist_runtime:
             logger.info(
                 "Foreign runtime %s authenticated via fresh bridge "
