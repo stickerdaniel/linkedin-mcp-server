@@ -29,7 +29,7 @@ class BrowserConfig:
     user_data_dir: str = "~/.linkedin-mcp/profile"  # Persistent browser profile
     locale: str = "en-US"  # Browser locale (navigator.language)
     timezone_id: str = "America/Sao_Paulo"  # Browser timezone (Date.toString())
-    accept_language: str = "en-US,en;q=0.9"  # HTTP Accept-Language header
+    accept_language: str = "en-US,en;q=0.9,pt;q=0.8"  # HTTP Accept-Language header
 
     def validate(self) -> None:
         """Validate browser configuration values."""
