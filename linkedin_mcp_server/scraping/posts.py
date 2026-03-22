@@ -936,7 +936,7 @@ async def get_post_comments(
                     comment_text = (c.get("text") or "").strip()
                     author_name = (c.get("author_name") or "").strip()
                     clean_author = re.sub(r"^View\s+", "", author_name)
-                    clean_author = re.sub(r"[\u0027\u2019]s\s+graphic link$", "", clean_author).strip()
+                    clean_author = re.sub("['\\u2019]s\\s+graphic link$", "", clean_author).strip()
                     if clean_author and comment_text:
                         text_sans_author = comment_text.replace(clean_author, "").strip()
                         if len(text_sans_author) < 3:
