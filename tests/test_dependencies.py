@@ -28,10 +28,6 @@ class TestGetExtractor:
                 return_value=True,
             ),
             patch(
-                "linkedin_mcp_server.dependencies.ensure_warmup_complete",
-                new_callable=AsyncMock,
-            ),
-            patch(
                 "linkedin_mcp_server.dependencies.hard_reset_browser",
                 side_effect=mock_hard_reset,
             ),
@@ -62,10 +58,6 @@ class TestGetExtractor:
             patch(
                 "linkedin_mcp_server.dependencies.should_rotate",
                 return_value=False,
-            ),
-            patch(
-                "linkedin_mcp_server.dependencies.ensure_warmup_complete",
-                new_callable=AsyncMock,
             ),
             patch(
                 "linkedin_mcp_server.dependencies.hard_reset_browser",
@@ -99,10 +91,6 @@ class TestGetExtractor:
             patch(
                 "linkedin_mcp_server.dependencies.should_rotate",
                 return_value=False,
-            ),
-            patch(
-                "linkedin_mcp_server.dependencies.ensure_warmup_complete",
-                new_callable=AsyncMock,
             ),
             patch(
                 "linkedin_mcp_server.dependencies.hard_reset_browser",
@@ -141,10 +129,6 @@ class TestGetExtractor:
                 return_value=False,
             ),
             patch(
-                "linkedin_mcp_server.dependencies.ensure_warmup_complete",
-                new_callable=AsyncMock,
-            ),
-            patch(
                 "linkedin_mcp_server.dependencies.hard_reset_browser",
                 new_callable=AsyncMock,
             ),
@@ -170,39 +154,3 @@ class TestGetExtractor:
 
         record_mock.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_get_extractor_calls_warmup_gate(self):
-        """get_extractor calls ensure_warmup_complete before get_or_create_browser."""
-        call_order = []
-
-        async def mock_warmup():
-            call_order.append("warmup_gate")
-
-        async def mock_get_browser():
-            call_order.append("get_browser")
-            browser = MagicMock()
-            browser.page = MagicMock()
-            return browser
-
-        with (
-            patch("linkedin_mcp_server.dependencies.should_rotate", return_value=False),
-            patch(
-                "linkedin_mcp_server.dependencies.ensure_warmup_complete",
-                side_effect=mock_warmup,
-            ),
-            patch(
-                "linkedin_mcp_server.dependencies.get_or_create_browser",
-                side_effect=mock_get_browser,
-            ),
-            patch(
-                "linkedin_mcp_server.dependencies.ensure_authenticated",
-                new_callable=AsyncMock,
-            ),
-            patch("linkedin_mcp_server.dependencies.record_scrape"),
-        ):
-            from linkedin_mcp_server.dependencies import get_extractor
-
-            async with get_extractor():
-                pass
-
-        assert call_order == ["warmup_gate", "get_browser"]
