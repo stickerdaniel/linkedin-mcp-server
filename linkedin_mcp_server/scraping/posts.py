@@ -1086,7 +1086,9 @@ async def _unreplied_via_notifications(
                 const fullUrl = href.startsWith('http') ? href : 'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
                 if (seen.has(fullUrl)) continue;
                 seen.add(fullUrl);
-                const text = (card.innerText || '').trim();
+                let text = (card.innerText || '').trim();
+                // Strip LinkedIn UI artefacts (e.g. "Status is reachable")
+                text = text.replace(/^Status is \\w+\\n?/i, '').trim();
                 const textLower = text.toLowerCase();
                 // Exclude reactions, likes, endorsements, mentions
                 const isExcluded = excludeTerms.some(t => textLower.includes(t));
