@@ -562,7 +562,7 @@ async def get_post_content(
 def _clean_author_display(name: str) -> str:
     """Strip LinkedIn display-name wrappers like 'View X's graphic link'."""
     s = re.sub(r"^View\s+", "", name)
-    s = re.sub("['\\u2019]s\\s+graphic link$", "", s)
+    s = re.sub("['\\u2019]s\\s+.*graphic link$", "", s)
     return s.strip()
 
 
@@ -999,10 +999,7 @@ async def get_post_comments(
                     if len(comment_text) < 3:
                         continue
                     author_name = (c.get("author_name") or "").strip()
-                    clean_author = re.sub(r"^View\s+", "", author_name)
-                    clean_author = re.sub(
-                        "['\\u2019]s\\s+graphic link$", "", clean_author
-                    ).strip()
+                    clean_author = _clean_author_display(author_name)
                     if clean_author and comment_text:
                         text_sans_author = comment_text.replace(
                             clean_author, ""

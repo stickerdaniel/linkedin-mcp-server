@@ -8,6 +8,7 @@ import pytest
 from linkedin_mcp_server.scraping.extractor import ExtractedSection, _RATE_LIMITED_MSG
 from linkedin_mcp_server.scraping.cache import scraping_cache
 from linkedin_mcp_server.scraping.posts import (
+    _clean_author_display,
     _extract_author_info,
     _extract_engagement_metrics,
     _detect_post_type,
@@ -23,6 +24,22 @@ from linkedin_mcp_server.scraping.posts import (
     get_post_content,
     get_profile_recent_posts,
 )
+
+
+class TestCleanAuthorDisplay:
+    """Unit tests for _clean_author_display (pure function)."""
+
+    def test_strips_view_prefix_and_graphic_link_suffix(self):
+        assert _clean_author_display("View Carina Fernândes\u2019s  graphic link") == "Carina Fernândes"
+
+    def test_strips_open_to_work_graphic_link(self):
+        assert _clean_author_display("View Osmani Sadzinski's open to work graphic link") == "Osmani Sadzinski"
+
+    def test_plain_name_unchanged(self):
+        assert _clean_author_display("Sergio Eiras") == "Sergio Eiras"
+
+    def test_empty_string(self):
+        assert _clean_author_display("") == ""
 
 
 class TestNormalizePostUrl:
