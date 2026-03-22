@@ -559,6 +559,26 @@ async def get_post_content(
     return result
 
 
+def _clean_author_display(name: str) -> str:
+    """Strip LinkedIn display-name wrappers like 'View X's graphic link'."""
+    s = re.sub(r"^View\s+", "", name)
+    s = re.sub("['\\u2019]s\\s+graphic link$", "", s)
+    return s.strip()
+
+
+def _is_same_person(name_a: str, name_b: str) -> bool:
+    """Case-insensitive check if two LinkedIn display names refer to the same person.
+
+    Requires both names to be at least 4 chars to avoid false positives
+    from short names like "Me" matching inside "Commenter".
+    """
+    a = _clean_author_display(name_a).lower()
+    b = _clean_author_display(name_b).lower()
+    if not a or not b or len(a) < 4 or len(b) < 4:
+        return False
+    return a in b or b in a
+
+
 async def _get_current_user_name(page: Page) -> str | None:
     """Try to get current user display name from nav (for reply detection).
 
@@ -974,8 +994,10 @@ async def get_post_comments(
                         if key in seen_keys:
                             continue
                         seen_keys.add(key)
-                    # Filter ghost entries (text is just the author name)
+                    # Filter ghost / empty entries
                     comment_text = (c.get("text") or "").strip()
+                    if len(comment_text) < 3:
+                        continue
                     author_name = (c.get("author_name") or "").strip()
                     clean_author = re.sub(r"^View\s+", "", author_name)
                     clean_author = re.sub(
@@ -1161,6 +1183,7 @@ async def find_unreplied_comments(
     Results ordered by most recent first (best-effort).
     """
     unreplied: list[dict[str, Any]] = []
+    seen_permalinks: set[str] = set()
     current_name = await _get_current_user_name(page)
 
     # 1) Try notifications first — fast, low-cost (1 navigation)
@@ -1172,15 +1195,20 @@ async def find_unreplied_comments(
             len(from_notifications),
         )
         for item in from_notifications:
+            permalink = item.get("comment_permalink") or ""
+            if permalink and permalink in seen_permalinks:
+                continue
             unreplied.append(
                 {
-                    "comment_permalink": item.get("comment_permalink"),
+                    "comment_permalink": permalink or None,
                     "post_url": item.get("post_url"),
                     "snippet": item.get("snippet"),
                     "author_name": None,
                     "text": None,
                 }
             )
+            if permalink:
+                seen_permalinks.add(permalink)
             post_url = item.get("post_url")
             if post_url:
                 covered_post_urls.add(_normalize_post_url(post_url))
@@ -1225,10 +1253,21 @@ async def find_unreplied_comments(
             for c in comments:
                 if c.get("has_reply_from_author"):
                     continue
+                # Skip own comments
+                if current_name and _is_same_person(
+                    current_name, c.get("author_name") or ""
+                ):
+                    continue
+                # Deduplicate across sources (only on real comment permalinks)
+                permalink = c.get("comment_permalink")
+                if permalink and permalink in seen_permalinks:
+                    continue
+                if permalink:
+                    seen_permalinks.add(permalink)
                 unreplied.append(
                     {
                         "comment_id": c.get("comment_id"),
-                        "comment_permalink": c.get("comment_permalink") or post_url,
+                        "comment_permalink": permalink or post_url,
                         "post_url": post_url,
                         "author_name": c.get("author_name"),
                         "text": c.get("text"),
