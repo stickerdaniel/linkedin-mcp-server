@@ -719,6 +719,82 @@ class TestFindUnrepliedComments:
         permalinks = [r["comment_permalink"] for r in result]
         assert permalinks.count(permalink) == 1
 
+    async def test_filters_name_only_ghost_in_supplement(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """Comments where text equals the cleaned author name should be excluded."""
+        mock_notif.return_value = None
+        mock_name.return_value = "Andre Martins"
+        mock_posts.return_value = [
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "post_id": "urn:li:activity:1",
+                "text_preview": "",
+                "created_at": None,
+            }
+        ]
+        mock_comments.return_value = [
+            {
+                "comment_id": "c1",
+                "author_name": "View Carina Fern\u00e2ndes\u2019s  graphic link",
+                "author_url": "https://linkedin.com/in/carina/",
+                "text": "Carina Fern\u00e2ndes",
+                "created_at": None,
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c1",
+                "has_reply_from_author": False,
+            },
+            {
+                "comment_id": "c2",
+                "author_name": "Someone Real",
+                "author_url": "https://linkedin.com/in/someone/",
+                "text": "Great post!",
+                "created_at": None,
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c2",
+                "has_reply_from_author": False,
+            },
+        ]
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        assert len(result) == 1
+        assert result[0]["text"] == "Great post!"
+
+    async def test_filters_comma_prefix_own_replies(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """Replies starting with ', ' are the user's own replies (@ mention stripped)."""
+        mock_notif.return_value = None
+        mock_name.return_value = "Andre Martins"
+        mock_posts.return_value = [
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "post_id": "urn:li:activity:1",
+                "text_preview": "",
+                "created_at": None,
+            }
+        ]
+        mock_comments.return_value = [
+            {
+                "comment_id": "c1",
+                "author_name": "Alessandra Sim\u00f5es",
+                "author_url": "https://linkedin.com/in/alessandra/",
+                "text": ", isso que voc\u00ea disse sobre liberdade \u00e9 o que eu mais me importo.",
+                "created_at": None,
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c1",
+                "has_reply_from_author": False,
+            },
+            {
+                "comment_id": "c2",
+                "author_name": "Alessandra Sim\u00f5es",
+                "author_url": "https://linkedin.com/in/alessandra/",
+                "text": "Excelente reflex\u00e3o!",
+                "created_at": None,
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c2",
+                "has_reply_from_author": False,
+            },
+        ]
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        assert len(result) == 1
+        assert result[0]["text"] == "Excelente reflex\u00e3o!"
+
 
 class TestGetPostContent:
     """Tests for get_post_content."""
