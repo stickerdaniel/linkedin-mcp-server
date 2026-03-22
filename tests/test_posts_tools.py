@@ -421,11 +421,15 @@ class TestPostsToolRegistration:
             assert tool is not None, f"Tool {name} not registered"
 
     async def test_all_tools_have_timeout(self):
-        from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+        from linkedin_mcp_server.constants import (
+            TOOL_TIMEOUT_LONG_SECONDS,
+            TOOL_TIMEOUT_SECONDS,
+        )
 
         mcp = FastMCP("test")
         register_posts_tools(mcp)
 
+        long_timeout_tools = {"find_unreplied_comments"}
         tool_names = [
             "get_my_recent_posts",
             "get_post_comments",
@@ -437,4 +441,9 @@ class TestPostsToolRegistration:
         ]
         for name in tool_names:
             tool = await mcp.get_tool(name)
-            assert tool.timeout == TOOL_TIMEOUT_SECONDS, f"Tool {name} missing timeout"
+            expected = (
+                TOOL_TIMEOUT_LONG_SECONDS
+                if name in long_timeout_tools
+                else TOOL_TIMEOUT_SECONDS
+            )
+            assert tool.timeout == expected, f"Tool {name} has wrong timeout"
