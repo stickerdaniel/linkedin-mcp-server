@@ -424,10 +424,18 @@ async def get_my_recent_posts(
                     seen.add(urn);
 
                     let text = '';
-                    const textEl = card.querySelector('[dir="ltr"]') || card.querySelector('span[dir]') || card;
-                    text = (textEl?.innerText || '').trim();
-                    if (!text) {
-                        const any = card.querySelector('span') || card;
+                    // Pick the [dir="ltr"] element with the longest text (skip short author names)
+                    const dirEls = card.querySelectorAll('[dir="ltr"]');
+                    let best = null, bestLen = 0;
+                    for (const el of dirEls) {
+                        const t = (el.innerText || '').trim();
+                        if (t.length > bestLen) { best = el; bestLen = t.length; }
+                    }
+                    if (best && bestLen > 30) {
+                        text = best.innerText.trim();
+                    } else {
+                        // Fallback: full card text minus very short noise
+                        const any = card.querySelector('span[dir]') || card;
                         text = (any?.innerText || '').trim();
                     }
                     text = (text || '').trim().slice(0, 500);
@@ -1065,19 +1073,27 @@ async def _unreplied_via_notifications(
             const items = [];
             const main = document.querySelector('main');
             if (!main) return { items: items, hasContent: false };
-            const commentTerms = ['comment', 'commented', 'comentário', 'comentou', 'comentários', 'comments', 'reply', 'replied', 'resposta', 'respondeu', 'respostas'];
-            const links = main.querySelectorAll('a[href*="/feed/update/"], a[href*="commentUrn"]');
+            // Positive: someone commented/replied on your post
+            const commentVerbs = ['commented', 'comentou', 'replied', 'respondeu'];
+            // Negative: reactions, likes, mentions — not actionable comments
+            const excludeTerms = ['reacted', 'reagiu', 'liked', 'curtiu', 'endorsed', 'recomendou', 'mentioned', 'mencionou', 'reshared', 'compartilhou', 'celebrated', 'comemorou'];
+            const cards = main.querySelectorAll('div.nt-card, article, section > div > div');
             const seen = new Set();
-            for (const a of links) {
+            for (const card of cards) {
+                const a = card.querySelector('a[href*="commentUrn"]') || card.querySelector('a[href*="/feed/update/"]');
+                if (!a) continue;
                 const href = (a.getAttribute('href') || '').trim();
                 const fullUrl = href.startsWith('http') ? href : 'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
                 if (seen.has(fullUrl)) continue;
                 seen.add(fullUrl);
-                const container = a.closest('li') || a.closest('div') || a.closest('section') || a;
-                const text = (container?.innerText || '').trim();
+                const text = (card.innerText || '').trim();
                 const textLower = text.toLowerCase();
-                const isCommentNotif = commentTerms.some(t => textLower.includes(t)) || href.includes('comment');
-                if (!isCommentNotif) continue;
+                // Exclude reactions, likes, endorsements, mentions
+                const isExcluded = excludeTerms.some(t => textLower.includes(t));
+                if (isExcluded) continue;
+                // Must contain an explicit comment/reply verb
+                const isComment = commentVerbs.some(t => textLower.includes(t));
+                if (!isComment) continue;
                 items.push({ link: fullUrl, snippet: text.slice(0, 200) });
                 if (items.length >= maxItems) break;
             }
