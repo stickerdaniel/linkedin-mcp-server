@@ -76,8 +76,43 @@ class TestLoaders:
         config = load_from_env(AppConfig())
         assert config.browser.headless is True
 
+    def test_load_from_env_headless_true_with_whitespace_and_case(self, monkeypatch):
+        monkeypatch.setenv("HEADLESS", "  TrUe ")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.headless is True
+
+    def test_load_from_env_headless_false_with_off_alias(self, monkeypatch):
+        monkeypatch.setenv("HEADLESS", "off")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.headless is False
+
+    def test_load_from_env_headless_false_with_whitespace_and_case(self, monkeypatch):
+        monkeypatch.setenv("HEADLESS", "  FaLsE ")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.headless is False
+
+    def test_load_from_env_headless_true_with_on_alias(self, monkeypatch):
+        monkeypatch.setenv("HEADLESS", "on")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.headless is True
+
     def test_load_from_env_log_level(self, monkeypatch):
         monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.server.log_level == "DEBUG"
+
+    def test_load_from_env_log_level_with_whitespace_and_case(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "  dEbUg  ")
         from linkedin_mcp_server.config.loaders import load_from_env
 
         config = load_from_env(AppConfig())
@@ -98,6 +133,22 @@ class TestLoaders:
 
         config = load_from_env(AppConfig())
         assert config.server.transport == "streamable-http"
+        assert config.server.transport_explicitly_set is True
+
+    def test_load_from_env_transport_with_whitespace_and_case(self, monkeypatch):
+        monkeypatch.setenv("TRANSPORT", "  StReAmAbLe-HtTp ")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.server.transport == "streamable-http"
+        assert config.server.transport_explicitly_set is True
+
+    def test_load_from_env_transport_stdio_with_whitespace_and_case(self, monkeypatch):
+        monkeypatch.setenv("TRANSPORT", "  StDiO  ")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.server.transport == "stdio"
         assert config.server.transport_explicitly_set is True
 
     def test_load_from_env_invalid_transport(self, monkeypatch):
