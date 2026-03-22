@@ -40,9 +40,7 @@ async def test_interactive_login_writes_source_state_when_cookie_export_succeeds
         return_value=SimpleNamespace(login_generation="gen-123")
     )
 
-    monkeypatch.setattr(
-        "linkedin_mcp_server.setup.get_config", lambda: AppConfig()
-    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.get_config", lambda: AppConfig())
     monkeypatch.setattr(
         "linkedin_mcp_server.setup.BrowserManager",
         lambda **kwargs: _BrowserContextManager(browser),
@@ -79,9 +77,7 @@ async def test_interactive_login_returns_false_when_cookie_export_fails(
     browser = _make_browser(export_cookies=False)
     write_source_state = MagicMock()
 
-    monkeypatch.setattr(
-        "linkedin_mcp_server.setup.get_config", lambda: AppConfig()
-    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.get_config", lambda: AppConfig())
     monkeypatch.setattr(
         "linkedin_mcp_server.setup.BrowserManager",
         lambda **kwargs: _BrowserContextManager(browser),
@@ -109,3 +105,39 @@ async def test_interactive_login_returns_false_when_cookie_export_fails(
     captured = capsys.readouterr()
     assert "warning: cookie export failed" in captured.out.lower()
     assert "profile saved to" not in captured.out.lower()
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_passes_chrome_path_to_browser_manager(
+    monkeypatch, tmp_path
+):
+    """When config.browser.chrome_path is set, executable_path must reach BrowserManager."""
+    browser = _make_browser(export_cookies=True)
+    captured_kwargs: dict = {}
+
+    def fake_browser_manager(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _BrowserContextManager(browser)
+
+    config = AppConfig()
+    config.browser.chrome_path = "/custom/chrome"
+
+    monkeypatch.setattr("linkedin_mcp_server.setup.get_config", lambda: config)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.setup.BrowserManager", fake_browser_manager
+    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.warm_up_browser", AsyncMock())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.setup.resolve_remember_me_prompt",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.wait_for_manual_login", AsyncMock())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.setup.write_source_state",
+        MagicMock(return_value=SimpleNamespace(login_generation="gen-1")),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.asyncio.sleep", AsyncMock())
+
+    await interactive_login(tmp_path / "profile")
+
+    assert captured_kwargs.get("executable_path") == "/custom/chrome"
