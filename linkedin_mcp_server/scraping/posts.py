@@ -1258,6 +1258,14 @@ async def find_unreplied_comments(
                     current_name, c.get("author_name") or ""
                 ):
                     continue
+                # Skip name-only ghost entries that slipped through
+                c_text = (c.get("text") or "").strip()
+                c_author_clean = _clean_author_display(c.get("author_name") or "")
+                if c_author_clean and c_text == c_author_clean:
+                    continue
+                # Skip own replies where @mention was stripped (text starts with ", ")
+                if c_text.startswith(", ") or c_text.startswith(",\n"):
+                    continue
                 # Deduplicate across sources (only on real comment permalinks)
                 permalink = c.get("comment_permalink")
                 if permalink and permalink in seen_permalinks:
