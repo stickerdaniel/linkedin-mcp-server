@@ -562,7 +562,7 @@ async def get_post_content(
 def _clean_author_display(name: str) -> str:
     """Strip LinkedIn display-name wrappers like 'View X's graphic link'."""
     s = re.sub(r"^View\s+", "", name)
-    s = re.sub("['\\u2019]s\\s+.*graphic link$", "", s)
+    s = re.sub("['\\u2019]s?\\s+.*graphic link$", "", s)
     return s.strip()
 
 
