@@ -53,8 +53,18 @@ async def interactive_login(
     if config.browser.chrome_path:
         launch_options["executable_path"] = config.browser.chrome_path
 
+    viewport = {
+        "width": config.browser.viewport_width,
+        "height": config.browser.viewport_height,
+    }
+
     async with BrowserManager(
-        user_data_dir=user_data_dir, headless=False, **launch_options
+        user_data_dir=user_data_dir,
+        headless=False,
+        slow_mo=config.browser.slow_mo,
+        user_agent=config.browser.user_agent,
+        viewport=viewport,
+        **launch_options,
     ) as browser:
         # Warm up browser to appear more human-like and avoid security checkpoints
         if warm_up:
