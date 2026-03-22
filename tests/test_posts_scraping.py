@@ -35,6 +35,13 @@ class TestCleanAuthorDisplay:
     def test_strips_open_to_work_graphic_link(self):
         assert _clean_author_display("View Osmani Sadzinski's open to work graphic link") == "Osmani Sadzinski"
 
+    def test_strips_possessive_without_extra_s(self):
+        """Names ending in 's' use just apostrophe (Eiras' not Eiras's)."""
+        assert _clean_author_display("View Sergio Eiras'  graphic link") == "Sergio Eiras"
+
+    def test_strips_possessive_without_extra_s_curly(self):
+        assert _clean_author_display("View Carina Fernândes\u2019  graphic link") == "Carina Fernândes"
+
     def test_plain_name_unchanged(self):
         assert _clean_author_display("Sergio Eiras") == "Sergio Eiras"
 
