@@ -369,7 +369,7 @@ class TestGetPostComments:
             return_value=[
                 {
                     "comment_id": "c1",
-                    "author_name": "View Eloisio Alves de Abreu's  graphic link",
+                    "author_name": "View Eloisio Alves de Abreu\u2019s  graphic link",
                     "author_url": "https://linkedin.com/in/eloisio/",
                     "text": "Obrigado por compartilhar André! Parabéns pela carreira!",
                     "created_at": None,
@@ -377,7 +377,7 @@ class TestGetPostComments:
                 },
                 {
                     "comment_id": "c2",
-                    "author_name": "View Eloisio Alves de Abreu's  graphic link",
+                    "author_name": "View Eloisio Alves de Abreu\u2019s  graphic link",
                     "author_url": "https://linkedin.com/in/eloisio/",
                     "text": "Eloisio Alves de Abreu",
                     "created_at": None,
