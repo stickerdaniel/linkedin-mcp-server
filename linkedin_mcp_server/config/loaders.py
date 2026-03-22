@@ -20,8 +20,13 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Boolean value mappings for environment variable parsing
-TRUTHY_VALUES = ("1", "true", "True", "yes", "Yes")
-FALSY_VALUES = ("0", "false", "False", "no", "No")
+TRUTHY_VALUES = ("1", "true", "yes", "on")
+FALSY_VALUES = ("0", "false", "no", "off")
+
+
+def _normalize_env(value: str) -> str:
+    """Normalize environment variable values for tolerant parsing."""
+    return value.strip().lower()
 
 
 def positive_int(value: str) -> int:
@@ -67,24 +72,27 @@ def load_from_env(config: AppConfig) -> AppConfig:
 
     # Log level
     if log_level_env := os.environ.get(EnvironmentKeys.LOG_LEVEL):
-        log_level_upper = log_level_env.upper()
+        log_level_upper = log_level_env.strip().upper()
         if log_level_upper in ("DEBUG", "INFO", "WARNING", "ERROR"):
             config.server.log_level = cast(
                 Literal["DEBUG", "INFO", "WARNING", "ERROR"], log_level_upper
             )
 
     # Headless mode
-    if os.environ.get(EnvironmentKeys.HEADLESS) in FALSY_VALUES:
-        config.browser.headless = False
-    elif os.environ.get(EnvironmentKeys.HEADLESS) in TRUTHY_VALUES:
-        config.browser.headless = True
+    if headless_env := os.environ.get(EnvironmentKeys.HEADLESS):
+        headless_value = _normalize_env(headless_env)
+        if headless_value in FALSY_VALUES:
+            config.browser.headless = False
+        elif headless_value in TRUTHY_VALUES:
+            config.browser.headless = True
 
     # Transport mode
     if transport_env := os.environ.get(EnvironmentKeys.TRANSPORT):
         config.server.transport_explicitly_set = True
-        if transport_env == "stdio":
+        transport_value = _normalize_env(transport_env)
+        if transport_value == "stdio":
             config.server.transport = "stdio"
-        elif transport_env == "streamable-http":
+        elif transport_value == "streamable-http":
             config.server.transport = "streamable-http"
         else:
             raise ConfigurationError(
