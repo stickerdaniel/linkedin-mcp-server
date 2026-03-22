@@ -118,11 +118,16 @@ class BrowserManager:
                 {"Accept-Language": self.accept_language}
             )
 
-            # Apply stealth init scripts before any navigation
-            from .stealth import get_stealth_init_scripts
+            # Apply stealth init scripts before any navigation.
+            # IMPORTANT: context.add_init_script breaks DNS resolution when
+            # using channel="chrome" (Chrome real) inside Docker containers.
+            # Patchright already patches the critical signals (webdriver, etc.)
+            # natively, so we skip init scripts in Docker and rely on Patchright.
+            if not is_docker:
+                from .stealth import get_stealth_init_scripts
 
-            for script in get_stealth_init_scripts():
-                await self._context.add_init_script(script)
+                for script in get_stealth_init_scripts():
+                    await self._context.add_init_script(script)
 
             logger.info(
                 "Persistent browser launched (headless=%s, user_data_dir=%s, locale=%s, tz=%s)",
