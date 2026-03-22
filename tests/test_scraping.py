@@ -18,23 +18,35 @@ from linkedin_mcp_server.scraping.link_metadata import Reference
 
 class TestUrlMatchesProfile:
     def test_exact_match(self):
-        assert _url_matches_profile("https://www.linkedin.com/in/testuser", "/in/testuser")
+        assert _url_matches_profile(
+            "https://www.linkedin.com/in/testuser", "/in/testuser"
+        )
 
     def test_trailing_slash(self):
-        assert _url_matches_profile("https://www.linkedin.com/in/testuser/", "/in/testuser")
+        assert _url_matches_profile(
+            "https://www.linkedin.com/in/testuser/", "/in/testuser"
+        )
 
     def test_sub_path(self):
-        assert _url_matches_profile("https://www.linkedin.com/in/testuser/details/", "/in/testuser")
+        assert _url_matches_profile(
+            "https://www.linkedin.com/in/testuser/details/", "/in/testuser"
+        )
 
     def test_prefix_mismatch_no_false_positive(self):
         # "/in/dan" must NOT match "/in/daniel"
-        assert not _url_matches_profile("https://www.linkedin.com/in/daniel/", "/in/dan")
+        assert not _url_matches_profile(
+            "https://www.linkedin.com/in/daniel/", "/in/dan"
+        )
 
     def test_redirect_url(self):
-        assert not _url_matches_profile("https://www.linkedin.com/login", "/in/testuser")
+        assert not _url_matches_profile(
+            "https://www.linkedin.com/login", "/in/testuser"
+        )
 
     def test_authwall_redirect(self):
-        assert not _url_matches_profile("https://www.linkedin.com/authwall", "/in/testuser")
+        assert not _url_matches_profile(
+            "https://www.linkedin.com/authwall", "/in/testuser"
+        )
 
 
 def extracted(
@@ -1897,13 +1909,10 @@ class TestScrapePersonSessionStatus:
 
         assert "main_profile" not in result["sections"]
         assert (
-            result["section_errors"]["main_profile"]["error_type"]
-            == "RateLimitedError"
+            result["section_errors"]["main_profile"]["error_type"] == "RateLimitedError"
         )
 
-    async def test_session_blocked_status_on_rate_limited_main_profile(
-        self, mock_page
-    ):
+    async def test_session_blocked_status_on_rate_limited_main_profile(self, mock_page):
         """Rate-limited main_profile must NOT set session_status=session_blocked."""
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -1927,7 +1936,9 @@ class TestScrapePersonSessionStatus:
             result = await extractor.scrape_person("testuser", {"main_profile"})
 
         assert "session_status" not in result
-        assert result["section_errors"]["main_profile"]["error_type"] == "RateLimitedError"
+        assert (
+            result["section_errors"]["main_profile"]["error_type"] == "RateLimitedError"
+        )
         assert result["sections"] == {}
 
     async def test_profile_not_found_status_on_url_mismatch(self, mock_page):
@@ -2012,7 +2023,9 @@ class TestScrapePersonSessionStatus:
             result = await extractor.scrape_person("testuser", {"main_profile"})
 
         assert "session_status" not in result
-        assert result["section_errors"]["main_profile"]["error_type"] == "NavigationError"
+        assert (
+            result["section_errors"]["main_profile"]["error_type"] == "NavigationError"
+        )
 
     async def test_no_session_status_on_navigation_error_with_mismatched_url(
         self, mock_page
@@ -2047,7 +2060,9 @@ class TestScrapePersonSessionStatus:
             result = await extractor.scrape_person("testuser", {"main_profile"})
 
         assert "session_status" not in result
-        assert result["section_errors"]["main_profile"]["error_type"] == "NavigationError"
+        assert (
+            result["section_errors"]["main_profile"]["error_type"] == "NavigationError"
+        )
 
 
 class TestScrapeCompanySessionStatus:
@@ -2071,9 +2086,7 @@ class TestScrapeCompanySessionStatus:
             result = await extractor.scrape_company("testcorp", {"about"})
 
         assert "about" not in result["sections"]
-        assert (
-            result["section_errors"]["about"]["error_type"] == "RateLimitedError"
-        )
+        assert result["section_errors"]["about"]["error_type"] == "RateLimitedError"
 
     async def test_session_blocked_status_on_rate_limited_about(self, mock_page):
         """Rate-limited about section must NOT set session_status=session_blocked."""

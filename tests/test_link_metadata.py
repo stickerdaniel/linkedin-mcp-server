@@ -541,9 +541,7 @@ class TestNewSectionMetadata:
 
     def test_reference_caps_has_all_new_sections(self):
         for section in NEW_PERSON_SECTIONS:
-            assert section in _REFERENCE_CAPS, (
-                f"{section} missing from _REFERENCE_CAPS"
-            )
+            assert section in _REFERENCE_CAPS, f"{section} missing from _REFERENCE_CAPS"
 
     def test_section_contexts_has_all_new_sections(self):
         for section in NEW_PERSON_SECTIONS:

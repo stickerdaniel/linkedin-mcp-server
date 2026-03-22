@@ -153,4 +153,3 @@ class TestGetExtractor:
                     raise RuntimeError("consumer error")
 
         record_mock.assert_called_once()
-

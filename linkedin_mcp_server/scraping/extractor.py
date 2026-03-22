@@ -61,6 +61,7 @@ _RATE_LIMITED_ERROR: dict[str, str] = {
     "error_message": "LinkedIn rate-limited this section. Try again later.",
 }
 
+
 def _url_matches_profile(url: str, expected_path_prefix: str) -> bool:
     """Return True when the URL's path matches the expected profile path prefix.
 
@@ -651,9 +652,7 @@ class LinkedInExtractor:
             elif (
                 not mp_error
                 and main_profile_final_url
-                and not _url_matches_profile(
-                    main_profile_final_url, f"/in/{username}"
-                )
+                and not _url_matches_profile(main_profile_final_url, f"/in/{username}")
             ):
                 result["session_status"] = "profile_not_found"
         return result

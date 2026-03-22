@@ -103,6 +103,26 @@ btca ask -r fastmcp -r patchright -q "How do I set up browser context with FastM
 
 ---
 
+<!-- COUNCIL-PROJECT-START -->
+<!-- Seções abaixo são geridas pelo Dev Council. Preservar ao rodar /init. -->
+
+## Contexto de Sessão
+
+Ao iniciar sessão neste projeto, carregue:
+- `.council/current-plan.md` (se existir — retomar de onde parou)
+- `SESSION_LOG.md` (últimas sessões — contexto recente)
+- `.council/ARCHITECTURE.md` (snapshot da arquitetura atual)
+- `INSTRUCTIONS.md` (regras de operação deste projeto)
+
+## Modelos Canônicos
+
+| Peer | Modelo | CLI |
+|---|---|---|
+| Gemini | `gemini-3.1-pro-preview` | `gemini -m gemini-3.1-pro-preview --sandbox` |
+| Codex | `gpt-5.4` | `codex exec --model gpt-5.4 --cd "$PROJECT_DIR"` |
+
+<!-- COUNCIL-PROJECT-END -->
+
 <!-- DEV-COUNCIL-MANAGED — created by /council-init. Do not edit manually. -->
 <!-- COUNCIL-PEER-START -->
 ## Dev Council Peer Reviewer Config
