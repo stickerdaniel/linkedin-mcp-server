@@ -96,6 +96,7 @@ class BrowserManager:
             # Stealth browser args (extensible list)
             existing_args = list(context_options.get("args", []))
             existing_args.append("--disable-blink-features=AutomationControlled")
+            existing_args.append("--disable-async-dns")
             context_options["args"] = existing_args
 
             self._context = await self._playwright.chromium.launch_persistent_context(
