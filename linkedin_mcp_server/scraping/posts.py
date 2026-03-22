@@ -637,7 +637,7 @@ async def _get_current_user_slug(page: Page) -> str | None:
     try:
         slug = await page.evaluate(
             """() => {
-            const a = document.querySelector('nav a[href*="/in/"]');
+            const a = document.querySelector('nav a[href*="/in/"]:not([href*="/in/me"])');
             if (!a) return null;
             const m = a.href.match(/\\/in\\/([^/?#]+)/);
             return m ? m[1] : null;
