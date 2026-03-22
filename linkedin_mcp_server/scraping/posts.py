@@ -1155,63 +1155,68 @@ async def find_unreplied_comments(
     """
     Find comments on the user's posts that have no reply from the logged-in user.
 
-    Prefer: scrape notifications and return comment links (best-effort unreplied).
-    Fallback: get my recent posts, then for each post get comments and filter
-    those that don't have a reply from the current user. Results ordered by
-    most recent first (best-effort).
+    Strategy: scrape notifications for a fast initial set, then always supplement
+    by scanning recent posts not covered by notifications. This catches comments
+    that notifications may have missed (scroll depth, grouping, filtering).
+    Results ordered by most recent first (best-effort).
     """
     unreplied: list[dict[str, Any]] = []
     current_name = await _get_current_user_name(page)
 
-    # 1) Try notifications first
+    # 1) Try notifications first — fast, low-cost (1 navigation)
+    covered_post_urls: set[str] = set()
     from_notifications = await _unreplied_via_notifications(page, since_days, max_posts)
-    if from_notifications is not None:
-        if len(from_notifications) > 0:
-            logger.info(
-                "Using notifications for unreplied comments (%d items)",
-                len(from_notifications),
+    if from_notifications is not None and len(from_notifications) > 0:
+        logger.info(
+            "Notifications returned %d unreplied comment(s)",
+            len(from_notifications),
+        )
+        for item in from_notifications:
+            unreplied.append(
+                {
+                    "comment_permalink": item.get("comment_permalink"),
+                    "post_url": item.get("post_url"),
+                    "snippet": item.get("snippet"),
+                    "author_name": None,
+                    "text": None,
+                }
             )
-            for item in from_notifications:
-                unreplied.append(
-                    {
-                        "comment_permalink": item.get("comment_permalink"),
-                        "post_url": item.get("post_url"),
-                        "snippet": item.get("snippet"),
-                        "author_name": None,
-                        "text": None,
-                    }
-                )
-        else:
-            logger.info(
-                "Notifications loaded successfully but no unreplied comments found"
-            )
-        return unreplied
+            post_url = item.get("post_url")
+            if post_url:
+                covered_post_urls.add(_normalize_post_url(post_url))
 
-    # 2) Fallback: scan recent posts and collect comments without our reply.
+    # 2) Always supplement: scan recent posts not covered by notifications.
     #    Cap navigations to avoid triggering rate limits.
     _MAX_FALLBACK_NAVIGATIONS = 5
-    logger.info(
-        "Fallback: scanning recent posts for unreplied comments (max %d navigations)",
-        _MAX_FALLBACK_NAVIGATIONS,
-    )
-    posts = await get_my_recent_posts(
-        page, limit=max_posts, since_days=since_days, max_scrolls=max(10, max_posts)
-    )
+    try:
+        posts = await get_my_recent_posts(
+            page,
+            limit=max_posts,
+            since_days=since_days,
+            max_scrolls=max(10, max_posts),
+        )
+    except Exception as e:
+        logger.warning("get_my_recent_posts failed, returning notification-only: %s", e)
+        return unreplied
+
     await asyncio.sleep(humanized_delay())
 
     nav_count = 0
     for i, post in enumerate(posts):
         if nav_count >= _MAX_FALLBACK_NAVIGATIONS:
             logger.info(
-                "Reached max fallback navigations (%d), stopping",
+                "Reached max supplement navigations (%d), stopping",
                 _MAX_FALLBACK_NAVIGATIONS,
             )
             break
-        if i > 0:
-            await asyncio.sleep(humanized_delay())
         post_url = post.get("post_url")
         if not post_url:
             continue
+        # Skip posts already covered by notification results
+        if _normalize_post_url(post_url) in covered_post_urls:
+            continue
+        if nav_count > 0:
+            await asyncio.sleep(humanized_delay())
         try:
             comments = await get_post_comments(
                 page, post_url, current_user_name=current_name

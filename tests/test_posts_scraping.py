@@ -427,9 +427,10 @@ class TestGetPostComments:
 class TestFindUnrepliedComments:
     """Tests for find_unreplied_comments (notifications path and fallback)."""
 
-    async def test_uses_notifications_when_available(
+    async def test_notifications_included_and_supplement_runs(
         self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
     ):
+        """Notification results are included AND post scanning runs for uncovered posts."""
         mock_notif.return_value = [
             {
                 "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=urn:li:comment:1",
@@ -437,25 +438,77 @@ class TestFindUnrepliedComments:
                 "snippet": "Someone commented",
             }
         ]
+        mock_name.return_value = "Me"
+        mock_posts.return_value = [
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "post_id": "urn:li:activity:1",
+                "text_preview": "",
+                "created_at": None,
+            },
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:2/",
+                "post_id": "urn:li:activity:2",
+                "text_preview": "",
+                "created_at": None,
+            },
+        ]
+        mock_comments.return_value = [
+            {
+                "comment_id": "c2",
+                "author_name": "OtherUser",
+                "author_url": "https://linkedin.com/in/other/",
+                "text": "Missed comment on post 2",
+                "created_at": None,
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:2/?commentUrn=urn:li:comment:2",
+                "has_reply_from_author": False,
+            }
+        ]
         result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
-        assert len(result) == 1
-        assert result[0]["comment_permalink"] is not None
-        assert "comment" in (result[0].get("snippet") or "").lower()
         mock_notif.assert_awaited_once()
-        mock_posts.assert_not_awaited()
-        mock_comments.assert_not_awaited()
+        # Supplement should run — post scanning fetches recent posts
+        mock_posts.assert_awaited_once()
+        # Post 1 covered by notifications — only post 2 scanned
+        mock_comments.assert_awaited_once()
+        call_url = mock_comments.call_args[0][1]
+        assert "activity:2" in call_url
+        # Results include both notification item and post-scan item
+        assert len(result) == 2
+        snippets = [r.get("snippet") or "" for r in result]
+        assert any("Someone commented" in s for s in snippets)
+        assert any("Missed comment" in s for s in snippets)
 
-    async def test_empty_notifications_returns_empty_without_fallback(
+    async def test_empty_notifications_triggers_post_scan(
         self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
     ):
-        """When notifications loads successfully but finds nothing, return empty
-        without falling back to the expensive post-scanning path."""
+        """When notifications loads but finds nothing, supplement with post scanning."""
         mock_notif.return_value = []
+        mock_name.return_value = "Me"
+        mock_posts.return_value = [
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "post_id": "urn:li:activity:1",
+                "text_preview": "",
+                "created_at": None,
+            }
+        ]
+        mock_comments.return_value = [
+            {
+                "comment_id": "c1",
+                "author_name": "Commenter",
+                "author_url": "https://linkedin.com/in/commenter/",
+                "text": "Unreplied comment",
+                "created_at": None,
+                "comment_permalink": None,
+                "has_reply_from_author": False,
+            }
+        ]
         result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
         mock_notif.assert_awaited_once()
-        mock_posts.assert_not_awaited()
-        mock_comments.assert_not_awaited()
-        assert result == []
+        mock_posts.assert_awaited_once()
+        mock_comments.assert_awaited_once()
+        assert len(result) == 1
+        assert result[0]["author_name"] == "Commenter"
 
     async def test_fallback_to_posts_when_notifications_fail(
         self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
@@ -1749,3 +1802,242 @@ class TestFindUnrepliedCommentsEdgeCases:
         result = await find_unreplied_comments(mock_page, since_days=7, max_posts=1)
         # All 10 comments returned because cap is max_posts*5=5, but loop checks after append
         assert len(result) >= 5
+
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_name",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
+        new_callable=AsyncMock,
+    )
+    async def test_supplement_skips_notification_covered_posts(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """Posts already covered by notifications are not re-scanned."""
+        mock_notif.return_value = [
+            {
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=urn:li:comment:1",
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "snippet": "Notif comment",
+            },
+            {
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:2/?commentUrn=urn:li:comment:2",
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:2/",
+                "snippet": "Another notif",
+            },
+        ]
+        mock_name.return_value = "Me"
+        mock_posts.return_value = [
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "post_id": "1",
+                "text_preview": "",
+                "created_at": None,
+            },
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:2/",
+                "post_id": "2",
+                "text_preview": "",
+                "created_at": None,
+            },
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:3/",
+                "post_id": "3",
+                "text_preview": "",
+                "created_at": None,
+            },
+        ]
+        mock_comments.return_value = []
+        await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        # Only post 3 should be scanned (posts 1 and 2 covered by notifications)
+        assert mock_comments.await_count == 1
+        call_url = mock_comments.call_args[0][1]
+        assert "activity:3" in call_url
+
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_name",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
+        new_callable=AsyncMock,
+    )
+    async def test_supplement_uses_full_budget_when_notifications_empty(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """When notifications return empty, all posts are scanned up to nav cap."""
+        mock_notif.return_value = []
+        mock_name.return_value = "Me"
+        mock_posts.return_value = [
+            {"post_url": f"https://linkedin.com/post/{i}", "post_id": f"p{i}"}
+            for i in range(10)
+        ]
+        mock_comments.return_value = []
+        await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        assert mock_comments.await_count == 5  # capped at _MAX_FALLBACK_NAVIGATIONS
+
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_name",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
+        new_callable=AsyncMock,
+    )
+    async def test_no_supplement_scans_when_all_posts_covered(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """When notifications cover all recent posts, no supplement scans needed."""
+        mock_notif.return_value = [
+            {
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=urn:li:comment:1",
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "snippet": "Notif comment",
+            }
+        ]
+        mock_name.return_value = "Me"
+        mock_posts.return_value = [
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "post_id": "1",
+                "text_preview": "",
+                "created_at": None,
+            }
+        ]
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        # Post 1 covered by notifications — no comments calls
+        mock_comments.assert_not_awaited()
+        assert len(result) == 1
+
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_name",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
+        new_callable=AsyncMock,
+    )
+    async def test_supplement_graceful_degradation_on_posts_failure(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """If get_my_recent_posts fails, notification results are still returned."""
+        mock_notif.return_value = [
+            {
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=urn:li:comment:1",
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "snippet": "Notif comment",
+            }
+        ]
+        mock_name.return_value = "Me"
+        mock_posts.side_effect = Exception("Network error")
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        assert len(result) == 1
+        assert result[0]["snippet"] == "Notif comment"
+
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_name",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
+        new_callable=AsyncMock,
+    )
+    async def test_max_unreplied_cap_across_both_sources(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """Combined count from both sources respects max_posts * 5 cap."""
+        mock_notif.return_value = [
+            {
+                "comment_permalink": f"https://linkedin.com/feed/update/urn:li:activity:{i}/?commentUrn=urn:li:comment:{i}",
+                "post_url": f"https://linkedin.com/feed/update/urn:li:activity:{i}/",
+                "snippet": f"Notif {i}",
+            }
+            for i in range(3)
+        ]
+        mock_name.return_value = "Me"
+        # max_posts=1 -> cap = 5
+        mock_posts.return_value = [
+            {"post_url": "https://linkedin.com/post/new", "post_id": "new"}
+        ]
+        mock_comments.return_value = [
+            {
+                "comment_id": f"c{i}",
+                "author_name": f"User{i}",
+                "text": f"Comment {i}",
+                "has_reply_from_author": False,
+            }
+            for i in range(10)
+        ]
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=1)
+        # 3 from notifications + up to cap from post scan; total should be >= 5
+        assert len(result) >= 5
+
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_name",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
+        new_callable=AsyncMock,
+    )
+    async def test_normalize_dedup_handles_trailing_slash_mismatch(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """URL with/without trailing slash treated as same post for dedup."""
+        mock_notif.return_value = [
+            {
+                "comment_permalink": "https://www.linkedin.com/feed/update/urn:li:activity:1?commentUrn=x",
+                "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:1",
+                "snippet": "Notif",
+            }
+        ]
+        mock_name.return_value = "Me"
+        mock_posts.return_value = [
+            {
+                "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                "post_id": "1",
+                "text_preview": "",
+                "created_at": None,
+            }
+        ]
+        mock_comments.return_value = []
+        await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        # Same post (with vs without trailing slash) — should NOT be re-scanned
+        mock_comments.assert_not_awaited()

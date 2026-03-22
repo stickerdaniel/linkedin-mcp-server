@@ -15,7 +15,10 @@ from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor, parse_company_sections
-from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_ERROR, _RATE_LIMITED_MSG
+from linkedin_mcp_server.scraping.extractor import (
+    _RATE_LIMITED_ERROR,
+    _RATE_LIMITED_MSG,
+)
 from linkedin_mcp_server.scraping.link_metadata import Reference
 from linkedin_mcp_server.serialization import strip_none
 

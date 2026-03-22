@@ -167,9 +167,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
             await ctx.report_progress(
                 progress=0, total=100, message="Fetching your notifications"
             )
-            notifications = await scrape_get_notifications(
-                extractor._page, limit=limit
-            )
+            notifications = await scrape_get_notifications(extractor._page, limit=limit)
             await ctx.report_progress(progress=100, total=100, message="Complete")
             return strip_none({"notifications": notifications})
         except Exception as e:
@@ -271,17 +269,18 @@ def register_posts_tools(mcp: FastMCP) -> None:
         """
         Find comments on your posts that you have not replied to.
 
-        Uses notifications when possible; otherwise scans your recent posts.
-        Results are ordered by most recent first (best-effort).
+        Combines notification scanning with recent post scanning for
+        comprehensive results. Notifications provide a fast initial set;
+        post scanning supplements with comments notifications may have missed.
 
-        Note: when using the notifications fast path, since_days filtering is
-        best-effort only (LinkedIn notifications lack reliable timestamps).
-        The fallback path (post scanning) enforces since_days strictly.
+        Note: since_days filtering is best-effort on the notifications path
+        (LinkedIn notifications lack reliable timestamps) but strict on
+        the post-scanning path.
 
         Args:
             ctx: FastMCP context for progress reporting
             since_days: Consider activity from the last N days (best-effort on notifications path).
-            max_posts: Maximum number of posts to scan in fallback mode.
+            max_posts: Maximum number of posts to scan in supplement mode.
 
         Returns:
             Dict with unreplied_comments: list of items with comment_permalink, post_url,

@@ -93,9 +93,7 @@ class TestParsePersonSections:
         assert unknown == []
 
     def test_all_sections(self):
-        all_names = ",".join(
-            name for name in PERSON_SECTIONS if name != "main_profile"
-        )
+        all_names = ",".join(name for name in PERSON_SECTIONS if name != "main_profile")
         requested, unknown = parse_person_sections(all_names)
         assert requested == set(PERSON_SECTIONS)
         assert unknown == []
@@ -131,9 +129,7 @@ class TestParsePersonSections:
         assert unknown == []
 
     def test_combined_new_and_existing_sections(self):
-        requested, unknown = parse_person_sections(
-            "experience,skills,recommendations"
-        )
+        requested, unknown = parse_person_sections("experience,skills,recommendations")
         assert requested == {"main_profile", "experience", "skills", "recommendations"}
         assert unknown == []
 

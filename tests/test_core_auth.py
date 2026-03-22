@@ -258,6 +258,7 @@ async def test_warm_up_browser_only_visits_external_sites():
     page.query_selector_all = AsyncMock(return_value=[])
 
     from linkedin_mcp_server.core.auth import warm_up_browser
+
     await warm_up_browser(page)
 
     for url in visited_urls:
@@ -277,6 +278,7 @@ async def test_warm_up_browser_scrolls_external_pages():
     page.query_selector_all = AsyncMock(return_value=[])
 
     from linkedin_mcp_server.core.auth import warm_up_browser
+
     await warm_up_browser(page)
 
     # mouse.wheel should have been called for scrolling
@@ -295,6 +297,7 @@ async def test_warm_up_browser_returns_success_status():
     page.query_selector_all = AsyncMock(return_value=[])
 
     from linkedin_mcp_server.core.auth import warm_up_browser
+
     result = await warm_up_browser(page)
 
     assert result.sites_visited > 0
@@ -314,6 +317,7 @@ async def test_warm_up_browser_handles_all_failures():
     page.query_selector_all = AsyncMock(return_value=[])
 
     from linkedin_mcp_server.core.auth import warm_up_browser
+
     result = await warm_up_browser(page)
 
     assert result.sites_visited == 0

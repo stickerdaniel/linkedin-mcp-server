@@ -100,11 +100,13 @@ class BrowserManager:
             # Required for Chrome in Docker containers (sandbox blocks DNS/networking)
             is_docker = os.environ.get("container") or Path("/.dockerenv").exists()
             if is_docker:
-                existing_args.extend([
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-setuid-sandbox",
-                ])
+                existing_args.extend(
+                    [
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-setuid-sandbox",
+                    ]
+                )
                 context_options["chromium_sandbox"] = False
             context_options["args"] = existing_args
 

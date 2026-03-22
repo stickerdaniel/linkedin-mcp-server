@@ -191,9 +191,7 @@ class TestGetPersonPosts:
 
         assert "posts" in result
         assert len(result["posts"]) == 1
-        mock_scrape.assert_awaited_once_with(
-            mock_extractor._page, "testuser", limit=5
-        )
+        mock_scrape.assert_awaited_once_with(mock_extractor._page, "testuser", limit=5)
 
     async def test_error_raises_tool_error(self, mock_context):
         mock_extractor = _make_extractor_with_page()
@@ -439,6 +437,4 @@ class TestPostsToolRegistration:
         ]
         for name in tool_names:
             tool = await mcp.get_tool(name)
-            assert tool.timeout == TOOL_TIMEOUT_SECONDS, (
-                f"Tool {name} missing timeout"
-            )
+            assert tool.timeout == TOOL_TIMEOUT_SECONDS, f"Tool {name} missing timeout"

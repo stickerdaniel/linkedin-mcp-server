@@ -6,7 +6,10 @@ def reset_singletons():
     """Reset global state for test isolation."""
     from linkedin_mcp_server.config import reset_config
     from linkedin_mcp_server.core.utils import rate_limit_state
-    from linkedin_mcp_server.drivers.browser import reset_browser_for_testing, reset_warmup_gate
+    from linkedin_mcp_server.drivers.browser import (
+        reset_browser_for_testing,
+        reset_warmup_gate,
+    )
     from linkedin_mcp_server.scraping.cache import scraping_cache
 
     reset_browser_for_testing()

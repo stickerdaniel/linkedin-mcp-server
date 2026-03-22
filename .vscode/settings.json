@@ -13,7 +13,7 @@
             "source.organizeImports.ruff": "explicit"
         }
     },
-    "python.defaultInterpreterPath": ".venv/bin/python",
+    "python.defaultInterpreterPath": "/Users/andre/Documents/GitHub/linkedin-mcp-server/.venv/bin/python",
     "python.terminal.activateEnvironment": true,
     "yaml.schemas": {
         "https://www.schemastore.org/github-issue-config.json": "file:///Users/daniel/Documents/development/python/linkedin-mcp-server/.github/ISSUE_TEMPLATE/config.yml"

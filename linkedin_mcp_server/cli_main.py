@@ -442,7 +442,9 @@ async () => {
     if audit_profile.exists():
         shutil.rmtree(audit_profile, ignore_errors=True)
 
-    print("\nAudit complete. Check the diff above and results in tools/fingerprint_results/")
+    print(
+        "\nAudit complete. Check the diff above and results in tools/fingerprint_results/"
+    )
     sys.exit(0)
 
 
