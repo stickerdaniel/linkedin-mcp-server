@@ -97,6 +97,13 @@ class BrowserManager:
             existing_args = list(context_options.get("args", []))
             existing_args.append("--disable-blink-features=AutomationControlled")
             existing_args.append("--disable-async-dns")
+            # Required for Chrome in Docker containers (sandbox blocks DNS/networking)
+            if os.environ.get("container") or Path("/.dockerenv").exists():
+                existing_args.extend([
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-setuid-sandbox",
+                ])
             context_options["args"] = existing_args
 
             self._context = await self._playwright.chromium.launch_persistent_context(
