@@ -579,6 +579,26 @@ def _is_same_person(name_a: str, name_b: str) -> bool:
     return a in b or b in a
 
 
+async def _get_current_user_slug(page: Page) -> str | None:
+    """Extract the current user's LinkedIn profile slug from the nav bar.
+
+    Returns the slug portion of /in/<slug> (e.g. 'andre-martins-tech').
+    """
+    try:
+        slug = await page.evaluate(
+            """() => {
+            const a = document.querySelector('nav a[href*="/in/"]');
+            if (!a) return null;
+            const m = a.href.match(/\\/in\\/([^/?#]+)/);
+            return m ? m[1] : null;
+        }"""
+        )
+        return slug if isinstance(slug, str) and slug else None
+    except Exception as e:
+        logger.debug("Could not get current user slug: %s", e)
+        return None
+
+
 async def _get_current_user_name(page: Page) -> str | None:
     """Try to get current user display name from nav (for reply detection).
 
@@ -1182,6 +1202,7 @@ async def find_unreplied_comments(
     unreplied: list[dict[str, Any]] = []
     seen_permalinks: set[str] = set()
     current_name = await _get_current_user_name(page)
+    current_slug = await _get_current_user_slug(page)
 
     # 1) Try notifications first — fast, low-cost (1 navigation)
     covered_post_urls: set[str] = set()
@@ -1250,7 +1271,10 @@ async def find_unreplied_comments(
             for c in comments:
                 if c.get("has_reply_from_author"):
                     continue
-                # Skip own comments
+                # Skip own comments (slug match on author_url is most reliable)
+                author_url = c.get("author_url") or ""
+                if current_slug and f"/in/{current_slug}" in author_url:
+                    continue
                 if current_name and _is_same_person(
                     current_name, c.get("author_name") or ""
                 ):

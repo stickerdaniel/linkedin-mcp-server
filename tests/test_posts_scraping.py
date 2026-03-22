@@ -10,6 +10,7 @@ from linkedin_mcp_server.scraping.cache import scraping_cache
 from linkedin_mcp_server.scraping.posts import (
     _clean_author_display,
     _extract_author_info,
+    _get_current_user_slug,
     _extract_engagement_metrics,
     _detect_post_type,
     _expand_comments_section,
@@ -30,17 +31,28 @@ class TestCleanAuthorDisplay:
     """Unit tests for _clean_author_display (pure function)."""
 
     def test_strips_view_prefix_and_graphic_link_suffix(self):
-        assert _clean_author_display("View Carina Fernândes\u2019s  graphic link") == "Carina Fernândes"
+        assert (
+            _clean_author_display("View Carina Fernândes\u2019s  graphic link")
+            == "Carina Fernândes"
+        )
 
     def test_strips_open_to_work_graphic_link(self):
-        assert _clean_author_display("View Osmani Sadzinski's open to work graphic link") == "Osmani Sadzinski"
+        assert (
+            _clean_author_display("View Osmani Sadzinski's open to work graphic link")
+            == "Osmani Sadzinski"
+        )
 
     def test_strips_possessive_without_extra_s(self):
         """Names ending in 's' use just apostrophe (Eiras' not Eiras's)."""
-        assert _clean_author_display("View Sergio Eiras'  graphic link") == "Sergio Eiras"
+        assert (
+            _clean_author_display("View Sergio Eiras'  graphic link") == "Sergio Eiras"
+        )
 
     def test_strips_possessive_without_extra_s_curly(self):
-        assert _clean_author_display("View Carina Fernândes\u2019  graphic link") == "Carina Fernândes"
+        assert (
+            _clean_author_display("View Carina Fernândes\u2019  graphic link")
+            == "Carina Fernândes"
+        )
 
     def test_plain_name_unchanged(self):
         assert _clean_author_display("Sergio Eiras") == "Sergio Eiras"
@@ -498,6 +510,9 @@ class TestGetPostComments:
     "linkedin_mcp_server.scraping.posts._get_current_user_name", new_callable=AsyncMock
 )
 @patch(
+    "linkedin_mcp_server.scraping.posts._get_current_user_slug", new_callable=AsyncMock
+)
+@patch(
     "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
     new_callable=AsyncMock,
 )
@@ -505,7 +520,7 @@ class TestFindUnrepliedComments:
     """Tests for find_unreplied_comments (notifications path and fallback)."""
 
     async def test_notifications_included_and_supplement_runs(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """Notification results are included AND post scanning runs for uncovered posts."""
         mock_notif.return_value = [
@@ -556,7 +571,7 @@ class TestFindUnrepliedComments:
         assert any("Missed comment" in s for s in snippets)
 
     async def test_empty_notifications_triggers_post_scan(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """When notifications loads but finds nothing, supplement with post scanning."""
         mock_notif.return_value = []
@@ -588,7 +603,7 @@ class TestFindUnrepliedComments:
         assert result[0]["author_name"] == "Commenter"
 
     async def test_fallback_to_posts_when_notifications_fail(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """When notifications path fails (returns None), fall back to scanning posts."""
         mock_notif.return_value = None
@@ -622,7 +637,7 @@ class TestFindUnrepliedComments:
         assert result[0]["text"] == "Unreplied comment"
 
     async def test_fallback_excludes_comments_with_reply(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         mock_notif.return_value = None
         mock_name.return_value = "Me"
@@ -659,7 +674,7 @@ class TestFindUnrepliedComments:
         assert result[0]["text"] == "Unreplied"
 
     async def test_fallback_when_notifications_returns_none(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         mock_notif.return_value = None
         mock_name.return_value = "Me"
@@ -669,12 +684,13 @@ class TestFindUnrepliedComments:
         assert result == []
         mock_posts.assert_awaited_once()
 
-    async def test_filters_own_comments_in_supplement(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    async def test_filters_own_comments_by_slug(
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
-        """Comments by the current user should be excluded from unreplied list."""
+        """Comments by the current user (matched by profile slug) are excluded."""
         mock_notif.return_value = None
         mock_name.return_value = "Andre Martins"
+        mock_slug.return_value = "andre-martins-tech"
         mock_posts.return_value = [
             {
                 "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
@@ -687,10 +703,19 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": "c1",
                 "author_name": "View Andre Martins\u2019s  graphic link",
-                "author_url": "https://linkedin.com/in/andremartins/",
+                "author_url": "https://linkedin.com/in/andre-martins-tech/",
                 "text": "Thanks for the kind words!",
                 "created_at": None,
                 "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c1",
+                "has_reply_from_author": False,
+            },
+            {
+                "comment_id": "c2",
+                "author_name": "Andre Martins",
+                "author_url": "https://www.linkedin.com/in/andre-martins-tech",
+                "text": "Another reply from me",
+                "created_at": None,
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c3",
                 "has_reply_from_author": False,
             },
             {
@@ -708,7 +733,7 @@ class TestFindUnrepliedComments:
         assert result[0]["author_name"] == "Someone Else"
 
     async def test_dedup_across_notification_and_post_scan(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """Same comment_permalink from notifications and post scan should appear once."""
         permalink = "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=urn:li:comment:100"
@@ -744,7 +769,7 @@ class TestFindUnrepliedComments:
         assert permalinks.count(permalink) == 1
 
     async def test_filters_name_only_ghost_in_supplement(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """Comments where text equals the cleaned author name should be excluded."""
         mock_notif.return_value = None
@@ -782,7 +807,7 @@ class TestFindUnrepliedComments:
         assert result[0]["text"] == "Great post!"
 
     async def test_filters_comma_prefix_own_replies(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """Replies starting with ', ' are the user's own replies (@ mention stripped)."""
         mock_notif.return_value = None
@@ -1924,11 +1949,15 @@ class TestFindUnrepliedCommentsEdgeCases:
         new_callable=AsyncMock,
     )
     @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_slug",
+        new_callable=AsyncMock,
+    )
+    @patch(
         "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
         new_callable=AsyncMock,
     )
     async def test_fallback_skips_posts_without_url(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         mock_notif.return_value = None
         mock_name.return_value = "Me"
@@ -1950,11 +1979,15 @@ class TestFindUnrepliedCommentsEdgeCases:
         new_callable=AsyncMock,
     )
     @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_slug",
+        new_callable=AsyncMock,
+    )
+    @patch(
         "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
         new_callable=AsyncMock,
     )
     async def test_fallback_handles_comment_exception(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         mock_notif.return_value = None
         mock_name.return_value = "Me"
@@ -1976,11 +2009,15 @@ class TestFindUnrepliedCommentsEdgeCases:
         new_callable=AsyncMock,
     )
     @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_slug",
+        new_callable=AsyncMock,
+    )
+    @patch(
         "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
         new_callable=AsyncMock,
     )
     async def test_fallback_caps_navigations(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         mock_notif.return_value = None
         mock_name.return_value = "Me"
@@ -2005,11 +2042,15 @@ class TestFindUnrepliedCommentsEdgeCases:
         new_callable=AsyncMock,
     )
     @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_slug",
+        new_callable=AsyncMock,
+    )
+    @patch(
         "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
         new_callable=AsyncMock,
     )
     async def test_fallback_stops_when_too_many_unreplied(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         mock_notif.return_value = None
         mock_name.return_value = "Me"
@@ -2041,11 +2082,15 @@ class TestFindUnrepliedCommentsEdgeCases:
         new_callable=AsyncMock,
     )
     @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_slug",
+        new_callable=AsyncMock,
+    )
+    @patch(
         "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
         new_callable=AsyncMock,
     )
     async def test_supplement_skips_notification_covered_posts(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """Posts already covered by notifications are not re-scanned."""
         mock_notif.return_value = [
@@ -2099,11 +2144,15 @@ class TestFindUnrepliedCommentsEdgeCases:
         new_callable=AsyncMock,
     )
     @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_slug",
+        new_callable=AsyncMock,
+    )
+    @patch(
         "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
         new_callable=AsyncMock,
     )
     async def test_supplement_uses_full_budget_when_notifications_empty(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """When notifications return empty, all posts are scanned up to nav cap."""
         mock_notif.return_value = []
@@ -2127,11 +2176,15 @@ class TestFindUnrepliedCommentsEdgeCases:
         new_callable=AsyncMock,
     )
     @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_slug",
+        new_callable=AsyncMock,
+    )
+    @patch(
         "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
         new_callable=AsyncMock,
     )
     async def test_no_supplement_scans_when_all_posts_covered(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """When notifications cover all recent posts, no supplement scans needed."""
         mock_notif.return_value = [
@@ -2166,11 +2219,15 @@ class TestFindUnrepliedCommentsEdgeCases:
         new_callable=AsyncMock,
     )
     @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_slug",
+        new_callable=AsyncMock,
+    )
+    @patch(
         "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
         new_callable=AsyncMock,
     )
     async def test_supplement_graceful_degradation_on_posts_failure(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """If get_my_recent_posts fails, notification results are still returned."""
         mock_notif.return_value = [
@@ -2197,11 +2254,15 @@ class TestFindUnrepliedCommentsEdgeCases:
         new_callable=AsyncMock,
     )
     @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_slug",
+        new_callable=AsyncMock,
+    )
+    @patch(
         "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
         new_callable=AsyncMock,
     )
     async def test_max_unreplied_cap_across_both_sources(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """Combined count from both sources respects max_posts * 5 cap."""
         mock_notif.return_value = [
@@ -2241,11 +2302,15 @@ class TestFindUnrepliedCommentsEdgeCases:
         new_callable=AsyncMock,
     )
     @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_slug",
+        new_callable=AsyncMock,
+    )
+    @patch(
         "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
         new_callable=AsyncMock,
     )
     async def test_normalize_dedup_handles_trailing_slash_mismatch(
-        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
     ):
         """URL with/without trailing slash treated as same post for dedup."""
         mock_notif.return_value = [
