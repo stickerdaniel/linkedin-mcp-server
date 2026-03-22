@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.session_state import portable_cookie_path
 from linkedin_mcp_server.setup import interactive_login
 
@@ -40,6 +41,9 @@ async def test_interactive_login_writes_source_state_when_cookie_export_succeeds
     )
 
     monkeypatch.setattr(
+        "linkedin_mcp_server.setup.get_config", lambda: AppConfig()
+    )
+    monkeypatch.setattr(
         "linkedin_mcp_server.setup.BrowserManager",
         lambda **kwargs: _BrowserContextManager(browser),
     )
@@ -75,6 +79,9 @@ async def test_interactive_login_returns_false_when_cookie_export_fails(
     browser = _make_browser(export_cookies=False)
     write_source_state = MagicMock()
 
+    monkeypatch.setattr(
+        "linkedin_mcp_server.setup.get_config", lambda: AppConfig()
+    )
     monkeypatch.setattr(
         "linkedin_mcp_server.setup.BrowserManager",
         lambda **kwargs: _BrowserContextManager(browser),
