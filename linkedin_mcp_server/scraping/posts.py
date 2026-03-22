@@ -36,6 +36,280 @@ _NOTIFICATIONS_URL = "https://www.linkedin.com/notifications/"
 _ACTIVITY_URN_PATTERN = re.compile(r"urn:li:activity:(\d+)")
 _BASE_POST_URL = "https://www.linkedin.com/feed/update/"
 
+# ---------------------------------------------------------------------------
+# JS evaluate strings — extracted as constants so integration tests can
+# import and run them against HTML fixtures via patchright.
+# ---------------------------------------------------------------------------
+
+_JS_EXTRACT_MY_POSTS = """(limit) => {
+    const out = [];
+    const seen = new Set();
+    const root = document.querySelector('main') || document.body;
+    if (!root) return { items: out, scrollHeight: document.body.scrollHeight };
+    const cards = root.querySelectorAll('article, div[data-urn], div.feed-shared-update-v2');
+    for (const card of cards) {
+        let urn = '';
+        const dataUrn = (card.getAttribute('data-urn') || '').trim();
+        const m1 = dataUrn.match(/urn:li:activity:\\d+/);
+        if (m1) urn = m1[0];
+        if (!urn) {
+            const a = card.querySelector('a[href*="/feed/update/"]');
+            const href = (a?.getAttribute('href') || '').trim();
+            const m2 = href.match(/feed\\/update\\/(urn:li:activity:\\d+)/);
+            if (m2) urn = m2[1];
+        }
+        if (!urn || seen.has(urn)) continue;
+        seen.add(urn);
+        let text = '';
+        const dirEls = card.querySelectorAll('[dir="ltr"]');
+        let best = null, bestLen = 0;
+        for (const el of dirEls) {
+            const t = (el.innerText || '').trim();
+            if (t.length > bestLen) { best = el; bestLen = t.length; }
+        }
+        if (best && bestLen > 30) {
+            text = best.innerText.trim();
+        } else {
+            const any = card.querySelector('span[dir]') || card;
+            text = (any?.innerText || '').trim();
+        }
+        text = (text || '').trim().slice(0, 500);
+        let createdAt = null;
+        const timeEl = card.querySelector('time');
+        if (timeEl) {
+            createdAt = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim() || null;
+        }
+        const idMatch = urn.match(/urn:li:activity:(\\d+)/);
+        const id = idMatch ? idMatch[1] : null;
+        const postUrl = id ? ('https://www.linkedin.com/feed/update/' + urn + '/') : null;
+        if (postUrl) {
+            out.push({ post_url: postUrl, post_id: urn, text_preview: text, created_at: createdAt });
+            if (out.length >= limit) break;
+        }
+    }
+    return { items: out, scrollHeight: document.body.scrollHeight };
+}"""
+
+_JS_EXTRACT_FEED_POSTS = """(limit) => {
+    const out = [];
+    const seen = new Set();
+    const root = document.querySelector('main') || document.body;
+    if (!root) return { items: out, scrollHeight: document.body.scrollHeight };
+    const cards = root.querySelectorAll(
+        'div.feed-shared-update-v2, div[data-urn*="activity"], article'
+    );
+    for (const card of cards) {
+        let urn = '';
+        const dataUrn = (card.getAttribute('data-urn') || '').trim();
+        const m1 = dataUrn.match(/urn:li:activity:\\d+/);
+        if (m1) urn = m1[0];
+        if (!urn) {
+            const a = card.querySelector('a[href*="/feed/update/"]');
+            const href = (a?.getAttribute('href') || '').trim();
+            const m2 = href.match(/feed\\/update\\/(urn:li:activity:\\d+)/);
+            if (m2) urn = m2[1];
+        }
+        if (!urn || seen.has(urn)) continue;
+        seen.add(urn);
+        let authorName = null;
+        let authorUrl = null;
+        const authorLink = card.querySelector(
+            'a.update-components-actor__meta-link, ' +
+            'a[data-tracking-control-name*="actor"], ' +
+            'a[href*="/in/"]'
+        );
+        if (authorLink) {
+            authorName = (authorLink.innerText || '').trim().split('\\n')[0].trim();
+            const href = (authorLink.getAttribute('href') || '').trim();
+            authorUrl = href.startsWith('http') ? href :
+                'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
+        }
+        let text = '';
+        const dirEls = card.querySelectorAll('[dir="ltr"]');
+        let best = null, bestLen = 0;
+        for (const el of dirEls) {
+            const t = (el.innerText || '').trim();
+            if (t.length > bestLen) { best = el; bestLen = t.length; }
+        }
+        if (best && bestLen > 30) {
+            text = best.innerText.trim();
+        } else {
+            const any = card.querySelector('span[dir]') || card;
+            text = (any?.innerText || '').trim();
+        }
+        text = (text || '').trim().slice(0, 500);
+        let createdAt = null;
+        const timeEl = card.querySelector('time');
+        if (timeEl) {
+            createdAt = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim() || null;
+        }
+        const idMatch = urn.match(/urn:li:activity:(\\d+)/);
+        const postUrl = idMatch
+            ? 'https://www.linkedin.com/feed/update/' + urn + '/'
+            : null;
+        if (postUrl) {
+            out.push({
+                post_url: postUrl, post_id: urn, text_preview: text,
+                author_name: authorName, author_url: authorUrl, created_at: createdAt
+            });
+            if (out.length >= limit) break;
+        }
+    }
+    return { items: out, scrollHeight: document.body.scrollHeight };
+}"""
+
+_JS_EXTRACT_COMMENTS = """(postAuthorName) => {
+    const comments = [];
+    const main = document.querySelector('main');
+    if (!main) return comments;
+    const nameToCheck = (postAuthorName || '').trim().toLowerCase();
+    const allCommentEls = main.querySelectorAll('[data-urn*="urn:li:comment"]');
+    const topLevel = [];
+    for (const el of allCommentEls) {
+        const parent = el.parentElement;
+        if (parent && parent.closest('[data-urn*="urn:li:comment"]')) continue;
+        topLevel.push(el);
+    }
+    for (const block of topLevel) {
+        const commentUrn = (block.getAttribute('data-urn') || '').trim();
+        const authorLink = block.querySelector('a[href*="/in/"]');
+        if (!authorLink) continue;
+        const authorUrl = (authorLink.getAttribute('href') || '').trim();
+        if (authorUrl.includes('/in/me') || !authorUrl) continue;
+        const authorName = (authorLink.innerText || authorLink.getAttribute('aria-label') || '').trim();
+        const textEl = block.querySelector('[dir="ltr"]') || block.querySelector('span');
+        const text = (textEl ? textEl.innerText : block.innerText) || '';
+        const cleanText = text.replace(authorName, '').trim().slice(0, 2000);
+        let permalink = null;
+        const permLink = block.querySelector('a[href*="commentUrn"]');
+        if (permLink) permalink = (permLink.getAttribute('href') || '').trim();
+        const commentId = commentUrn || (permalink ? (permalink.match(/commentUrn=([^&]+)/) || [])[1] : null);
+        let hasReplyFromAuthor = false;
+        if (nameToCheck) {
+            const replyEls = block.querySelectorAll('[data-urn*="urn:li:comment"]');
+            for (const r of replyEls) {
+                if (r === block) continue;
+                const replyLink = r.querySelector('a[href*="/in/"]');
+                if (!replyLink) continue;
+                const replyName = (replyLink.innerText || '').trim().toLowerCase();
+                if (replyName && replyName.indexOf(nameToCheck) !== -1) { hasReplyFromAuthor = true; break; }
+            }
+        }
+        const fullAuthorUrl = authorUrl.startsWith('http') ? authorUrl : 'https://www.linkedin.com' + (authorUrl.startsWith('/') ? authorUrl : '/' + authorUrl);
+        comments.push({
+            comment_id: commentId, author_name: authorName || null, author_url: fullAuthorUrl,
+            text: cleanText, created_at: null, comment_permalink: permalink,
+            has_reply_from_author: hasReplyFromAuthor
+        });
+    }
+    if (comments.length === 0) {
+        const blocks = main.querySelectorAll('[class*="comment"], [data-id*="comment"]');
+        for (const block of blocks) {
+            const authorLink = block.querySelector('a[href*="/in/"]');
+            if (!authorLink) continue;
+            const authorUrl = (authorLink.getAttribute('href') || '').trim();
+            if (authorUrl.includes('/in/me') || !authorUrl) continue;
+            const authorName = (authorLink.innerText || authorLink.getAttribute('aria-label') || '').trim();
+            const textEl = block.querySelector('[dir="ltr"]') || block.querySelector('span');
+            const text = (textEl ? textEl.innerText : block.innerText) || '';
+            const cleanText = text.replace(authorName, '').trim().slice(0, 2000);
+            const permLink = block.querySelector('a[href*="commentUrn"]');
+            const commentId = permLink ? ((permLink.getAttribute('href') || '').match(/commentUrn=([^&]+)/) || [])[1] : null;
+            let hasReplyFromAuthor = false;
+            if (nameToCheck) {
+                const replyBlocks = block.querySelectorAll('[class*="reply"], [class*="comment"]');
+                for (const r of replyBlocks) {
+                    if (r === block) continue;
+                    const replyLink = r.querySelector('a[href*="/in/"]');
+                    if (replyLink && (replyLink.innerText || '').trim().toLowerCase().indexOf(nameToCheck) !== -1) { hasReplyFromAuthor = true; break; }
+                }
+            }
+            comments.push({
+                comment_id: commentId, author_name: authorName || null,
+                author_url: authorUrl.startsWith('http') ? authorUrl : 'https://www.linkedin.com' + (authorUrl.startsWith('/') ? authorUrl : '/' + authorUrl),
+                text: cleanText, created_at: null,
+                comment_permalink: permLink ? (permLink.getAttribute('href') || '').trim() : null,
+                has_reply_from_author: hasReplyFromAuthor
+            });
+        }
+    }
+    return comments;
+}"""
+
+_JS_EXTRACT_NOTIFICATIONS = """(maxItems) => {
+    const items = [];
+    const main = document.querySelector('main');
+    if (!main) return items;
+    const typeMap = [
+        { type: 'reaction', terms: ['reacted', 'like', 'liked', 'love', 'celebrate', 'support', 'insightful', 'funny', 'curtiu', 'reagiu', 'reação'] },
+        { type: 'comment', terms: ['comment', 'commented', 'comentou', 'comentário', 'reply', 'replied', 'respondeu', 'resposta'] },
+        { type: 'connection', terms: ['connect', 'connection', 'accepted', 'invitation', 'convite', 'conexão', 'aceito'] },
+        { type: 'mention', terms: ['mention', 'mentioned', 'mencionou', 'menção', 'tagged', 'marcou'] },
+        { type: 'endorsement', terms: ['endorse', 'endorsed', 'skill', 'competência', 'recomend'] },
+        { type: 'job', terms: ['job', 'hiring', 'vaga', 'emprego', 'position', 'career', 'carreira', 'recruiter'] },
+        { type: 'post', terms: ['post', 'posted', 'shared', 'publicou', 'compartilhou', 'article', 'artigo'] },
+        { type: 'birthday', terms: ['birthday', 'aniversário', 'born'] },
+        { type: 'work_anniversary', terms: ['anniversary', 'work anniversary', 'aniversário de trabalho'] },
+        { type: 'view', terms: ['view', 'viewed', 'appeared', 'visualiz', 'perfil'] },
+    ];
+    function detectType(text) {
+        const lower = text.toLowerCase();
+        for (const entry of typeMap) {
+            if (entry.terms.some(t => lower.includes(t))) return entry.type;
+        }
+        return 'other';
+    }
+    let cards = main.querySelectorAll(
+        'div.nt-card, div[data-urn*="notification"], article'
+    );
+    if (cards.length === 0) {
+        cards = main.querySelectorAll('section li');
+    }
+    if (cards.length === 0) {
+        const anchors = main.querySelectorAll(
+            'a[href*="/feed/update/"], a[href*="/notifications/"], a[href*="/jobs/view/"], a[href*="/in/"]'
+        );
+        const cardSet = new Set();
+        for (const a of anchors) {
+            let container = a.parentElement;
+            while (container && container !== main && container.innerText.trim().length < 20) {
+                container = container.parentElement;
+            }
+            if (container && container !== main) cardSet.add(container);
+        }
+        cards = Array.from(cardSet);
+    }
+    const seen = new Set();
+    for (const card of cards) {
+        let text = (card.innerText || '').trim();
+        text = text.replace(/^Status is \\w+\\n?/i, '').trim();
+        if (!text || text.length < 10) continue;
+        let link = null;
+        const a = card.querySelector('a[href*="/feed/"], a[href*="/in/"], a[href*="/jobs/"], a[href*="/notifications/"]');
+        if (a) {
+            const href = (a.getAttribute('href') || '').trim();
+            link = href.startsWith('http') ? href : 'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
+        }
+        const dedup = link || text.slice(0, 120);
+        if (seen.has(dedup)) continue;
+        seen.add(dedup);
+        let createdAt = null;
+        const timeEl = card.querySelector('time');
+        if (timeEl) {
+            createdAt = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim() || null;
+        }
+        if (!createdAt) {
+            const relMatch = text.match(/\\b(\\d+[smhdw]|\\d+ (?:second|minute|hour|day|week|month|year|segundo|minuto|hora|dia|semana|mês|ano)s? ago)\\b/i);
+            if (relMatch) createdAt = relMatch[0];
+        }
+        const type = detectType(text);
+        const snippet = text.slice(0, 300);
+        items.push({ text: snippet, link: link, type: type, created_at: createdAt });
+        if (items.length >= maxItems) break;
+    }
+    return items;
+}"""
+
 
 def _normalize_post_url(post_url_or_id: str) -> str:
     """Return canonical post URL from post_url or post_id."""
@@ -403,65 +677,7 @@ async def get_my_recent_posts(
             prev_count = len(posts)
 
             raw = await page.evaluate(
-                """(limit) => {
-                const out = [];
-                const seen = new Set();
-
-                const root = document.querySelector('main') || document.body;
-                if (!root) return { items: out, scrollHeight: document.body.scrollHeight };
-
-                const cards = root.querySelectorAll('article, div[data-urn], div.feed-shared-update-v2');
-                for (const card of cards) {
-                    let urn = '';
-                    const dataUrn = (card.getAttribute('data-urn') || '').trim();
-                    const m1 = dataUrn.match(/urn:li:activity:\\d+/);
-                    if (m1) urn = m1[0];
-
-                    if (!urn) {
-                        const a = card.querySelector('a[href*="/feed/update/"]');
-                        const href = (a?.getAttribute('href') || '').trim();
-                        const m2 = href.match(/feed\\/update\\/(urn:li:activity:\\d+)/);
-                        if (m2) urn = m2[1];
-                    }
-
-                    if (!urn || seen.has(urn)) continue;
-                    seen.add(urn);
-
-                    let text = '';
-                    // Pick the [dir="ltr"] element with the longest text (skip short author names)
-                    const dirEls = card.querySelectorAll('[dir="ltr"]');
-                    let best = null, bestLen = 0;
-                    for (const el of dirEls) {
-                        const t = (el.innerText || '').trim();
-                        if (t.length > bestLen) { best = el; bestLen = t.length; }
-                    }
-                    if (best && bestLen > 30) {
-                        text = best.innerText.trim();
-                    } else {
-                        // Fallback: full card text minus very short noise
-                        const any = card.querySelector('span[dir]') || card;
-                        text = (any?.innerText || '').trim();
-                    }
-                    text = (text || '').trim().slice(0, 500);
-
-                    let createdAt = null;
-                    const timeEl = card.querySelector('time');
-                    if (timeEl) {
-                        createdAt = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim() || null;
-                    }
-
-                    const idMatch = urn.match(/urn:li:activity:(\\d+)/);
-                    const id = idMatch ? idMatch[1] : null;
-                    const postUrl = id ? (`${"https://www.linkedin.com/feed/update/"}${urn}/`) : null;
-
-                    if (postUrl) {
-                        out.push({ post_url: postUrl, post_id: urn, text_preview: text, created_at: createdAt });
-                        if (out.length >= limit) break;
-                    }
-                }
-
-                return { items: out, scrollHeight: document.body.scrollHeight };
-            }""",
+                _JS_EXTRACT_MY_POSTS,
                 limit,
             )
 
@@ -645,90 +861,7 @@ async def get_feed_posts(
             prev_count = len(posts)
 
             raw = await page.evaluate(
-                """(limit) => {
-                const out = [];
-                const seen = new Set();
-
-                const root = document.querySelector('main') || document.body;
-                if (!root) return { items: out, scrollHeight: document.body.scrollHeight };
-
-                const cards = root.querySelectorAll(
-                    'div.feed-shared-update-v2, div[data-urn*="activity"], article'
-                );
-                for (const card of cards) {
-                    let urn = '';
-                    const dataUrn = (card.getAttribute('data-urn') || '').trim();
-                    const m1 = dataUrn.match(/urn:li:activity:\\d+/);
-                    if (m1) urn = m1[0];
-
-                    if (!urn) {
-                        const a = card.querySelector('a[href*="/feed/update/"]');
-                        const href = (a?.getAttribute('href') || '').trim();
-                        const m2 = href.match(/feed\\/update\\/(urn:li:activity:\\d+)/);
-                        if (m2) urn = m2[1];
-                    }
-
-                    if (!urn || seen.has(urn)) continue;
-                    seen.add(urn);
-
-                    // Author info
-                    let authorName = null;
-                    let authorUrl = null;
-                    const authorLink = card.querySelector(
-                        'a.update-components-actor__meta-link, ' +
-                        'a[data-tracking-control-name*="actor"], ' +
-                        'a[href*="/in/"]'
-                    );
-                    if (authorLink) {
-                        authorName = (authorLink.innerText || '').trim().split('\\n')[0].trim();
-                        const href = (authorLink.getAttribute('href') || '').trim();
-                        authorUrl = href.startsWith('http') ? href :
-                            'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
-                    }
-
-                    // Post text — pick the longest [dir="ltr"] element (skip short author names)
-                    let text = '';
-                    const dirEls = card.querySelectorAll('[dir="ltr"]');
-                    let best = null, bestLen = 0;
-                    for (const el of dirEls) {
-                        const t = (el.innerText || '').trim();
-                        if (t.length > bestLen) { best = el; bestLen = t.length; }
-                    }
-                    if (best && bestLen > 30) {
-                        text = best.innerText.trim();
-                    } else {
-                        const any = card.querySelector('span[dir]') || card;
-                        text = (any?.innerText || '').trim();
-                    }
-                    text = (text || '').trim().slice(0, 500);
-
-                    // Timestamp
-                    let createdAt = null;
-                    const timeEl = card.querySelector('time');
-                    if (timeEl) {
-                        createdAt = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim() || null;
-                    }
-
-                    const idMatch = urn.match(/urn:li:activity:(\\d+)/);
-                    const postUrl = idMatch
-                        ? `https://www.linkedin.com/feed/update/${urn}/`
-                        : null;
-
-                    if (postUrl) {
-                        out.push({
-                            post_url: postUrl,
-                            post_id: urn,
-                            text_preview: text,
-                            author_name: authorName,
-                            author_url: authorUrl,
-                            created_at: createdAt
-                        });
-                        if (out.length >= limit) break;
-                    }
-                }
-
-                return { items: out, scrollHeight: document.body.scrollHeight };
-            }""",
+                _JS_EXTRACT_FEED_POSTS,
                 limit,
             )
 
@@ -819,98 +952,7 @@ async def get_post_comments(
         await _expand_comments_section(page, max_clicks=5)
 
         raw = await page.evaluate(
-            """(postAuthorName) => {
-            const comments = [];
-            const main = document.querySelector('main');
-            if (!main) return comments;
-            const nameToCheck = (postAuthorName || '').trim().toLowerCase();
-
-            // Prefer elements with data-urn containing urn:li:comment (top-level only).
-            const allCommentEls = main.querySelectorAll('[data-urn*="urn:li:comment"]');
-            const topLevel = [];
-            for (const el of allCommentEls) {
-                // Skip if any ANCESTOR (not el itself) also has a comment urn
-                const parent = el.parentElement;
-                if (parent && parent.closest('[data-urn*="urn:li:comment"]')) continue;
-                topLevel.push(el);
-            }
-
-            for (const block of topLevel) {
-                const commentUrn = (block.getAttribute('data-urn') || '').trim();
-                const authorLink = block.querySelector('a[href*="/in/"]');
-                if (!authorLink) continue;
-                const authorUrl = (authorLink.getAttribute('href') || '').trim();
-                if (authorUrl.includes('/in/me') || !authorUrl) continue;
-                const authorName = (authorLink.innerText || authorLink.getAttribute('aria-label') || '').trim();
-                const textEl = block.querySelector('[dir="ltr"]') || block.querySelector('span');
-                const text = (textEl ? textEl.innerText : block.innerText) || '';
-                const cleanText = text.replace(authorName, '').trim().slice(0, 2000);
-
-                let permalink = null;
-                const permLink = block.querySelector('a[href*="commentUrn"]');
-                if (permLink) permalink = (permLink.getAttribute('href') || '').trim();
-                const commentId = commentUrn || (permalink ? (permalink.match(/commentUrn=([^&]+)/) || [])[1] : null);
-
-                let hasReplyFromAuthor = false;
-                if (nameToCheck) {
-                    const replyEls = block.querySelectorAll('[data-urn*="urn:li:comment"]');
-                    for (const r of replyEls) {
-                        if (r === block) continue;
-                        const replyLink = r.querySelector('a[href*="/in/"]');
-                        if (!replyLink) continue;
-                        const replyName = (replyLink.innerText || '').trim().toLowerCase();
-                        if (replyName && replyName.indexOf(nameToCheck) !== -1) { hasReplyFromAuthor = true; break; }
-                    }
-                }
-
-                const fullAuthorUrl = authorUrl.startsWith('http') ? authorUrl : 'https://www.linkedin.com' + (authorUrl.startsWith('/') ? authorUrl : '/' + authorUrl);
-                comments.push({
-                    comment_id: commentId,
-                    author_name: authorName || null,
-                    author_url: fullAuthorUrl,
-                    text: cleanText,
-                    created_at: null,
-                    comment_permalink: permalink,
-                    has_reply_from_author: hasReplyFromAuthor
-                });
-            }
-
-            // Fallback: if no data-urn comments found, use class-based selectors
-            if (comments.length === 0) {
-                const blocks = main.querySelectorAll('[class*="comment"], [data-id*="comment"]');
-                for (const block of blocks) {
-                    const authorLink = block.querySelector('a[href*="/in/"]');
-                    if (!authorLink) continue;
-                    const authorUrl = (authorLink.getAttribute('href') || '').trim();
-                    if (authorUrl.includes('/in/me') || !authorUrl) continue;
-                    const authorName = (authorLink.innerText || authorLink.getAttribute('aria-label') || '').trim();
-                    const textEl = block.querySelector('[dir="ltr"]') || block.querySelector('span');
-                    const text = (textEl ? textEl.innerText : block.innerText) || '';
-                    const cleanText = text.replace(authorName, '').trim().slice(0, 2000);
-                    const permLink = block.querySelector('a[href*="commentUrn"]');
-                    const commentId = permLink ? ((permLink.getAttribute('href') || '').match(/commentUrn=([^&]+)/) || [])[1] : null;
-                    let hasReplyFromAuthor = false;
-                    if (nameToCheck) {
-                        const replyBlocks = block.querySelectorAll('[class*="reply"], [class*="comment"]');
-                        for (const r of replyBlocks) {
-                            if (r === block) continue;
-                            const replyLink = r.querySelector('a[href*="/in/"]');
-                            if (replyLink && (replyLink.innerText || '').trim().toLowerCase().indexOf(nameToCheck) !== -1) { hasReplyFromAuthor = true; break; }
-                        }
-                    }
-                    comments.push({
-                        comment_id: commentId,
-                        author_name: authorName || null,
-                        author_url: authorUrl.startsWith('http') ? authorUrl : 'https://www.linkedin.com' + (authorUrl.startsWith('/') ? authorUrl : '/' + authorUrl),
-                        text: cleanText,
-                        created_at: null,
-                        comment_permalink: permLink ? (permLink.getAttribute('href') || '').trim() : null,
-                        has_reply_from_author: hasReplyFromAuthor
-                    });
-                }
-            }
-            return comments;
-        }""",
+            _JS_EXTRACT_COMMENTS,
             current_user_name or "",
         )
 
@@ -936,9 +978,13 @@ async def get_post_comments(
                     comment_text = (c.get("text") or "").strip()
                     author_name = (c.get("author_name") or "").strip()
                     clean_author = re.sub(r"^View\s+", "", author_name)
-                    clean_author = re.sub("['\\u2019]s\\s+graphic link$", "", clean_author).strip()
+                    clean_author = re.sub(
+                        "['\\u2019]s\\s+graphic link$", "", clean_author
+                    ).strip()
                     if clean_author and comment_text:
-                        text_sans_author = comment_text.replace(clean_author, "").strip()
+                        text_sans_author = comment_text.replace(
+                            clean_author, ""
+                        ).strip()
                         if len(text_sans_author) < 3:
                             continue
                     out: dict[str, Any] = {
@@ -990,97 +1036,7 @@ async def get_notifications(
         await asyncio.sleep(1)
 
         raw = await page.evaluate(
-            """(maxItems) => {
-            const items = [];
-            const main = document.querySelector('main');
-            if (!main) return items;
-
-            // Type detection keywords (order matters: first match wins)
-            const typeMap = [
-                { type: 'reaction', terms: ['reacted', 'like', 'liked', 'love', 'celebrate', 'support', 'insightful', 'funny', 'curtiu', 'reagiu', 'reação'] },
-                { type: 'comment', terms: ['comment', 'commented', 'comentou', 'comentário', 'reply', 'replied', 'respondeu', 'resposta'] },
-                { type: 'connection', terms: ['connect', 'connection', 'accepted', 'invitation', 'convite', 'conexão', 'aceito'] },
-                { type: 'mention', terms: ['mention', 'mentioned', 'mencionou', 'menção', 'tagged', 'marcou'] },
-                { type: 'endorsement', terms: ['endorse', 'endorsed', 'skill', 'competência', 'recomend'] },
-                { type: 'job', terms: ['job', 'hiring', 'vaga', 'emprego', 'position', 'career', 'carreira', 'recruiter'] },
-                { type: 'post', terms: ['post', 'posted', 'shared', 'publicou', 'compartilhou', 'article', 'artigo'] },
-                { type: 'birthday', terms: ['birthday', 'aniversário', 'born'] },
-                { type: 'work_anniversary', terms: ['anniversary', 'work anniversary', 'aniversário de trabalho'] },
-                { type: 'view', terms: ['view', 'viewed', 'appeared', 'visualiz', 'perfil'] },
-            ];
-
-            function detectType(text) {
-                const lower = text.toLowerCase();
-                for (const entry of typeMap) {
-                    if (entry.terms.some(t => lower.includes(t))) return entry.type;
-                }
-                return 'other';
-            }
-
-            // Each notification is typically an <li> or article inside main.
-            // Progressive fallback: most specific selectors first.
-            let cards = main.querySelectorAll(
-                'div.nt-card, div[data-urn*="notification"], article'
-            );
-            if (cards.length === 0) {
-                cards = main.querySelectorAll('section li');
-            }
-            if (cards.length === 0) {
-                // Walk up from notification-relevant links to find containers
-                const anchors = main.querySelectorAll(
-                    'a[href*="/feed/update/"], a[href*="/notifications/"], a[href*="/jobs/view/"], a[href*="/in/"]'
-                );
-                const cardSet = new Set();
-                for (const a of anchors) {
-                    let container = a.parentElement;
-                    while (container && container !== main && container.innerText.trim().length < 20) {
-                        container = container.parentElement;
-                    }
-                    if (container && container !== main) cardSet.add(container);
-                }
-                cards = Array.from(cardSet);
-            }
-            const seen = new Set();
-
-            for (const card of cards) {
-                let text = (card.innerText || '').trim();
-                // Strip LinkedIn UI artefacts (e.g. "Status is reachable")
-                text = text.replace(/^Status is \\w+\\n?/i, '').trim();
-                if (!text || text.length < 10) continue;
-
-                // Find the most relevant link (computed early for dedup)
-                let link = null;
-                const a = card.querySelector('a[href*="/feed/"], a[href*="/in/"], a[href*="/jobs/"], a[href*="/notifications/"]');
-                if (a) {
-                    const href = (a.getAttribute('href') || '').trim();
-                    link = href.startsWith('http') ? href : 'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
-                }
-
-                // Deduplicate: prefer link, fall back to text prefix
-                const dedup = link || text.slice(0, 120);
-                if (seen.has(dedup)) continue;
-                seen.add(dedup);
-
-                // Best-effort timestamp
-                let createdAt = null;
-                const timeEl = card.querySelector('time');
-                if (timeEl) {
-                    createdAt = (timeEl.getAttribute('datetime') || timeEl.innerText || '').trim() || null;
-                }
-                if (!createdAt) {
-                    // Look for relative time patterns like "2h", "3d", "1w"
-                    const relMatch = text.match(/\\b(\\d+[smhdw]|\\d+ (?:second|minute|hour|day|week|month|year|segundo|minuto|hora|dia|semana|mês|ano)s? ago)\\b/i);
-                    if (relMatch) createdAt = relMatch[0];
-                }
-
-                const type = detectType(text);
-                const snippet = text.slice(0, 300);
-
-                items.push({ text: snippet, link: link, type: type, created_at: createdAt });
-                if (items.length >= maxItems) break;
-            }
-            return items;
-        }""",
+            _JS_EXTRACT_NOTIFICATIONS,
             limit,
         )
 
@@ -1089,7 +1045,12 @@ async def get_notifications(
                 if isinstance(item, dict) and item.get("text"):
                     notifications.append(
                         {
-                            "text": re.sub(r"^Status is \w+\n?", "", (item.get("text") or ""), flags=re.IGNORECASE).strip(),
+                            "text": re.sub(
+                                r"^Status is \w+\n?",
+                                "",
+                                (item.get("text") or ""),
+                                flags=re.IGNORECASE,
+                            ).strip(),
                             "link": item.get("link"),
                             "type": item.get("type", "other"),
                             "created_at": item.get("created_at"),

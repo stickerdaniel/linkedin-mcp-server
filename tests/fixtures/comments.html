@@ -1,0 +1,31 @@
+<html><body>
+<main>
+  <!-- Top-level comment -->
+  <div data-urn="urn:li:comment:(activity:123,7001)">
+    <a href="/in/alice-smith/">View Alice Smith&#x2019;s  graphic link</a>
+    <div dir="ltr">Great post, thanks for sharing this insightful content!</div>
+    <a href="?commentUrn=urn%3Ali%3Acomment%3A7001&other=x">permalink</a>
+  </div>
+  <!-- Nested duplicate (child of a comment-urn parent) — should be skipped by JS -->
+  <div data-urn="urn:li:comment:(activity:123,7001)">
+    <div data-urn="urn:li:comment:(activity:123,7001)">
+      <a href="/in/alice-smith/">Alice Smith</a>
+      <span dir="ltr">Alice Smith</span>
+    </div>
+  </div>
+  <!-- Second distinct comment -->
+  <div data-urn="urn:li:comment:(activity:123,7002)">
+    <a href="/in/bob-jones/">Bob Jones</a>
+    <div dir="ltr">I disagree with this take, here is why I think differently.</div>
+  </div>
+  <!-- Comment with reply from post author -->
+  <div data-urn="urn:li:comment:(activity:123,7003)">
+    <a href="/in/charlie-w/">Charlie W</a>
+    <div dir="ltr">What do you think about this approach?</div>
+    <div data-urn="urn:li:comment:(activity:123,7004)">
+      <a href="/in/theauthor/">The Author</a>
+      <span>Thanks for asking!</span>
+    </div>
+  </div>
+</main>
+</body></html>
