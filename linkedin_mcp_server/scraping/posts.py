@@ -932,6 +932,14 @@ async def get_post_comments(
                         if key in seen_keys:
                             continue
                         seen_keys.add(key)
+                    # Filter ghost entries (text is just the author name)
+                    comment_text = (c.get("text") or "").strip()
+                    author_name = (c.get("author_name") or "").strip()
+                    clean_author = re.sub(r"^View\s+", "", author_name).replace("'s  graphic link", "").strip()
+                    if clean_author and comment_text:
+                        text_sans_author = comment_text.replace(clean_author, "").strip()
+                        if len(text_sans_author) < 3:
+                            continue
                     out: dict[str, Any] = {
                         "comment_id": c.get("comment_id"),
                         "author_name": c.get("author_name"),
@@ -989,7 +997,7 @@ async def get_notifications(
             // Type detection keywords (order matters: first match wins)
             const typeMap = [
                 { type: 'comment', terms: ['comment', 'commented', 'comentou', 'comentário', 'reply', 'replied', 'respondeu', 'resposta'] },
-                { type: 'reaction', terms: ['like', 'liked', 'love', 'celebrate', 'support', 'insightful', 'funny', 'curtiu', 'reagiu', 'reação'] },
+                { type: 'reaction', terms: ['like', 'liked', 'love', 'celebrate', 'support', 'insightful', 'funny', 'curtiu', 'reagiu', 'reacted', 'reação'] },
                 { type: 'connection', terms: ['connect', 'connection', 'accepted', 'invitation', 'convite', 'conexão', 'aceito'] },
                 { type: 'mention', terms: ['mention', 'mentioned', 'mencionou', 'menção', 'tagged', 'marcou'] },
                 { type: 'endorsement', terms: ['endorse', 'endorsed', 'skill', 'competência', 'recomend'] },
@@ -1034,7 +1042,9 @@ async def get_notifications(
             const seen = new Set();
 
             for (const card of cards) {
-                const text = (card.innerText || '').trim();
+                let text = (card.innerText || '').trim();
+                // Strip LinkedIn UI artefacts (e.g. "Status is reachable")
+                text = text.replace(/^Status is \\w+\\n?/i, '').trim();
                 if (!text || text.length < 10) continue;
 
                 // Find the most relevant link (computed early for dedup)
@@ -1078,7 +1088,7 @@ async def get_notifications(
                 if isinstance(item, dict) and item.get("text"):
                     notifications.append(
                         {
-                            "text": (item.get("text") or "").strip(),
+                            "text": re.sub(r"^Status is \w+\n?", "", (item.get("text") or ""), flags=re.IGNORECASE).strip(),
                             "link": item.get("link"),
                             "type": item.get("type", "other"),
                             "created_at": item.get("created_at"),

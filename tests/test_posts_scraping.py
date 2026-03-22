@@ -361,6 +361,59 @@ class TestGetPostComments:
         texts = {r["text"] for r in result}
         assert texts == {"Great post!", "One more thought..."}
 
+    async def test_filters_ghost_comment_entries(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        """Ghost entry with text matching author name should be filtered out."""
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "comment_id": "c1",
+                    "author_name": "View Eloisio Alves de Abreu's  graphic link",
+                    "author_url": "https://linkedin.com/in/eloisio/",
+                    "text": "Obrigado por compartilhar André! Parabéns pela carreira!",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+                {
+                    "comment_id": "c2",
+                    "author_name": "View Eloisio Alves de Abreu's  graphic link",
+                    "author_url": "https://linkedin.com/in/eloisio/",
+                    "text": "Eloisio Alves de Abreu",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+            ]
+        )
+        result = await get_post_comments(
+            mock_page,
+            "https://linkedin.com/feed/update/urn:li:activity:ghost-test/",
+        )
+        assert len(result) == 1
+        assert "Obrigado" in result[0]["text"]
+
+    async def test_filters_short_ghost_comment(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        """Comment with very short text after author removal should be filtered."""
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "comment_id": "c1",
+                    "author_name": "Alice Bob",
+                    "author_url": "https://linkedin.com/in/alice/",
+                    "text": "Alice Bob ok",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+            ]
+        )
+        result = await get_post_comments(
+            mock_page,
+            "https://linkedin.com/feed/update/urn:li:activity:ghost-short-test/",
+        )
+        assert len(result) == 0
+
 
 @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
 @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
@@ -658,6 +711,43 @@ class TestGetNotifications:
         mock_page.evaluate = AsyncMock(return_value=[])
         await get_notifications(mock_page)
         assert mock_page.evaluate.await_args[0][1] == 20
+
+    async def test_strips_status_reachable_from_notifications(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        """Notification text prefixed with 'Status is reachable' should be stripped."""
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "text": "Status is reachable\nFrancisco commented on your post",
+                    "link": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                    "type": "comment",
+                    "created_at": "2h",
+                },
+            ]
+        )
+        result = await get_notifications(mock_page, limit=10)
+        assert len(result) == 1
+        assert not result[0]["text"].startswith("Status is")
+        assert result[0]["text"] == "Francisco commented on your post"
+
+    async def test_classifies_reacted_as_reaction_type(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        """Notification with type 'reaction' should be preserved through Python layer."""
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "text": "Francisco Pinheiro and 19 others reacted to your post",
+                    "link": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                    "type": "reaction",
+                    "created_at": "1d",
+                },
+            ]
+        )
+        result = await get_notifications(mock_page, limit=10)
+        assert len(result) == 1
+        assert result[0]["type"] == "reaction"
 
 
 class TestCache:
