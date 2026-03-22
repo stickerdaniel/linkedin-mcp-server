@@ -23,7 +23,11 @@ from linkedin_mcp_server.core.utils import (
     wait_for_cooldown,
 )
 from linkedin_mcp_server.scraping.cache import scraping_cache
-from linkedin_mcp_server.scraping.extractor import LinkedInExtractor, _RATE_LIMITED_ERROR, _RATE_LIMITED_MSG
+from linkedin_mcp_server.scraping.extractor import (
+    LinkedInExtractor,
+    _RATE_LIMITED_ERROR,
+    _RATE_LIMITED_MSG,
+)
 
 logger = logging.getLogger(__name__)
 _FEED_URL = "https://www.linkedin.com/feed/"
@@ -682,14 +686,21 @@ async def get_feed_posts(
                             'https://www.linkedin.com' + (href.startsWith('/') ? href : '/' + href);
                     }
 
-                    // Post text
+                    // Post text — pick the longest [dir="ltr"] element (skip short author names)
                     let text = '';
-                    const textEl = card.querySelector(
-                        'div.feed-shared-update-v2__description, ' +
-                        'div.update-components-text, ' +
-                        'span[dir="ltr"]'
-                    ) || card.querySelector('[dir="ltr"]') || card;
-                    text = (textEl?.innerText || '').trim().slice(0, 500);
+                    const dirEls = card.querySelectorAll('[dir="ltr"]');
+                    let best = null, bestLen = 0;
+                    for (const el of dirEls) {
+                        const t = (el.innerText || '').trim();
+                        if (t.length > bestLen) { best = el; bestLen = t.length; }
+                    }
+                    if (best && bestLen > 30) {
+                        text = best.innerText.trim();
+                    } else {
+                        const any = card.querySelector('span[dir]') || card;
+                        text = (any?.innerText || '').trim();
+                    }
+                    text = (text || '').trim().slice(0, 500);
 
                     // Timestamp
                     let createdAt = null;
@@ -818,8 +829,9 @@ async def get_post_comments(
             const allCommentEls = main.querySelectorAll('[data-urn*="urn:li:comment"]');
             const topLevel = [];
             for (const el of allCommentEls) {
-                const parentWithUrn = el.closest('[data-urn*="urn:li:comment"]');
-                if (parentWithUrn && parentWithUrn !== el) continue;
+                // Skip if any ANCESTOR (not el itself) also has a comment urn
+                const parent = el.parentElement;
+                if (parent && parent.closest('[data-urn*="urn:li:comment"]')) continue;
                 topLevel.push(el);
             }
 
@@ -903,8 +915,23 @@ async def get_post_comments(
         )
 
         if isinstance(raw, list):
+            seen_ids: set[str] = set()
+            seen_keys: set[tuple[str, str]] = set()
             for c in raw:
                 if isinstance(c, dict) and (c.get("author_name") or c.get("text")):
+                    cid = c.get("comment_id")
+                    if cid:
+                        if cid in seen_ids:
+                            continue
+                        seen_ids.add(cid)
+                    else:
+                        key = (
+                            c.get("author_url", ""),
+                            (c.get("text") or "").strip()[:200],
+                        )
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
                     out: dict[str, Any] = {
                         "comment_id": c.get("comment_id"),
                         "author_name": c.get("author_name"),
@@ -981,10 +1008,29 @@ async def get_notifications(
                 return 'other';
             }
 
-            // Each notification is typically an <li> or article inside main
-            const cards = main.querySelectorAll(
-                'div.nt-card, article, section li, div[data-urn], main > div > div > div'
+            // Each notification is typically an <li> or article inside main.
+            // Progressive fallback: most specific selectors first.
+            let cards = main.querySelectorAll(
+                'div.nt-card, div[data-urn*="notification"], article'
             );
+            if (cards.length === 0) {
+                cards = main.querySelectorAll('section li');
+            }
+            if (cards.length === 0) {
+                // Walk up from notification-relevant links to find containers
+                const anchors = main.querySelectorAll(
+                    'a[href*="/feed/update/"], a[href*="/notifications/"], a[href*="/jobs/view/"], a[href*="/in/"]'
+                );
+                const cardSet = new Set();
+                for (const a of anchors) {
+                    let container = a.parentElement;
+                    while (container && container !== main && container.innerText.trim().length < 20) {
+                        container = container.parentElement;
+                    }
+                    if (container && container !== main) cardSet.add(container);
+                }
+                cards = Array.from(cardSet);
+            }
             const seen = new Set();
 
             for (const card of cards) {

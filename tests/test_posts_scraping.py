@@ -267,6 +267,100 @@ class TestGetPostComments:
         assert len(result) == 1
         assert result[0].get("has_reply_from_author") is True
 
+    async def test_deduplicates_comments_by_id(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        """Same comment_id appearing multiple times should be deduplicated."""
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "comment_id": "urn:li:comment:(activity:1,100)",
+                    "author_name": "Alice",
+                    "author_url": "https://linkedin.com/in/alice/",
+                    "text": "Great post!",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+                {
+                    "comment_id": "urn:li:comment:(activity:1,100)",
+                    "author_name": "Alice",
+                    "author_url": "https://linkedin.com/in/alice/",
+                    "text": "Great post!",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+            ]
+        )
+        result = await get_post_comments(
+            mock_page,
+            "https://linkedin.com/feed/update/urn:li:activity:dedup-id-test/",
+        )
+        assert len(result) == 1
+        assert result[0]["comment_id"] == "urn:li:comment:(activity:1,100)"
+
+    async def test_deduplicates_comments_by_text_fallback(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        """When comment_id is missing, dedup by (author_url, text)."""
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "comment_id": None,
+                    "author_name": "Bob",
+                    "author_url": "https://linkedin.com/in/bob/",
+                    "text": "Nice!",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+                {
+                    "comment_id": None,
+                    "author_name": "Bob",
+                    "author_url": "https://linkedin.com/in/bob/",
+                    "text": "Nice!",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+            ]
+        )
+        result = await get_post_comments(
+            mock_page,
+            "https://linkedin.com/feed/update/urn:li:activity:dedup-text-test/",
+        )
+        assert len(result) == 1
+        assert result[0]["author_name"] == "Bob"
+
+    async def test_keeps_distinct_comments_same_author(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        """Same author with different text should both be kept."""
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "comment_id": "c1",
+                    "author_name": "Alice",
+                    "author_url": "https://linkedin.com/in/alice/",
+                    "text": "Great post!",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+                {
+                    "comment_id": "c2",
+                    "author_name": "Alice",
+                    "author_url": "https://linkedin.com/in/alice/",
+                    "text": "One more thought...",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+            ]
+        )
+        result = await get_post_comments(
+            mock_page,
+            "https://linkedin.com/feed/update/urn:li:activity:dedup-distinct-test/",
+        )
+        assert len(result) == 2
+        texts = {r["text"] for r in result}
+        assert texts == {"Great post!", "One more thought..."}
+
 
 @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
 @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
@@ -404,7 +498,9 @@ class TestGetPostContent:
     ):
         mock_instance = MagicMock()
         mock_instance.extract_page = AsyncMock(
-            return_value=ExtractedSection(text="Hello, this is my post content!", references=[])
+            return_value=ExtractedSection(
+                text="Hello, this is my post content!", references=[]
+            )
         )
         mock_extractor_cls.return_value = mock_instance
 
@@ -417,21 +513,27 @@ class TestGetPostContent:
         assert result["sections"]["post_content"] == "Hello, this is my post content!"
         assert result["pages_visited"] == [result["url"]]
         assert result["sections_requested"] == ["post_content"]
-        mock_instance.extract_page.assert_awaited_once_with(result["url"], section_name="post_content")
+        mock_instance.extract_page.assert_awaited_once_with(
+            result["url"], section_name="post_content"
+        )
 
     @patch(
         "linkedin_mcp_server.scraping.posts.LinkedInExtractor",
     )
     async def test_normalizes_full_url(self, mock_extractor_cls, mock_page):
         mock_instance = MagicMock()
-        mock_instance.extract_page = AsyncMock(return_value=ExtractedSection(text="Content", references=[]))
+        mock_instance.extract_page = AsyncMock(
+            return_value=ExtractedSection(text="Content", references=[])
+        )
         mock_extractor_cls.return_value = mock_instance
 
         url = "https://www.linkedin.com/feed/update/urn:li:activity:999/"
         result = await get_post_content(mock_page, url)
 
         assert result["url"] == url
-        mock_instance.extract_page.assert_awaited_once_with(url, section_name="post_content")
+        mock_instance.extract_page.assert_awaited_once_with(
+            url, section_name="post_content"
+        )
 
     @patch(
         "linkedin_mcp_server.scraping.posts.LinkedInExtractor",
@@ -440,7 +542,9 @@ class TestGetPostContent:
         self, mock_extractor_cls, mock_page
     ):
         mock_instance = MagicMock()
-        mock_instance.extract_page = AsyncMock(return_value=ExtractedSection(text="", references=[]))
+        mock_instance.extract_page = AsyncMock(
+            return_value=ExtractedSection(text="", references=[])
+        )
         mock_extractor_cls.return_value = mock_instance
 
         result = await get_post_content(mock_page, "12345")
@@ -453,7 +557,9 @@ class TestGetPostContent:
     )
     async def test_normalizes_urn_input(self, mock_extractor_cls, mock_page):
         mock_instance = MagicMock()
-        mock_instance.extract_page = AsyncMock(return_value=ExtractedSection(text="Post text", references=[]))
+        mock_instance.extract_page = AsyncMock(
+            return_value=ExtractedSection(text="Post text", references=[])
+        )
         mock_extractor_cls.return_value = mock_instance
 
         result = await get_post_content(mock_page, "urn:li:activity:777")
@@ -571,6 +677,7 @@ class TestCache:
     def test_cache_expired_entry(self):
         scraping_cache.put("expired", [{"id": "old"}], ttl=0.0)
         import time as _time
+
         _time.sleep(0.01)
         assert scraping_cache.get("expired") is None
 
@@ -782,7 +889,9 @@ class TestExpandCommentsSection:
         page = MagicMock()
         loc = MagicMock()
         # First call: visible and clickable, second call: not visible
-        loc.is_visible = AsyncMock(side_effect=[True, False, False, False, False, False, False, False, False])
+        loc.is_visible = AsyncMock(
+            side_effect=[True, False, False, False, False, False, False, False, False]
+        )
         loc.click = AsyncMock()
         page.locator = MagicMock(return_value=MagicMock(first=loc))
         result = await _expand_comments_section(page, max_clicks=1)
@@ -1039,7 +1148,9 @@ class TestUnrepliedViaNotifications:
                 "hasContent": True,
             }
         )
-        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        result = await _unreplied_via_notifications(
+            mock_page, since_days=7, max_posts=20
+        )
         assert result is not None
         assert len(result) == 1
         assert "comment_permalink" in result[0]
@@ -1048,26 +1159,28 @@ class TestUnrepliedViaNotifications:
     async def test_returns_empty_list_when_no_comments_but_content(
         self, mock_scroll, mock_modal, mock_rate_limit, mock_page
     ):
-        mock_page.evaluate = AsyncMock(
-            return_value={"items": [], "hasContent": True}
+        mock_page.evaluate = AsyncMock(return_value={"items": [], "hasContent": True})
+        result = await _unreplied_via_notifications(
+            mock_page, since_days=7, max_posts=20
         )
-        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
         assert result == []
 
     async def test_returns_none_when_no_content(
         self, mock_scroll, mock_modal, mock_rate_limit, mock_page
     ):
-        mock_page.evaluate = AsyncMock(
-            return_value={"items": [], "hasContent": False}
+        mock_page.evaluate = AsyncMock(return_value={"items": [], "hasContent": False})
+        result = await _unreplied_via_notifications(
+            mock_page, since_days=7, max_posts=20
         )
-        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
         assert result is None
 
     async def test_returns_none_on_exception(
         self, mock_scroll, mock_modal, mock_rate_limit, mock_page
     ):
         mock_page.goto = AsyncMock(side_effect=Exception("Network error"))
-        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        result = await _unreplied_via_notifications(
+            mock_page, since_days=7, max_posts=20
+        )
         assert result is None
 
     async def test_reraises_linkedin_scraper_exception(
@@ -1094,14 +1207,18 @@ class TestUnrepliedViaNotifications:
                 "hasContent": True,
             }
         )
-        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        result = await _unreplied_via_notifications(
+            mock_page, since_days=7, max_posts=20
+        )
         assert len(result) == 1
 
     async def test_returns_none_on_non_dict_raw(
         self, mock_scroll, mock_modal, mock_rate_limit, mock_page
     ):
         mock_page.evaluate = AsyncMock(return_value="not a dict")
-        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
+        result = await _unreplied_via_notifications(
+            mock_page, since_days=7, max_posts=20
+        )
         assert result is None
 
     async def test_splits_link_for_post_url(
@@ -1118,8 +1235,13 @@ class TestUnrepliedViaNotifications:
                 "hasContent": True,
             }
         )
-        result = await _unreplied_via_notifications(mock_page, since_days=7, max_posts=20)
-        assert result[0]["post_url"] == "https://linkedin.com/feed/update/urn:li:activity:1/"
+        result = await _unreplied_via_notifications(
+            mock_page, since_days=7, max_posts=20
+        )
+        assert (
+            result[0]["post_url"]
+            == "https://linkedin.com/feed/update/urn:li:activity:1/"
+        )
 
 
 @patch("linkedin_mcp_server.scraping.posts.detect_rate_limit", new_callable=AsyncMock)
@@ -1135,7 +1257,10 @@ class TestGetPostCommentsCache:
         self, mock_scroll, mock_modal, mock_rate_limit, mock_page
     ):
         cached_data = [{"comment_id": "c1", "author_name": "Cached", "text": "cached"}]
-        scraping_cache.put("comments:https://www.linkedin.com/feed/update/urn:li:activity:111/:user=", cached_data)
+        scraping_cache.put(
+            "comments:https://www.linkedin.com/feed/update/urn:li:activity:111/:user=",
+            cached_data,
+        )
         result = await get_post_comments(mock_page, "111")
         assert result == cached_data
         mock_page.goto.assert_not_awaited()
@@ -1293,9 +1418,17 @@ class TestGetMyRecentPostsEdgeCases:
 class TestGetPostContentEngagement:
     """Tests for get_post_content engagement, post_type, and author integration."""
 
-    @patch("linkedin_mcp_server.scraping.posts._extract_author_info", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._extract_engagement_metrics", new_callable=AsyncMock)
+    @patch(
+        "linkedin_mcp_server.scraping.posts._extract_author_info",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._extract_engagement_metrics",
+        new_callable=AsyncMock,
+    )
     @patch("linkedin_mcp_server.scraping.posts.LinkedInExtractor")
     async def test_includes_engagement_post_type_author(
         self, mock_ext_cls, mock_engagement, mock_type, mock_author, mock_page
@@ -1315,9 +1448,17 @@ class TestGetPostContentEngagement:
         assert result["post_type"] == "image"
         assert result["author"] == {"name": "Alice"}
 
-    @patch("linkedin_mcp_server.scraping.posts._extract_author_info", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._extract_engagement_metrics", new_callable=AsyncMock)
+    @patch(
+        "linkedin_mcp_server.scraping.posts._extract_author_info",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._extract_engagement_metrics",
+        new_callable=AsyncMock,
+    )
     @patch("linkedin_mcp_server.scraping.posts.LinkedInExtractor")
     async def test_preserves_references_when_present(
         self, mock_ext_cls, mock_engagement, mock_type, mock_author, mock_page
@@ -1338,9 +1479,17 @@ class TestGetPostContentEngagement:
         assert result["references"] == {"post_content": refs}
         assert "section_errors" not in result
 
-    @patch("linkedin_mcp_server.scraping.posts._extract_author_info", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._extract_engagement_metrics", new_callable=AsyncMock)
+    @patch(
+        "linkedin_mcp_server.scraping.posts._extract_author_info",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._extract_engagement_metrics",
+        new_callable=AsyncMock,
+    )
     @patch("linkedin_mcp_server.scraping.posts.LinkedInExtractor")
     async def test_surfaces_section_errors_on_failure(
         self, mock_ext_cls, mock_engagement, mock_type, mock_author, mock_page
@@ -1361,9 +1510,17 @@ class TestGetPostContentEngagement:
         assert result["section_errors"] == {"post_content": error_info}
         assert "references" not in result
 
-    @patch("linkedin_mcp_server.scraping.posts._extract_author_info", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._extract_engagement_metrics", new_callable=AsyncMock)
+    @patch(
+        "linkedin_mcp_server.scraping.posts._extract_author_info",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._detect_post_type", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._extract_engagement_metrics",
+        new_callable=AsyncMock,
+    )
     @patch("linkedin_mcp_server.scraping.posts.LinkedInExtractor")
     async def test_suppresses_rate_limited_msg(
         self, mock_ext_cls, mock_engagement, mock_type, mock_author, mock_page
@@ -1386,10 +1543,20 @@ class TestGetPostContentEngagement:
 class TestFindUnrepliedCommentsEdgeCases:
     """Additional edge cases for find_unreplied_comments."""
 
-    @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._get_current_user_name", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._unreplied_via_notifications", new_callable=AsyncMock)
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_name",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
+        new_callable=AsyncMock,
+    )
     async def test_fallback_skips_posts_without_url(
         self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
     ):
@@ -1402,10 +1569,20 @@ class TestFindUnrepliedCommentsEdgeCases:
         assert result == []
         mock_comments.assert_not_awaited()
 
-    @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._get_current_user_name", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._unreplied_via_notifications", new_callable=AsyncMock)
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_name",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
+        new_callable=AsyncMock,
+    )
     async def test_fallback_handles_comment_exception(
         self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
     ):
@@ -1418,10 +1595,20 @@ class TestFindUnrepliedCommentsEdgeCases:
         result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
         assert result == []
 
-    @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._get_current_user_name", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._unreplied_via_notifications", new_callable=AsyncMock)
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_name",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
+        new_callable=AsyncMock,
+    )
     async def test_fallback_caps_navigations(
         self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
     ):
@@ -1437,10 +1624,20 @@ class TestFindUnrepliedCommentsEdgeCases:
         # Should be capped at 5 navigations
         assert mock_comments.await_count == 5
 
-    @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._get_current_user_name", new_callable=AsyncMock)
-    @patch("linkedin_mcp_server.scraping.posts._unreplied_via_notifications", new_callable=AsyncMock)
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._get_current_user_name",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "linkedin_mcp_server.scraping.posts._unreplied_via_notifications",
+        new_callable=AsyncMock,
+    )
     async def test_fallback_stops_when_too_many_unreplied(
         self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
     ):
