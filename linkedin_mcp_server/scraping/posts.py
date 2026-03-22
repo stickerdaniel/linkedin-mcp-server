@@ -997,8 +997,8 @@ async def get_notifications(
 
             // Type detection keywords (order matters: first match wins)
             const typeMap = [
+                { type: 'reaction', terms: ['reacted', 'like', 'liked', 'love', 'celebrate', 'support', 'insightful', 'funny', 'curtiu', 'reagiu', 'reação'] },
                 { type: 'comment', terms: ['comment', 'commented', 'comentou', 'comentário', 'reply', 'replied', 'respondeu', 'resposta'] },
-                { type: 'reaction', terms: ['like', 'liked', 'love', 'celebrate', 'support', 'insightful', 'funny', 'curtiu', 'reagiu', 'reacted', 'reação'] },
                 { type: 'connection', terms: ['connect', 'connection', 'accepted', 'invitation', 'convite', 'conexão', 'aceito'] },
                 { type: 'mention', terms: ['mention', 'mentioned', 'mencionou', 'menção', 'tagged', 'marcou'] },
                 { type: 'endorsement', terms: ['endorse', 'endorsed', 'skill', 'competência', 'recomend'] },
