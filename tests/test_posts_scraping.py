@@ -414,6 +414,59 @@ class TestGetPostComments:
         )
         assert len(result) == 0
 
+    async def test_filters_empty_text_comment(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        """Comment with empty text (JS already stripped name) should be filtered."""
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "comment_id": "c1",
+                    "author_name": "Carina Fernândes",
+                    "author_url": "https://linkedin.com/in/carina/",
+                    "text": "",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+                {
+                    "comment_id": "c2",
+                    "author_name": "Bob",
+                    "author_url": "https://linkedin.com/in/bob/",
+                    "text": "Great insight!",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+            ]
+        )
+        result = await get_post_comments(
+            mock_page,
+            "https://linkedin.com/feed/update/urn:li:activity:empty-text-test/",
+        )
+        assert len(result) == 1
+        assert result[0]["text"] == "Great insight!"
+
+    async def test_filters_very_short_text_comment(
+        self, mock_scroll, mock_modal, mock_rate_limit, mock_page
+    ):
+        """Comment with text shorter than 3 chars should be filtered as ghost."""
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "comment_id": "c1",
+                    "author_name": "Someone",
+                    "author_url": "https://linkedin.com/in/someone/",
+                    "text": ",",
+                    "created_at": None,
+                    "comment_permalink": None,
+                },
+            ]
+        )
+        result = await get_post_comments(
+            mock_page,
+            "https://linkedin.com/feed/update/urn:li:activity:short-text-test/",
+        )
+        assert len(result) == 0
+
 
 @patch("linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock)
 @patch("linkedin_mcp_server.scraping.posts.get_post_comments", new_callable=AsyncMock)
@@ -591,6 +644,80 @@ class TestFindUnrepliedComments:
         result = await find_unreplied_comments(mock_page, since_days=7, max_posts=5)
         assert result == []
         mock_posts.assert_awaited_once()
+
+    async def test_filters_own_comments_in_supplement(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """Comments by the current user should be excluded from unreplied list."""
+        mock_notif.return_value = None
+        mock_name.return_value = "Andre Martins"
+        mock_posts.return_value = [
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "post_id": "urn:li:activity:1",
+                "text_preview": "",
+                "created_at": None,
+            }
+        ]
+        mock_comments.return_value = [
+            {
+                "comment_id": "c1",
+                "author_name": "View Andre Martins\u2019s  graphic link",
+                "author_url": "https://linkedin.com/in/andremartins/",
+                "text": "Thanks for the kind words!",
+                "created_at": None,
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c1",
+                "has_reply_from_author": False,
+            },
+            {
+                "comment_id": "c2",
+                "author_name": "Someone Else",
+                "author_url": "https://linkedin.com/in/someone/",
+                "text": "Great post!",
+                "created_at": None,
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c2",
+                "has_reply_from_author": False,
+            },
+        ]
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        assert len(result) == 1
+        assert result[0]["author_name"] == "Someone Else"
+
+    async def test_dedup_across_notification_and_post_scan(
+        self, mock_notif, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """Same comment_permalink from notifications and post scan should appear once."""
+        permalink = "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=urn:li:comment:100"
+        mock_notif.return_value = [
+            {
+                "comment_permalink": permalink,
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "snippet": "Someone commented",
+            }
+        ]
+        mock_name.return_value = "Me"
+        mock_posts.return_value = [
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:2/",
+                "post_id": "urn:li:activity:2",
+                "text_preview": "",
+                "created_at": None,
+            }
+        ]
+        mock_comments.return_value = [
+            {
+                "comment_id": "100",
+                "author_name": "Commenter",
+                "author_url": "https://linkedin.com/in/commenter/",
+                "text": "Someone commented on this",
+                "created_at": None,
+                "comment_permalink": permalink,
+                "has_reply_from_author": False,
+            },
+        ]
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        permalinks = [r["comment_permalink"] for r in result]
+        assert permalinks.count(permalink) == 1
 
 
 class TestGetPostContent:
