@@ -7,7 +7,9 @@ with persistent context. Profile state auto-persists to user_data_dir.
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
+from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core import (
     BrowserManager,
     resolve_remember_me_prompt,
@@ -46,7 +48,14 @@ async def interactive_login(
     print("   Please log in manually. You have 5 minutes to complete authentication.")
     print("   (This handles 2FA, captcha, and any security challenges)")
 
-    async with BrowserManager(user_data_dir=user_data_dir, headless=False) as browser:
+    launch_options: dict[str, Any] = {}
+    config = get_config()
+    if config.browser.chrome_path:
+        launch_options["executable_path"] = config.browser.chrome_path
+
+    async with BrowserManager(
+        user_data_dir=user_data_dir, headless=False, **launch_options
+    ) as browser:
         # Warm up browser to appear more human-like and avoid security checkpoints
         if warm_up:
             print("   Warming up browser (visiting normal sites first)...")
