@@ -12,7 +12,10 @@ from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
 from pydantic import Field
 
-from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.constants import (
+    TOOL_TIMEOUT_LONG_SECONDS,
+    TOOL_TIMEOUT_SECONDS,
+)
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor
@@ -255,7 +258,7 @@ def register_posts_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_feed_posts")
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=TOOL_TIMEOUT_LONG_SECONDS,
         title="Find Unreplied Comments",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"posts", "scraping"},
