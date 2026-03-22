@@ -75,8 +75,7 @@ async def detect_rate_limit(page: Page) -> None:
 
     Checks (in order):
     1. URL contains /checkpoint or /authwall (security challenge)
-    2. Page contains CAPTCHA iframe (bot detection)
-    3. Body text contains rate-limit phrases on error-shaped pages (throttling)
+    2. Body text contains rate-limit phrases on error-shaped pages (throttling)
 
     The body-text heuristic only runs on pages without a ``<main>`` element
     and with short body text (<2000 chars), since real rate-limit pages are
@@ -95,24 +94,6 @@ async def detect_rate_limit(page: Page) -> None:
             "You may need to verify your identity or wait before continuing.",
             suggested_wait_time=30,
         )
-
-    # Check for CAPTCHA
-    try:
-        captcha = await page.locator(
-            'iframe[title*="captcha" i], iframe[src*="captcha" i]'
-        ).count()
-        if captcha > 0:
-            rate_limit_state.record_rate_limit()
-            raise RateLimitError(
-                "CAPTCHA challenge detected. Manual intervention required.",
-                suggested_wait_time=30,
-            )
-    except RateLimitError:
-        raise
-    except PlaywrightTimeoutError:
-        pass
-    except Exception as e:
-        logger.debug("Error checking for CAPTCHA: %s", e)
 
     # Check for rate limit messages — only on error-shaped pages.
     # Real rate-limit pages have no <main> element and short body text.
