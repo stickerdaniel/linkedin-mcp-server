@@ -238,3 +238,83 @@ async def test_wait_for_manual_login_times_out_when_remember_me_repeats(monkeypa
 
     with pytest.raises(AuthenticationError, match="Manual login timeout"):
         await wait_for_manual_login(page, timeout=1000)
+
+
+@pytest.mark.asyncio
+async def test_warm_up_browser_only_visits_external_sites():
+    """warm_up_browser should NOT visit LinkedIn pages."""
+    visited_urls = []
+
+    page = MagicMock()
+
+    async def mock_goto(url, **kwargs):
+        visited_urls.append(url)
+
+    page.goto = AsyncMock(side_effect=mock_goto)
+    page.viewport_size = {"width": 1280, "height": 720}
+    page.mouse = MagicMock()
+    page.mouse.move = AsyncMock()
+    page.mouse.wheel = AsyncMock()
+    page.query_selector_all = AsyncMock(return_value=[])
+
+    from linkedin_mcp_server.core.auth import warm_up_browser
+    await warm_up_browser(page)
+
+    for url in visited_urls:
+        assert "linkedin.com" not in url, f"Warm-up should not visit LinkedIn: {url}"
+    assert len(visited_urls) >= 2, "Should visit at least 2 external sites"
+
+
+@pytest.mark.asyncio
+async def test_warm_up_browser_scrolls_external_pages():
+    """warm_up_browser should scroll on external pages."""
+    page = MagicMock()
+    page.goto = AsyncMock()
+    page.viewport_size = {"width": 1280, "height": 720}
+    page.mouse = MagicMock()
+    page.mouse.move = AsyncMock()
+    page.mouse.wheel = AsyncMock()
+    page.query_selector_all = AsyncMock(return_value=[])
+
+    from linkedin_mcp_server.core.auth import warm_up_browser
+    await warm_up_browser(page)
+
+    # mouse.wheel should have been called for scrolling
+    assert page.mouse.wheel.call_count >= 3, "Should scroll on external pages"
+
+
+@pytest.mark.asyncio
+async def test_warm_up_browser_returns_success_status():
+    """warm_up_browser should return a WarmUpResult with sites_visited count."""
+    page = MagicMock()
+    page.goto = AsyncMock()
+    page.viewport_size = {"width": 1280, "height": 720}
+    page.mouse = MagicMock()
+    page.mouse.move = AsyncMock()
+    page.mouse.wheel = AsyncMock()
+    page.query_selector_all = AsyncMock(return_value=[])
+
+    from linkedin_mcp_server.core.auth import warm_up_browser
+    result = await warm_up_browser(page)
+
+    assert result.sites_visited > 0
+    assert result.total_sites > 0
+    assert result.elapsed_seconds > 0
+
+
+@pytest.mark.asyncio
+async def test_warm_up_browser_handles_all_failures():
+    """warm_up_browser should return gracefully when all sites fail."""
+    page = MagicMock()
+    page.goto = AsyncMock(side_effect=Exception("network error"))
+    page.viewport_size = {"width": 1280, "height": 720}
+    page.mouse = MagicMock()
+    page.mouse.move = AsyncMock()
+    page.mouse.wheel = AsyncMock()
+    page.query_selector_all = AsyncMock(return_value=[])
+
+    from linkedin_mcp_server.core.auth import warm_up_browser
+    result = await warm_up_browser(page)
+
+    assert result.sites_visited == 0
+    assert result.success is False

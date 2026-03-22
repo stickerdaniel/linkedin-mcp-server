@@ -33,6 +33,10 @@ class TestServerConfig:
         assert config.transport == "stdio"
         assert config.port == 8000
 
+    def test_server_config_fingerprint_audit_default(self):
+        config = ServerConfig()
+        assert config.fingerprint_audit is False
+
 
 class TestAppConfig:
     def test_validate_invalid_port(self):

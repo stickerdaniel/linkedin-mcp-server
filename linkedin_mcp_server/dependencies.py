@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from linkedin_mcp_server.drivers.browser import (
     ensure_authenticated,
+    ensure_warmup_complete,
     get_or_create_browser,
     hard_reset_browser,
     record_scrape,
@@ -30,6 +31,7 @@ async def get_extractor() -> AsyncGenerator[LinkedInExtractor, None]:
     via raise_tool_error(); unexpected exceptions propagate as-is.
     """
     try:
+        await ensure_warmup_complete()
         if should_rotate():
             logger.info("Context rotation threshold reached — resetting browser")
             await hard_reset_browser()

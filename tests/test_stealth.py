@@ -43,6 +43,22 @@ def test_stealth_scripts_contain_memory_patch():
     assert any("performance.memory" in s or "jsHeapSizeLimit" in s for s in scripts)
 
 
+def test_stealth_scripts_contain_user_agent_patch():
+    scripts = get_stealth_init_scripts()
+    assert any("HeadlessChrome" in s for s in scripts)
+
+
+def test_stealth_scripts_contain_device_memory_patch():
+    scripts = get_stealth_init_scripts()
+    assert any("deviceMemory" in s for s in scripts)
+
+
+def test_stealth_scripts_do_not_patch_connection():
+    """navigator.connection should NOT be patched — real Chrome exposes it."""
+    scripts = get_stealth_init_scripts()
+    assert not any("navigator.connection" in s for s in scripts)
+
+
 # --- random_mouse_move ---
 
 

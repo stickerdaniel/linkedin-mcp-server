@@ -8,14 +8,17 @@ from patchright.async_api import Page
 
 logger = logging.getLogger(__name__)
 
-# Defense-in-depth: Patchright already patches navigator.webdriver, but the
-# guard (!== undefined) ensures this is a no-op when already patched — no
-# double-define risk.  Kept as a safety net for edge cases where Patchright's
-# patch may not apply (e.g. certain page navigations or iframes).
+# Defense-in-depth: Patchright already patches navigator.webdriver to undefined,
+# but real Chrome reports false (not undefined).  We patch it to false so the
+# value matches a non-automated browser.  The guard keeps this a no-op if
+# Patchright has already set it to undefined (treat undefined as already patched).
 _WEBDRIVER_SCRIPT = """\
-if (navigator.webdriver !== undefined) {
-  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-}
+(function() {
+  const wd = navigator.webdriver;
+  if (wd === true || wd === undefined) {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  }
+})();
 """
 
 _PLUGINS_SCRIPT = """\
@@ -78,6 +81,32 @@ if (!performance.memory) {
 }
 """
 
+# Headless Chrome includes "HeadlessChrome" in the User-Agent string, which is
+# a primary bot detection signal.  Strip it so the UA matches a real browser.
+_USER_AGENT_SCRIPT = """\
+(function() {
+  const ua = navigator.userAgent;
+  if (ua.indexOf('HeadlessChrome') !== -1) {
+    const patched = ua.replace('HeadlessChrome/', 'Chrome/');
+    Object.defineProperty(navigator, 'userAgent', { get: () => patched });
+  }
+})();
+"""
+
+# navigator.deviceMemory is absent in headless Chromium, signalling a bot/VM.
+# 4 GB is the most common capped value Chrome reports on real hardware.
+_DEVICE_MEMORY_SCRIPT = """\
+if (navigator.deviceMemory === undefined || navigator.deviceMemory === null) {
+  Object.defineProperty(navigator, 'deviceMemory', { get: () => 4 });
+}
+"""
+
+# navigator.connection: Real Chrome on macOS exposes this API with real data
+# (effectiveType, downlink, rtt).  Patchright/headless also exposes it with
+# synthetic data which is close enough — do NOT patch to null.  Previously we
+# patched to null based on a Brave baseline (Brave blocks this API), but real
+# Chrome has it.  Leaving Patchright's values is safer than null.
+
 
 def get_stealth_init_scripts() -> list[str]:
     """Return JavaScript init scripts for fingerprint hardening.
@@ -87,6 +116,8 @@ def get_stealth_init_scripts() -> list[str]:
     """
     return [
         _WEBDRIVER_SCRIPT,
+        _USER_AGENT_SCRIPT,
+        _DEVICE_MEMORY_SCRIPT,
         _PLUGINS_SCRIPT,
         _WEBGL_SCRIPT,
         _PERFORMANCE_MEMORY_SCRIPT,

@@ -271,6 +271,12 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
+        "--fingerprint-audit",
+        action="store_true",
+        help="Run fingerprint audit: compare Playwright vs real Chrome fingerprints",
+    )
+
+    parser.add_argument(
         "--user-data-dir",
         type=str,
         default=None,
@@ -333,6 +339,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.logout:
         config.server.logout = True
+
+    if args.fingerprint_audit:
+        config.server.fingerprint_audit = True
 
     if args.user_data_dir:
         config.browser.user_data_dir = args.user_data_dir

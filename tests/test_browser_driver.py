@@ -1,11 +1,13 @@
 """Tests for linkedin_mcp_server.drivers.browser runtime-aware auth startup."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.core.auth import WarmUpResult
 from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
     get_or_create_browser,
@@ -1014,6 +1016,7 @@ async def test_bridge_warms_up_browser_before_feed_validation(tmp_path):
         patch(
             "linkedin_mcp_server.drivers.browser.warm_up_browser",
             new_callable=AsyncMock,
+            return_value=WarmUpResult(sites_visited=3, total_sites=3, elapsed_seconds=1.0),
         ) as warm_up_mock,
     ):
         await get_or_create_browser()
@@ -1052,6 +1055,7 @@ async def test_bridge_does_not_navigate_before_cookie_injection(tmp_path):
         patch(
             "linkedin_mcp_server.drivers.browser.warm_up_browser",
             new_callable=AsyncMock,
+            return_value=WarmUpResult(sites_visited=3, total_sites=3, elapsed_seconds=1.0),
         ),
     ):
         await get_or_create_browser()
@@ -1063,3 +1067,50 @@ async def test_bridge_does_not_navigate_before_cookie_injection(tmp_path):
     first_browser.page.goto.assert_awaited_once_with(
         "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
     )
+
+
+@pytest.mark.asyncio
+async def test_ensure_warmup_complete_returns_immediately_when_set():
+    """Gate returns immediately if warm-up already complete."""
+    from linkedin_mcp_server.drivers.browser import (
+        ensure_warmup_complete,
+        mark_warmup_complete,
+        reset_warmup_gate,
+    )
+    mark_warmup_complete()
+    await asyncio.wait_for(ensure_warmup_complete(), timeout=0.1)
+    reset_warmup_gate()  # cleanup
+
+
+@pytest.mark.asyncio
+async def test_ensure_warmup_complete_blocks_until_set():
+    """Gate blocks until mark_warmup_complete is called."""
+    from linkedin_mcp_server.drivers.browser import (
+        ensure_warmup_complete,
+        mark_warmup_complete,
+        reset_warmup_gate,
+    )
+    reset_warmup_gate()
+
+    async def wait_then_mark():
+        await asyncio.sleep(0.05)
+        mark_warmup_complete()
+
+    asyncio.create_task(wait_then_mark())
+    await asyncio.wait_for(ensure_warmup_complete(), timeout=1.0)
+    reset_warmup_gate()  # cleanup
+
+
+@pytest.mark.asyncio
+async def test_ensure_warmup_complete_degrades_on_timeout(monkeypatch):
+    """Gate proceeds in degraded mode after timeout."""
+    from linkedin_mcp_server.drivers.browser import (
+        ensure_warmup_complete,
+        reset_warmup_gate,
+    )
+    import linkedin_mcp_server.drivers.browser as browser_mod
+    reset_warmup_gate()
+    monkeypatch.setattr(browser_mod, "_WARMUP_TIMEOUT", 0.1)
+    # Should not raise — just logs warning and returns
+    await ensure_warmup_complete()
+    reset_warmup_gate()  # cleanup

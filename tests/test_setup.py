@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from linkedin_mcp_server.core.auth import WarmUpResult
+
 from linkedin_mcp_server.session_state import portable_cookie_path
 from linkedin_mcp_server.setup import interactive_login
 
@@ -44,7 +46,7 @@ async def test_interactive_login_writes_source_state_when_cookie_export_succeeds
         "linkedin_mcp_server.setup.BrowserManager",
         lambda **kwargs: _BrowserContextManager(browser),
     )
-    monkeypatch.setattr("linkedin_mcp_server.setup.warm_up_browser", AsyncMock())
+    monkeypatch.setattr("linkedin_mcp_server.setup.warm_up_browser", AsyncMock(return_value=WarmUpResult(sites_visited=3, total_sites=3, elapsed_seconds=1.0)))
     monkeypatch.setattr(
         "linkedin_mcp_server.setup.resolve_remember_me_prompt",
         AsyncMock(return_value=False),
@@ -80,7 +82,7 @@ async def test_interactive_login_returns_false_when_cookie_export_fails(
         "linkedin_mcp_server.setup.BrowserManager",
         lambda **kwargs: _BrowserContextManager(browser),
     )
-    monkeypatch.setattr("linkedin_mcp_server.setup.warm_up_browser", AsyncMock())
+    monkeypatch.setattr("linkedin_mcp_server.setup.warm_up_browser", AsyncMock(return_value=WarmUpResult(sites_visited=3, total_sites=3, elapsed_seconds=1.0)))
     monkeypatch.setattr(
         "linkedin_mcp_server.setup.resolve_remember_me_prompt",
         AsyncMock(return_value=False),
