@@ -559,6 +559,56 @@ async def get_post_content(
     return result
 
 
+def _find_replied_authors(
+    comments: list[dict[str, Any]],
+    user_slug: str | None,
+) -> set[str]:
+    """Detect which authors the user has replied to by name-mention in reply text.
+
+    Scans comments from the user (matched by slug in author_url) and checks
+    if the text starts with another commenter's name. Returns set of author_url
+    values that the user has replied to.
+    """
+    if not user_slug:
+        return set()
+
+    slug_pattern = f"/in/{user_slug}"
+
+    # Collect non-user authors: author_url -> cleaned name
+    other_authors: dict[str, str] = {}
+    for c in comments:
+        url = c.get("author_url") or ""
+        if slug_pattern in url:
+            continue
+        name = _clean_author_display(c.get("author_name") or "")
+        if name and url:
+            other_authors[url] = name
+
+    # Check user's own comments for name mentions at start of text
+    replied_urls: set[str] = set()
+    for c in comments:
+        url = c.get("author_url") or ""
+        if slug_pattern not in url:
+            continue
+        text = (c.get("text") or "").strip().lower()
+        if not text:
+            continue
+        for author_url, author_name in other_authors.items():
+            if author_url in replied_urls:
+                continue
+            # Check full name
+            if text.startswith(author_name.lower()):
+                replied_urls.add(author_url)
+                continue
+            # Check individual name parts (min 4 chars to avoid false positives)
+            for part in author_name.split():
+                if len(part) >= 4 and text.startswith(part.lower()):
+                    replied_urls.add(author_url)
+                    break
+
+    return replied_urls
+
+
 def _clean_author_display(name: str) -> str:
     """Strip LinkedIn display-name wrappers like 'View X's graphic link'."""
     s = re.sub(r"^View\s+", "", name)
@@ -1268,8 +1318,16 @@ async def find_unreplied_comments(
                 page, post_url, current_user_name=current_name
             )
             nav_count += 1
+            # Detect authors the user already replied to (by name mention)
+            replied_author_urls = _find_replied_authors(comments, current_slug)
             for c in comments:
                 if c.get("has_reply_from_author"):
+                    continue
+                # Skip comments from authors the user already replied to
+                c_author_url = (c.get("author_url") or "").rstrip("/")
+                if c_author_url and c_author_url in {
+                    u.rstrip("/") for u in replied_author_urls
+                }:
                     continue
                 # Skip own comments (slug match on author_url is most reliable)
                 author_url = c.get("author_url") or ""

@@ -10,6 +10,7 @@ from linkedin_mcp_server.scraping.cache import scraping_cache
 from linkedin_mcp_server.scraping.posts import (
     _clean_author_display,
     _extract_author_info,
+    _find_replied_authors,
     _get_current_user_slug,
     _extract_engagement_metrics,
     _detect_post_type,
@@ -59,6 +60,84 @@ class TestCleanAuthorDisplay:
 
     def test_empty_string(self):
         assert _clean_author_display("") == ""
+
+
+class TestFindRepliedAuthors:
+    """Unit tests for _find_replied_authors (pure function)."""
+
+    def test_detects_reply_by_full_name_mention(self):
+        """User reply starting with author's full name marks that author as replied."""
+        comments = [
+            {
+                "author_name": "View Osmani Sadzinski's open to work graphic link",
+                "author_url": "https://linkedin.com/in/osmani/",
+                "text": "Excelente reflexão!",
+            },
+            {
+                "author_name": "View Andre Martins' graphic link",
+                "author_url": "https://linkedin.com/in/andre-martins-tech/",
+                "text": "Osmani Sadzinski, muito bom o seu ponto.",
+            },
+        ]
+        replied = _find_replied_authors(comments, "andre-martins-tech")
+        assert "https://linkedin.com/in/osmani/" in replied
+
+    def test_detects_reply_by_partial_name(self):
+        """Surname-only mention like 'Monici, obrigado!' matches 'Edson Monici'."""
+        comments = [
+            {
+                "author_name": "View Edson Monici's graphic link",
+                "author_url": "https://linkedin.com/in/monici/",
+                "text": "Andre, excelente reflexao.",
+            },
+            {
+                "author_name": "View Andre Martins' graphic link",
+                "author_url": "https://linkedin.com/in/andre-martins-tech/",
+                "text": "Monici, obrigado! Fico feliz que tenha ressoado.",
+            },
+        ]
+        replied = _find_replied_authors(comments, "andre-martins-tech")
+        assert "https://linkedin.com/in/monici/" in replied
+
+    def test_no_user_comments_returns_empty(self):
+        comments = [
+            {
+                "author_name": "Someone",
+                "author_url": "https://linkedin.com/in/someone/",
+                "text": "Great post!",
+            },
+        ]
+        replied = _find_replied_authors(comments, "andre-martins-tech")
+        assert replied == set()
+
+    def test_no_slug_returns_empty(self):
+        comments = [
+            {
+                "author_name": "Someone",
+                "author_url": "https://linkedin.com/in/someone/",
+                "text": "Great post!",
+            },
+        ]
+        replied = _find_replied_authors(comments, None)
+        assert replied == set()
+
+    def test_does_not_match_short_name_parts(self):
+        """Name parts shorter than 4 chars should not trigger matches."""
+        comments = [
+            {
+                "author_name": "Ana Lu",
+                "author_url": "https://linkedin.com/in/analu/",
+                "text": "Nice post!",
+            },
+            {
+                "author_name": "Andre Martins",
+                "author_url": "https://linkedin.com/in/andre-martins-tech/",
+                "text": "An interesting perspective on this topic.",
+            },
+        ]
+        replied = _find_replied_authors(comments, "andre-martins-tech")
+        # "An" (2 chars) should NOT match "Ana Lu"
+        assert "https://linkedin.com/in/analu/" not in replied
 
 
 class TestNormalizePostUrl:
@@ -767,6 +846,54 @@ class TestFindUnrepliedComments:
         result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
         permalinks = [r["comment_permalink"] for r in result]
         assert permalinks.count(permalink) == 1
+
+    async def test_excludes_comments_from_replied_authors(
+        self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
+    ):
+        """Comments from authors the user already replied to should be excluded."""
+        mock_notif.return_value = None
+        mock_name.return_value = "Andre Martins"
+        mock_slug.return_value = "andre-martins-tech"
+        mock_posts.return_value = [
+            {
+                "post_url": "https://linkedin.com/feed/update/urn:li:activity:1/",
+                "post_id": "urn:li:activity:1",
+                "text_preview": "",
+                "created_at": None,
+            }
+        ]
+        mock_comments.return_value = [
+            {
+                "comment_id": "c1",
+                "author_name": "View Osmani Sadzinski's open to work graphic link",
+                "author_url": "https://linkedin.com/in/osmani/",
+                "text": "Excelente reflexao!",
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c1",
+                "has_reply_from_author": False,
+            },
+            {
+                "comment_id": "c2",
+                "author_name": "View Andre Martins' graphic link",
+                "author_url": "https://linkedin.com/in/andre-martins-tech/",
+                "text": "Osmani Sadzinski, muito bom o seu ponto.",
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c2",
+                "has_reply_from_author": False,
+            },
+            {
+                "comment_id": "c3",
+                "author_name": "View Anderson Souza's graphic link",
+                "author_url": "https://linkedin.com/in/anderson/",
+                "text": "No fim, sao esses comportamentos que constroem carreira.",
+                "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c3",
+                "has_reply_from_author": False,
+            },
+        ]
+        result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
+        # Osmani replied to (user mentioned his name) → excluded
+        # Andre Martins is user → excluded by slug
+        # Anderson has no reply → included
+        assert len(result) == 1
+        assert result[0]["author_name"] == "View Anderson Souza's graphic link"
 
     async def test_filters_name_only_ghost_in_supplement(
         self, mock_notif, mock_slug, mock_name, mock_comments, mock_posts, mock_page
