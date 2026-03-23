@@ -3,7 +3,7 @@ name = "linkedin-scraper-mcp"
 version = "4.6.0"
 description = "MCP server for LinkedIn profile, company, and job scraping with Claude AI integration. Supports direct profile/company/job URL scraping with secure credential storage."
 readme = "README.md"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.14,<3.15"
 authors = [
     { name = "Daniel Sticker", email = "daniel@sticker.name" }
 ]
