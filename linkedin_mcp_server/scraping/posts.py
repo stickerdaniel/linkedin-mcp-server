@@ -1320,7 +1320,20 @@ async def find_unreplied_comments(
             nav_count += 1
             # Detect authors the user already replied to (by name mention)
             replied_author_urls = _find_replied_authors(comments, current_slug)
+            logger.info(
+                "Post %s: %d comments, current_slug=%r, replied_author_urls=%s",
+                post_url,
+                len(comments),
+                current_slug,
+                replied_author_urls,
+            )
             for c in comments:
+                logger.debug(
+                    "  comment author_url=%r text=%r has_reply=%s",
+                    c.get("author_url"),
+                    (c.get("text") or "")[:80],
+                    c.get("has_reply_from_author"),
+                )
                 if c.get("has_reply_from_author"):
                     continue
                 # Skip comments from authors the user already replied to
