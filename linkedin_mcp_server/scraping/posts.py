@@ -630,23 +630,43 @@ def _is_same_person(name_a: str, name_b: str) -> bool:
 
 
 async def _get_current_user_slug(page: Page) -> str | None:
-    """Extract the current user's LinkedIn profile slug from the nav bar.
+    """Extract the current user's LinkedIn profile slug.
 
+    Tries multiple strategies: nav bar link, then any page link.
     Returns the slug portion of /in/<slug> (e.g. 'andre-martins-tech').
     """
     try:
         slug = await page.evaluate(
             """() => {
-            const a = document.querySelector('nav a[href*="/in/"]:not([href*="/in/me"])');
-            if (!a) return null;
-            const m = a.href.match(/\\/in\\/([^/?#]+)/);
-            return m ? m[1] : null;
+            const BAD = /\\/(me|share|company|school|jobs)([/?#]|$)/;
+            // 1) Nav a[href*="/in/"] excluding /in/me
+            const navLink = document.querySelector('nav a[href*="/in/"]:not([href*="/in/me"])');
+            if (navLink) {
+                const m = navLink.href.match(/\\/in\\/([^/?#]+)/);
+                if (m && !BAD.test('/' + m[1])) return m[1];
+            }
+            // 2) Any link on the page with linkedin.com/in/<slug>
+            const links = Array.from(document.querySelectorAll('a[href*="/in/"]'));
+            for (const el of links) {
+                const m = el.href.match(/linkedin\\.com\\/in\\/([^/?#]+)/);
+                if (m && m[1] !== 'me' && !BAD.test('/' + m[1])) return m[1];
+            }
+            return null;
         }"""
         )
         return slug if isinstance(slug, str) and slug else None
     except Exception as e:
         logger.debug("Could not get current user slug: %s", e)
         return None
+
+
+def _slug_from_url(url: str) -> str | None:
+    """Extract LinkedIn profile slug from a /in/<slug> URL."""
+    m = re.search(r"/in/([^/?#]+)", url)
+    if not m:
+        return None
+    slug = m.group(1).rstrip("/")
+    return slug if slug and slug not in ("me", "share") else None
 
 
 async def _get_current_user_name(page: Page) -> str | None:
@@ -1318,6 +1338,11 @@ async def find_unreplied_comments(
                 page, post_url, current_user_name=current_name
             )
             nav_count += 1
+            # Fallback: retry slug detection now that page has navigated to a post
+            if not current_slug:
+                current_slug = await _get_current_user_slug(page)
+                if current_slug:
+                    logger.info("Got user slug after post navigation: %s", current_slug)
             # Detect authors the user already replied to (by name mention)
             replied_author_urls = _find_replied_authors(comments, current_slug)
             logger.info(
