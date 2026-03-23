@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote
 from typing import Any
 
 from patchright.async_api import Page
@@ -313,7 +314,7 @@ _JS_EXTRACT_NOTIFICATIONS = """(maxItems) => {
 
 def _normalize_post_url(post_url_or_id: str) -> str:
     """Return canonical post URL from post_url or post_id."""
-    s = post_url_or_id.strip()
+    s = unquote(post_url_or_id.strip())
     if s.startswith("http"):
         return s.rstrip("/") + "/"
     # Allow raw numeric id or urn
@@ -1360,6 +1361,10 @@ async def find_unreplied_comments(
                     c.get("has_reply_from_author"),
                 )
                 if c.get("has_reply_from_author"):
+                    continue
+                # Skip ghost entries: LinkedIn duplicates replies as sibling entries
+                # attributed to the other party's URL with a trailing slash.
+                if (c.get("author_url") or "").endswith("/"):
                     continue
                 # Skip comments from authors the user already replied to
                 c_author_url = (c.get("author_url") or "").rstrip("/")

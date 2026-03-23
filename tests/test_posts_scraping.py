@@ -628,7 +628,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": "c2",
                 "author_name": "OtherUser",
-                "author_url": "https://linkedin.com/in/other/",
+                "author_url": "https://linkedin.com/in/other",
                 "text": "Missed comment on post 2",
                 "created_at": None,
                 "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:2/?commentUrn=urn:li:comment:2",
@@ -667,7 +667,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": "c1",
                 "author_name": "Commenter",
-                "author_url": "https://linkedin.com/in/commenter/",
+                "author_url": "https://linkedin.com/in/commenter",
                 "text": "Unreplied comment",
                 "created_at": None,
                 "comment_permalink": None,
@@ -699,7 +699,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": None,
                 "author_name": "Commenter",
-                "author_url": "https://linkedin.com/in/commenter/",
+                "author_url": "https://linkedin.com/in/commenter",
                 "text": "Unreplied comment",
                 "created_at": None,
                 "comment_permalink": None,
@@ -732,7 +732,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": None,
                 "author_name": "A",
-                "author_url": "https://linkedin.com/in/a/",
+                "author_url": "https://linkedin.com/in/a",
                 "text": "Replied",
                 "created_at": None,
                 "comment_permalink": None,
@@ -741,7 +741,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": None,
                 "author_name": "B",
-                "author_url": "https://linkedin.com/in/b/",
+                "author_url": "https://linkedin.com/in/b",
                 "text": "Unreplied",
                 "created_at": None,
                 "comment_permalink": None,
@@ -800,7 +800,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": "c2",
                 "author_name": "Someone Else",
-                "author_url": "https://linkedin.com/in/someone/",
+                "author_url": "https://linkedin.com/in/someone",
                 "text": "Great post!",
                 "created_at": None,
                 "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c2",
@@ -866,7 +866,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": "c1",
                 "author_name": "View Osmani Sadzinski's open to work graphic link",
-                "author_url": "https://linkedin.com/in/osmani/",
+                "author_url": "https://linkedin.com/in/osmani",
                 "text": "Excelente reflexao!",
                 "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c1",
                 "has_reply_from_author": False,
@@ -882,7 +882,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": "c3",
                 "author_name": "View Anderson Souza's graphic link",
-                "author_url": "https://linkedin.com/in/anderson/",
+                "author_url": "https://linkedin.com/in/anderson",
                 "text": "No fim, sao esses comportamentos que constroem carreira.",
                 "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c3",
                 "has_reply_from_author": False,
@@ -913,7 +913,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": "c1",
                 "author_name": "View Carina Fern\u00e2ndes\u2019s  graphic link",
-                "author_url": "https://linkedin.com/in/carina/",
+                "author_url": "https://linkedin.com/in/carina",
                 "text": "Carina Fern\u00e2ndes",
                 "created_at": None,
                 "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c1",
@@ -922,7 +922,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": "c2",
                 "author_name": "Someone Real",
-                "author_url": "https://linkedin.com/in/someone/",
+                "author_url": "https://linkedin.com/in/someone",
                 "text": "Great post!",
                 "created_at": None,
                 "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c2",
@@ -960,7 +960,7 @@ class TestFindUnrepliedComments:
             {
                 "comment_id": "c2",
                 "author_name": "Alessandra Sim\u00f5es",
-                "author_url": "https://linkedin.com/in/alessandra/",
+                "author_url": "https://linkedin.com/in/alessandra",
                 "text": "Excelente reflex\u00e3o!",
                 "created_at": None,
                 "comment_permalink": "https://linkedin.com/feed/update/urn:li:activity:1/?commentUrn=c2",
