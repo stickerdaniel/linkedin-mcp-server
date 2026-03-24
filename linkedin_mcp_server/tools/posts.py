@@ -20,6 +20,7 @@ from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor
 from linkedin_mcp_server.serialization import strip_none
+from linkedin_mcp_server.scraping.sqlite_cache import sqlite_cache
 from linkedin_mcp_server.scraping.posts import (
     find_unreplied_comments as scrape_find_unreplied_comments,
     get_feed_posts as scrape_get_feed_posts,
@@ -60,12 +61,19 @@ def register_posts_tools(mcp: FastMCP) -> None:
         """
         try:
             logger.info("Scraping my recent posts (limit=%s)", limit)
+            _cache_args = {"limit": limit}
+            _cached = sqlite_cache.get_tool("get_my_recent_posts", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
             await ctx.report_progress(
                 progress=0, total=100, message="Fetching your recent posts"
             )
             posts = await scrape_get_my_recent_posts(extractor._page, limit=limit)
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return strip_none({"posts": posts})
+            result = strip_none({"posts": posts})
+            sqlite_cache.set_tool("get_my_recent_posts", _cache_args, result, ttl=21600)
+            return result
         except Exception as e:
             raise_tool_error(e, "get_my_recent_posts")
 
@@ -94,12 +102,19 @@ def register_posts_tools(mcp: FastMCP) -> None:
         """
         try:
             logger.info("Scraping post comments: %s", post_url[:80])
+            _cache_args = {"post_url": post_url}
+            _cached = sqlite_cache.get_tool("get_post_comments", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
             await ctx.report_progress(
                 progress=0, total=100, message="Loading post comments"
             )
             comments = await scrape_get_post_comments(extractor._page, post_url)
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return strip_none({"comments": comments})
+            result = strip_none({"comments": comments})
+            sqlite_cache.set_tool("get_post_comments", _cache_args, result, ttl=21600)
+            return result
         except Exception as e:
             raise_tool_error(e, "get_post_comments")
 
@@ -128,12 +143,19 @@ def register_posts_tools(mcp: FastMCP) -> None:
         """
         try:
             logger.info("Scraping post content: %s", post_url[:80])
+            _cache_args = {"post_url": post_url}
+            _cached = sqlite_cache.get_tool("get_post_content", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
             await ctx.report_progress(
                 progress=0, total=100, message="Loading post content"
             )
-            result = await scrape_get_post_content(extractor._page, post_url)
+            result_raw = await scrape_get_post_content(extractor._page, post_url)
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return strip_none(result)
+            result = strip_none(result_raw)
+            sqlite_cache.set_tool("get_post_content", _cache_args, result, ttl=21600)
+            return result
         except Exception as e:
             raise_tool_error(e, "get_post_content")
 
@@ -167,12 +189,19 @@ def register_posts_tools(mcp: FastMCP) -> None:
         """
         try:
             logger.info("Scraping notifications (limit=%s)", limit)
+            _cache_args = {"limit": limit}
+            _cached = sqlite_cache.get_tool("get_notifications", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
             await ctx.report_progress(
                 progress=0, total=100, message="Fetching your notifications"
             )
             notifications = await scrape_get_notifications(extractor._page, limit=limit)
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return strip_none({"notifications": notifications})
+            result = strip_none({"notifications": notifications})
+            sqlite_cache.set_tool("get_notifications", _cache_args, result, ttl=3600)
+            return result
         except Exception as e:
             raise_tool_error(e, "get_notifications")
 
@@ -207,6 +236,11 @@ def register_posts_tools(mcp: FastMCP) -> None:
             logger.info(
                 "Scraping person posts: %s (limit=%s)", linkedin_username, limit
             )
+            _cache_args = {"linkedin_username": linkedin_username, "limit": limit}
+            _cached = sqlite_cache.get_tool("get_person_posts", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
             await ctx.report_progress(
                 progress=0,
                 total=100,
@@ -216,7 +250,9 @@ def register_posts_tools(mcp: FastMCP) -> None:
                 extractor._page, linkedin_username, limit=limit
             )
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return strip_none({"posts": posts})
+            result = strip_none({"posts": posts})
+            sqlite_cache.set_tool("get_person_posts", _cache_args, result, ttl=21600)
+            return result
         except Exception as e:
             raise_tool_error(e, "get_person_posts")
 
@@ -248,12 +284,19 @@ def register_posts_tools(mcp: FastMCP) -> None:
         """
         try:
             logger.info("Scraping feed posts (limit=%s)", limit)
+            _cache_args = {"limit": limit}
+            _cached = sqlite_cache.get_tool("get_feed_posts", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
             await ctx.report_progress(
                 progress=0, total=100, message="Fetching feed posts"
             )
             posts = await scrape_get_feed_posts(extractor._page, limit=limit)
             await ctx.report_progress(progress=100, total=100, message="Complete")
-            return strip_none({"posts": posts})
+            result = strip_none({"posts": posts})
+            sqlite_cache.set_tool("get_feed_posts", _cache_args, result, ttl=21600)
+            return result
         except Exception as e:
             raise_tool_error(e, "get_feed_posts")
 

@@ -447,3 +447,74 @@ class TestPostsToolRegistration:
                 else TOOL_TIMEOUT_SECONDS
             )
             assert tool.timeout == expected, f"Tool {name} has wrong timeout"
+
+
+class TestGetMyRecentPostsCacheIntegration:
+    async def test_cache_miss_calls_scraper_and_stores(self, mock_context):
+        """On cache miss, scraper is called and result is stored."""
+        mock_extractor = _make_extractor_with_page()
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_my_recent_posts")
+
+        with (
+            patch("linkedin_mcp_server.tools.posts.sqlite_cache") as mock_cache,
+            patch(
+                "linkedin_mcp_server.tools.posts.scrape_get_my_recent_posts",
+                new_callable=AsyncMock,
+                return_value=[{"post_url": "https://linkedin.com/post/1"}],
+            ) as mock_scrape,
+        ):
+            mock_cache.get_tool.return_value = None
+            result = await tool_fn(mock_context, limit=5, extractor=mock_extractor)
+
+        mock_cache.get_tool.assert_called_once_with("get_my_recent_posts", {"limit": 5})
+        mock_scrape.assert_awaited_once()
+        mock_cache.set_tool.assert_called_once()
+        assert "posts" in result
+
+    async def test_cache_hit_skips_scraper(self, mock_context):
+        """On cache hit, scraper is NOT called."""
+        mock_extractor = _make_extractor_with_page()
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_my_recent_posts")
+        cached = {"posts": [{"post_url": "https://linkedin.com/cached"}]}
+
+        with (
+            patch("linkedin_mcp_server.tools.posts.sqlite_cache") as mock_cache,
+            patch(
+                "linkedin_mcp_server.tools.posts.scrape_get_my_recent_posts",
+                new_callable=AsyncMock,
+            ) as mock_scrape,
+        ):
+            mock_cache.get_tool.return_value = cached
+            result = await tool_fn(mock_context, limit=5, extractor=mock_extractor)
+
+        mock_scrape.assert_not_awaited()
+        assert result == cached
+
+
+class TestFindUnrepliedCommentsCacheIntegration:
+    async def test_scraper_called_results_returned(self, mock_context):
+        """find_unreplied_comments always calls scraper (not tool-result cached)."""
+        mock_extractor = _make_extractor_with_page()
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "find_unreplied_comments")
+        unreplied = [{"comment_permalink": "https://p/1", "text": "Hello"}]
+
+        with (
+            patch("linkedin_mcp_server.tools.posts.sqlite_cache"),
+            patch(
+                "linkedin_mcp_server.tools.posts.scrape_find_unreplied_comments",
+                new_callable=AsyncMock,
+                return_value=unreplied,
+            ) as mock_scrape,
+        ):
+            result = await tool_fn(
+                mock_context, since_days=7, max_posts=10, extractor=mock_extractor
+            )
+
+        mock_scrape.assert_awaited_once()
+        assert len(result["unreplied_comments"]) == 1
