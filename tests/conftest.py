@@ -1,4 +1,29 @@
+import importlib
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolate_sqlite_cache(tmp_path, monkeypatch):
+    """Redirect SQLiteCache singleton to a fresh temp DB for each test."""
+    from linkedin_mcp_server.scraping.sqlite_cache import SQLiteCache
+    import linkedin_mcp_server.scraping.sqlite_cache as _cache_mod
+
+    fresh = SQLiteCache(db_path=tmp_path / "test_cache.db")
+    monkeypatch.setattr(_cache_mod, "sqlite_cache", fresh)
+
+    for module_path in [
+        "linkedin_mcp_server.tools.posts",
+        "linkedin_mcp_server.tools.person",
+        "linkedin_mcp_server.tools.company",
+        "linkedin_mcp_server.tools.job",
+    ]:
+        try:
+            m = importlib.import_module(module_path)
+            if hasattr(m, "sqlite_cache"):
+                monkeypatch.setattr(m, "sqlite_cache", fresh)
+        except ImportError:
+            pass
 
 
 @pytest.fixture(autouse=True)

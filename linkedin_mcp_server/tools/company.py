@@ -20,6 +20,7 @@ from linkedin_mcp_server.scraping.extractor import (
     _RATE_LIMITED_MSG,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.scraping.sqlite_cache import sqlite_cache
 from linkedin_mcp_server.serialization import strip_none
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,12 @@ def register_company_tools(mcp: FastMCP) -> None:
                 sections,
             )
 
+            _cache_args = {"company_name": company_name, "sections": sections}
+            _cached = sqlite_cache.get_tool("get_company_profile", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
+
             await ctx.report_progress(
                 progress=0, total=100, message="Starting company profile scrape"
             )
@@ -77,7 +84,9 @@ def register_company_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return strip_none(result)
+            result = strip_none(result)
+            sqlite_cache.set_tool("get_company_profile", _cache_args, result, ttl=604800)
+            return result
 
         except Exception as e:
             raise_tool_error(e, "get_company_profile")  # NoReturn
@@ -106,6 +115,12 @@ def register_company_tools(mcp: FastMCP) -> None:
         """
         try:
             logger.info("Scraping company posts: %s", company_name)
+
+            _cache_args = {"company_name": company_name}
+            _cached = sqlite_cache.get_tool("get_company_posts", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting company posts scrape"
@@ -136,7 +151,9 @@ def register_company_tools(mcp: FastMCP) -> None:
                 result["references"] = references
             if section_errors:
                 result["section_errors"] = section_errors
-            return strip_none(result)
+            result = strip_none(result)
+            sqlite_cache.set_tool("get_company_posts", _cache_args, result, ttl=21600)
+            return result
 
         except Exception as e:
             raise_tool_error(e, "get_company_posts")  # NoReturn

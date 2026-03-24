@@ -15,6 +15,7 @@ from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor
+from linkedin_mcp_server.scraping.sqlite_cache import sqlite_cache
 from linkedin_mcp_server.serialization import strip_none
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,12 @@ def register_job_tools(mcp: FastMCP) -> None:
         try:
             logger.info("Scraping job: %s", job_id)
 
+            _cache_args = {"job_id": job_id}
+            _cached = sqlite_cache.get_tool("get_job_details", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
+
             await ctx.report_progress(
                 progress=0, total=100, message="Starting job scrape"
             )
@@ -56,7 +63,9 @@ def register_job_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return strip_none(result)
+            result = strip_none(result)
+            sqlite_cache.set_tool("get_job_details", _cache_args, result, ttl=86400)
+            return result
 
         except Exception as e:
             raise_tool_error(e, "get_job_details")  # NoReturn
@@ -109,6 +118,22 @@ def register_job_tools(mcp: FastMCP) -> None:
                 max_pages,
             )
 
+            _cache_args = {
+                "keywords": keywords,
+                "location": location,
+                "max_pages": max_pages,
+                "date_posted": date_posted,
+                "job_type": job_type,
+                "experience_level": experience_level,
+                "work_type": work_type,
+                "easy_apply": easy_apply,
+                "sort_by": sort_by,
+            }
+            _cached = sqlite_cache.get_tool("search_jobs", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
+
             await ctx.report_progress(
                 progress=0, total=100, message="Starting job search"
             )
@@ -127,7 +152,9 @@ def register_job_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return strip_none(result)
+            result = strip_none(result)
+            sqlite_cache.set_tool("search_jobs", _cache_args, result, ttl=14400)
+            return result
 
         except Exception as e:
             raise_tool_error(e, "search_jobs")  # NoReturn

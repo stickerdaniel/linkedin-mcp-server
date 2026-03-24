@@ -15,6 +15,7 @@ from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import LinkedInExtractor, parse_person_sections
+from linkedin_mcp_server.scraping.sqlite_cache import sqlite_cache
 from linkedin_mcp_server.serialization import strip_none
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,12 @@ def register_person_tools(mcp: FastMCP) -> None:
                 sections,
             )
 
+            _cache_args = {"linkedin_username": linkedin_username, "sections": sections}
+            _cached = sqlite_cache.get_tool("get_person_profile", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
+
             await ctx.report_progress(
                 progress=0, total=100, message="Starting person profile scrape"
             )
@@ -73,7 +80,9 @@ def register_person_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return strip_none(result)
+            result = strip_none(result)
+            sqlite_cache.set_tool("get_person_profile", _cache_args, result, ttl=604800)
+            return result
 
         except Exception as e:
             raise_tool_error(e, "get_person_profile")  # NoReturn
@@ -109,6 +118,12 @@ def register_person_tools(mcp: FastMCP) -> None:
                 location,
             )
 
+            _cache_args = {"keywords": keywords, "location": location}
+            _cached = sqlite_cache.get_tool("search_people", _cache_args)
+            if _cached is not None:
+                await ctx.report_progress(progress=100, total=100, message="Complete (cached)")
+                return _cached
+
             await ctx.report_progress(
                 progress=0, total=100, message="Starting people search"
             )
@@ -117,7 +132,9 @@ def register_person_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return strip_none(result)
+            result = strip_none(result)
+            sqlite_cache.set_tool("search_people", _cache_args, result, ttl=14400)
+            return result
 
         except Exception as e:
             raise_tool_error(e, "search_people")  # NoReturn
