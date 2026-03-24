@@ -495,6 +495,61 @@ class TestGetMyRecentPostsCacheIntegration:
         assert result == cached
 
 
+class TestSectionErrorsNotCached:
+    async def test_post_comments_with_section_errors_not_cached(self, mock_context):
+        """Results with section_errors must not be written to cache."""
+        mock_extractor = _make_extractor_with_page()
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+
+        with (
+            patch("linkedin_mcp_server.tools.posts.sqlite_cache") as mock_cache,
+            patch(
+                "linkedin_mcp_server.tools.posts.scrape_get_post_comments",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            mock_cache.get_tool.return_value = None
+            # Simulate that strip_none produces a result with section_errors
+            with patch(
+                "linkedin_mcp_server.tools.posts.strip_none",
+                return_value={"section_errors": {"comments": {"error_type": "rate_limited"}}},
+            ):
+                await tool_fn(
+                    "https://linkedin.com/feed/update/urn:li:activity:1/",
+                    mock_context,
+                    extractor=mock_extractor,
+                )
+
+        mock_cache.set_tool.assert_not_called()
+
+    async def test_post_comments_without_section_errors_is_cached(self, mock_context):
+        """Results without section_errors are written to cache."""
+        mock_extractor = _make_extractor_with_page()
+        mcp = FastMCP("test")
+        register_posts_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+
+        with (
+            patch("linkedin_mcp_server.tools.posts.sqlite_cache") as mock_cache,
+            patch(
+                "linkedin_mcp_server.tools.posts.scrape_get_post_comments",
+                new_callable=AsyncMock,
+                return_value=[{"comment_id": "c1", "text": "Hello"}],
+            ),
+        ):
+            mock_cache.get_tool.return_value = None
+            await tool_fn(
+                "https://linkedin.com/feed/update/urn:li:activity:1/",
+                mock_context,
+                extractor=mock_extractor,
+            )
+
+        mock_cache.set_tool.assert_called_once()
+
+
 class TestFindUnrepliedCommentsCacheIntegration:
     async def test_scraper_called_results_returned(self, mock_context):
         """find_unreplied_comments always calls scraper (not tool-result cached)."""

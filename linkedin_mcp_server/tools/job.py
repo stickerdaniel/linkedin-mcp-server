@@ -64,7 +64,8 @@ def register_job_tools(mcp: FastMCP) -> None:
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
             result = strip_none(result)
-            sqlite_cache.set_tool("get_job_details", _cache_args, result, ttl=86400)
+            if not result.get("section_errors"):
+                sqlite_cache.set_tool("get_job_details", _cache_args, result, ttl=86400)
             return result
 
         except Exception as e:
@@ -153,7 +154,8 @@ def register_job_tools(mcp: FastMCP) -> None:
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
             result = strip_none(result)
-            sqlite_cache.set_tool("search_jobs", _cache_args, result, ttl=14400)
+            if not result.get("section_errors"):
+                sqlite_cache.set_tool("search_jobs", _cache_args, result, ttl=14400)
             return result
 
         except Exception as e:

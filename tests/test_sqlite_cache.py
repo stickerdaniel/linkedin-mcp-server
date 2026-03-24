@@ -64,6 +64,12 @@ class TestToolCache:
         assert db.get_tool("tool_a", {"x": 1}) == {"data": "a"}
         assert db.get_tool("tool_b", {"x": 1}) == {"data": "b"}
 
+    def test_valid_entry_not_deleted_on_different_key_miss(self, db):
+        """A true cache miss (unknown key) does not delete valid entries for other keys."""
+        db.set_tool("my_tool", {"limit": 10}, {"posts": ["A"]}, ttl=3600)
+        db.get_tool("my_tool", {"limit": 99})  # miss — different key
+        assert db.get_tool("my_tool", {"limit": 10}) == {"posts": ["A"]}
+
 
 class TestSeenComments:
     def test_not_seen_by_default(self, db):

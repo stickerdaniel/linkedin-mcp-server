@@ -63,27 +63,23 @@ class SQLiteCache:
         """Return cached result if present and not expired, else None."""
         h = self._args_hash(tool_name, args)
         row = self._conn.execute(
-            "SELECT result_json, expires_at FROM tool_cache"
-            " WHERE tool_name=? AND args_hash=?",
+            "SELECT result_json FROM tool_cache"
+            " WHERE tool_name=? AND args_hash=? AND expires_at > datetime('now')",
             (tool_name, h),
         ).fetchone()
         if row is None:
-            return None
-        result_json, expires_at = row
-        expired = self._conn.execute(
-            "SELECT ? <= datetime('now')", (expires_at,)
-        ).fetchone()[0]
-        if expired:
+            # Lazy delete any expired entry for this key
             try:
                 self._conn.execute(
-                    "DELETE FROM tool_cache WHERE tool_name=? AND args_hash=?",
+                    "DELETE FROM tool_cache WHERE tool_name=? AND args_hash=?"
+                    " AND expires_at <= datetime('now')",
                     (tool_name, h),
                 )
             except Exception:
                 pass
             return None
         logger.debug("Cache hit: %s %s", tool_name, str(args)[:60])
-        return json.loads(result_json)
+        return json.loads(row[0])
 
     def set_tool(
         self,
@@ -130,13 +126,14 @@ class SQLiteCache:
                 (permalink, post_url),
             )
 
-    def cleanup(self) -> None:
-        """Delete all expired tool_cache entries."""
+    def cleanup(self) -> int:
+        """Delete all expired tool_cache entries. Returns count deleted."""
         deleted = self._conn.execute(
             "DELETE FROM tool_cache WHERE expires_at <= datetime('now')"
         ).rowcount
         if deleted:
             logger.info("SQLiteCache cleanup: removed %d expired entries", deleted)
+        return deleted
 
 
 # Module-level singleton — path resolved at import time

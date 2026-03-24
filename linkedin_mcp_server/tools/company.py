@@ -85,7 +85,8 @@ def register_company_tools(mcp: FastMCP) -> None:
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
             result = strip_none(result)
-            sqlite_cache.set_tool("get_company_profile", _cache_args, result, ttl=604800)
+            if not result.get("section_errors"):
+                sqlite_cache.set_tool("get_company_profile", _cache_args, result, ttl=604800)
             return result
 
         except Exception as e:
@@ -152,7 +153,8 @@ def register_company_tools(mcp: FastMCP) -> None:
             if section_errors:
                 result["section_errors"] = section_errors
             result = strip_none(result)
-            sqlite_cache.set_tool("get_company_posts", _cache_args, result, ttl=21600)
+            if not result.get("section_errors"):
+                sqlite_cache.set_tool("get_company_posts", _cache_args, result, ttl=21600)
             return result
 
         except Exception as e:

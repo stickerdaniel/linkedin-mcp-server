@@ -55,13 +55,13 @@ async def _periodic_cache_cleanup() -> None:
     """Run SQLiteCache cleanup every 6 hours."""
     while True:
         await asyncio.sleep(6 * 3600)
-        sqlite_cache.cleanup()
+        await asyncio.to_thread(sqlite_cache.cleanup)
 
 
 @lifespan
 async def cache_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Run startup cache cleanup and schedule periodic cleanup every 6h."""
-    sqlite_cache.cleanup()
+    await asyncio.to_thread(sqlite_cache.cleanup)
     task = asyncio.create_task(_periodic_cache_cleanup())
     yield {}
     task.cancel()

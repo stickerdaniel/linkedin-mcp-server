@@ -113,7 +113,8 @@ def register_posts_tools(mcp: FastMCP) -> None:
             comments = await scrape_get_post_comments(extractor._page, post_url)
             await ctx.report_progress(progress=100, total=100, message="Complete")
             result = strip_none({"comments": comments})
-            sqlite_cache.set_tool("get_post_comments", _cache_args, result, ttl=21600)
+            if not result.get("section_errors"):
+                sqlite_cache.set_tool("get_post_comments", _cache_args, result, ttl=21600)
             return result
         except Exception as e:
             raise_tool_error(e, "get_post_comments")
@@ -154,7 +155,8 @@ def register_posts_tools(mcp: FastMCP) -> None:
             result_raw = await scrape_get_post_content(extractor._page, post_url)
             await ctx.report_progress(progress=100, total=100, message="Complete")
             result = strip_none(result_raw)
-            sqlite_cache.set_tool("get_post_content", _cache_args, result, ttl=21600)
+            if not result.get("section_errors"):
+                sqlite_cache.set_tool("get_post_content", _cache_args, result, ttl=21600)
             return result
         except Exception as e:
             raise_tool_error(e, "get_post_content")
