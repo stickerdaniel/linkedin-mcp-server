@@ -226,7 +226,11 @@ def ensure_browser_installed() -> None:
     if browser_setup_ready():
         return
     print("   Installing Patchright Chromium browser...")
-    asyncio.run(_run_browser_setup())
+    try:
+        asyncio.run(_run_browser_setup())
+    except Exception as exc:
+        print(f"   ❌ Browser installation failed: {exc}")
+        raise
     print("   Browser installed.")
 
 
