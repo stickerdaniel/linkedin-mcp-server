@@ -5,6 +5,7 @@ Creates and configures the MCP server with comprehensive LinkedIn tool suite inc
 person profiles, company data, job information, and session management capabilities.
 """
 
+import asyncio
 import logging
 from typing import Any, AsyncIterator
 
@@ -16,6 +17,7 @@ from linkedin_mcp_server.authentication import get_authentication_source
 from linkedin_mcp_server.core.background_nav import stop_background_navigation
 from linkedin_mcp_server.drivers.browser import close_browser, hard_reset_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.scraping.sqlite_cache import sqlite_cache
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -49,11 +51,32 @@ async def auth_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     yield {}
 
 
+async def _periodic_cache_cleanup() -> None:
+    """Run SQLiteCache cleanup every 6 hours."""
+    while True:
+        await asyncio.sleep(6 * 3600)
+        sqlite_cache.cleanup()
+
+
+@lifespan
+async def cache_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
+    """Run startup cache cleanup and schedule periodic cleanup every 6h."""
+    sqlite_cache.cleanup()
+    task = asyncio.create_task(_periodic_cache_cleanup())
+    yield {}
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Cache cleanup task stopped")
+
+
 def create_mcp_server() -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools."""
     mcp = FastMCP(
         "linkedin_scraper",
-        lifespan=auth_lifespan | browser_lifespan,
+        lifespan=auth_lifespan | browser_lifespan | cache_lifespan,
         mask_error_details=True,
     )
     mcp.add_middleware(SequentialToolExecutionMiddleware())
