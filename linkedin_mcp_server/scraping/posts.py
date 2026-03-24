@@ -1276,13 +1276,9 @@ async def find_unreplied_comments(
     current_slug = await _get_current_user_slug(page)
 
     # 1) Try notifications first — fast, low-cost (1 navigation)
-    covered_post_urls: set[str] = set()
+    notification_post_urls: set[str] = set()
     from_notifications = await _unreplied_via_notifications(page, since_days, max_posts)
     if from_notifications is not None and len(from_notifications) > 0:
-        logger.info(
-            "Notifications returned %d unreplied comment(s)",
-            len(from_notifications),
-        )
         for item in from_notifications:
             permalink = item.get("comment_permalink") or ""
             if permalink and permalink in seen_permalinks:
@@ -1300,7 +1296,7 @@ async def find_unreplied_comments(
                 seen_permalinks.add(permalink)
             post_url = item.get("post_url")
             if post_url:
-                covered_post_urls.add(_normalize_post_url(post_url))
+                notification_post_urls.add(_normalize_post_url(post_url))
 
     # 2) Always supplement: scan recent posts not covered by notifications.
     #    Cap navigations to avoid triggering rate limits.
@@ -1329,9 +1325,6 @@ async def find_unreplied_comments(
         post_url = post.get("post_url")
         if not post_url:
             continue
-        # Skip posts already covered by notification results
-        if _normalize_post_url(post_url) in covered_post_urls:
-            continue
         if nav_count > 0:
             await asyncio.sleep(humanized_delay())
         try:
@@ -1342,24 +1335,27 @@ async def find_unreplied_comments(
             # Fallback: retry slug detection now that page has navigated to a post
             if not current_slug:
                 current_slug = await _get_current_user_slug(page)
-                if current_slug:
-                    logger.info("Got user slug after post navigation: %s", current_slug)
             # Detect authors the user already replied to (by name mention)
             replied_author_urls = _find_replied_authors(comments, current_slug)
-            logger.info(
-                "Post %s: %d comments, current_slug=%r, replied_author_urls=%s",
-                post_url,
-                len(comments),
-                current_slug,
-                replied_author_urls,
-            )
+            # Retroactively filter notification entries for this post:
+            # if _find_replied_authors found a reply to an author, remove
+            # that author's notification entry from unreplied.
+            if _normalize_post_url(post_url) in notification_post_urls:
+                permalink_to_author = {
+                    c["comment_permalink"]: (c.get("author_url") or "").rstrip("/")
+                    for c in comments
+                    if c.get("comment_permalink")
+                }
+                replied_set = {u.rstrip("/") for u in replied_author_urls}
+                unreplied[:] = [
+                    e for e in unreplied
+                    if not (
+                        e.get("comment_permalink") in permalink_to_author
+                        and permalink_to_author[e["comment_permalink"]]
+                        and permalink_to_author[e["comment_permalink"]] in replied_set
+                    )
+                ]
             for c in comments:
-                logger.debug(
-                    "  comment author_url=%r text=%r has_reply=%s",
-                    c.get("author_url"),
-                    (c.get("text") or "")[:80],
-                    c.get("has_reply_from_author"),
-                )
                 if c.get("has_reply_from_author"):
                     continue
                 # Skip ghost entries: LinkedIn duplicates replies as sibling entries

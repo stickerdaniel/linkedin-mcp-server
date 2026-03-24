@@ -639,11 +639,9 @@ class TestFindUnrepliedComments:
         mock_notif.assert_awaited_once()
         # Supplement should run — post scanning fetches recent posts
         mock_posts.assert_awaited_once()
-        # Post 1 covered by notifications — only post 2 scanned
-        mock_comments.assert_awaited_once()
-        call_url = mock_comments.call_args[0][1]
-        assert "activity:2" in call_url
-        # Results include both notification item and post-scan item
+        # Both posts are now scanned (notification-covered posts also scanned for retroactive filter)
+        assert mock_comments.await_count == 2
+        # Results include both notification item and post-scan item (deduped by permalink)
         assert len(result) == 2
         snippets = [r.get("snippet") or "" for r in result]
         assert any("Someone commented" in s for s in snippets)
@@ -2255,10 +2253,10 @@ class TestFindUnrepliedCommentsEdgeCases:
         ]
         mock_comments.return_value = []
         await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
-        # Only post 3 should be scanned (posts 1 and 2 covered by notifications)
-        assert mock_comments.await_count == 1
-        call_url = mock_comments.call_args[0][1]
-        assert "activity:3" in call_url
+        # All 3 posts are scanned (notification-covered posts also scanned for retroactive filter)
+        assert mock_comments.await_count == 3
+        scanned_urls = [c.args[1] for c in mock_comments.call_args_list]
+        assert any("activity:3" in url for url in scanned_urls)
 
     @patch(
         "linkedin_mcp_server.scraping.posts.get_my_recent_posts", new_callable=AsyncMock
@@ -2331,8 +2329,8 @@ class TestFindUnrepliedCommentsEdgeCases:
             }
         ]
         result = await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
-        # Post 1 covered by notifications — no comments calls
-        mock_comments.assert_not_awaited()
+        # Post 1 is now scanned to apply retroactive filter (even if notification-covered)
+        mock_comments.assert_awaited_once()
         assert len(result) == 1
 
     @patch(
@@ -2458,5 +2456,5 @@ class TestFindUnrepliedCommentsEdgeCases:
         ]
         mock_comments.return_value = []
         await find_unreplied_comments(mock_page, since_days=7, max_posts=20)
-        # Same post (with vs without trailing slash) — should NOT be re-scanned
-        mock_comments.assert_not_awaited()
+        # Same post (with vs without trailing slash) — scanned once for retroactive filter
+        mock_comments.assert_awaited_once()
