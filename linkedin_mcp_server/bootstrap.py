@@ -220,7 +220,9 @@ async def _run_browser_setup() -> None:
 def ensure_browser_installed() -> None:
     """Install Patchright Chromium synchronously if not already present.
 
-    Used by --login to guarantee the browser exists before launching it.
+    Used by CLI modes (--login, --status) to guarantee the browser exists
+    before launching it.  The normal server path uses async background setup
+    instead (non-blocking).
     """
     configure_browser_environment()
     if browser_setup_ready():

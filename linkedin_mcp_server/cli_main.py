@@ -7,7 +7,10 @@ from typing import Literal
 
 import inquirer
 
-from linkedin_mcp_server.bootstrap import configure_browser_environment, ensure_browser_installed
+from linkedin_mcp_server.bootstrap import (
+    configure_browser_environment,
+    ensure_browser_installed,
+)
 from linkedin_mcp_server.core import AuthenticationError
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
@@ -113,8 +116,6 @@ def get_profile_and_exit() -> None:
 
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Session Creation mode")
-
-    ensure_browser_installed()
 
     user_data_dir = config.browser.user_data_dir
     success = run_profile_creation(user_data_dir)
@@ -285,6 +286,11 @@ def main() -> None:
         # Handle --logout flag
         if config.server.logout:
             clear_profile_and_exit()
+
+        # Ensure browser is installed for CLI modes that need it.
+        # Normal server startup uses async background setup instead.
+        if config.server.login or config.server.status:
+            ensure_browser_installed()
 
         # Handle --login flag
         if config.server.login:
