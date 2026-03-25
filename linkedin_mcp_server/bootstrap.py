@@ -217,6 +217,25 @@ async def _run_browser_setup() -> None:
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
 
 
+def ensure_browser_installed() -> None:
+    """Install Patchright Chromium synchronously if not already present.
+
+    Used by CLI modes (--login, --status) to guarantee the browser exists
+    before launching it.  The normal server path uses async background setup
+    instead (non-blocking).
+    """
+    configure_browser_environment()
+    if browser_setup_ready():
+        return
+    print("   Installing Patchright Chromium browser...")
+    try:
+        asyncio.run(_run_browser_setup())
+    except Exception as exc:
+        print(f"   ❌ Browser installation failed: {exc}")
+        raise
+    print("   Browser installed.")
+
+
 def _safe_task_done(task: asyncio.Task[None] | None) -> bool:
     return task is not None and task.done()
 
