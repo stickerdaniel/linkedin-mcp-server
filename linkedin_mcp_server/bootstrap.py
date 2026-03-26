@@ -15,7 +15,7 @@ import sys
 from fastmcp import Context
 
 from linkedin_mcp_server.authentication import get_authentication_source
-from linkedin_mcp_server.common_utils import utcnow_iso
+from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
 from linkedin_mcp_server.drivers.browser import get_profile_dir
 from linkedin_mcp_server.exceptions import (
     AuthenticationBootstrapFailedError,
@@ -186,7 +186,7 @@ def _start_browser_setup_task_locked() -> None:
 async def _run_browser_setup() -> None:
     browser_dir = configure_browser_environment()
     metadata_path = install_metadata_path()
-    browser_dir.mkdir(parents=True, exist_ok=True)
+    secure_mkdir(browser_dir)
 
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -214,7 +214,9 @@ async def _run_browser_setup() -> None:
         "browser_name": "chromium",
         "installer_name": "patchright",
     }
-    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+    secure_write_text(
+        metadata_path, json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+    )
 
 
 def ensure_browser_installed() -> None:
