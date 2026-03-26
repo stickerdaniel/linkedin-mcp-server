@@ -11,7 +11,7 @@ import shutil
 from typing import Any
 from uuid import uuid4
 
-from linkedin_mcp_server.common_utils import utcnow_iso
+from linkedin_mcp_server.common_utils import secure_write_text, utcnow_iso
 from linkedin_mcp_server.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -327,5 +327,4 @@ def _load_json(path: Path) -> dict[str, Any] | None:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    secure_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")

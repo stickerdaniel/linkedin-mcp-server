@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 
+from linkedin_mcp_server.common_utils import secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
@@ -244,7 +245,7 @@ async def _bridge_runtime_profile(
     source_profile_dir = get_source_profile_dir()
     bridge_started_at = utcnow_iso()
     clear_runtime_profile(runtime_id, source_profile_dir)
-    profile_dir.parent.mkdir(parents=True, exist_ok=True)
+    secure_mkdir(profile_dir.parent)
     storage_state_path = runtime_storage_state_path(runtime_id, source_profile_dir)
     browser = _make_browser(
         profile_dir, launch_options=launch_options, viewport=viewport

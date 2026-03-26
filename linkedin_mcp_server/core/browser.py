@@ -13,6 +13,8 @@ from patchright.async_api import (
     async_playwright,
 )
 
+from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text
+
 from .exceptions import NetworkError
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,7 @@ class BrowserManager:
         try:
             self._playwright = await async_playwright().start()
 
-            Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
+            secure_mkdir(Path(self.user_data_dir))
 
             context_options: dict[str, Any] = {
                 "headless": self.headless,
@@ -186,7 +188,7 @@ class BrowserManager:
                 for c in all_cookies
                 if "linkedin.com" in c.get("domain", "")
             ]
-            path.write_text(json.dumps(cookies, indent=2))
+            secure_write_text(path, json.dumps(cookies, indent=2))
             logger.info("Exported %d LinkedIn cookies to %s", len(cookies), path)
             return True
         except Exception:
@@ -202,7 +204,7 @@ class BrowserManager:
             return False
 
         storage_path = Path(path)
-        storage_path.parent.mkdir(parents=True, exist_ok=True)
+        secure_mkdir(storage_path.parent)
         try:
             await self._context.storage_state(
                 path=storage_path,
