@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
+from pathlib import Path
 import re
+import tempfile
 
 
 def slugify_fragment(value: str) -> str:
@@ -14,3 +17,28 @@ def slugify_fragment(value: str) -> str:
 def utcnow_iso() -> str:
     """Return the current UTC timestamp in a compact ISO-8601 form."""
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def secure_mkdir(path: Path, mode: int = 0o700) -> None:
+    """Create a directory tree with restrictive permissions."""
+    path.mkdir(parents=True, exist_ok=True, mode=mode)
+
+
+def secure_write_text(path: Path, content: str, mode: int = 0o600) -> None:
+    """Atomically write *content* to *path* with owner-only permissions.
+
+    Uses a temp file + ``os.replace`` in the same directory so the write is
+    atomic on the same filesystem and avoids TOCTOU permission races.
+    """
+    secure_mkdir(path.parent)
+    fd = tempfile.NamedTemporaryFile(
+        mode="w", dir=path.parent, delete=False, suffix=".tmp"
+    )
+    try:
+        fd.write(content)
+        fd.close()
+        os.chmod(fd.name, mode)
+        os.replace(fd.name, path)
+    except BaseException:
+        os.unlink(fd.name)
+        raise
