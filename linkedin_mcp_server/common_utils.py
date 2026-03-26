@@ -31,14 +31,12 @@ def secure_write_text(path: Path, content: str, mode: int = 0o600) -> None:
     atomic on the same filesystem and avoids TOCTOU permission races.
     """
     secure_mkdir(path.parent)
-    fd = tempfile.NamedTemporaryFile(
-        mode="w", dir=path.parent, delete=False, suffix=".tmp"
-    )
+    fd_int, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
-        fd.write(content)
-        fd.close()
-        os.chmod(fd.name, mode)
-        os.replace(fd.name, path)
+        with os.fdopen(fd_int, "w") as f:
+            f.write(content)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
     except BaseException:
-        os.unlink(fd.name)
+        os.unlink(tmp)
         raise
