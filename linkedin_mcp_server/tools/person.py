@@ -136,3 +136,62 @@ def register_person_tools(mcp: FastMCP) -> None:
                 raise_tool_error(relogin_exc, "search_people")
         except Exception as e:
             raise_tool_error(e, "search_people")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Connect With Person",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"person", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def connect_with_person(
+        linkedin_username: str,
+        confirm_send: bool,
+        ctx: Context,
+        note: str | None = None,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Send a LinkedIn connection request to a person profile.
+
+        Args:
+            linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates")
+            confirm_send: Must be True to actually send the connection request
+            ctx: FastMCP context for progress reporting
+            note: Optional note to include with the invitation
+
+        Returns:
+            Dict with url, status, message, note_sent, and connect_path.
+            The tool returns structured statuses such as confirmation_required,
+            pending, already_connected, follow_only, connect_unavailable,
+            note_not_supported, or connected.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="connect_with_person"
+            )
+            logger.info(
+                "Connecting with person: %s (confirm_send=%s, note=%s)",
+                linkedin_username,
+                confirm_send,
+                note is not None,
+            )
+
+            await ctx.report_progress(
+                progress=0,
+                total=100,
+                message="Starting LinkedIn connection flow",
+            )
+
+            result = await extractor.connect_with_person(
+                linkedin_username,
+                confirm_send=confirm_send,
+                note=note,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except Exception as e:
+            raise_tool_error(e, "connect_with_person")  # NoReturn
