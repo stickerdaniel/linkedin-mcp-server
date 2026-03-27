@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
+ConnectPath = Literal["direct", "more_menu"]
 
 # Delay between page navigations to avoid rate limiting
 _NAV_DELAY = 2.0
@@ -86,6 +87,37 @@ _JOB_TYPE_MAP = {
 _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
+
+_CONNECT_BUTTON_SELECTOR = (
+    'main button:has-text("Connect"), '
+    'main a:has-text("Connect"), '
+    'main div[role="button"]:has-text("Connect")'
+)
+_PENDING_BUTTON_SELECTOR = (
+    'main button:has-text("Pending"), '
+    'main a:has-text("Pending"), '
+    'main div[role="button"]:has-text("Pending")'
+)
+_MORE_ACTIONS_SELECTOR = (
+    'main button[aria-label*="More"], '
+    'main button:has-text("More"), '
+    'main div[role="button"]:has-text("More")'
+)
+_MENU_CONNECT_SELECTOR = (
+    '[role="menu"] button:has-text("Connect"), '
+    '[role="menu"] a:has-text("Connect"), '
+    '[role="menu"] div[role="button"]:has-text("Connect"), '
+    '[role="menu"] li:has-text("Connect")'
+)
+_CONNECT_DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
+_ADD_NOTE_SELECTOR = (
+    'button:has-text("Add a note"), div[role="button"]:has-text("Add a note")'
+)
+_NOTE_TEXTAREA_SELECTOR = 'textarea[name="message"], textarea#custom-message, textarea'
+_SEND_INVITE_SELECTOR = 'button:has-text("Send"), div[role="button"]:has-text("Send")'
+_DISMISS_DIALOG_SELECTOR = (
+    'button[aria-label="Dismiss"], button:has-text("Dismiss"), button:has-text("Close")'
+)
 
 
 def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
@@ -359,6 +391,196 @@ class LinkedInExtractor:
     async def _navigate_to_page(self, url: str) -> None:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
         await self._goto_with_auth_checks(url)
+
+    @staticmethod
+    def _connection_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        note_sent: bool = False,
+        connect_path: ConnectPath | None = None,
+    ) -> dict[str, Any]:
+        """Build a structured response for a profile connection attempt."""
+        return {
+            "url": url,
+            "status": status,
+            "message": message,
+            "note_sent": note_sent,
+            "connect_path": connect_path,
+        }
+
+    async def _locator_is_visible(self, selector: str, *, timeout: int = 2000) -> bool:
+        """Return whether the first matching locator is visible."""
+        locator = self._page.locator(selector)
+        try:
+            if await locator.count() == 0:
+                return False
+        except Exception:
+            return False
+
+        first = locator.first
+        try:
+            await first.wait_for(state="visible", timeout=timeout)
+            return True
+        except PlaywrightTimeoutError:
+            return False
+        except Exception:
+            try:
+                return bool(await first.is_visible())
+            except Exception:
+                return False
+
+    async def _click_first(self, selector: str, *, timeout: int = 5000) -> None:
+        """Click the first visible locator that matches a selector."""
+        target = self._page.locator(selector).first
+        try:
+            await target.scroll_into_view_if_needed(timeout=timeout)
+        except Exception:
+            logger.debug("Could not scroll %s into view", selector, exc_info=True)
+        await target.click(timeout=timeout)
+
+    async def _fill_first(
+        self, selector: str, value: str, *, timeout: int = 5000
+    ) -> None:
+        """Fill the first matching input-like locator."""
+        await self._page.locator(selector).first.fill(value, timeout=timeout)
+
+    async def _read_profile_action_labels(self) -> set[str]:
+        """Read visible action labels from the profile action area."""
+        labels = await self._page.evaluate(
+            """() => {
+                const root = document.querySelector('main') || document.body;
+                if (!root) return [];
+
+                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+                return Array.from(root.querySelectorAll('button, a, [role="button"]'))
+                    .map(node => normalize(node.innerText || node.textContent))
+                    .filter(Boolean)
+                    .slice(0, 80);
+            }"""
+        )
+        if not isinstance(labels, list):
+            return set()
+        return {
+            str(label).strip().lower()
+            for label in labels
+            if isinstance(label, str) and label.strip()
+        }
+
+    async def _open_more_actions_menu(self) -> bool:
+        """Open the profile More actions menu when present."""
+        if not await self._locator_is_visible(_MORE_ACTIONS_SELECTOR):
+            return False
+        await self._click_first(_MORE_ACTIONS_SELECTOR)
+        try:
+            await self._page.wait_for_selector("[role='menu']", timeout=3000)
+        except PlaywrightTimeoutError:
+            logger.debug("More actions menu did not expose a role=menu container")
+        return True
+
+    async def _read_menu_action_labels(self) -> set[str]:
+        """Read visible action labels from the currently open More menu."""
+        labels = await self._page.evaluate(
+            """() => {
+                const menu = document.querySelector('[role="menu"]');
+                if (!menu) return [];
+
+                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+                return Array.from(
+                    menu.querySelectorAll('button, a, li, [role="menuitem"], [role="button"]')
+                )
+                    .map(node => normalize(node.innerText || node.textContent))
+                    .filter(Boolean)
+                    .slice(0, 80);
+            }"""
+        )
+        if not isinstance(labels, list):
+            return set()
+        return {
+            str(label).strip().lower()
+            for label in labels
+            if isinstance(label, str) and label.strip()
+        }
+
+    async def _more_actions_indicates_connected(self) -> bool:
+        """Return whether the More menu exposes a strong connected-state signal."""
+        menu_labels = await self._read_menu_action_labels()
+        if not menu_labels:
+            if not await self._open_more_actions_menu():
+                return False
+            menu_labels = await self._read_menu_action_labels()
+
+        return any("remove connection" in label for label in menu_labels)
+
+    async def _resolve_connect_path(self) -> ConnectPath | None:
+        """Determine how to access the Connect action on the current profile."""
+        if await self._locator_is_visible(_CONNECT_BUTTON_SELECTOR):
+            return "direct"
+
+        if not await self._open_more_actions_menu():
+            return None
+
+        if await self._locator_is_visible(_MENU_CONNECT_SELECTOR):
+            return "more_menu"
+
+        return None
+
+    async def _dismiss_connect_dialog(self) -> None:
+        """Dismiss the active connection dialog if one is still open."""
+        if await self._locator_is_visible(_DISMISS_DIALOG_SELECTOR, timeout=1000):
+            try:
+                await self._click_first(_DISMISS_DIALOG_SELECTOR)
+            except Exception:
+                logger.debug("Could not dismiss connect dialog", exc_info=True)
+
+    async def _send_connection_request(
+        self,
+        *,
+        connect_path: ConnectPath,
+        note: str | None,
+    ) -> tuple[str, str, bool]:
+        """Drive the LinkedIn connect dialog and submit the invite."""
+        if connect_path == "direct":
+            await self._click_first(_CONNECT_BUTTON_SELECTOR)
+        else:
+            await self._click_first(_MENU_CONNECT_SELECTOR)
+
+        try:
+            await self._page.wait_for_selector(_CONNECT_DIALOG_SELECTOR, timeout=5000)
+        except PlaywrightTimeoutError:
+            logger.debug("Connect dialog did not appear after clicking Connect")
+
+        note_sent = False
+        if note:
+            if not await self._locator_is_visible(_ADD_NOTE_SELECTOR, timeout=3000):
+                await self._dismiss_connect_dialog()
+                return (
+                    "note_not_supported",
+                    "LinkedIn did not offer note entry for this connection flow.",
+                    False,
+                )
+            await self._click_first(_ADD_NOTE_SELECTOR)
+            await self._fill_first(_NOTE_TEXTAREA_SELECTOR, note)
+            note_sent = True
+
+        if await self._locator_is_visible(_SEND_INVITE_SELECTOR, timeout=3000):
+            await self._click_first(_SEND_INVITE_SELECTOR)
+            try:
+                await self._page.wait_for_selector(
+                    _CONNECT_DIALOG_SELECTOR,
+                    state="hidden",
+                    timeout=5000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Connect dialog did not close after sending invite")
+
+        labels = await self._read_profile_action_labels()
+        if "pending" in labels:
+            message = "Connection request sent."
+        else:
+            message = "Connection request submitted."
+        return ("connected", message, note_sent)
 
     async def extract_page(
         self,
@@ -640,6 +862,86 @@ class LinkedInExtractor:
             await callbacks.on_complete("person profile", result)
 
         return result
+
+    async def connect_with_person(
+        self,
+        username: str,
+        *,
+        confirm_send: bool,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a LinkedIn connection request to a person profile."""
+        url = f"https://www.linkedin.com/in/{username}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=5000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s before connection flow", url)
+
+        await handle_modal_close(self._page)
+        labels = await self._read_profile_action_labels()
+
+        if (
+            await self._locator_is_visible(_PENDING_BUTTON_SELECTOR)
+            or "pending" in labels
+        ):
+            return self._connection_result(
+                url,
+                "pending",
+                "A connection request is already pending for this profile.",
+            )
+
+        direct_connect_visible = await self._locator_is_visible(
+            _CONNECT_BUTTON_SELECTOR
+        )
+
+        connect_path: ConnectPath | None
+        if direct_connect_visible:
+            connect_path = "direct"
+        else:
+            connect_path = await self._resolve_connect_path()
+
+        if connect_path is None and await self._more_actions_indicates_connected():
+            return self._connection_result(
+                url,
+                "already_connected",
+                "You are already connected with this profile.",
+            )
+
+        if connect_path is None:
+            if "follow" in labels:
+                return self._connection_result(
+                    url,
+                    "follow_only",
+                    "This profile currently exposes Follow but not Connect.",
+                )
+            return self._connection_result(
+                url,
+                "connect_unavailable",
+                "LinkedIn did not expose a usable Connect action for this profile.",
+            )
+
+        if not confirm_send:
+            return self._connection_result(
+                url,
+                "confirmation_required",
+                "Set confirm_send=true to send the connection request.",
+                connect_path=connect_path,
+            )
+
+        status, message, note_sent = await self._send_connection_request(
+            connect_path=connect_path,
+            note=note,
+        )
+        return self._connection_result(
+            url,
+            status,
+            message,
+            note_sent=note_sent,
+            connect_path=connect_path,
+        )
 
     async def scrape_company(
         self,
