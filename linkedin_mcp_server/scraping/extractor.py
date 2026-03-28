@@ -825,10 +825,13 @@ class LinkedInExtractor:
             )
 
         # ---- Handle dialog (structural selectors only) ----
-        try:
-            await self._page.wait_for_selector(_DIALOG_SELECTOR, timeout=5000)
-        except PlaywrightTimeoutError:
-            logger.debug("No dialog appeared after clicking '%s'", button_text)
+        # Only wait for a dialog when sending a Connect request (Accept
+        # typically completes immediately without a dialog).
+        if state == "connectable":
+            try:
+                await self._page.wait_for_selector(_DIALOG_SELECTOR, timeout=5000)
+            except PlaywrightTimeoutError:
+                logger.debug("No dialog appeared after clicking '%s'", button_text)
 
         note_sent = False
         if note and await self._dialog_is_open():
