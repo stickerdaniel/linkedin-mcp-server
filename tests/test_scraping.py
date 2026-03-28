@@ -4,7 +4,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.callbacks import ProgressCallback
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInScraperException,
+)
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
@@ -1773,3 +1777,148 @@ class TestSearchResultsExtraction:
             )
 
         assert result.text == placeholder
+
+
+class TestScrapePersonCallbacks:
+    """Test that scrape_person invokes callbacks at each stage."""
+
+    async def test_scrape_person_calls_callbacks(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        cb = MagicMock(spec=ProgressCallback)
+        cb.on_start = AsyncMock()
+        cb.on_progress = AsyncMock()
+        cb.on_complete = AsyncMock()
+        cb.on_error = AsyncMock()
+
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted("overlay text"),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.scrape_person(
+                "testuser", {"experience", "education"}, callbacks=cb
+            )
+
+        cb.on_start.assert_awaited_once()
+        assert cb.on_start.call_args[0][0] == "person profile"
+
+        # 3 sections: main_profile (always) + experience + education
+        assert cb.on_progress.await_count == 3
+        messages = [c.args[0] for c in cb.on_progress.call_args_list]
+        assert messages == [
+            "Scraped main_profile (1/3)",
+            "Scraped experience (2/3)",
+            "Scraped education (3/3)",
+        ]
+        # Last section should be at 95%
+        assert cb.on_progress.call_args_list[-1].args[1] == 95
+
+        cb.on_complete.assert_awaited_once()
+        assert cb.on_complete.call_args[0][0] == "person profile"
+        cb.on_error.assert_not_awaited()
+
+    async def test_scrape_person_no_callbacks_by_default(self, mock_page):
+        """Without callbacks, scrape_person works identically to before."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"main_profile"})
+
+        assert "main_profile" in result["sections"]
+
+    async def test_scrape_person_calls_on_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        cb = MagicMock(spec=ProgressCallback)
+        cb.on_start = AsyncMock()
+        cb.on_progress = AsyncMock()
+        cb.on_complete = AsyncMock()
+        cb.on_error = AsyncMock()
+
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=LinkedInScraperException("boom"),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            with pytest.raises(LinkedInScraperException):
+                await extractor.scrape_person(
+                    "testuser", {"main_profile"}, callbacks=cb
+                )
+
+        cb.on_start.assert_awaited_once()
+        cb.on_error.assert_awaited_once()
+        cb.on_complete.assert_not_awaited()
+
+
+class TestScrapeCompanyCallbacks:
+    """Test that scrape_company invokes callbacks at each stage."""
+
+    async def test_scrape_company_calls_callbacks(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        cb = MagicMock(spec=ProgressCallback)
+        cb.on_start = AsyncMock()
+        cb.on_progress = AsyncMock()
+        cb.on_complete = AsyncMock()
+        cb.on_error = AsyncMock()
+
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.scrape_company(
+                "testcorp", {"about", "posts", "jobs"}, callbacks=cb
+            )
+
+        cb.on_start.assert_awaited_once()
+        assert cb.on_start.call_args[0][0] == "company profile"
+
+        # 3 sections: about + posts + jobs
+        assert cb.on_progress.await_count == 3
+        messages = [c.args[0] for c in cb.on_progress.call_args_list]
+        assert messages == [
+            "Scraped about (1/3)",
+            "Scraped posts (2/3)",
+            "Scraped jobs (3/3)",
+        ]
+        assert cb.on_progress.call_args_list[-1].args[1] == 95
+
+        cb.on_complete.assert_awaited_once()
+        assert cb.on_complete.call_args[0][0] == "company profile"
+        cb.on_error.assert_not_awaited()

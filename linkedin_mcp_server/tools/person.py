@@ -10,6 +10,7 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 
+from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_ready_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -64,16 +65,13 @@ def register_person_tools(mcp: FastMCP) -> None:
                 sections,
             )
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Starting person profile scrape"
+            cb = MCPContextProgressCallback(ctx)
+            result = await extractor.scrape_person(
+                linkedin_username, requested, callbacks=cb
             )
-
-            result = await extractor.scrape_person(linkedin_username, requested)
 
             if unknown:
                 result["unknown_sections"] = unknown
-
-            await ctx.report_progress(progress=100, total=100, message="Complete")
 
             return result
 
