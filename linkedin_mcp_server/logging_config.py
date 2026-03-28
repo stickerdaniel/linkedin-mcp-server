@@ -12,6 +12,7 @@ import json
 import logging
 from typing import Any, Dict
 
+from linkedin_mcp_server.common_utils import secure_mkdir
 from linkedin_mcp_server.debug_trace import cleanup_trace_dir, get_trace_dir
 
 _TRACE_FILE_HANDLER: logging.Handler | None = None
@@ -122,7 +123,7 @@ def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> 
 
     trace_dir = get_trace_dir()
     if trace_dir is not None:
-        trace_dir.mkdir(parents=True, exist_ok=True)
+        secure_mkdir(trace_dir)
         file_handler = logging.FileHandler(trace_dir / "server.log", encoding="utf-8")
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
