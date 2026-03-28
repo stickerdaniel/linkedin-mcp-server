@@ -11,7 +11,8 @@ from fastmcp import Context, FastMCP
 from pydantic import Field
 
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.dependencies import get_ready_extractor
+from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,8 @@ def register_job_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            await handle_auth_error(e, ctx)  # NoReturn
         except Exception as e:
             raise_tool_error(e, "get_job_details")  # NoReturn
 
@@ -134,5 +137,7 @@ def register_job_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            await handle_auth_error(e, ctx)  # NoReturn
         except Exception as e:
             raise_tool_error(e, "search_jobs")  # NoReturn
