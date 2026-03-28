@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+from typing import NoReturn
 
 from fastmcp import Context
 
@@ -385,7 +386,70 @@ async def start_login_if_needed(ctx: Context | None = None) -> None:
     await _start_login_if_needed(ctx)
 
 
-def _move_invalid_auth_state_aside() -> None:
+async def invalidate_auth_and_trigger_relogin(
+    ctx: Context | None = None,
+) -> NoReturn:
+    """Force-invalidate stale auth state and trigger interactive login.
+
+    Unlike ``_start_login_if_needed()``, this ignores ``_auth_ready()`` — the
+    caller has already proven the session is invalid despite profile files
+    being present on disk.  The check-task → force-move → start-login sequence
+    is atomic under ``_lock`` so an in-flight login is never corrupted.
+
+    Raises:
+        AuthenticationStartedError: Login browser opened.
+        AuthenticationInProgressError: Login already running from a prior call.
+    """
+    logger.warning("Invalidating stale auth state and triggering re-login")
+    async with _lock:
+        await _refresh_background_task_state()
+
+        # If a login is already in progress, don't touch files — just report.
+        if _state.login_task is not None and not _state.login_task.done():
+            if ctx is not None:
+                await ctx.report_progress(
+                    progress=25,
+                    total=100,
+                    message="LinkedIn login already in progress",
+                )
+            raise AuthenticationInProgressError(
+                "No valid LinkedIn session is available yet. LinkedIn login is "
+                "already in progress in a browser window. Complete login there, "
+                "then retry this tool."
+            )
+
+        # Force-move stale profile files (skip _auth_ready() guard).
+        _force_move_auth_state_aside()
+
+        # Start fresh login.
+        _state.auth_state = AuthState.STARTING
+        _state.auth_started_at = utcnow_iso()
+        _state.last_error = None
+        _state.auth_completed_at = None
+        _state.login_task = asyncio.create_task(
+            _run_login_flow(), name="linkedin-login"
+        )
+
+    if ctx is not None:
+        await ctx.report_progress(
+            progress=25,
+            total=100,
+            message="LinkedIn login browser opened",
+        )
+    raise AuthenticationStartedError(
+        "Session expired. A login browser window has been opened. "
+        "Sign in with your LinkedIn credentials there, then retry this tool."
+    )
+
+
+def _move_auth_state_aside(*, force: bool = False) -> None:
+    """Move auth artifacts to a timestamped backup directory.
+
+    Args:
+        force: If True, skip the ``_auth_ready()`` guard.  Used by
+            ``invalidate_auth_and_trigger_relogin`` when the caller already
+            knows the session is stale.
+    """
     profile_dir = get_profile_dir()
     targets = [
         profile_dir,
@@ -396,16 +460,25 @@ def _move_invalid_auth_state_aside() -> None:
     existing = [target for target in targets if target.exists()]
     if not existing:
         return
-    if _auth_ready():
+    if not force and _auth_ready():
         return
 
     backup_dir = (
         auth_root_dir(profile_dir)
         / f"{_INVALID_STATE_PREFIX}{utcnow_iso().replace(':', '-')}"
     )
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    secure_mkdir(backup_dir)
     for target in existing:
         shutil.move(str(target), str(backup_dir / target.name))
+
+
+def _force_move_auth_state_aside() -> None:
+    """Move auth artifacts aside unconditionally (no ``_auth_ready()`` guard)."""
+    _move_auth_state_aside(force=True)
+
+
+def _move_invalid_auth_state_aside() -> None:
+    _move_auth_state_aside(force=False)
 
 
 async def _run_login_flow() -> None:
