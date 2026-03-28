@@ -1,10 +1,12 @@
 """Core extraction engine using innerText instead of DOM selectors."""
 
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
 import logging
 import re
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote_plus
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
@@ -34,6 +36,9 @@ from linkedin_mcp_server.scraping.link_metadata import (
 )
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
+
+if TYPE_CHECKING:
+    from linkedin_mcp_server.callbacks import ProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -550,7 +555,12 @@ class LinkedInExtractor:
             references=build_references(raw_result["references"], section_name),
         )
 
-    async def scrape_person(self, username: str, requested: set[str]) -> dict[str, Any]:
+    async def scrape_person(
+        self,
+        username: str,
+        requested: set[str],
+        callbacks: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
         """Scrape a person profile with configurable sections.
 
         Returns:
@@ -562,40 +572,60 @@ class LinkedInExtractor:
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
 
-        first = True
-        for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
-            if section_name not in requested:
-                continue
+        requested_ordered = [
+            (name, suffix, is_overlay)
+            for name, (suffix, is_overlay) in PERSON_SECTIONS.items()
+            if name in requested
+        ]
+        total = len(requested_ordered)
 
-            if not first:
-                await asyncio.sleep(_NAV_DELAY)
-            first = False
+        if callbacks:
+            await callbacks.on_start("person profile", base_url)
 
-            url = base_url + suffix
-            try:
-                if is_overlay:
-                    extracted = await self._extract_overlay(
-                        url, section_name=section_name
+        try:
+            for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
+                if i > 0:
+                    await asyncio.sleep(_NAV_DELAY)
+
+                url = base_url + suffix
+                try:
+                    if is_overlay:
+                        extracted = await self._extract_overlay(
+                            url, section_name=section_name
+                        )
+                    else:
+                        extracted = await self.extract_page(
+                            url, section_name=section_name
+                        )
+
+                    if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                        sections[section_name] = extracted.text
+                        if extracted.references:
+                            references[section_name] = extracted.references
+                    elif extracted.error:
+                        section_errors[section_name] = extracted.error
+                except LinkedInScraperException:
+                    raise
+                except Exception as e:
+                    logger.warning("Error scraping section %s: %s", section_name, e)
+                    section_errors[section_name] = build_issue_diagnostics(
+                        e,
+                        context="scrape_person",
+                        target_url=url,
+                        section_name=section_name,
                     )
-                else:
-                    extracted = await self.extract_page(url, section_name=section_name)
 
-                if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-                    sections[section_name] = extracted.text
-                    if extracted.references:
-                        references[section_name] = extracted.references
-                elif extracted.error:
-                    section_errors[section_name] = extracted.error
-            except LinkedInScraperException:
-                raise
-            except Exception as e:
-                logger.warning("Error scraping section %s: %s", section_name, e)
-                section_errors[section_name] = build_issue_diagnostics(
-                    e,
-                    context="scrape_person",
-                    target_url=url,
-                    section_name=section_name,
-                )
+                # "Scraped" = processed/attempted, not necessarily successful.
+                # Per-section failures are captured in section_errors.
+                if callbacks:
+                    percent = round((i + 1) / total * 95)
+                    await callbacks.on_progress(
+                        f"Scraped {section_name} ({i + 1}/{total})", percent
+                    )
+        except LinkedInScraperException as e:
+            if callbacks:
+                await callbacks.on_error(e)
+            raise
 
         result: dict[str, Any] = {
             "url": f"{base_url}/",
@@ -605,10 +635,17 @@ class LinkedInExtractor:
             result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
+
+        if callbacks:
+            await callbacks.on_complete("person profile", result)
+
         return result
 
     async def scrape_company(
-        self, company_name: str, requested: set[str]
+        self,
+        company_name: str,
+        requested: set[str],
+        callbacks: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         """Scrape a company profile with configurable sections.
 
@@ -621,40 +658,60 @@ class LinkedInExtractor:
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
 
-        first = True
-        for section_name, (suffix, is_overlay) in COMPANY_SECTIONS.items():
-            if section_name not in requested:
-                continue
+        requested_ordered = [
+            (name, suffix, is_overlay)
+            for name, (suffix, is_overlay) in COMPANY_SECTIONS.items()
+            if name in requested
+        ]
+        total = len(requested_ordered)
 
-            if not first:
-                await asyncio.sleep(_NAV_DELAY)
-            first = False
+        if callbacks:
+            await callbacks.on_start("company profile", base_url)
 
-            url = base_url + suffix
-            try:
-                if is_overlay:
-                    extracted = await self._extract_overlay(
-                        url, section_name=section_name
+        try:
+            for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
+                if i > 0:
+                    await asyncio.sleep(_NAV_DELAY)
+
+                url = base_url + suffix
+                try:
+                    if is_overlay:
+                        extracted = await self._extract_overlay(
+                            url, section_name=section_name
+                        )
+                    else:
+                        extracted = await self.extract_page(
+                            url, section_name=section_name
+                        )
+
+                    if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                        sections[section_name] = extracted.text
+                        if extracted.references:
+                            references[section_name] = extracted.references
+                    elif extracted.error:
+                        section_errors[section_name] = extracted.error
+                except LinkedInScraperException:
+                    raise
+                except Exception as e:
+                    logger.warning("Error scraping section %s: %s", section_name, e)
+                    section_errors[section_name] = build_issue_diagnostics(
+                        e,
+                        context="scrape_company",
+                        target_url=url,
+                        section_name=section_name,
                     )
-                else:
-                    extracted = await self.extract_page(url, section_name=section_name)
 
-                if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-                    sections[section_name] = extracted.text
-                    if extracted.references:
-                        references[section_name] = extracted.references
-                elif extracted.error:
-                    section_errors[section_name] = extracted.error
-            except LinkedInScraperException:
-                raise
-            except Exception as e:
-                logger.warning("Error scraping section %s: %s", section_name, e)
-                section_errors[section_name] = build_issue_diagnostics(
-                    e,
-                    context="scrape_company",
-                    target_url=url,
-                    section_name=section_name,
-                )
+                # "Scraped" = processed/attempted, not necessarily successful.
+                # Per-section failures are captured in section_errors.
+                if callbacks:
+                    percent = round((i + 1) / total * 95)
+                    await callbacks.on_progress(
+                        f"Scraped {section_name} ({i + 1}/{total})", percent
+                    )
+        except LinkedInScraperException as e:
+            if callbacks:
+                await callbacks.on_error(e)
+            raise
 
         result: dict[str, Any] = {
             "url": f"{base_url}/",
@@ -664,6 +721,10 @@ class LinkedInExtractor:
             result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
+
+        if callbacks:
+            await callbacks.on_complete("company profile", result)
+
         return result
 
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
