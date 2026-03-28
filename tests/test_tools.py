@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastmcp import FastMCP
 
+from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.scraping.extractor import ExtractedSection, _RATE_LIMITED_MSG
 
 
@@ -84,6 +85,26 @@ class TestPersonTool:
         assert isinstance(call_args[0][1], set)
         assert "experience" in call_args[0][1]
         assert "contact_info" in call_args[0][1]
+
+    async def test_get_person_profile_passes_callbacks(self, mock_context):
+        """Verify tool wires MCPContextProgressCallback to the extractor."""
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "sections": {"main_profile": "John Doe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_person_profile")
+        await tool_fn("test-user", mock_context, extractor=mock_extractor)
+
+        call_kwargs = mock_extractor.scrape_person.call_args.kwargs
+        assert "callbacks" in call_kwargs
+        assert isinstance(call_kwargs["callbacks"], MCPContextProgressCallback)
 
     async def test_get_person_profile_unknown_section(self, mock_context):
         expected = {
@@ -190,6 +211,26 @@ class TestCompanyTools:
         result = await tool_fn("testcorp", mock_context, extractor=mock_extractor)
         assert "about" in result["sections"]
         assert "pages_visited" not in result
+
+    async def test_get_company_profile_passes_callbacks(self, mock_context):
+        """Verify tool wires MCPContextProgressCallback to the extractor."""
+        expected = {
+            "url": "https://www.linkedin.com/company/testcorp/",
+            "sections": {"about": "TestCorp\nWe build things"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_company_profile")
+        await tool_fn("testcorp", mock_context, extractor=mock_extractor)
+
+        call_kwargs = mock_extractor.scrape_company.call_args.kwargs
+        assert "callbacks" in call_kwargs
+        assert isinstance(call_kwargs["callbacks"], MCPContextProgressCallback)
 
     async def test_get_company_profile_unknown_section(self, mock_context):
         expected = {
