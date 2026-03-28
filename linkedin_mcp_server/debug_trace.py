@@ -180,5 +180,11 @@ async def record_page_trace(
         "extra": extra or {},
     }
 
-    with (trace_dir / "trace.jsonl").open("a", encoding="utf-8") as fh:
+    trace_jsonl = trace_dir / "trace.jsonl"
+    try:
+        fd = os.open(str(trace_jsonl), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except FileExistsError:
+        pass
+    with trace_jsonl.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
