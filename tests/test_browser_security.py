@@ -13,7 +13,9 @@ def _mode(path):
     return stat.S_IMODE(path.stat().st_mode)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not portable on Windows")
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX permission bits are not portable on Windows"
+)
 def test_secure_profile_dirs_hardens_linkedin_tree(tmp_path):
     root = tmp_path / ".linkedin-mcp"
     profile = root / "profile"
@@ -27,7 +29,9 @@ def test_secure_profile_dirs_hardens_linkedin_tree(tmp_path):
     assert _mode(profile) == 0o700
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not portable on Windows")
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX permission bits are not portable on Windows"
+)
 def test_secure_profile_dirs_does_not_harden_unrelated_parent(tmp_path):
     parent = tmp_path / "custom"
     profile = parent / "profile"
@@ -40,7 +44,9 @@ def test_secure_profile_dirs_does_not_harden_unrelated_parent(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not portable on Windows")
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX permission bits are not portable on Windows"
+)
 async def test_export_cookies_writes_owner_only_file(tmp_path):
     manager = BrowserManager(user_data_dir=tmp_path / ".linkedin-mcp" / "profile")
     manager._context = MagicMock()
