@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 
-from linkedin_mcp_server.common_utils import slugify_fragment, utcnow_iso
+from linkedin_mcp_server.common_utils import secure_mkdir, slugify_fragment, utcnow_iso
 from linkedin_mcp_server.debug_trace import get_trace_dir, mark_trace_for_retention
 from linkedin_mcp_server.session_state import (
     auth_root_dir,
@@ -45,7 +45,7 @@ def build_issue_diagnostics(
     trace_dir = mark_trace_for_retention() or get_trace_dir()
     log_path = trace_dir / "server.log" if trace_dir else None
     issue_dir = trace_dir or (auth_root_dir(source_profile_dir) / "issue-reports")
-    issue_dir.mkdir(parents=True, exist_ok=True)
+    secure_mkdir(issue_dir)
     issue_path = (
         issue_dir
         / f"{timestamp.replace(':', '').replace('-', '')}-{slugify_fragment(context) or 'issue'}.md"
