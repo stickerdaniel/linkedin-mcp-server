@@ -113,7 +113,12 @@ _CONNECT_DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 _ADD_NOTE_SELECTOR = (
     'button:has-text("Add a note"), div[role="button"]:has-text("Add a note")'
 )
-_NOTE_TEXTAREA_SELECTOR = 'textarea[name="message"], textarea#custom-message, textarea'
+_NOTE_TEXTAREA_SELECTOR = (
+    '[role="dialog"] textarea[name="message"], '
+    '[role="dialog"] textarea#custom-message, '
+    'dialog textarea[name="message"], '
+    "dialog textarea"
+)
 _SEND_INVITE_SELECTOR = 'button:has-text("Send"), div[role="button"]:has-text("Send")'
 _DISMISS_DIALOG_SELECTOR = (
     'button[aria-label="Dismiss"], button:has-text("Dismiss"), button:has-text("Close")'
@@ -564,16 +569,23 @@ class LinkedInExtractor:
             await self._fill_first(_NOTE_TEXTAREA_SELECTOR, note)
             note_sent = True
 
-        if await self._locator_is_visible(_SEND_INVITE_SELECTOR, timeout=3000):
-            await self._click_first(_SEND_INVITE_SELECTOR)
-            try:
-                await self._page.wait_for_selector(
-                    _CONNECT_DIALOG_SELECTOR,
-                    state="hidden",
-                    timeout=5000,
-                )
-            except PlaywrightTimeoutError:
-                logger.debug("Connect dialog did not close after sending invite")
+        if not await self._locator_is_visible(_SEND_INVITE_SELECTOR, timeout=3000):
+            await self._dismiss_connect_dialog()
+            return (
+                "send_failed",
+                "LinkedIn did not expose a Send button in the connection dialog.",
+                False,
+            )
+
+        await self._click_first(_SEND_INVITE_SELECTOR)
+        try:
+            await self._page.wait_for_selector(
+                _CONNECT_DIALOG_SELECTOR,
+                state="hidden",
+                timeout=5000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Connect dialog did not close after sending invite")
 
         labels = await self._read_profile_action_labels()
         if "pending" in labels:

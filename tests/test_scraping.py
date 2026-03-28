@@ -1006,6 +1006,37 @@ class TestConnectWithPerson:
         mock_click.assert_awaited_once()
         mock_dismiss.assert_awaited_once()
 
+    async def test_send_connection_request_returns_send_failed(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch.object(
+                extractor,
+                "_click_first",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_dismiss_connect_dialog",
+                new_callable=AsyncMock,
+            ) as mock_dismiss,
+            patch.object(
+                extractor,
+                "_locator_is_visible",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            status, message, note_sent = await extractor._send_connection_request(
+                connect_path="direct",
+                note=None,
+            )
+
+        assert status == "send_failed"
+        assert "Send button" in message
+        assert note_sent is False
+        mock_dismiss.assert_awaited_once()
+
     async def test_references_are_grouped_by_section(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with (
