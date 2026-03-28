@@ -750,72 +750,31 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         note: str | None = None,
-        ctx: Any = None,
     ) -> dict[str, Any]:
-        """Send a LinkedIn connection request using LLM-driven state detection.
+        """Send a LinkedIn connection request or accept an incoming one.
 
-        Uses ``ctx.sample()`` to analyze the profile page text and determine
-        the relationship state and which button to click.  The dialog
-        interaction (note textarea, send button) uses structural CSS
-        selectors only — no hardcoded button text.
+        Scrapes the profile page, parses the action area text to detect
+        the connection state, then clicks the appropriate button.  Dialog
+        interaction uses structural CSS selectors — no hardcoded button text.
         """
         from linkedin_mcp_server.scraping.connection import (
-            ANALYSIS_SYSTEM_PROMPT,
-            ProfileAnalysis,
-            build_analysis_message,
+            STATE_BUTTON_MAP,
+            detect_connection_state,
         )
 
         url = f"https://www.linkedin.com/in/{username}/"
-        await self._navigate_to_page(url)
-        await detect_rate_limit(self._page)
 
-        try:
-            await self._page.wait_for_selector("main", timeout=5000)
-        except PlaywrightTimeoutError:
-            logger.debug("No <main> element found on %s before connection flow", url)
-
-        await handle_modal_close(self._page)
-
-        # ---- LLM analysis (single call) ----
-        page_text = await self.get_page_text()
+        # Scrape the profile to get the page text
+        profile = await self.scrape_person(username, {"main_profile"})
+        page_text = profile.get("sections", {}).get("main_profile", "")
         if not page_text:
             return _connection_result(
                 url, "unavailable", "Could not read profile page."
             )
 
-        if ctx is None:
-            return _connection_result(
-                url,
-                "sampling_unavailable",
-                "MCP sampling (ctx) is required for connect_with_person.",
-            )
-
-        try:
-            sampling_result = await ctx.sample(
-                messages=build_analysis_message(page_text),
-                system_prompt=ANALYSIS_SYSTEM_PROMPT,
-                result_type=ProfileAnalysis,
-                max_tokens=256,
-            )
-            analysis: ProfileAnalysis = sampling_result.result
-        except Exception as exc:
-            logger.warning("LLM sampling failed: %s", exc)
-            return _connection_result(
-                url,
-                "sampling_error",
-                f"LLM sampling failed: {exc}",
-            )
-
-        logger.info(
-            "LLM analysis for %s: state=%s button=%s reason=%s",
-            username,
-            analysis.state,
-            analysis.action_button_text,
-            analysis.reasoning,
-        )
-
-        # ---- Act on analysis ----
-        state = analysis.state
+        # Detect state from the scraped text
+        state = detect_connection_state(page_text)
+        logger.info("Connection state for %s: %s", username, state)
 
         if state == "already_connected":
             return _connection_result(
@@ -848,15 +807,15 @@ class LinkedInExtractor:
                 "Set confirm_send=true to send the connection request.",
             )
 
-        button_text = analysis.action_button_text
+        button_text = STATE_BUTTON_MAP.get(state)
         if not button_text:
             return _connection_result(
                 url,
                 "connect_unavailable",
-                "LLM analysis did not identify a button to click.",
+                f"No button mapping for state '{state}'.",
             )
 
-        # ---- Click the LLM-identified button ----
+        # Click the button (page is already loaded from scrape_person)
         clicked = await self.click_button_by_text(button_text)
         if not clicked:
             return _connection_result(
