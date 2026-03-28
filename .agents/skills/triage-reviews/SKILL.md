@@ -32,7 +32,7 @@ For EVERY finding, verify against real code before accepting or rejecting:
 2. **Check if the issue still exists** — it may already be fixed in a later commit
 3. **Verify correctness** using:
    - Code analysis (read surrounding context, trace call paths)
-   - `btca ask -r <resource> -q "..."` for library/framework questions (`btca resources` to list available)
+   - Run `btca resources` to see what's available, then `btca ask -r <resource> -q "..."` for library/framework questions
    - Web search for API behavior, language semantics, or CVEs
 4. **Classify** each finding:
    - **Valid** — real bug, real gap, or real improvement needed

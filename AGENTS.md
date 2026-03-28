@@ -101,9 +101,8 @@ gh api repos/{owner}/{repo}/issues/{pr}/comments   # follow-up reviews
 
 When you need up-to-date information about technologies used in this project, use btca to query source repositories directly.
 
-**Available resources**: fastmcp, patchright, pytest, ruff, ty, uv, inquirer, pythonDotenv, pyperclip, preCommit
-
 ```bash
+btca resources                           # list available resources
 btca ask -r <resource> -q "<question>"
-btca ask -r fastmcp -r patchright -q "How do I set up browser context with FastMCP tools?"
+btca ask -r fastmcp -r playwright -q "How do I set up browser context with FastMCP tools?"
 ```
