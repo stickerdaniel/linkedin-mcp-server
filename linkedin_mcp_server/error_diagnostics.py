@@ -11,7 +11,12 @@ from typing import Any
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 
-from linkedin_mcp_server.common_utils import secure_mkdir, slugify_fragment, utcnow_iso
+from linkedin_mcp_server.common_utils import (
+    secure_mkdir,
+    secure_write_text,
+    slugify_fragment,
+    utcnow_iso,
+)
 from linkedin_mcp_server.debug_trace import get_trace_dir, mark_trace_for_retention
 from linkedin_mcp_server.session_state import (
     auth_root_dir,
@@ -90,7 +95,7 @@ def build_issue_diagnostics(
     else:
         payload["existing_issues"] = _find_existing_issues(payload)
     issue_template = _render_issue_template(payload)
-    issue_path.write_text(issue_template)
+    secure_write_text(issue_path, issue_template)
     return _public_issue_diagnostics(payload, issue_path=issue_path)
 
 

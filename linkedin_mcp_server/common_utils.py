@@ -20,8 +20,21 @@ def utcnow_iso() -> str:
 
 
 def secure_mkdir(path: Path, mode: int = 0o700) -> None:
-    """Create a directory tree with restrictive permissions."""
-    path.mkdir(parents=True, exist_ok=True, mode=mode)
+    """Create a directory tree with restrictive permissions.
+
+    Unlike ``Path.mkdir(parents=True, mode=...)``, this applies *mode* to
+    every newly created directory in the chain, not just the leaf.
+    """
+    if path.exists() and not path.is_dir():
+        raise NotADirectoryError(f"Path exists and is not a directory: {path}")
+
+    missing: list[Path] = []
+    p = path
+    while not p.exists():
+        missing.append(p)
+        p = p.parent
+    for part in reversed(missing):
+        part.mkdir(mode=mode, exist_ok=True)
 
 
 def secure_write_text(path: Path, content: str, mode: int = 0o600) -> None:
