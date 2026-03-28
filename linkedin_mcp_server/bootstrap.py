@@ -467,7 +467,7 @@ def _move_auth_state_aside(*, force: bool = False) -> None:
         auth_root_dir(profile_dir)
         / f"{_INVALID_STATE_PREFIX}{utcnow_iso().replace(':', '-')}"
     )
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    secure_mkdir(backup_dir)
     for target in existing:
         shutil.move(str(target), str(backup_dir / target.name))
 
