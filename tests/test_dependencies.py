@@ -131,7 +131,7 @@ class TestGetReadyExtractor:
             new_callable=AsyncMock,
             side_effect=AuthenticationStartedError("login opened"),
         ) as mock_handle:
-            with pytest.raises(AuthenticationStartedError):
+            with pytest.raises(ToolError, match="login opened"):
                 await tools["get_person_profile"](
                     linkedin_username="testuser",
                     ctx=mock_ctx,

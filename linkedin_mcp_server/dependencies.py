@@ -56,9 +56,11 @@ async def handle_auth_error(
         ) from error
 
     logger.warning("Stale session detected; closing browser and triggering re-login")
-    await close_browser()
+    try:
+        await close_browser()
+    except Exception as close_exc:
+        logger.warning("Failed to close stale browser (ignored): %s", close_exc)
     await invalidate_auth_and_trigger_relogin(ctx)  # always raises
-    raise AssertionError("unreachable")  # pragma: no cover
 
 
 async def get_ready_extractor(

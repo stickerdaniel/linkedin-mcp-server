@@ -61,7 +61,10 @@ def register_job_tools(mcp: FastMCP) -> None:
             return result
 
         except AuthenticationError as e:
-            await handle_auth_error(e, ctx)  # NoReturn
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_job_details")
         except Exception as e:
             raise_tool_error(e, "get_job_details")  # NoReturn
 
@@ -138,6 +141,9 @@ def register_job_tools(mcp: FastMCP) -> None:
             return result
 
         except AuthenticationError as e:
-            await handle_auth_error(e, ctx)  # NoReturn
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "search_jobs")
         except Exception as e:
             raise_tool_error(e, "search_jobs")  # NoReturn

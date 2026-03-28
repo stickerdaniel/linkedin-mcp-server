@@ -78,7 +78,10 @@ def register_company_tools(mcp: FastMCP) -> None:
             return result
 
         except AuthenticationError as e:
-            await handle_auth_error(e, ctx)  # NoReturn
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_company_profile")
         except Exception as e:
             raise_tool_error(e, "get_company_profile")  # NoReturn
 
@@ -141,6 +144,9 @@ def register_company_tools(mcp: FastMCP) -> None:
             return result
 
         except AuthenticationError as e:
-            await handle_auth_error(e, ctx)  # NoReturn
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_company_posts")
         except Exception as e:
             raise_tool_error(e, "get_company_posts")  # NoReturn

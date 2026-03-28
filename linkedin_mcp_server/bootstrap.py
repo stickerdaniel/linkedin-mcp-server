@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+from typing import NoReturn
 
 from fastmcp import Context
 
@@ -387,7 +388,7 @@ async def start_login_if_needed(ctx: Context | None = None) -> None:
 
 async def invalidate_auth_and_trigger_relogin(
     ctx: Context | None = None,
-) -> None:
+) -> NoReturn:
     """Force-invalidate stale auth state and trigger interactive login.
 
     Unlike ``_start_login_if_needed()``, this ignores ``_auth_ready()`` — the
@@ -405,6 +406,12 @@ async def invalidate_auth_and_trigger_relogin(
 
         # If a login is already in progress, don't touch files — just report.
         if _state.login_task is not None and not _state.login_task.done():
+            if ctx is not None:
+                await ctx.report_progress(
+                    progress=25,
+                    total=100,
+                    message="LinkedIn login already in progress",
+                )
             raise AuthenticationInProgressError(
                 "No valid LinkedIn session is available yet. LinkedIn login is "
                 "already in progress in a browser window. Complete login there, "
@@ -435,11 +442,13 @@ async def invalidate_auth_and_trigger_relogin(
     )
 
 
-def _force_move_auth_state_aside() -> None:
-    """Move auth artifacts aside unconditionally (no ``_auth_ready()`` guard).
+def _move_auth_state_aside(*, force: bool = False) -> None:
+    """Move auth artifacts to a timestamped backup directory.
 
-    Used by ``invalidate_auth_and_trigger_relogin`` when the caller already
-    knows the session is stale.  Must be called under ``_lock``.
+    Args:
+        force: If True, skip the ``_auth_ready()`` guard.  Used by
+            ``invalidate_auth_and_trigger_relogin`` when the caller already
+            knows the session is stale.
     """
     profile_dir = get_profile_dir()
     targets = [
@@ -451,6 +460,8 @@ def _force_move_auth_state_aside() -> None:
     existing = [target for target in targets if target.exists()]
     if not existing:
         return
+    if not force and _auth_ready():
+        return
 
     backup_dir = (
         auth_root_dir(profile_dir)
@@ -459,29 +470,15 @@ def _force_move_auth_state_aside() -> None:
     backup_dir.mkdir(parents=True, exist_ok=True)
     for target in existing:
         shutil.move(str(target), str(backup_dir / target.name))
+
+
+def _force_move_auth_state_aside() -> None:
+    """Move auth artifacts aside unconditionally (no ``_auth_ready()`` guard)."""
+    _move_auth_state_aside(force=True)
 
 
 def _move_invalid_auth_state_aside() -> None:
-    profile_dir = get_profile_dir()
-    targets = [
-        profile_dir,
-        portable_cookie_path(profile_dir),
-        source_state_path(profile_dir),
-        runtime_profiles_root(profile_dir),
-    ]
-    existing = [target for target in targets if target.exists()]
-    if not existing:
-        return
-    if _auth_ready():
-        return
-
-    backup_dir = (
-        auth_root_dir(profile_dir)
-        / f"{_INVALID_STATE_PREFIX}{utcnow_iso().replace(':', '-')}"
-    )
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    for target in existing:
-        shutil.move(str(target), str(backup_dir / target.name))
+    _move_auth_state_aside(force=False)
 
 
 async def _run_login_flow() -> None:

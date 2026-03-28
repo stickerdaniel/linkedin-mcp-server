@@ -166,6 +166,10 @@ class TestPersonTool:
             AsyncMock(side_effect=AuthenticationError("Session expired or invalid.")),
         )
         monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_runtime_policy",
+            lambda: "managed",
+        )
+        monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.close_browser",
             AsyncMock(return_value=None),
         )
