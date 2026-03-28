@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,42 @@ from .exceptions import NetworkError
 logger = logging.getLogger(__name__)
 
 _DEFAULT_USER_DATA_DIR = Path.home() / ".linkedin-mcp" / "profile"
+_PRIVATE_DIR_MODE = 0o700
+_PRIVATE_FILE_MODE = 0o600
+
+
+def _set_private_mode(path: Path, mode: int) -> None:
+    """Set owner-only permissions for sensitive files/directories."""
+    if os.name == "nt":
+        return
+
+    current_mode = stat.S_IMODE(path.stat().st_mode)
+    if current_mode != mode:
+        path.chmod(mode)
+
+
+def _secure_profile_dirs(profile_dir: Path) -> None:
+    """Ensure the profile directory tree is private (owner-only)."""
+    resolved_profile = profile_dir.expanduser()
+    resolved_profile.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIR_MODE)
+
+    dirs_to_secure = {resolved_profile}
+    linkedin_root = next(
+        (p for p in [resolved_profile, *resolved_profile.parents] if p.name == ".linkedin-mcp"),
+        None,
+    )
+
+    if linkedin_root:
+        current = resolved_profile
+        while True:
+            dirs_to_secure.add(current)
+            if current == linkedin_root:
+                break
+            current = current.parent
+
+    for directory in dirs_to_secure:
+        if directory.exists():
+            _set_private_mode(directory, _PRIVATE_DIR_MODE)
 
 
 class BrowserManager:
@@ -67,7 +104,7 @@ class BrowserManager:
         try:
             self._playwright = await async_playwright().start()
 
-            secure_mkdir(Path(self.user_data_dir))
+            _secure_profile_dirs(Path(self.user_data_dir))
 
             context_options: dict[str, Any] = {
                 "headless": self.headless,
@@ -188,7 +225,12 @@ class BrowserManager:
                 for c in all_cookies
                 if "linkedin.com" in c.get("domain", "")
             ]
-            secure_write_text(path, json.dumps(cookies, indent=2))
+            if any(p.name == ".linkedin-mcp" for p in [path.parent, *path.parent.parents]):
+                _secure_profile_dirs(path.parent)
+            else:
+                secure_mkdir(path.parent)
+
+            secure_write_text(path, json.dumps(cookies, indent=2), mode=_PRIVATE_FILE_MODE)
             logger.info("Exported %d LinkedIn cookies to %s", len(cookies), path)
             return True
         except Exception:
