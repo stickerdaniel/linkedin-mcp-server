@@ -71,6 +71,12 @@
       "url": "https://github.com/pre-commit/pre-commit",
       "branch": "main",
       "specialNotes": "Framework for managing pre-commit hooks."
+    },
+    {
+      "type": "git",
+      "name": "patchright",
+      "url": "https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python",
+      "branch": "main"
     }
   ],
   "model": "gpt-5.4-mini",
