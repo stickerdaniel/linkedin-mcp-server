@@ -1876,6 +1876,9 @@ class TestScrapePersonCallbacks:
 
         cb.on_start.assert_awaited_once()
         cb.on_error.assert_awaited_once()
+        error_arg = cb.on_error.call_args[0][0]
+        assert isinstance(error_arg, LinkedInScraperException)
+        assert "boom" in str(error_arg)
         cb.on_complete.assert_not_awaited()
 
 

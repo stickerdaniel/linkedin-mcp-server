@@ -620,9 +620,9 @@ class LinkedInExtractor:
                     await callbacks.on_progress(
                         f"Scraped {section_name} ({i + 1}/{total})", percent
                     )
-        except LinkedInScraperException:
+        except LinkedInScraperException as e:
             if callbacks:
-                await callbacks.on_error(LinkedInScraperException())
+                await callbacks.on_error(e)
             raise
 
         result: dict[str, Any] = {
@@ -704,9 +704,9 @@ class LinkedInExtractor:
                     await callbacks.on_progress(
                         f"Scraped {section_name} ({i + 1}/{total})", percent
                     )
-        except LinkedInScraperException:
+        except LinkedInScraperException as e:
             if callbacks:
-                await callbacks.on_error(LinkedInScraperException())
+                await callbacks.on_error(e)
             raise
 
         result: dict[str, Any] = {
