@@ -43,7 +43,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
-ConnectPath = Literal["direct", "more_menu"]
 
 # Delay between page navigations to avoid rate limiting
 _NAV_DELAY = 2.0
@@ -88,41 +87,24 @@ _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
-_CONNECT_BUTTON_SELECTOR = (
-    'main button:has-text("Connect"), '
-    'main a:has-text("Connect"), '
-    'main div[role="button"]:has-text("Connect")'
-)
-_PENDING_BUTTON_SELECTOR = (
-    'main button:has-text("Pending"), '
-    'main a:has-text("Pending"), '
-    'main div[role="button"]:has-text("Pending")'
-)
-_MORE_ACTIONS_SELECTOR = (
-    'main button[aria-label*="More"], '
-    'main button:has-text("More"), '
-    'main div[role="button"]:has-text("More")'
-)
-_MENU_CONNECT_SELECTOR = (
-    '[role="menu"] button:has-text("Connect"), '
-    '[role="menu"] a:has-text("Connect"), '
-    '[role="menu"] div[role="button"]:has-text("Connect"), '
-    '[role="menu"] li:has-text("Connect")'
-)
-_CONNECT_DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
-_ADD_NOTE_SELECTOR = (
-    'button:has-text("Add a note"), div[role="button"]:has-text("Add a note")'
-)
-_NOTE_TEXTAREA_SELECTOR = (
-    '[role="dialog"] textarea[name="message"], '
-    '[role="dialog"] textarea#custom-message, '
-    'dialog textarea[name="message"], '
-    "dialog textarea"
-)
-_SEND_INVITE_SELECTOR = 'button:has-text("Send"), div[role="button"]:has-text("Send")'
-_DISMISS_DIALOG_SELECTOR = (
-    'button[aria-label="Dismiss"], button:has-text("Dismiss"), button:has-text("Close")'
-)
+_DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
+_DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
+
+
+def _connection_result(
+    url: str,
+    status: str,
+    message: str,
+    *,
+    note_sent: bool = False,
+) -> dict[str, Any]:
+    """Build a structured response for a profile connection attempt."""
+    return {
+        "url": url,
+        "status": status,
+        "message": message,
+        "note_sent": note_sent,
+    }
 
 
 def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
@@ -397,202 +379,89 @@ class LinkedInExtractor:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
         await self._goto_with_auth_checks(url)
 
-    @staticmethod
-    def _connection_result(
-        url: str,
-        status: str,
-        message: str,
-        *,
-        note_sent: bool = False,
-        connect_path: ConnectPath | None = None,
-    ) -> dict[str, Any]:
-        """Build a structured response for a profile connection attempt."""
-        return {
-            "url": url,
-            "status": status,
-            "message": message,
-            "note_sent": note_sent,
-            "connect_path": connect_path,
-        }
+    # ------------------------------------------------------------------
+    # Generic browser helpers for LLM-driven connection flow
+    # ------------------------------------------------------------------
 
-    async def _locator_is_visible(self, selector: str, *, timeout: int = 2000) -> bool:
-        """Return whether the first matching locator is visible."""
-        locator = self._page.locator(selector)
+    async def get_page_text(self) -> str:
+        """Extract innerText from the main content area of the current page."""
+        text = await self._page.evaluate(
+            "() => (document.querySelector('main') || document.body).innerText || ''"
+        )
+        return strip_linkedin_noise(text) if isinstance(text, str) else ""
+
+    async def click_button_by_text(
+        self, text: str, *, scope: str = "main", timeout: int = 5000
+    ) -> bool:
+        """Click the first button/link matching *text* within *scope*.
+
+        The text comes from LLM analysis at runtime — not hardcoded.
+        Returns True if clicked, False if no match found.
+        """
+        selector = (
+            f'{scope} button:has-text("{text}"), '
+            f'{scope} a:has-text("{text}"), '
+            f'{scope} [role="button"]:has-text("{text}")'
+        )
+        locator = self._page.locator(selector).first
+        try:
+            if await self._page.locator(selector).count() == 0:
+                return False
+            await locator.scroll_into_view_if_needed(timeout=timeout)
+        except Exception:
+            logger.debug("Scroll failed for button '%s'", text, exc_info=True)
+        try:
+            await locator.click(timeout=timeout)
+            return True
+        except Exception:
+            logger.debug("Click failed for button '%s'", text, exc_info=True)
+            return False
+
+    async def _dialog_is_open(self, *, timeout: int = 1000) -> bool:
+        """Return whether a dialog is currently open (structural check)."""
+        locator = self._page.locator(_DIALOG_SELECTOR)
         try:
             if await locator.count() == 0:
                 return False
-        except Exception:
-            return False
-
-        first = locator.first
-        try:
-            await first.wait_for(state="visible", timeout=timeout)
+            await locator.first.wait_for(state="visible", timeout=timeout)
             return True
-        except PlaywrightTimeoutError:
+        except Exception:
             return False
-        except Exception:
-            try:
-                return bool(await first.is_visible())
-            except Exception:
-                return False
 
-    async def _click_first(self, selector: str, *, timeout: int = 5000) -> None:
-        """Click the first visible locator that matches a selector."""
-        target = self._page.locator(selector).first
-        try:
-            await target.scroll_into_view_if_needed(timeout=timeout)
-        except Exception:
-            logger.debug("Could not scroll %s into view", selector, exc_info=True)
-        await target.click(timeout=timeout)
+    async def _click_dialog_primary_button(self, *, timeout: int = 5000) -> bool:
+        """Click the last (primary/Send) button in the open dialog.
 
-    async def _fill_first(
-        self, selector: str, value: str, *, timeout: int = 5000
-    ) -> None:
-        """Fill the first matching input-like locator."""
-        await self._page.locator(selector).first.fill(value, timeout=timeout)
-
-    async def _read_profile_action_labels(self) -> set[str]:
-        """Read visible action labels from the profile action area."""
-        labels = await self._page.evaluate(
-            """() => {
-                const root = document.querySelector('main') || document.body;
-                if (!root) return [];
-
-                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
-                return Array.from(root.querySelectorAll('button, a, [role="button"]'))
-                    .map(node => normalize(node.innerText || node.textContent))
-                    .filter(Boolean)
-                    .slice(0, 80);
-            }"""
+        LinkedIn consistently places the primary action as the last button.
+        """
+        buttons = self._page.locator(
+            f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
         )
-        if not isinstance(labels, list):
-            return set()
-        return {
-            str(label).strip().lower()
-            for label in labels
-            if isinstance(label, str) and label.strip()
-        }
-
-    async def _open_more_actions_menu(self) -> bool:
-        """Open the profile More actions menu when present."""
-        if not await self._locator_is_visible(_MORE_ACTIONS_SELECTOR):
+        count = await buttons.count()
+        if count == 0:
             return False
-        await self._click_first(_MORE_ACTIONS_SELECTOR)
-        try:
-            await self._page.wait_for_selector("[role='menu']", timeout=3000)
-        except PlaywrightTimeoutError:
-            logger.debug("More actions menu did not expose a role=menu container")
+        await buttons.nth(count - 1).click(timeout=timeout)
         return True
 
-    async def _read_menu_action_labels(self) -> set[str]:
-        """Read visible action labels from the currently open More menu."""
-        labels = await self._page.evaluate(
-            """() => {
-                const menu = document.querySelector('[role="menu"]');
-                if (!menu) return [];
-
-                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
-                return Array.from(
-                    menu.querySelectorAll('button, a, li, [role="menuitem"], [role="button"]')
-                )
-                    .map(node => normalize(node.innerText || node.textContent))
-                    .filter(Boolean)
-                    .slice(0, 80);
-            }"""
-        )
-        if not isinstance(labels, list):
-            return set()
-        return {
-            str(label).strip().lower()
-            for label in labels
-            if isinstance(label, str) and label.strip()
-        }
-
-    async def _more_actions_indicates_connected(self) -> bool:
-        """Return whether the More menu exposes a strong connected-state signal."""
-        menu_labels = await self._read_menu_action_labels()
-        if not menu_labels:
-            if not await self._open_more_actions_menu():
-                return False
-            menu_labels = await self._read_menu_action_labels()
-
-        return any("remove connection" in label for label in menu_labels)
-
-    async def _resolve_connect_path(self) -> ConnectPath | None:
-        """Determine how to access the Connect action on the current profile."""
-        if await self._locator_is_visible(_CONNECT_BUTTON_SELECTOR):
-            return "direct"
-
-        if not await self._open_more_actions_menu():
-            return None
-
-        if await self._locator_is_visible(_MENU_CONNECT_SELECTOR):
-            return "more_menu"
-
-        return None
-
-    async def _dismiss_connect_dialog(self) -> None:
-        """Dismiss the active connection dialog if one is still open."""
-        if await self._locator_is_visible(_DISMISS_DIALOG_SELECTOR, timeout=1000):
-            try:
-                await self._click_first(_DISMISS_DIALOG_SELECTOR)
-            except Exception:
-                logger.debug("Could not dismiss connect dialog", exc_info=True)
-
-    async def _send_connection_request(
-        self,
-        *,
-        connect_path: ConnectPath,
-        note: str | None,
-    ) -> tuple[str, str, bool]:
-        """Drive the LinkedIn connect dialog and submit the invite."""
-        if connect_path == "direct":
-            await self._click_first(_CONNECT_BUTTON_SELECTOR)
-        else:
-            await self._click_first(_MENU_CONNECT_SELECTOR)
-
+    async def _fill_dialog_textarea(self, value: str, *, timeout: int = 5000) -> bool:
+        """Fill the first textarea inside the open dialog (structural)."""
+        locator = self._page.locator(_DIALOG_TEXTAREA_SELECTOR).first
         try:
-            await self._page.wait_for_selector(_CONNECT_DIALOG_SELECTOR, timeout=5000)
-        except PlaywrightTimeoutError:
-            logger.debug("Connect dialog did not appear after clicking Connect")
+            if await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count() == 0:
+                return False
+            await locator.fill(value, timeout=timeout)
+            return True
+        except Exception:
+            return False
 
-        note_sent = False
-        if note:
-            if not await self._locator_is_visible(_ADD_NOTE_SELECTOR, timeout=3000):
-                await self._dismiss_connect_dialog()
-                return (
-                    "note_not_supported",
-                    "LinkedIn did not offer note entry for this connection flow.",
-                    False,
-                )
-            await self._click_first(_ADD_NOTE_SELECTOR)
-            await self._fill_first(_NOTE_TEXTAREA_SELECTOR, note)
-            note_sent = True
-
-        if not await self._locator_is_visible(_SEND_INVITE_SELECTOR, timeout=3000):
-            await self._dismiss_connect_dialog()
-            return (
-                "send_failed",
-                "LinkedIn did not expose a Send button in the connection dialog.",
-                False,
-            )
-
-        await self._click_first(_SEND_INVITE_SELECTOR)
+    async def _dismiss_dialog(self) -> None:
+        """Dismiss any open dialog via Escape key (structural)."""
+        await self._page.keyboard.press("Escape")
         try:
             await self._page.wait_for_selector(
-                _CONNECT_DIALOG_SELECTOR,
-                state="hidden",
-                timeout=5000,
+                _DIALOG_SELECTOR, state="hidden", timeout=3000
             )
         except PlaywrightTimeoutError:
-            logger.debug("Connect dialog did not close after sending invite")
-
-        labels = await self._read_profile_action_labels()
-        if "pending" in labels:
-            message = "Connection request sent."
-        else:
-            message = "Connection request submitted."
-        return ("connected", message, note_sent)
+            pass
 
     async def extract_page(
         self,
@@ -881,8 +750,21 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         note: str | None = None,
+        ctx: Any = None,
     ) -> dict[str, Any]:
-        """Send a LinkedIn connection request to a person profile."""
+        """Send a LinkedIn connection request using LLM-driven state detection.
+
+        Uses ``ctx.sample()`` to analyze the profile page text and determine
+        the relationship state and which button to click.  The dialog
+        interaction (note textarea, send button) uses structural CSS
+        selectors only — no hardcoded button text.
+        """
+        from linkedin_mcp_server.scraping.connection import (
+            ANALYSIS_SYSTEM_PROMPT,
+            ProfileAnalysis,
+            build_analysis_message,
+        )
+
         url = f"https://www.linkedin.com/in/{username}/"
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
@@ -893,66 +775,149 @@ class LinkedInExtractor:
             logger.debug("No <main> element found on %s before connection flow", url)
 
         await handle_modal_close(self._page)
-        labels = await self._read_profile_action_labels()
 
-        if (
-            await self._locator_is_visible(_PENDING_BUTTON_SELECTOR)
-            or "pending" in labels
-        ):
-            return self._connection_result(
+        # ---- LLM analysis (single call) ----
+        page_text = await self.get_page_text()
+        if not page_text:
+            return _connection_result(
+                url, "unavailable", "Could not read profile page."
+            )
+
+        if ctx is None:
+            return _connection_result(
+                url,
+                "sampling_unavailable",
+                "MCP sampling (ctx) is required for connect_with_person.",
+            )
+
+        try:
+            sampling_result = await ctx.sample(
+                messages=build_analysis_message(page_text),
+                system_prompt=ANALYSIS_SYSTEM_PROMPT,
+                result_type=ProfileAnalysis,
+                max_tokens=256,
+            )
+            analysis: ProfileAnalysis = sampling_result.result
+        except Exception as exc:
+            logger.warning("LLM sampling failed: %s", exc)
+            return _connection_result(
+                url,
+                "sampling_error",
+                f"LLM sampling failed: {exc}",
+            )
+
+        logger.info(
+            "LLM analysis for %s: state=%s button=%s reason=%s",
+            username,
+            analysis.state,
+            analysis.action_button_text,
+            analysis.reasoning,
+        )
+
+        # ---- Act on analysis ----
+        state = analysis.state
+
+        if state == "already_connected":
+            return _connection_result(
+                url, "already_connected", "You are already connected with this profile."
+            )
+        if state == "pending":
+            return _connection_result(
                 url,
                 "pending",
                 "A connection request is already pending for this profile.",
             )
-
-        direct_connect_visible = await self._locator_is_visible(
-            _CONNECT_BUTTON_SELECTOR
-        )
-
-        connect_path: ConnectPath | None
-        if direct_connect_visible:
-            connect_path = "direct"
-        else:
-            connect_path = await self._resolve_connect_path()
-
-        if connect_path is None and await self._more_actions_indicates_connected():
-            return self._connection_result(
+        if state == "follow_only":
+            return _connection_result(
                 url,
-                "already_connected",
-                "You are already connected with this profile.",
+                "follow_only",
+                "This profile currently exposes Follow but not Connect.",
             )
-
-        if connect_path is None:
-            if "follow" in labels:
-                return self._connection_result(
-                    url,
-                    "follow_only",
-                    "This profile currently exposes Follow but not Connect.",
-                )
-            return self._connection_result(
+        if state == "unavailable":
+            return _connection_result(
                 url,
                 "connect_unavailable",
                 "LinkedIn did not expose a usable Connect action for this profile.",
             )
 
+        # state is "connectable" or "incoming_request"
         if not confirm_send:
-            return self._connection_result(
+            return _connection_result(
                 url,
                 "confirmation_required",
                 "Set confirm_send=true to send the connection request.",
-                connect_path=connect_path,
             )
 
-        status, message, note_sent = await self._send_connection_request(
-            connect_path=connect_path,
-            note=note,
-        )
-        return self._connection_result(
+        button_text = analysis.action_button_text
+        if not button_text:
+            return _connection_result(
+                url,
+                "connect_unavailable",
+                "LLM analysis did not identify a button to click.",
+            )
+
+        # ---- Click the LLM-identified button ----
+        clicked = await self.click_button_by_text(button_text)
+        if not clicked:
+            return _connection_result(
+                url,
+                "send_failed",
+                f"Could not find or click button '{button_text}'.",
+            )
+
+        # ---- Handle dialog (structural selectors only) ----
+        try:
+            await self._page.wait_for_selector(_DIALOG_SELECTOR, timeout=5000)
+        except PlaywrightTimeoutError:
+            logger.debug("No dialog appeared after clicking '%s'", button_text)
+
+        note_sent = False
+        if note and await self._dialog_is_open():
+            # Try to find textarea directly; if not visible, click the first
+            # button in the dialog (typically "Add a note") to reveal it
+            textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
+            if textarea_count == 0:
+                buttons = self._page.locator(
+                    f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+                )
+                if await buttons.count() > 1:
+                    await buttons.first.click(timeout=5000)
+
+            filled = await self._fill_dialog_textarea(note)
+            if filled:
+                note_sent = True
+            else:
+                await self._dismiss_dialog()
+                return _connection_result(
+                    url,
+                    "note_not_supported",
+                    "LinkedIn did not offer note entry for this connection flow.",
+                )
+
+        # Click the primary (Send) button if a dialog is still open
+        if await self._dialog_is_open():
+            sent = await self._click_dialog_primary_button()
+            if not sent:
+                await self._dismiss_dialog()
+                return _connection_result(
+                    url, "send_failed", "Could not find the send button in the dialog."
+                )
+            # Wait for dialog to close
+            try:
+                await self._page.wait_for_selector(
+                    _DIALOG_SELECTOR, state="hidden", timeout=5000
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Dialog did not close after clicking send")
+
+        status = "accepted" if state == "incoming_request" else "connected"
+        return _connection_result(
             url,
             status,
-            message,
+            "Connection request sent."
+            if status == "connected"
+            else "Connection request accepted.",
             note_sent=note_sent,
-            connect_path=connect_path,
         )
 
     async def scrape_company(

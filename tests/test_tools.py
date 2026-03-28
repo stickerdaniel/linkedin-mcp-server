@@ -217,7 +217,6 @@ class TestPersonTool:
             "status": "connected",
             "message": "Connection request sent.",
             "note_sent": True,
-            "connect_path": "direct",
         }
         mock_extractor = _make_mock_extractor(expected)
 
@@ -241,6 +240,7 @@ class TestPersonTool:
             "test-user",
             confirm_send=True,
             note="Let us connect.",
+            ctx=mock_context,
         )
 
     async def test_connect_with_person_confirmation_required(self, mock_context):
@@ -249,7 +249,6 @@ class TestPersonTool:
             "status": "confirmation_required",
             "message": "Set confirm_send=true to send the connection request.",
             "note_sent": False,
-            "connect_path": "direct",
         }
         mock_extractor = _make_mock_extractor(expected)
 
@@ -271,6 +270,7 @@ class TestPersonTool:
             "test-user",
             confirm_send=False,
             note=None,
+            ctx=mock_context,
         )
 
     async def test_connect_with_person_auth_error(self, monkeypatch):

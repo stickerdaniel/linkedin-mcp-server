@@ -161,10 +161,10 @@ def register_person_tools(mcp: FastMCP) -> None:
             note: Optional note to include with the invitation
 
         Returns:
-            Dict with url, status, message, note_sent, and connect_path.
-            The tool returns structured statuses such as confirmation_required,
-            pending, already_connected, follow_only, connect_unavailable,
-            note_not_supported, or connected.
+            Dict with url, status, message, and note_sent.
+            Statuses: confirmation_required, pending, already_connected,
+            incoming_request, follow_only, connect_unavailable,
+            note_not_supported, connected, accepted, or sampling_error.
         """
         try:
             extractor = extractor or await get_ready_extractor(
@@ -187,6 +187,7 @@ def register_person_tools(mcp: FastMCP) -> None:
                 linkedin_username,
                 confirm_send=confirm_send,
                 note=note,
+                ctx=ctx,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
