@@ -25,6 +25,9 @@ def secure_mkdir(path: Path, mode: int = 0o700) -> None:
     Unlike ``Path.mkdir(parents=True, mode=...)``, this applies *mode* to
     every newly created directory in the chain, not just the leaf.
     """
+    if path.exists() and not path.is_dir():
+        raise NotADirectoryError(f"Path exists and is not a directory: {path}")
+
     missing: list[Path] = []
     p = path
     while not p.exists():

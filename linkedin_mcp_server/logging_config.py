@@ -126,9 +126,11 @@ def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> 
     if trace_dir is not None:
         secure_mkdir(trace_dir)
         log_path = trace_dir / "server.log"
-        if not log_path.exists():
-            fd = os.open(str(log_path), os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            fd = os.open(str(log_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(fd)
+        except FileExistsError:
+            pass
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
