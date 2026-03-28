@@ -12,7 +12,8 @@ from fastmcp import Context, FastMCP
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.dependencies import get_ready_extractor
+from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import parse_person_sections
 
@@ -75,6 +76,11 @@ def register_person_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_person_profile")
         except Exception as e:
             raise_tool_error(e, "get_person_profile")  # NoReturn
 
@@ -123,5 +129,10 @@ def register_person_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "search_people")
         except Exception as e:
             raise_tool_error(e, "search_people")  # NoReturn

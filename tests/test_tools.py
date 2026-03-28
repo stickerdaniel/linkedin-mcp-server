@@ -145,10 +145,11 @@ class TestPersonTool:
             await tool_fn("test-user", mock_context, extractor=mock_extractor)
 
     async def test_get_person_profile_auth_error(self, monkeypatch):
-        """Auth failures in the DI layer produce proper ToolError responses."""
+        """Auth failures in the DI layer trigger auto-relogin and report the login browser."""
         from fastmcp.exceptions import ToolError
 
         from linkedin_mcp_server.core.exceptions import AuthenticationError
+        from linkedin_mcp_server.exceptions import AuthenticationStartedError
 
         mock_browser = MagicMock()
         mock_browser.page = MagicMock()
@@ -164,13 +165,29 @@ class TestPersonTool:
             "linkedin_mcp_server.dependencies.ensure_authenticated",
             AsyncMock(side_effect=AuthenticationError("Session expired or invalid.")),
         )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_runtime_policy",
+            lambda: "managed",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.close_browser",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+            AsyncMock(
+                side_effect=AuthenticationStartedError(
+                    "Session expired. A login browser window has been opened."
+                )
+            ),
+        )
 
         from linkedin_mcp_server.tools.person import register_person_tools
 
         mcp = FastMCP("test")
         register_person_tools(mcp)
 
-        with pytest.raises(ToolError, match="Authentication failed"):
+        with pytest.raises(ToolError, match="Session expired"):
             await mcp.call_tool("get_person_profile", {"linkedin_username": "test"})
 
     async def test_search_people(self, mock_context):

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from unittest.mock import MagicMock
 
@@ -6,11 +7,13 @@ import pytest
 
 from linkedin_mcp_server.bootstrap import (
     AuthState,
+    _force_move_auth_state_aside,
     ensure_tool_ready_or_raise,
     get_bootstrap_state,
     get_runtime_policy,
     initialize_bootstrap,
     install_metadata_path,
+    invalidate_auth_and_trigger_relogin,
     browsers_path,
     reset_bootstrap_for_testing,
     SetupState,
@@ -21,6 +24,10 @@ from linkedin_mcp_server.exceptions import (
     AuthenticationStartedError,
     BrowserSetupInProgressError,
     DockerHostLoginRequiredError,
+)
+from linkedin_mcp_server.session_state import (
+    portable_cookie_path,
+    source_state_path,
 )
 
 
@@ -149,3 +156,86 @@ class TestBootstrap:
     def test_runtime_policy_uses_initialized_value(self):
         initialize_bootstrap("managed")
         assert get_runtime_policy() == "managed"
+
+
+def _make_auth_ready(profile_dir):
+    """Create all files that _auth_ready() checks."""
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Default" / "Cookies").write_text("placeholder")
+    cookie_path = portable_cookie_path(profile_dir)
+    cookie_path.parent.mkdir(parents=True, exist_ok=True)
+    cookie_path.write_text(json.dumps([{"name": "li_at", "domain": ".linkedin.com"}]))
+    source_state_path(profile_dir).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_runtime_id": "macos-arm64-host",
+                "login_generation": "gen-1",
+                "created_at": "2026-03-12T17:00:00Z",
+                "profile_path": str(profile_dir),
+                "cookies_path": str(cookie_path),
+            }
+        )
+    )
+
+
+class TestInvalidateAuthAndTriggerRelogin:
+    async def test_force_moves_files_and_starts_login(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """Stale-but-present profile files are moved aside and login starts."""
+        _make_auth_ready(isolate_profile_dir)
+
+        async def fake_login_flow():
+            return None
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_login_flow", fake_login_flow
+        )
+        initialize_bootstrap("managed")
+
+        with pytest.raises(AuthenticationStartedError, match="Session expired"):
+            await invalidate_auth_and_trigger_relogin()
+
+        # Profile files should have been moved aside.
+        assert not isolate_profile_dir.exists()
+        assert not portable_cookie_path(isolate_profile_dir).exists()
+        assert not source_state_path(isolate_profile_dir).exists()
+
+        state = get_bootstrap_state()
+        assert state.auth_state is AuthState.STARTING
+        assert state.login_task is not None
+
+    async def test_login_in_progress_does_not_move_files(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """If login is already running, raise InProgress without touching files."""
+        _make_auth_ready(isolate_profile_dir)
+        initialize_bootstrap("managed")
+
+        state = get_bootstrap_state()
+        state.login_task = MagicMock(done=lambda: False)
+        state.auth_state = AuthState.IN_PROGRESS
+
+        with pytest.raises(AuthenticationInProgressError):
+            await invalidate_auth_and_trigger_relogin()
+
+        # Files must NOT have been moved.
+        assert isolate_profile_dir.exists()
+        assert portable_cookie_path(isolate_profile_dir).exists()
+
+    def test_force_move_skips_auth_ready_guard(self, isolate_profile_dir):
+        """_force_move_auth_state_aside moves files even when _auth_ready() is True."""
+        _make_auth_ready(isolate_profile_dir)
+
+        # Confirm _auth_ready() would return True before the move.
+        from linkedin_mcp_server.bootstrap import _auth_ready
+
+        assert _auth_ready()
+
+        _force_move_auth_state_aside()
+
+        assert not isolate_profile_dir.exists()
+        assert not portable_cookie_path(isolate_profile_dir).exists()
+        assert not source_state_path(isolate_profile_dir).exists()
