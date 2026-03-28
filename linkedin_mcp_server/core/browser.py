@@ -42,7 +42,11 @@ def _secure_profile_dirs(profile_dir: Path) -> None:
 
     dirs_to_secure = {resolved_profile}
     linkedin_root = next(
-        (p for p in [resolved_profile, *resolved_profile.parents] if p.name == ".linkedin-mcp"),
+        (
+            p
+            for p in [resolved_profile, *resolved_profile.parents]
+            if p.name == ".linkedin-mcp"
+        ),
         None,
     )
 
@@ -225,12 +229,16 @@ class BrowserManager:
                 for c in all_cookies
                 if "linkedin.com" in c.get("domain", "")
             ]
-            if any(p.name == ".linkedin-mcp" for p in [path.parent, *path.parent.parents]):
+            if any(
+                p.name == ".linkedin-mcp" for p in [path.parent, *path.parent.parents]
+            ):
                 _secure_profile_dirs(path.parent)
             else:
                 secure_mkdir(path.parent)
 
-            secure_write_text(path, json.dumps(cookies, indent=2), mode=_PRIVATE_FILE_MODE)
+            secure_write_text(
+                path, json.dumps(cookies, indent=2), mode=_PRIVATE_FILE_MODE
+            )
             logger.info("Exported %d LinkedIn cookies to %s", len(cookies), path)
             return True
         except Exception:
