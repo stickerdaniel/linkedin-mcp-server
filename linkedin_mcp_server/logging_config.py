@@ -10,6 +10,7 @@ Includes proper logger hierarchy and external library noise reduction.
 import atexit
 import json
 import logging
+import os
 from typing import Any, Dict
 
 from linkedin_mcp_server.common_utils import secure_mkdir
@@ -124,7 +125,11 @@ def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> 
     trace_dir = get_trace_dir()
     if trace_dir is not None:
         secure_mkdir(trace_dir)
-        file_handler = logging.FileHandler(trace_dir / "server.log", encoding="utf-8")
+        log_path = trace_dir / "server.log"
+        if not log_path.exists():
+            fd = os.open(str(log_path), os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
         _TRACE_FILE_HANDLER = file_handler
