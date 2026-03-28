@@ -73,8 +73,8 @@ class BrowserManager:
                 "headless": self.headless,
                 "slow_mo": self.slow_mo,
                 "viewport": self.viewport,
-                "locale": "en-US",
                 **self.launch_options,
+                "locale": "en-US",
             }
 
             if self.user_agent:

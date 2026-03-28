@@ -163,8 +163,8 @@ def register_person_tools(mcp: FastMCP) -> None:
         Returns:
             Dict with url, status, message, and note_sent.
             Statuses: confirmation_required, pending, already_connected,
-            incoming_request, follow_only, connect_unavailable,
-            note_not_supported, connected, accepted, or sampling_error.
+            follow_only, connect_unavailable, unavailable, send_failed,
+            note_not_supported, connected, or accepted.
         """
         try:
             extractor = extractor or await get_ready_extractor(
