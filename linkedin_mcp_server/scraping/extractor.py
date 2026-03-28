@@ -615,6 +615,8 @@ class LinkedInExtractor:
                         section_name=section_name,
                     )
 
+                # "Scraped" = processed/attempted, not necessarily successful.
+                # Per-section failures are captured in section_errors.
                 if callbacks:
                     percent = round((i + 1) / total * 95)
                     await callbacks.on_progress(
@@ -699,6 +701,8 @@ class LinkedInExtractor:
                         section_name=section_name,
                     )
 
+                # "Scraped" = processed/attempted, not necessarily successful.
+                # Per-section failures are captured in section_errors.
                 if callbacks:
                     percent = round((i + 1) / total * 95)
                     await callbacks.on_progress(
