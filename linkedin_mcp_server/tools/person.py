@@ -187,7 +187,6 @@ def register_person_tools(mcp: FastMCP) -> None:
                 linkedin_username,
                 confirm_send=confirm_send,
                 note=note,
-                ctx=ctx,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
