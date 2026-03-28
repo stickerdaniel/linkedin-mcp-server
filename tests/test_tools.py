@@ -240,7 +240,6 @@ class TestPersonTool:
             "test-user",
             confirm_send=True,
             note="Let us connect.",
-            ctx=mock_context,
         )
 
     async def test_connect_with_person_confirmation_required(self, mock_context):
@@ -270,7 +269,6 @@ class TestPersonTool:
             "test-user",
             confirm_send=False,
             note=None,
-            ctx=mock_context,
         )
 
     async def test_connect_with_person_auth_error(self, monkeypatch):

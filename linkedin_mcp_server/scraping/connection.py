@@ -1,10 +1,14 @@
-"""LLM-driven connection state analysis for LinkedIn profiles."""
+"""Connection state detection from scraped LinkedIn profile text.
+
+Parses the action area of a profile page (buttons near the top) to
+determine the relationship state.  The browser locale is forced to
+en-US so button text is always English.
+"""
 
 from __future__ import annotations
 
+import re
 from typing import Literal
-
-from pydantic import BaseModel, Field
 
 ConnectionState = Literal[
     "already_connected",
@@ -15,58 +19,51 @@ ConnectionState = Literal[
     "unavailable",
 ]
 
+# Button text to click for each actionable state (en-US locale)
+STATE_BUTTON_MAP: dict[ConnectionState, str] = {
+    "connectable": "Connect",
+    "incoming_request": "Accept",
+}
 
-class ProfileAnalysis(BaseModel):
-    """LLM-produced analysis of a LinkedIn profile's connection state."""
-
-    state: ConnectionState = Field(
-        description="The relationship state between the viewer and this profile.",
-    )
-    action_button_text: str | None = Field(
-        default=None,
-        description=(
-            "Exact visible text of the button to click for the connection action. "
-            "For example 'Connect', 'Accept', 'Vernetzen', 'Annehmen'. "
-            "None when no actionable button exists (already_connected, pending, unavailable)."
-        ),
-    )
-    reasoning: str = Field(
-        default="",
-        description="Brief reasoning for the classification.",
-    )
+# Markers that end the action area (section headings after the buttons)
+_ACTION_AREA_END = re.compile(
+    r"^(?:About|Highlights|Featured|Activity|Experience|Education)\n",
+    re.MULTILINE,
+)
 
 
-ANALYSIS_SYSTEM_PROMPT = """\
-You are analyzing a LinkedIn profile page to determine the connection state \
-between the viewer and the profile owner. You will receive the visible text \
-of the profile page.
+def _extract_action_area(profile_text: str) -> str:
+    """Return the top portion of profile text containing action buttons.
 
-Classify the state as one of:
-
-- already_connected: The viewer and profile owner are 1st-degree connections. \
-  Indicators: "· 1st" near the name, "Message" as the primary action button, \
-  or "Remove connection" in a menu. No Connect button is present.
-- pending: A connection request has already been sent and is waiting. \
-  Indicators: a "Pending" button is visible.
-- incoming_request: The profile owner sent the viewer a connection request. \
-  Indicators: "Accept" and "Ignore" buttons are visible.
-- connectable: A "Connect" button is visible, either directly or in a \
-  More/overflow menu. The viewer can send a new connection request.
-- follow_only: Only a "Follow" button is the primary action, with no \
-  Connect option visible anywhere.
-- unavailable: None of the above states are detectable.
-
-For action_button_text, provide the EXACT text shown on the actionable button \
-(e.g. "Connect", "Accept"). This must match what is visually displayed on the \
-page. Set to null for non-actionable states.\
-"""
+    Cuts off at the first content section heading (About, Highlights, etc.)
+    to avoid matching "Follow" or "Connect" text that appears in sidebar
+    suggestions, interests, or post content.
+    """
+    match = _ACTION_AREA_END.search(profile_text)
+    if match:
+        return profile_text[: match.start()]
+    # Fallback: use first 500 chars if no section heading found
+    return profile_text[:500]
 
 
-def build_analysis_message(page_text: str) -> str:
-    """Build the user message for profile connection state analysis."""
-    # Cap text to avoid excessive token usage; action area is near the top
-    trimmed = page_text[:3000]
-    return (
-        "Here is the visible text from the LinkedIn profile page:\n\n"
-        f"---\n{trimmed}\n---"
-    )
+def detect_connection_state(profile_text: str) -> ConnectionState:
+    """Detect the connection relationship from scraped profile text.
+
+    Checks the degree indicator and action button labels that appear
+    as standalone lines in the profile action area.
+    """
+    # 1st-degree connection indicator appears near the top, before buttons
+    if "\u00b7 1st" in profile_text[:300]:
+        return "already_connected"
+
+    action_area = _extract_action_area(profile_text)
+
+    if "\nPending\n" in action_area or action_area.endswith("\nPending"):
+        return "pending"
+    if "\nAccept\n" in action_area and "\nIgnore\n" in action_area:
+        return "incoming_request"
+    if "\nConnect\n" in action_area or action_area.endswith("\nConnect"):
+        return "connectable"
+    if "\nFollow\n" in action_area or action_area.endswith("\nFollow"):
+        return "follow_only"
+    return "unavailable"
