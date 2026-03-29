@@ -51,7 +51,7 @@
     },
     {
       "name": "connect_with_person",
-      "description": "Send a LinkedIn connection request to a person profile with explicit confirmation and optional note support"
+      "description": "Send a connection request or accept an incoming one, with optional note"
     },
     {
       "name": "get_company_profile",
