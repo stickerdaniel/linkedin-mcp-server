@@ -5,6 +5,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 ## Features
 
 - **Profile Access**: Get detailed LinkedIn profile information
+- **Profile Connections**: Send LinkedIn connection requests with optional notes and explicit confirmation
 - **Company Profiles**: Extract comprehensive company data
 - **Job Details**: Retrieve job posting information
 - **Job Search**: Search for jobs with keywords and location filters
