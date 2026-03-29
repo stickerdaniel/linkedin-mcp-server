@@ -810,7 +810,7 @@ class TestConnectWithPerson:
 
         assert result["status"] == "connected"
         assert result["url"] == "https://www.linkedin.com/in/testuser/"
-        mock_click.assert_awaited_once_with("Connect")
+        mock_click.assert_awaited_once_with("Connect", scope="main")
 
     async def test_returns_already_connected(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -852,7 +852,7 @@ class TestConnectWithPerson:
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "accepted"
-        mock_click.assert_awaited_once_with("Accept")
+        mock_click.assert_awaited_once_with("Accept", scope="main")
 
     async def test_returns_follow_only(self, mock_page):
         extractor = LinkedInExtractor(mock_page)

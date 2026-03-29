@@ -470,6 +470,38 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             pass
 
+    async def _open_more_menu(self) -> bool:
+        """Open the profile's More (three-dot) menu and check for Connect.
+
+        Uses ``aria-label`` to find the More button (language-independent)
+        and ``[role="menu"]`` to detect the opened menu (structural).
+        Returns True if the menu opened and contains a Connect option.
+        """
+        more_btn = self._page.locator("main button[aria-label*='More']")
+        try:
+            if await more_btn.count() == 0:
+                return False
+            await more_btn.first.click(timeout=5000)
+        except Exception:
+            logger.debug("Could not click More button", exc_info=True)
+            return False
+
+        try:
+            await self._page.wait_for_selector("[role='menu']", timeout=3000)
+        except PlaywrightTimeoutError:
+            logger.debug("More menu did not appear")
+            return False
+
+        # Check if Connect is in the menu
+        menu_connect = (
+            self._page.locator("[role='menu']")
+            .locator("button, a, li, [role='menuitem'], [role='button']")
+            .filter(has_text=re.compile(r"^Connect$"))
+        )
+        count = await menu_connect.count()
+        logger.debug("More menu Connect matches: %d", count)
+        return count > 0
+
     async def extract_page(
         self,
         url: str,
@@ -796,13 +828,20 @@ class LinkedInExtractor:
                 "A connection request is already pending for this profile.",
                 profile=page_text,
             )
+        via_more_menu = False
         if state == "follow_only":
-            return _connection_result(
-                url,
-                "follow_only",
-                "This profile currently exposes Follow but not Connect.",
-                profile=page_text,
-            )
+            # Connect may be hidden behind the More (three-dot) menu
+            if await self._open_more_menu():
+                state = "connectable"
+                via_more_menu = True
+            else:
+                return _connection_result(
+                    url,
+                    "follow_only",
+                    "This profile currently exposes Follow but not Connect.",
+                    profile=page_text,
+                )
+
         if state == "unavailable":
             return _connection_result(
                 url,
@@ -821,7 +860,8 @@ class LinkedInExtractor:
             )
 
         # Click the button (page is already loaded from scrape_person)
-        clicked = await self.click_button_by_text(button_text)
+        click_scope = "[role='menu']" if via_more_menu else "main"
+        clicked = await self.click_button_by_text(button_text, scope=click_scope)
         if not clicked:
             return _connection_result(
                 url,
