@@ -228,7 +228,6 @@ class TestPersonTool:
         tool_fn = await get_tool_fn(mcp, "connect_with_person")
         result = await tool_fn(
             "test-user",
-            True,
             mock_context,
             note="Let us connect.",
             extractor=mock_extractor,
@@ -238,15 +237,14 @@ class TestPersonTool:
         assert result["note_sent"] is True
         mock_extractor.connect_with_person.assert_awaited_once_with(
             "test-user",
-            confirm_send=True,
             note="Let us connect.",
         )
 
-    async def test_connect_with_person_confirmation_required(self, mock_context):
+    async def test_connect_with_person_no_note(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/in/test-user/",
-            "status": "confirmation_required",
-            "message": "Set confirm_send=true to send the connection request.",
+            "status": "connected",
+            "message": "Connection request sent.",
             "note_sent": False,
         }
         mock_extractor = _make_mock_extractor(expected)
@@ -259,15 +257,13 @@ class TestPersonTool:
         tool_fn = await get_tool_fn(mcp, "connect_with_person")
         result = await tool_fn(
             "test-user",
-            False,
             mock_context,
             extractor=mock_extractor,
         )
 
-        assert result["status"] == "confirmation_required"
+        assert result["status"] == "connected"
         mock_extractor.connect_with_person.assert_awaited_once_with(
             "test-user",
-            confirm_send=False,
             note=None,
         )
 
@@ -317,7 +313,7 @@ class TestPersonTool:
         with pytest.raises(ToolError, match="Session expired"):
             await mcp.call_tool(
                 "connect_with_person",
-                {"linkedin_username": "test", "confirm_send": True},
+                {"linkedin_username": "test"},
             )
 
 
