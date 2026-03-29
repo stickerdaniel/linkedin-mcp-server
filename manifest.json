@@ -54,6 +54,10 @@
       "description": "Send a connection request or accept an incoming one, with optional note"
     },
     {
+      "name": "get_sidebar_profiles",
+      "description": "Extract profile URLs from LinkedIn sidebar recommendation sections on a profile page"
+    },
+    {
       "name": "get_company_profile",
       "description": "Extract comprehensive company information and details"
     },

@@ -27,6 +27,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
+    mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -492,6 +493,65 @@ class TestJobTools:
         assert "pages_visited" not in result
 
 
+class TestGetSidebarProfilesTool:
+    async def test_get_sidebar_profiles_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "sidebar_profiles": {
+                "more_profiles_for_you": ["/in/alice/", "/in/bob/"],
+            },
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_sidebar_profiles")
+        result = await tool_fn("test-user", mock_context, extractor=mock_extractor)
+
+        assert result["url"] == "https://www.linkedin.com/in/test-user/"
+        assert "more_profiles_for_you" in result["sidebar_profiles"]
+        mock_extractor.get_sidebar_profiles.assert_awaited_once_with("test-user")
+
+    async def test_get_sidebar_profiles_empty_result(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "sidebar_profiles": {},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_sidebar_profiles")
+        result = await tool_fn("test-user", mock_context, extractor=mock_extractor)
+
+        assert result["sidebar_profiles"] == {}
+
+    async def test_get_sidebar_profiles_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.get_sidebar_profiles = AsyncMock(
+            side_effect=SessionExpiredError()
+        )
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_sidebar_profiles")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn("test-user", mock_context, extractor=mock_extractor)
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
@@ -502,6 +562,7 @@ class TestToolTimeouts:
         tool_names = (
             "get_person_profile",
             "connect_with_person",
+            "get_sidebar_profiles",
             "search_people",
             "get_company_profile",
             "get_company_posts",
