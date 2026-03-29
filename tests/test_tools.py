@@ -22,6 +22,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     """Create a mock LinkedInExtractor that returns the given result."""
     mock = MagicMock()
     mock.scrape_person = AsyncMock(return_value=scrape_result)
+    mock.connect_with_person = AsyncMock(return_value=scrape_result)
     mock.scrape_company = AsyncMock(return_value=scrape_result)
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
@@ -210,6 +211,111 @@ class TestPersonTool:
         assert "pages_visited" not in result
         mock_extractor.search_people.assert_awaited_once_with("AI engineer", "New York")
 
+    async def test_connect_with_person(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "status": "connected",
+            "message": "Connection request sent.",
+            "note_sent": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "connect_with_person")
+        result = await tool_fn(
+            "test-user",
+            mock_context,
+            note="Let us connect.",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "connected"
+        assert result["note_sent"] is True
+        mock_extractor.connect_with_person.assert_awaited_once_with(
+            "test-user",
+            note="Let us connect.",
+        )
+
+    async def test_connect_with_person_no_note(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "status": "connected",
+            "message": "Connection request sent.",
+            "note_sent": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "connect_with_person")
+        result = await tool_fn(
+            "test-user",
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "connected"
+        mock_extractor.connect_with_person.assert_awaited_once_with(
+            "test-user",
+            note=None,
+        )
+
+    async def test_connect_with_person_auth_error(self, monkeypatch):
+        """Auth failures in the DI layer trigger auto-relogin and report the login browser."""
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.core.exceptions import AuthenticationError
+        from linkedin_mcp_server.exceptions import AuthenticationStartedError
+
+        mock_browser = MagicMock()
+        mock_browser.page = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_or_create_browser",
+            AsyncMock(return_value=mock_browser),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.ensure_authenticated",
+            AsyncMock(side_effect=AuthenticationError("Session expired or invalid.")),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_runtime_policy",
+            lambda: "managed",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.close_browser",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+            AsyncMock(
+                side_effect=AuthenticationStartedError(
+                    "Session expired. A login browser window has been opened."
+                )
+            ),
+        )
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        with pytest.raises(ToolError, match="Session expired"):
+            await mcp.call_tool(
+                "connect_with_person",
+                {"linkedin_username": "test"},
+            )
+
 
 class TestCompanyTools:
     async def test_get_company_profile(self, mock_context):
@@ -395,6 +501,7 @@ class TestToolTimeouts:
 
         tool_names = (
             "get_person_profile",
+            "connect_with_person",
             "search_people",
             "get_company_profile",
             "get_company_posts",
