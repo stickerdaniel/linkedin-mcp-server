@@ -10,6 +10,7 @@ Available Tools:
 - Person tools: LinkedIn profile scraping and analysis
 - Company tools: Company profile and information extraction
 - Job tools: Job posting details and search functionality
+- Messaging tools: Inbox, conversations, search, and sending messages
 
 Architecture:
 - FastMCP integration for MCP-compliant tool registration
