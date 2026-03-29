@@ -28,6 +28,10 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.search_jobs = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
+    mock.get_inbox = AsyncMock(return_value=scrape_result)
+    mock.get_conversation = AsyncMock(return_value=scrape_result)
+    mock.search_conversations = AsyncMock(return_value=scrape_result)
+    mock.send_message = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -552,6 +556,149 @@ class TestGetSidebarProfilesTool:
             await tool_fn("test-user", mock_context, extractor=mock_extractor)
 
 
+class TestMessagingTools:
+    async def test_get_inbox_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/",
+            "sections": {"inbox": "Conversation 1\nConversation 2"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_inbox")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        assert result["sections"]["inbox"] == "Conversation 1\nConversation 2"
+        mock_extractor.get_inbox.assert_awaited_once_with(limit=20)
+
+    async def test_get_conversation_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/abc123/",
+            "sections": {"conversation": "Hello!\nHi there!"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_conversation")
+        result = await tool_fn(
+            mock_context, linkedin_username="testuser", extractor=mock_extractor
+        )
+
+        assert result["sections"]["conversation"] == "Hello!\nHi there!"
+        mock_extractor.get_conversation.assert_awaited_once_with(
+            linkedin_username="testuser", thread_id=None
+        )
+
+    async def test_search_conversations_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/",
+            "sections": {"search_results": "Result 1\nResult 2"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_conversations")
+        result = await tool_fn("hello", mock_context, extractor=mock_extractor)
+
+        assert result["sections"]["search_results"] == "Result 1\nResult 2"
+        mock_extractor.search_conversations.assert_awaited_once_with("hello")
+
+    async def test_send_message_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/abc123/",
+            "status": "sent",
+            "message": "Message sent.",
+            "recipient_selected": True,
+            "sent": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        result = await tool_fn(
+            "testuser",
+            "Hello!",
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        mock_extractor.send_message.assert_awaited_once_with(
+            "testuser", "Hello!", confirm_send=True, profile_urn=None
+        )
+
+    async def test_send_message_with_profile_urn(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/abc123/",
+            "status": "sent",
+            "message": "Message sent.",
+            "recipient_selected": True,
+            "sent": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        result = await tool_fn(
+            "testuser",
+            "Hello!",
+            True,
+            mock_context,
+            profile_urn="ACoAAB1IelEB",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "sent"
+        mock_extractor.send_message.assert_awaited_once_with(
+            "testuser", "Hello!", confirm_send=True, profile_urn="ACoAAB1IelEB"
+        )
+
+    async def test_send_message_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.send_message = AsyncMock(side_effect=SessionExpiredError())
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn(
+                "testuser",
+                "Hello!",
+                True,
+                mock_context,
+                extractor=mock_extractor,
+            )
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
@@ -568,6 +715,10 @@ class TestToolTimeouts:
             "get_company_posts",
             "get_job_details",
             "search_jobs",
+            "get_inbox",
+            "get_conversation",
+            "search_conversations",
+            "send_message",
             "close_session",
         )
 
