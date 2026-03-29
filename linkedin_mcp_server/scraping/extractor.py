@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import logging
 import re
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -713,6 +713,7 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
+        profile_urn: str | None = None
 
         requested_ordered = [
             (name, suffix, is_overlay)
@@ -746,6 +747,9 @@ class LinkedInExtractor:
                             references[section_name] = extracted.references
                     elif extracted.error:
                         section_errors[section_name] = extracted.error
+
+                    if section_name == "main_profile" and profile_urn is None:
+                        profile_urn = await self._extract_profile_urn()
                 except LinkedInScraperException:
                     raise
                 except Exception as e:
@@ -773,6 +777,8 @@ class LinkedInExtractor:
             "url": f"{base_url}/",
             "sections": sections,
         }
+        if profile_urn:
+            result["profile_urn"] = profile_urn
         if references:
             result["references"] = references
         if section_errors:
@@ -930,6 +936,202 @@ class LinkedInExtractor:
             note_sent=note_sent,
             profile=updated_text,
         )
+
+    async def _extract_profile_urn(self) -> str | None:
+        """Extract the recipient profile URN from the messaging compose link.
+
+        The compose button on a person's profile contains a recipient URN in its
+        href query string. This URN is more reliable than username for messaging.
+        Returns None when no compose button is present (e.g. not a 1st-degree
+        connection or viewing own profile).
+        """
+        href: str | None = await self._page.evaluate(
+            """() => {
+                const anchor = document.querySelector(
+                    'main a[href*="/messaging/compose/"]'
+                );
+                if (!anchor) return null;
+                return anchor.getAttribute('href') || anchor.href || null;
+            }"""
+        )
+        if not isinstance(href, str) or not href.strip():
+            return None
+        params = parse_qs(urlparse(href.strip()).query)
+        recipient = params.get("recipient", [None])[0]
+        return recipient if isinstance(recipient, str) and recipient else None
+
+    async def get_sidebar_profiles(self, username: str) -> dict[str, Any]:
+        """Extract profile links from sidebar sections on a LinkedIn profile page.
+
+        Scrapes "More profiles for you", "Explore premium profiles", and
+        "People you may know" sidebar sections. Follows each "Show all" link to
+        collect the full list; skips any section whose "Show all" URL contains or
+        redirects to /premium.
+
+        Returns:
+            Dict with url and sidebar_profiles mapping section key to list of
+            /in/username/ paths. Sections absent from the page are omitted.
+        """
+        url = f"https://www.linkedin.com/in/{username}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=5000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s", url)
+
+        await handle_modal_close(self._page)
+
+        sidebar_data: dict[str, Any] = await self._page.evaluate(
+            """() => {
+                const SIDEBAR_SECTIONS = [
+                    "More profiles for you",
+                    "Explore premium profiles",
+                    "People you may know"
+                ];
+                const normalize = text => (text || '').replace(/\\s+/g, ' ').trim();
+                const slugify = text => text.toLowerCase().replace(/\\s+/g, '_');
+                const extractProfilePath = href => {
+                    if (!href) return null;
+                    const idx = href.indexOf('/in/');
+                    if (idx === -1) return null;
+                    const rest = href.slice(idx + 4);
+                    const end = rest.search(/[/?#]/);
+                    const username = end === -1 ? rest : rest.slice(0, end);
+                    return username ? '/in/' + username + '/' : null;
+                };
+
+                const sections = {};
+                const showAllUrls = {};
+
+                const headings = Array.from(document.querySelectorAll('h1, h2, h3'));
+                for (const heading of headings) {
+                    const headingText = normalize(
+                        heading.innerText || heading.textContent
+                    );
+                    if (!SIDEBAR_SECTIONS.includes(headingText)) continue;
+
+                    const sectionKey = slugify(headingText);
+
+                    // Walk up to find a section/aside container (max 5 levels)
+                    let container = heading.parentElement;
+                    for (let depth = 0; container && depth < 5; depth++) {
+                        const tag = container.tagName.toLowerCase();
+                        if (tag === 'section' || tag === 'aside') break;
+                        container = container.parentElement;
+                    }
+                    if (!container) continue;
+
+                    // Collect /in/ profile links, deduplicated
+                    const seen = new Set();
+                    const profileLinks = [];
+                    for (const a of container.querySelectorAll('a[href*="/in/"]')) {
+                        const path = extractProfilePath(a.getAttribute('href'));
+                        if (path && !seen.has(path)) {
+                            seen.add(path);
+                            profileLinks.push(path);
+                        }
+                    }
+
+                    // Find "Show all" / "See all" anchor within container
+                    let showAll = null;
+                    for (const a of container.querySelectorAll('a')) {
+                        const text = normalize(
+                            a.innerText || a.textContent
+                        ).toLowerCase();
+                        if (text.startsWith('show all') || text.startsWith('see all')) {
+                            showAll = a.href || a.getAttribute('href');
+                            break;
+                        }
+                    }
+
+                    sections[sectionKey] = profileLinks;
+                    if (showAll) showAllUrls[sectionKey] = showAll;
+                }
+
+                return { sections, showAllUrls };
+            }"""
+        )
+
+        sidebar_profiles: dict[str, list[str]] = dict(sidebar_data.get("sections", {}))
+        show_all_urls: dict[str, str] = dict(sidebar_data.get("showAllUrls", {}))
+
+        first_show_all = True
+        for section_key, show_all_url in show_all_urls.items():
+            if "/premium" in show_all_url:
+                continue
+
+            if not first_show_all:
+                await asyncio.sleep(_NAV_DELAY)
+            first_show_all = False
+
+            try:
+                await self._navigate_to_page(show_all_url)
+            except Exception:
+                logger.debug(
+                    "Failed to navigate to Show all for section %s: %s",
+                    section_key,
+                    show_all_url,
+                )
+                continue
+
+            if "/premium" in self._page.url:
+                logger.debug(
+                    "Show all for section %s redirected to premium, skipping",
+                    section_key,
+                )
+                continue
+
+            await detect_rate_limit(self._page)
+
+            try:
+                await self._page.wait_for_selector("main", timeout=5000)
+            except PlaywrightTimeoutError:
+                logger.debug("No <main> on Show all page for section %s", section_key)
+
+            await handle_modal_close(self._page)
+
+            expanded_links: list[str] = await self._page.evaluate(
+                """() => {
+                    const extractProfilePath = href => {
+                        if (!href) return null;
+                        const idx = href.indexOf('/in/');
+                        if (idx === -1) return null;
+                        const rest = href.slice(idx + 4);
+                        const end = rest.search(/[/?#]/);
+                        const username = end === -1 ? rest : rest.slice(0, end);
+                        return username ? '/in/' + username + '/' : null;
+                    };
+                    const seen = new Set();
+                    const links = [];
+                    for (const a of document.querySelectorAll(
+                        'main a[href*="/in/"]'
+                    )) {
+                        const path = extractProfilePath(a.getAttribute('href'));
+                        if (path && !seen.has(path)) {
+                            seen.add(path);
+                            links.push(path);
+                        }
+                    }
+                    return links;
+                }"""
+            )
+
+            # Merge: sidebar links first, then show_all expansion, deduped
+            existing = sidebar_profiles.get(section_key, [])
+            seen_paths: set[str] = set(existing)
+            merged = list(existing)
+            for link in expanded_links:
+                if link not in seen_paths:
+                    seen_paths.add(link)
+                    merged.append(link)
+            sidebar_profiles[section_key] = merged
+
+        return {
+            "url": url,
+            "sidebar_profiles": sidebar_profiles,
+        }
 
     async def scrape_company(
         self,
