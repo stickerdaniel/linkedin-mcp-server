@@ -787,22 +787,37 @@ class TestConnectWithPerson:
             }
         )
 
-    async def test_returns_confirmation_required(self, mock_page):
+    async def test_connectable_clicks_connect(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
 
-        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
-            result = await extractor.connect_with_person("testuser", confirm_send=False)
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "click_button_by_text",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_click,
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
 
-        assert result["status"] == "confirmation_required"
+        assert result["status"] == "connected"
         assert result["url"] == "https://www.linkedin.com/in/testuser/"
+        mock_click.assert_awaited_once_with("Connect")
 
     async def test_returns_already_connected(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         text = "Collin\n\n· 1st\n\nEngineer\n\nMessage\nMore\nAbout\n"
 
         with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
-            result = await extractor.connect_with_person("testuser", confirm_send=True)
+            result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "already_connected"
 
@@ -811,7 +826,7 @@ class TestConnectWithPerson:
         text = "Marinus\n\n· 2nd\n\nStudent\n\nMessage\nPending\nMore\nAbout\n"
 
         with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
-            result = await extractor.connect_with_person("testuser", confirm_send=True)
+            result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "pending"
 
@@ -834,7 +849,7 @@ class TestConnectWithPerson:
                 return_value=False,
             ),
         ):
-            result = await extractor.connect_with_person("testuser", confirm_send=True)
+            result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "accepted"
         mock_click.assert_awaited_once_with("Accept")
@@ -844,7 +859,7 @@ class TestConnectWithPerson:
         text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMore\nAbout\n"
 
         with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
-            result = await extractor.connect_with_person("testuser", confirm_send=True)
+            result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "follow_only"
 
@@ -853,7 +868,7 @@ class TestConnectWithPerson:
         text = "Unknown\n\nSome text\nAbout\n"
 
         with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
-            result = await extractor.connect_with_person("testuser", confirm_send=True)
+            result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "connect_unavailable"
 
@@ -870,7 +885,7 @@ class TestConnectWithPerson:
                 return_value=False,
             ),
         ):
-            result = await extractor.connect_with_person("testuser", confirm_send=True)
+            result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "send_failed"
 
@@ -887,7 +902,7 @@ class TestConnectWithPerson:
                 }
             ),
         ):
-            result = await extractor.connect_with_person("testuser", confirm_send=True)
+            result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "unavailable"
 

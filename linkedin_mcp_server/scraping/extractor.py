@@ -748,7 +748,6 @@ class LinkedInExtractor:
         self,
         username: str,
         *,
-        confirm_send: bool,
         note: str | None = None,
     ) -> dict[str, Any]:
         """Send a LinkedIn connection request or accept an incoming one.
@@ -800,13 +799,6 @@ class LinkedInExtractor:
             )
 
         # state is "connectable" or "incoming_request"
-        if not confirm_send:
-            return _connection_result(
-                url,
-                "confirmation_required",
-                "Set confirm_send=true to send the connection request.",
-            )
-
         button_text = STATE_BUTTON_MAP.get(state)
         if not button_text:
             return _connection_result(
