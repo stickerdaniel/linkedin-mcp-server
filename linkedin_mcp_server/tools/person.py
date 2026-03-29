@@ -146,24 +146,25 @@ def register_person_tools(mcp: FastMCP) -> None:
     )
     async def connect_with_person(
         linkedin_username: str,
-        confirm_send: bool,
         ctx: Context,
         note: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
-        Send a LinkedIn connection request to a person profile.
+        Send a LinkedIn connection request or accept an incoming one.
+
+        The tool is annotated with destructiveHint so MCP clients will
+        prompt for user confirmation before execution.
 
         Args:
             linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates")
-            confirm_send: Must be True to actually send the connection request
             ctx: FastMCP context for progress reporting
             note: Optional note to include with the invitation
 
         Returns:
             Dict with url, status, message, and note_sent.
-            Statuses: confirmation_required, pending, already_connected,
-            follow_only, connect_unavailable, unavailable, send_failed,
+            Statuses: pending, already_connected, follow_only,
+            connect_unavailable, unavailable, send_failed,
             note_not_supported, connected, or accepted.
         """
         try:
@@ -171,9 +172,8 @@ def register_person_tools(mcp: FastMCP) -> None:
                 ctx, tool_name="connect_with_person"
             )
             logger.info(
-                "Connecting with person: %s (confirm_send=%s, note=%s)",
+                "Connecting with person: %s (note=%s)",
                 linkedin_username,
-                confirm_send,
                 note is not None,
             )
 
@@ -185,7 +185,6 @@ def register_person_tools(mcp: FastMCP) -> None:
 
             result = await extractor.connect_with_person(
                 linkedin_username,
-                confirm_send=confirm_send,
                 note=note,
             )
 
