@@ -97,14 +97,18 @@ def _connection_result(
     message: str,
     *,
     note_sent: bool = False,
+    profile: str = "",
 ) -> dict[str, Any]:
     """Build a structured response for a profile connection attempt."""
-    return {
+    result: dict[str, Any] = {
         "url": url,
         "status": status,
         "message": message,
         "note_sent": note_sent,
     }
+    if profile:
+        result["profile"] = profile
+    return result
 
 
 def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
@@ -393,25 +397,28 @@ class LinkedInExtractor:
     async def click_button_by_text(
         self, text: str, *, scope: str = "main", timeout: int = 5000
     ) -> bool:
-        """Click the first button/link matching *text* within *scope*.
+        """Click the first button/link whose visible text is exactly *text*.
 
-        The text comes from LLM analysis at runtime — not hardcoded.
+        Uses a regex filter for exact matching to avoid substring false
+        positives (e.g. "Connect" matching "connections").
         Returns True if clicked, False if no match found.
         """
-        selector = (
-            f'{scope} button:has-text("{text}"), '
-            f'{scope} a:has-text("{text}"), '
-            f'{scope} [role="button"]:has-text("{text}")'
+        matches = (
+            self._page.locator(scope)
+            .locator("button, a, [role='button']")
+            .filter(has_text=re.compile(rf"^{re.escape(text)}$"))
         )
-        locator = self._page.locator(selector).first
+        count = await matches.count()
+        logger.debug("click_button_by_text(%r): %d matches in %s", text, count, scope)
+        if count == 0:
+            return False
+        target = matches.first
         try:
-            if await self._page.locator(selector).count() == 0:
-                return False
-            await locator.scroll_into_view_if_needed(timeout=timeout)
+            await target.scroll_into_view_if_needed(timeout=timeout)
         except Exception:
             logger.debug("Scroll failed for button '%s'", text, exc_info=True)
         try:
-            await locator.click(timeout=timeout)
+            await target.click(timeout=timeout)
             return True
         except Exception:
             logger.debug("Click failed for button '%s'", text, exc_info=True)
@@ -777,25 +784,31 @@ class LinkedInExtractor:
 
         if state == "already_connected":
             return _connection_result(
-                url, "already_connected", "You are already connected with this profile."
+                url,
+                "already_connected",
+                "You are already connected with this profile.",
+                profile=page_text,
             )
         if state == "pending":
             return _connection_result(
                 url,
                 "pending",
                 "A connection request is already pending for this profile.",
+                profile=page_text,
             )
         if state == "follow_only":
             return _connection_result(
                 url,
                 "follow_only",
                 "This profile currently exposes Follow but not Connect.",
+                profile=page_text,
             )
         if state == "unavailable":
             return _connection_result(
                 url,
                 "connect_unavailable",
                 "LinkedIn did not expose a usable Connect action for this profile.",
+                profile=page_text,
             )
 
         # state is "connectable" or "incoming_request"
@@ -864,6 +877,9 @@ class LinkedInExtractor:
             except PlaywrightTimeoutError:
                 logger.debug("Dialog did not close after clicking send")
 
+        # Read the current page text (already on the profile after the action)
+        updated_text = await self.get_page_text()
+
         status = "accepted" if state == "incoming_request" else "connected"
         return _connection_result(
             url,
@@ -872,6 +888,7 @@ class LinkedInExtractor:
             if status == "connected"
             else "Connection request accepted.",
             note_sent=note_sent,
+            profile=updated_text,
         )
 
     async def scrape_company(
