@@ -9,6 +9,10 @@ from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
 )
+from linkedin_mcp_server.scraping.connection import (
+    _extract_action_area,
+    detect_connection_state,
+)
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
@@ -722,6 +726,185 @@ class TestScrapePersonUrls:
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/recent-activity/all/" in url for url in urls)
         assert "posts" in result["sections"]
+
+
+class TestDetectConnectionState:
+    """Tests for connection state detection from profile text."""
+
+    def test_already_connected(self):
+        text = "Collin Pfeifer\n\n· 1st\n\nAI Engineer\n\nMessage\nMore"
+        assert detect_connection_state(text) == "already_connected"
+
+    def test_pending(self):
+        text = "Marinus Prey\n\n· 2nd\n\nStudent\n\nMessage\nPending\nMore"
+        assert detect_connection_state(text) == "pending"
+
+    def test_incoming_request(self):
+        text = "Aklasur Rahman\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore"
+        assert detect_connection_state(text) == "incoming_request"
+
+    def test_connectable(self):
+        text = "Jane Doe\n\n· 3rd\n\nEngineer\n\nConnect\nMore"
+        assert detect_connection_state(text) == "connectable"
+
+    def test_follow_only(self):
+        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMore"
+        assert detect_connection_state(text) == "follow_only"
+
+    def test_unavailable(self):
+        text = "Unknown Person\n\nSome text here"
+        assert detect_connection_state(text) == "unavailable"
+
+    def test_follow_in_interests_not_matched(self):
+        """Follow in the Interests section should not cause a false positive."""
+        text = (
+            "Jane Doe\n\n· 2nd\n\nEngineer\n\nConnect\nMore\n"
+            "About\n\nSome bio\n\nInterests\n\n"
+            "Elon Musk\n101,000 followers\nFollow"
+        )
+        assert detect_connection_state(text) == "connectable"
+
+    def test_action_area_cuts_at_about(self):
+        text = "Name\n\nConnect\nMore\nAbout\n\nFollow\nConnect"
+        area = _extract_action_area(text)
+        assert "About" not in area
+        assert "Follow" not in area
+
+    def test_action_area_cuts_at_highlights(self):
+        text = "Name\n\nMessage\nPending\nMore\nHighlights\n\nFollow"
+        area = _extract_action_area(text)
+        assert "Follow" not in area
+        assert "Pending" in area
+
+
+class TestConnectWithPerson:
+    def _mock_scrape(self, profile_text: str) -> AsyncMock:
+        """Return a mock for scrape_person that returns the given text."""
+        return AsyncMock(
+            return_value={
+                "url": "https://www.linkedin.com/in/testuser/",
+                "sections": {"main_profile": profile_text},
+            }
+        )
+
+    async def test_connectable_clicks_connect(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "click_button_by_text",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_click,
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connected"
+        assert result["url"] == "https://www.linkedin.com/in/testuser/"
+        mock_click.assert_awaited_once_with("Connect")
+
+    async def test_returns_already_connected(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        text = "Collin\n\n· 1st\n\nEngineer\n\nMessage\nMore\nAbout\n"
+
+        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "already_connected"
+
+    async def test_returns_pending(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        text = "Marinus\n\n· 2nd\n\nStudent\n\nMessage\nPending\nMore\nAbout\n"
+
+        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "pending"
+
+    async def test_returns_incoming_request_accepted(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        text = "Aklasur\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore\nAbout\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "click_button_by_text",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_click,
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "accepted"
+        mock_click.assert_awaited_once_with("Accept")
+
+    async def test_returns_follow_only(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMore\nAbout\n"
+
+        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "follow_only"
+
+    async def test_returns_unavailable(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        text = "Unknown\n\nSome text\nAbout\n"
+
+        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connect_unavailable"
+
+    async def test_returns_send_failed_when_button_not_found(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "click_button_by_text",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "send_failed"
+
+    async def test_returns_unavailable_on_empty_page(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+
+        with patch.object(
+            extractor,
+            "scrape_person",
+            AsyncMock(
+                return_value={
+                    "url": "https://www.linkedin.com/in/testuser/",
+                    "sections": {},
+                }
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "unavailable"
 
     async def test_references_are_grouped_by_section(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
