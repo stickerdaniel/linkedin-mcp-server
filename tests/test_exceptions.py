@@ -1,4 +1,5 @@
 from linkedin_mcp_server.exceptions import (
+    AuthenticationError,
     CredentialsNotFoundError,
     LinkedInMCPError,
     SessionExpiredError,
@@ -8,6 +9,10 @@ from linkedin_mcp_server.exceptions import (
 def test_base_exception():
     err = LinkedInMCPError("test")
     assert str(err) == "test"
+
+
+def test_credentials_not_found_inheritance():
+    assert issubclass(CredentialsNotFoundError, LinkedInMCPError)
 
 
 def test_session_expired_default_message():
@@ -22,4 +27,4 @@ def test_session_expired_custom_message():
 
 def test_inheritance():
     assert issubclass(SessionExpiredError, LinkedInMCPError)
-    assert issubclass(CredentialsNotFoundError, LinkedInMCPError)
+    assert issubclass(AuthenticationError, LinkedInMCPError)

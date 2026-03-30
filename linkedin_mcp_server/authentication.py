@@ -1,32 +1,29 @@
-"""
-Authentication logic for LinkedIn MCP Server.
-
-Handles LinkedIn session management with persistent browser profile.
-"""
+"""Authentication logic for LinkedIn MCP Server."""
 
 import logging
 import shutil
 from pathlib import Path
 
+from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 from linkedin_mcp_server.session_state import (
     clear_auth_state as clear_all_auth_state,
+)
+from linkedin_mcp_server.session_state import (
     get_source_profile_dir,
+    load_source_state,
     portable_cookie_path,
     profile_exists,
     source_state_path,
-    load_source_state,
 )
-from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 
 logger = logging.getLogger(__name__)
 
 
 def get_authentication_source() -> bool:
-    """
-    Check if authentication is available via persistent profile.
+    """Check if authentication is available via persistent profile.
 
     Returns:
-        True if profile exists
+        True if valid source profile exists
 
     Raises:
         CredentialsNotFoundError: If no authentication method available
@@ -58,15 +55,7 @@ def get_authentication_source() -> bool:
 
 
 def clear_profile(profile_dir: Path | None = None) -> bool:
-    """
-    Clear stored browser profile directory.
-
-    Args:
-        profile_dir: Path to profile directory
-
-    Returns:
-        True if clearing was successful
-    """
+    """Clear stored browser profile directory."""
     if profile_dir is None:
         profile_dir = get_source_profile_dir()
 

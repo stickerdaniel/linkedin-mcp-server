@@ -1,14 +1,17 @@
 """Core extraction engine using innerText instead of DOM selectors."""
 
 import asyncio
-from dataclasses import dataclass
 import logging
+import random
 import re
+from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote_plus
 
-from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+from patchright.async_api import Page
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.antidetect import nav_jitter
 from linkedin_mcp_server.core import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
@@ -18,15 +21,14 @@ from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
 )
-from linkedin_mcp_server.debug_trace import record_page_trace
-from linkedin_mcp_server.debug_utils import stabilize_navigation
-from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
     scroll_job_sidebar,
     scroll_to_bottom,
 )
+from linkedin_mcp_server.debug_trace import record_page_trace
+from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
     build_references,
@@ -39,14 +41,21 @@ logger = logging.getLogger(__name__)
 
 WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
 
-# Delay between page navigations to avoid rate limiting
-_NAV_DELAY = 2.0
+# Backoff before retrying a rate-limited page (exponential with jitter)
+_RATE_LIMIT_RETRY_BASE = 5.0
+_RATE_LIMIT_RETRY_MAX = 30.0
 
-# Backoff before retrying a rate-limited page
-_RATE_LIMIT_RETRY_DELAY = 5.0
+
+def _jittered_backoff(attempt: int = 1) -> float:
+    """Exponential backoff with full jitter (AWS-style)."""
+    cap = min(_RATE_LIMIT_RETRY_MAX, _RATE_LIMIT_RETRY_BASE * (2 ** (attempt - 1)))
+    return random.uniform(cap * 0.5, cap)
+
 
 # Returned as section text when LinkedIn rate-limits the page
-_RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
+_RATE_LIMITED_MSG = (
+    "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
+)
 
 # LinkedIn shows 25 results per page
 _PAGE_SIZE = 25
@@ -187,9 +196,7 @@ class LinkedInExtractor:
             auth_barrier = None
 
         try:
-            remember_me_visible = (
-                await self._page.locator("#rememberme-div").count()
-            ) > 0
+            remember_me_visible = (await self._page.locator("#rememberme-div").count()) > 0
         except Exception:
             remember_me_visible = False
 
@@ -268,7 +275,16 @@ class LinkedInExtractor:
                 extra={"target_url": url, "wait_until": wait_until},
             )
             try:
+                from linkedin_mcp_server.antidetect import (
+                    human_delay,
+                    inject_stealth_page,
+                    simulate_human_behavior,
+                )
+
+                await human_delay()
                 await self._page.goto(url, wait_until=wait_until, timeout=30000)
+                await inject_stealth_page(self._page)
+                await simulate_human_behavior(self._page)
                 await stabilize_navigation(f"goto {url}", logger)
                 await record_page_trace(
                     self._page,
@@ -277,9 +293,7 @@ class LinkedInExtractor:
                 )
             except Exception as exc:
                 if allow_remember_me and await resolve_remember_me_prompt(self._page):
-                    await stabilize_navigation(
-                        f"remember-me resolution for {url}", logger
-                    )
+                    await stabilize_navigation(f"remember-me resolution for {url}", logger)
                     await record_page_trace(
                         self._page,
                         "extractor-navigation-error-before-remember-me-retry",
@@ -305,6 +319,21 @@ class LinkedInExtractor:
                         allow_remember_me=False,
                     )
                     return
+                if allow_remember_me and await detect_auth_barrier_quick(self._page):
+                    from linkedin_mcp_server.drivers.browser import recover_session
+
+                    if await recover_session():
+                        logger.info(
+                            "Session recovered via cookie bridge after nav error, retrying %s",
+                            url,
+                        )
+                        unregister_navigation_listener()
+                        await self._goto_with_auth_checks(
+                            url,
+                            wait_until=wait_until,
+                            allow_remember_me=False,
+                        )
+                        return
                 await record_page_trace(
                     self._page,
                     "extractor-navigation-error",
@@ -337,6 +366,19 @@ class LinkedInExtractor:
                     allow_remember_me=False,
                 )
                 return
+
+            if allow_remember_me:
+                from linkedin_mcp_server.drivers.browser import recover_session
+
+                if await recover_session():
+                    logger.info("Session recovered via cookie bridge, retrying %s", url)
+                    unregister_navigation_listener()
+                    await self._goto_with_auth_checks(
+                        url,
+                        wait_until=wait_until,
+                        allow_remember_me=False,
+                    )
+                    return
 
             await record_page_trace(
                 self._page,
@@ -375,9 +417,10 @@ class LinkedInExtractor:
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
-            # Retry once after backoff
-            logger.info("Retrying %s after %.0fs backoff", url, _RATE_LIMIT_RETRY_DELAY)
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            # Retry once after jittered backoff
+            backoff = _jittered_backoff()
+            logger.info("Retrying %s after %.1fs backoff", url, backoff)
+            await asyncio.sleep(backoff)
             return await self._extract_page_once(url, section_name)
 
         except LinkedInScraperException:
@@ -387,12 +430,13 @@ class LinkedInExtractor:
             return ExtractedSection(
                 text="",
                 references=[],
-                error=build_issue_diagnostics(
-                    e,
-                    context="extract_page",
-                    target_url=url,
-                    section_name=section_name,
-                ),
+                error={
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "context": "extract_page",
+                    "target_url": url,
+                    "section_name": section_name,
+                },
             )
 
     async def _extract_page_once(
@@ -458,9 +502,7 @@ class LinkedInExtractor:
             return ExtractedSection(text="", references=[])
         truncated = _truncate_linkedin_noise(raw)
         if not truncated and raw.strip():
-            logger.warning(
-                "Page %s returned only LinkedIn chrome (likely rate-limited)", url
-            )
+            logger.warning("Page %s returned only LinkedIn chrome (likely rate-limited)", url)
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
@@ -486,12 +528,9 @@ class LinkedInExtractor:
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
-            logger.info(
-                "Retrying overlay %s after %.0fs backoff",
-                url,
-                _RATE_LIMIT_RETRY_DELAY,
-            )
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            backoff = _jittered_backoff()
+            logger.info("Retrying overlay %s after %.1fs backoff", url, backoff)
+            await asyncio.sleep(backoff)
             return await self._extract_overlay_once(url, section_name)
 
         except LinkedInScraperException:
@@ -501,12 +540,13 @@ class LinkedInExtractor:
             return ExtractedSection(
                 text="",
                 references=[],
-                error=build_issue_diagnostics(
-                    e,
-                    context="extract_overlay",
-                    target_url=url,
-                    section_name=section_name,
-                ),
+                error={
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "context": "extract_overlay",
+                    "target_url": url,
+                    "section_name": section_name,
+                },
             )
 
     async def _extract_overlay_once(
@@ -568,15 +608,13 @@ class LinkedInExtractor:
                 continue
 
             if not first:
-                await asyncio.sleep(_NAV_DELAY)
+                await nav_jitter()
             first = False
 
             url = base_url + suffix
             try:
                 if is_overlay:
-                    extracted = await self._extract_overlay(
-                        url, section_name=section_name
-                    )
+                    extracted = await self._extract_overlay(url, section_name=section_name)
                 else:
                     extracted = await self.extract_page(url, section_name=section_name)
 
@@ -590,12 +628,13 @@ class LinkedInExtractor:
                 raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
-                section_errors[section_name] = build_issue_diagnostics(
-                    e,
-                    context="scrape_person",
-                    target_url=url,
-                    section_name=section_name,
-                )
+                section_errors[section_name] = {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "context": "scrape_person",
+                    "target_url": url,
+                    "section_name": section_name,
+                }
 
         result: dict[str, Any] = {
             "url": f"{base_url}/",
@@ -607,9 +646,7 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
-    async def scrape_company(
-        self, company_name: str, requested: set[str]
-    ) -> dict[str, Any]:
+    async def scrape_company(self, company_name: str, requested: set[str]) -> dict[str, Any]:
         """Scrape a company profile with configurable sections.
 
         Returns:
@@ -627,15 +664,13 @@ class LinkedInExtractor:
                 continue
 
             if not first:
-                await asyncio.sleep(_NAV_DELAY)
+                await nav_jitter()
             first = False
 
             url = base_url + suffix
             try:
                 if is_overlay:
-                    extracted = await self._extract_overlay(
-                        url, section_name=section_name
-                    )
+                    extracted = await self._extract_overlay(url, section_name=section_name)
                 else:
                     extracted = await self.extract_page(url, section_name=section_name)
 
@@ -649,12 +684,13 @@ class LinkedInExtractor:
                 raise
             except Exception as e:
                 logger.warning("Error scraping section %s: %s", section_name, e)
-                section_errors[section_name] = build_issue_diagnostics(
-                    e,
-                    context="scrape_company",
-                    target_url=url,
-                    section_name=section_name,
-                )
+                section_errors[section_name] = {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "context": "scrape_company",
+                    "target_url": url,
+                    "section_name": section_name,
+                }
 
         result: dict[str, Any] = {
             "url": f"{base_url}/",
@@ -733,12 +769,9 @@ class LinkedInExtractor:
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
-            logger.info(
-                "Retrying search page %s after %.0fs backoff",
-                url,
-                _RATE_LIMIT_RETRY_DELAY,
-            )
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            backoff = _jittered_backoff()
+            logger.info("Retrying search page %s after %.1fs backoff", url, backoff)
+            await asyncio.sleep(backoff)
             result = await self._extract_search_page_once(url, section_name)
             if result.text == _RATE_LIMITED_MSG:
                 logger.warning("Search page %s still rate-limited after retry", url)
@@ -751,12 +784,13 @@ class LinkedInExtractor:
             return ExtractedSection(
                 text="",
                 references=[],
-                error=build_issue_diagnostics(
-                    e,
-                    context="extract_search_page",
-                    target_url=url,
-                    section_name=section_name,
-                ),
+                error={
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "context": "extract_search_page",
+                    "target_url": url,
+                    "section_name": section_name,
+                },
             )
 
     async def _extract_search_page_once(
@@ -923,18 +957,12 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await nav_jitter()
 
-            url = (
-                base_url
-                if page_num == 0
-                else f"{base_url}&start={page_num * _PAGE_SIZE}"
-            )
+            url = base_url if page_num == 0 else f"{base_url}&start={page_num * _PAGE_SIZE}"
 
             try:
-                extracted = await self._extract_search_page(
-                    url, section_name="search_results"
-                )
+                extracted = await self._extract_search_page(url, section_name="search_results")
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
                     if extracted.error:
@@ -954,12 +982,9 @@ class LinkedInExtractor:
                             logger.debug("LinkedIn reports %d total pages", total_pages)
 
                 # Extract job IDs from hrefs (page is already loaded)
-                if not self._page.url.startswith(
-                    "https://www.linkedin.com/jobs/search/"
-                ):
+                if not self._page.url.startswith("https://www.linkedin.com/jobs/search/"):
                     logger.debug(
-                        "Unexpected page URL after extraction: %s — "
-                        "skipping job ID extraction",
+                        "Unexpected page URL after extraction: %s — skipping job ID extraction",
                         self._page.url,
                     )
                     page_texts.append(extracted.text)
@@ -988,25 +1013,22 @@ class LinkedInExtractor:
                 raise
             except Exception as e:
                 logger.warning("Error on search page %d: %s", page_num + 1, e)
-                section_errors["search_results"] = build_issue_diagnostics(
-                    e,
-                    context="search_jobs",
-                    target_url=url,
-                    section_name="search_results",
-                )
+                section_errors["search_results"] = {
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "context": "search_jobs",
+                    "target_url": url,
+                    "section_name": "search_results",
+                }
                 break
 
         result: dict[str, Any] = {
             "url": base_url,
-            "sections": {"search_results": "\n---\n".join(page_texts)}
-            if page_texts
-            else {},
+            "sections": {"search_results": "\n---\n".join(page_texts)} if page_texts else {},
             "job_ids": all_job_ids,
         }
         if page_references:
-            result["references"] = {
-                "search_results": dedupe_references(page_references, cap=15)
-            }
+            result["references"] = {"search_results": dedupe_references(page_references, cap=15)}
         if section_errors:
             result["section_errors"] = section_errors
         return result

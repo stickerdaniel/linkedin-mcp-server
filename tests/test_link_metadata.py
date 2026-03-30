@@ -208,9 +208,7 @@ class TestBuildReferences:
         target = "https://example.com/report"
         href = target
         for _ in range(7):
-            href = "https://www.linkedin.com/redir/redirect/?url=" + quote(
-                href, safe=""
-            )
+            href = "https://www.linkedin.com/redir/redirect/?url=" + quote(href, safe="")
 
         assert normalize_url(href) is None
 

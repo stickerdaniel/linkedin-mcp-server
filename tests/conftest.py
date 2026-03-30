@@ -59,8 +59,6 @@ def isolate_profile_dir(tmp_path, monkeypatch):
     for source_module in [
         "linkedin_mcp_server.authentication",
         "linkedin_mcp_server.drivers.browser",
-        "linkedin_mcp_server.debug_trace",
-        "linkedin_mcp_server.error_diagnostics",
     ]:
         try:
             monkeypatch.setattr(
@@ -78,9 +76,7 @@ def profile_dir(isolate_profile_dir):
     """Create a non-empty profile directory."""
     isolate_profile_dir.mkdir(parents=True, exist_ok=True)
     # Create a marker file so profile_exists() returns True
-    (isolate_profile_dir / "Default" / "Cookies").parent.mkdir(
-        parents=True, exist_ok=True
-    )
+    (isolate_profile_dir / "Default" / "Cookies").parent.mkdir(parents=True, exist_ok=True)
     (isolate_profile_dir / "Default" / "Cookies").write_text("placeholder")
     return isolate_profile_dir
 

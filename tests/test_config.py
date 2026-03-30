@@ -1,6 +1,5 @@
 import pytest
-
-from linkedin_mcp_server.config.schema import (
+from linkedin_mcp_server.config.loaders import (
     AppConfig,
     BrowserConfig,
     ConfigurationError,

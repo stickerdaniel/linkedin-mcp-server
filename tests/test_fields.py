@@ -14,6 +14,14 @@ class TestPersonSections:
             "main_profile",
             "experience",
             "education",
+            "skills",
+            "recommendations",
+            "certifications",
+            "projects",
+            "publications",
+            "courses",
+            "organizations",
+            "volunteer",
             "interests",
             "honors",
             "languages",
@@ -38,7 +46,7 @@ class TestPersonSections:
 
 class TestCompanySections:
     def test_expected_keys(self):
-        assert set(COMPANY_SECTIONS) == {"about", "posts", "jobs"}
+        assert set(COMPANY_SECTIONS) == {"about", "posts", "jobs", "people", "life"}
 
     def test_no_overlays(self):
         for name, (_suffix, is_overlay) in COMPANY_SECTIONS.items():
@@ -87,9 +95,8 @@ class TestParsePersonSections:
         assert unknown == []
 
     def test_all_sections(self):
-        requested, unknown = parse_person_sections(
-            "experience,education,interests,honors,languages,contact_info,posts"
-        )
+        all_names = ",".join(PERSON_SECTIONS.keys())
+        requested, unknown = parse_person_sections(all_names)
         assert requested == set(PERSON_SECTIONS)
         assert unknown == []
 
@@ -136,12 +143,8 @@ class TestConfigCompleteness:
 
     def test_person_sections_all_have_suffixes(self):
         for name, (suffix, _) in PERSON_SECTIONS.items():
-            assert isinstance(suffix, str) and len(suffix) > 0, (
-                f"{name} has empty suffix"
-            )
+            assert isinstance(suffix, str) and len(suffix) > 0, f"{name} has empty suffix"
 
     def test_company_sections_all_have_suffixes(self):
         for name, (suffix, _) in COMPANY_SECTIONS.items():
-            assert isinstance(suffix, str) and len(suffix) > 0, (
-                f"{name} has empty suffix"
-            )
+            assert isinstance(suffix, str) and len(suffix) > 0, f"{name} has empty suffix"

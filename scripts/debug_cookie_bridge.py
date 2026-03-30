@@ -19,7 +19,6 @@ from linkedin_mcp_server.common_utils import slugify_fragment
 from linkedin_mcp_server.core.auth import detect_auth_barrier, is_logged_in
 from linkedin_mcp_server.core.browser import BrowserManager
 
-
 DEFAULT_TARGET_URL = "https://www.linkedin.com/in/williamhgates/"
 _SETTLE_DELAY_SECONDS = 10.0
 
@@ -136,17 +135,13 @@ async def capture_page_state(page, *, body_lines: int) -> dict[str, Any]:
 
     body_lines_trimmed = []
     if isinstance(body_text, str) and not body_text.startswith("<error:"):
-        body_lines_trimmed = [
-            line.strip() for line in body_text.splitlines() if line.strip()
-        ][:body_lines]
+        body_lines_trimmed = [line.strip() for line in body_text.splitlines() if line.strip()][
+            :body_lines
+        ]
 
     cookies = await page.context.cookies()
     linkedin_cookie_names = sorted(
-        {
-            cookie["name"]
-            for cookie in cookies
-            if "linkedin.com" in cookie.get("domain", "")
-        }
+        {cookie["name"] for cookie in cookies if "linkedin.com" in cookie.get("domain", "")}
     )
 
     return {
@@ -266,7 +261,7 @@ async def run_debug(args: argparse.Namespace) -> dict[str, Any]:
         if args.clear_existing:
             await browser.context.clear_cookies()
 
-        await browser.context.add_cookies(cast(Any, imported_cookies))
+        await browser.context.add_cookies(cast("Any", imported_cookies))
         await _capture_step(
             report,
             browser.page,

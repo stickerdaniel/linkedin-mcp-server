@@ -3,7 +3,8 @@
 import asyncio
 import logging
 
-from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+from patchright.async_api import Page
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .exceptions import RateLimitError
 
@@ -65,9 +66,7 @@ async def detect_rate_limit(page: Page) -> None:
         pass
 
 
-async def scroll_to_bottom(
-    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
-) -> None:
+async def scroll_to_bottom(page: Page, pause_time: float = 1.0, max_scrolls: int = 10) -> None:
     """Scroll to the bottom of the page to trigger lazy loading.
 
     Args:
@@ -86,9 +85,7 @@ async def scroll_to_bottom(
             break
 
 
-async def scroll_job_sidebar(
-    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
-) -> None:
+async def scroll_job_sidebar(page: Page, pause_time: float = 1.0, max_scrolls: int = 10) -> None:
     """Scroll the job search sidebar to load all job cards.
 
     LinkedIn renders job search results in a scrollable sidebar container,

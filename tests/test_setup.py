@@ -2,8 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.config.loaders import AppConfig
 from linkedin_mcp_server.session_state import portable_cookie_path
 from linkedin_mcp_server.setup import interactive_login
 
@@ -24,9 +23,7 @@ def _make_browser(*, export_cookies: bool) -> MagicMock:
     browser.page = MagicMock()
     browser.page.goto = AsyncMock()
     browser.context = MagicMock()
-    browser.context.cookies = AsyncMock(
-        return_value=[{"name": "li_at", "domain": ".linkedin.com"}]
-    )
+    browser.context.cookies = AsyncMock(return_value=[{"name": "li_at", "domain": ".linkedin.com"}])
     browser.export_cookies = AsyncMock(return_value=export_cookies)
     return browser
 
@@ -36,9 +33,7 @@ async def test_interactive_login_writes_source_state_when_cookie_export_succeeds
     monkeypatch, tmp_path, capsys
 ):
     browser = _make_browser(export_cookies=True)
-    write_source_state = MagicMock(
-        return_value=SimpleNamespace(login_generation="gen-123")
-    )
+    write_source_state = MagicMock(return_value=SimpleNamespace(login_generation="gen-123"))
 
     monkeypatch.setattr("linkedin_mcp_server.setup.get_config", lambda: AppConfig())
     monkeypatch.setattr(
@@ -54,19 +49,14 @@ async def test_interactive_login_writes_source_state_when_cookie_export_succeeds
         "linkedin_mcp_server.setup.wait_for_manual_login",
         AsyncMock(),
     )
-    monkeypatch.setattr(
-        "linkedin_mcp_server.setup.write_source_state", write_source_state
-    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.write_source_state", write_source_state)
     monkeypatch.setattr("linkedin_mcp_server.setup.asyncio.sleep", AsyncMock())
 
     assert await interactive_login(tmp_path / "profile") is True
 
-    browser.export_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile")
-    )
+    browser.export_cookies.assert_awaited_once_with(portable_cookie_path(tmp_path / "profile"))
     write_source_state.assert_called_once_with(tmp_path / "profile")
     captured = capsys.readouterr()
-    assert "cookies exported for docker portability" in captured.out.lower()
     assert "source session generation: gen-123" in captured.out.lower()
 
 
@@ -91,16 +81,12 @@ async def test_interactive_login_returns_false_when_cookie_export_fails(
         "linkedin_mcp_server.setup.wait_for_manual_login",
         AsyncMock(),
     )
-    monkeypatch.setattr(
-        "linkedin_mcp_server.setup.write_source_state", write_source_state
-    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.write_source_state", write_source_state)
     monkeypatch.setattr("linkedin_mcp_server.setup.asyncio.sleep", AsyncMock())
 
     assert await interactive_login(tmp_path / "profile") is False
 
-    browser.export_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile")
-    )
+    browser.export_cookies.assert_awaited_once_with(portable_cookie_path(tmp_path / "profile"))
     write_source_state.assert_not_called()
     captured = capsys.readouterr()
     assert "warning: cookie export failed" in captured.out.lower()
@@ -108,9 +94,7 @@ async def test_interactive_login_returns_false_when_cookie_export_fails(
 
 
 @pytest.mark.asyncio
-async def test_interactive_login_passes_chrome_path_to_browser_manager(
-    monkeypatch, tmp_path
-):
+async def test_interactive_login_passes_chrome_path_to_browser_manager(monkeypatch, tmp_path):
     """When config.browser.chrome_path is set, executable_path must reach BrowserManager."""
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
@@ -123,9 +107,7 @@ async def test_interactive_login_passes_chrome_path_to_browser_manager(
     config.browser.chrome_path = "/custom/chrome"
 
     monkeypatch.setattr("linkedin_mcp_server.setup.get_config", lambda: config)
-    monkeypatch.setattr(
-        "linkedin_mcp_server.setup.BrowserManager", fake_browser_manager
-    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.BrowserManager", fake_browser_manager)
     monkeypatch.setattr("linkedin_mcp_server.setup.warm_up_browser", AsyncMock())
     monkeypatch.setattr(
         "linkedin_mcp_server.setup.resolve_remember_me_prompt",

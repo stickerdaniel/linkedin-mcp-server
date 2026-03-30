@@ -44,14 +44,10 @@ def register_job_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text to extract job details.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_job_details"
-            )
+            extractor = extractor or await get_ready_extractor(ctx, tool_name="get_job_details")
             logger.info("Scraping job: %s", job_id)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Starting job scrape"
-            )
+            await ctx.report_progress(progress=0, total=100, message="Starting job scrape")
 
             result = await extractor.scrape_job(job_id)
 
@@ -104,9 +100,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             numeric job ID strings usable with get_job_details), and optional references.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_jobs"
-            )
+            extractor = extractor or await get_ready_extractor(ctx, tool_name="search_jobs")
             logger.info(
                 "Searching jobs: keywords='%s', location='%s', max_pages=%d",
                 keywords,
@@ -114,9 +108,7 @@ def register_job_tools(mcp: FastMCP) -> None:
                 max_pages,
             )
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Starting job search"
-            )
+            await ctx.report_progress(progress=0, total=100, message="Starting job search")
 
             result = await extractor.search_jobs(
                 keywords,

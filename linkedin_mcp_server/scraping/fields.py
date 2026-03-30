@@ -9,6 +9,14 @@ PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
     "main_profile": ("/", False),
     "experience": ("/details/experience/", False),
     "education": ("/details/education/", False),
+    "skills": ("/details/skills/", False),
+    "recommendations": ("/details/recommendations/", False),
+    "certifications": ("/details/certifications/", False),
+    "projects": ("/details/projects/", False),
+    "publications": ("/details/publications/", False),
+    "courses": ("/details/courses/", False),
+    "organizations": ("/details/organizations/", False),
+    "volunteer": ("/details/volunteering-experiences/", False),
     "interests": ("/details/interests/", False),
     "honors": ("/details/honors/", False),
     "languages": ("/details/languages/", False),
@@ -20,6 +28,8 @@ COMPANY_SECTIONS: dict[str, tuple[str, bool]] = {
     "about": ("/about/", False),
     "posts": ("/posts/", False),
     "jobs": ("/jobs/", False),
+    "people": ("/people/", False),
+    "life": ("/life/", False),
 }
 
 

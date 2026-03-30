@@ -21,10 +21,7 @@ def debug_stabilize_navigation_enabled() -> bool:
 
 async def stabilize_navigation(label: str, logger: logging.Logger) -> None:
     """Pause between navigation steps to help debug timing-sensitive flows."""
-    if (
-        os.environ.get("PYTEST_CURRENT_TEST")
-        or not debug_stabilize_navigation_enabled()
-    ):
+    if os.environ.get("PYTEST_CURRENT_TEST") or not debug_stabilize_navigation_enabled():
         return
 
     logger.debug(

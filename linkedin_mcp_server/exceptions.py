@@ -1,22 +1,8 @@
-# src/linkedin_mcp_server/exceptions.py
-"""
-Custom exceptions for LinkedIn MCP Server with specific error categorization.
-
-Defines hierarchical exception types for different error scenarios including
-authentication failures and MCP client reporting.
-"""
+"""Exception hierarchy for LinkedIn MCP Server."""
 
 
 class LinkedInMCPError(Exception):
-    """Base exception for LinkedIn MCP Server."""
-
-    pass
-
-
-class CredentialsNotFoundError(LinkedInMCPError):
-    """No credentials available in non-interactive mode."""
-
-    pass
+    """Base exception for MCP-layer errors."""
 
 
 class SessionExpiredError(LinkedInMCPError):
@@ -31,29 +17,33 @@ class SessionExpiredError(LinkedInMCPError):
         super().__init__(message or default_msg)
 
 
-class BrowserSetupInProgressError(LinkedInMCPError):
-    """Patchright Chromium browser setup is still running."""
+class CredentialsNotFoundError(LinkedInMCPError):
+    """No authentication credentials available."""
 
 
-class BrowserSetupFailedError(LinkedInMCPError):
-    """Patchright Chromium browser setup failed."""
+class AuthenticationError(LinkedInMCPError):
+    """Authentication failed."""
 
 
-class AuthenticationStartedError(LinkedInMCPError):
-    """Interactive LinkedIn login has been started."""
+class LinkedInScraperException(Exception):
+    """Base exception for scraper-layer errors."""
 
 
-class AuthenticationInProgressError(LinkedInMCPError):
-    """Interactive LinkedIn login is already running."""
+class RateLimitError(LinkedInScraperException):
+    """Rate limiting detected."""
+
+    def __init__(self, message: str, suggested_wait_time: int = 300):
+        super().__init__(message)
+        self.suggested_wait_time = suggested_wait_time
 
 
-class AuthenticationBootstrapFailedError(LinkedInMCPError):
-    """Interactive LinkedIn login could not be completed."""
+class ProfileNotFoundError(LinkedInScraperException):
+    """Profile/page returned 404."""
 
 
-class DockerHostLoginRequiredError(LinkedInMCPError):
-    """Docker runtime requires host-side login creation."""
+class NetworkError(LinkedInScraperException):
+    """Network-related failure."""
 
 
-class LinuxBrowserDependencyError(LinkedInMCPError):
-    """Linux host dependencies required for Chromium are missing."""
+class ScrapingError(LinkedInScraperException):
+    """Scraping failed."""

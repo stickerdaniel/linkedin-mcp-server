@@ -44,8 +44,8 @@ def register_company_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The about page is always included.
-                Available sections: posts, jobs
-                Examples: "posts", "posts,jobs"
+                Available sections: posts, jobs, people, life
+                Examples: "posts,jobs", "people", "posts,jobs,people,life"
                 Default (None) scrapes only the about page.
 
         Returns:
@@ -54,9 +54,7 @@ def register_company_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text in each section.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_profile"
-            )
+            extractor = extractor or await get_ready_extractor(ctx, tool_name="get_company_profile")
             requested, unknown = parse_company_sections(sections)
 
             logger.info(
@@ -105,9 +103,7 @@ def register_company_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text to extract individual posts.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_posts"
-            )
+            extractor = extractor or await get_ready_extractor(ctx, tool_name="get_company_posts")
             logger.info("Scraping company posts: %s", company_name)
 
             await ctx.report_progress(

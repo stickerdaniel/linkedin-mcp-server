@@ -5,7 +5,8 @@ import logging
 import re
 from urllib.parse import urlparse
 
-from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+from patchright.async_api import Page
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .exceptions import AuthenticationError
 
@@ -79,7 +80,9 @@ async def is_logged_in(page: Page) -> bool:
         old_selectors = '.global-nav__primary-link, [data-control-name="nav.settings"]'
         old_count = await page.locator(old_selectors).count()
 
-        new_selectors = 'nav a[href*="/feed"], nav button:has-text("Home"), nav a[href*="/mynetwork"]'
+        new_selectors = (
+            'nav a[href*="/feed"], nav button:has-text("Home"), nav a[href*="/mynetwork"]'
+        )
         new_count = await page.locator(new_selectors).count()
 
         has_nav_elements = old_count > 0 or new_count > 0
@@ -91,9 +94,7 @@ async def is_logged_in(page: Page) -> bool:
             "/messaging",
             "/notifications",
         ]
-        is_authenticated_page = any(
-            pattern in current_url for pattern in authenticated_only_pages
-        )
+        is_authenticated_page = any(pattern in current_url for pattern in authenticated_only_pages)
 
         if not is_authenticated_page:
             return has_nav_elements
@@ -204,17 +205,13 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
             target_count,
         )
         if target_count == 0:
-            logger.debug(
-                "Remember-me container appeared without any matching button selector"
-            )
+            logger.debug("Remember-me container appeared without any matching button selector")
             return False
         try:
             await target.wait_for(state="visible", timeout=3000)
             logger.debug("Remember-me button became visible")
         except PlaywrightTimeoutError:
-            logger.debug(
-                "Remember-me prompt container appeared without a visible login button"
-            )
+            logger.debug("Remember-me prompt container appeared without a visible login button")
             return False
 
         logger.info("Clicking LinkedIn saved-account chooser to resume session")
@@ -268,8 +265,7 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
         AuthenticationError: If timeout or login not completed
     """
     logger.info(
-        "Please complete the login process manually in the browser. "
-        "Waiting up to 5 minutes..."
+        "Please complete the login process manually in the browser. Waiting up to 5 minutes..."
     )
 
     loop = asyncio.get_running_loop()

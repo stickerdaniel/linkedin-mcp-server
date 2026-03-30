@@ -4,7 +4,6 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from linkedin_mcp_server.core.browser import BrowserManager
 
 

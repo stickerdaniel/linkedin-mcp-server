@@ -1,14 +1,10 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, call
 
-import mcp.types as mt
 from fastmcp import FastMCP
-from fastmcp.server.middleware import MiddlewareContext
-
-from linkedin_mcp_server.sequential_tool_middleware import (
+from linkedin_mcp_server.server import (
     SequentialToolExecutionMiddleware,
+    create_mcp_server,
 )
-from linkedin_mcp_server.server import create_mcp_server
 
 
 class TestSequentialToolExecutionMiddleware:
@@ -58,32 +54,3 @@ class TestSequentialToolExecutionMiddleware:
         result = await mcp.call_tool("simple_tool", {"value": 7})
 
         assert result.structured_content == {"value": 7}
-
-    async def test_sequential_tool_middleware_reports_queue_progress(self):
-        middleware = SequentialToolExecutionMiddleware()
-        fastmcp_context = MagicMock()
-        fastmcp_context.request_context = object()
-        fastmcp_context.report_progress = AsyncMock()
-        call_next = AsyncMock(return_value=MagicMock())
-        context = MiddlewareContext(
-            message=mt.CallToolRequestParams(name="slow_tool", arguments={}),
-            method="tools/call",
-            fastmcp_context=fastmcp_context,
-        )
-
-        await middleware.on_call_tool(context, call_next)
-
-        fastmcp_context.report_progress.assert_has_awaits(
-            [
-                call(
-                    progress=0,
-                    total=100,
-                    message="Queued waiting for scraper lock",
-                ),
-                call(
-                    progress=0,
-                    total=100,
-                    message="Scraper lock acquired, starting tool",
-                ),
-            ]
-        )

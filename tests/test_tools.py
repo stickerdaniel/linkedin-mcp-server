@@ -1,10 +1,10 @@
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastmcp import FastMCP
-
-from linkedin_mcp_server.scraping.extractor import ExtractedSection, _RATE_LIMITED_MSG
+from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG, ExtractedSection
 
 
 async def get_tool_fn(
@@ -25,9 +25,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
-    mock.extract_page = AsyncMock(
-        return_value=ExtractedSection(text="some text", references=[])
-    )
+    mock.extract_page = AsyncMock(return_value=ExtractedSection(text="some text", references=[]))
     return mock
 
 
@@ -108,7 +106,6 @@ class TestPersonTool:
 
     async def test_get_person_profile_error(self, mock_context):
         from fastmcp.exceptions import ToolError
-
         from linkedin_mcp_server.exceptions import SessionExpiredError
 
         mock_extractor = MagicMock()
@@ -126,7 +123,6 @@ class TestPersonTool:
     async def test_get_person_profile_auth_error(self, monkeypatch):
         """Auth failures in the DI layer produce proper ToolError responses."""
         from fastmcp.exceptions import ToolError
-
         from linkedin_mcp_server.core.exceptions import AuthenticationError
 
         mock_browser = MagicMock()
@@ -204,9 +200,7 @@ class TestCompanyTools:
         register_company_tools(mcp)
 
         tool_fn = await get_tool_fn(mcp, "get_company_profile")
-        result = await tool_fn(
-            "testcorp", mock_context, sections="bogus", extractor=mock_extractor
-        )
+        result = await tool_fn("testcorp", mock_context, sections="bogus", extractor=mock_extractor)
         assert result["unknown_sections"] == ["bogus"]
 
     async def test_get_company_posts(self, mock_context):
@@ -321,17 +315,14 @@ class TestJobTools:
         register_job_tools(mcp)
 
         tool_fn = await get_tool_fn(mcp, "search_jobs")
-        result = await tool_fn(
-            "python", mock_context, location="Remote", extractor=mock_extractor
-        )
+        result = await tool_fn("python", mock_context, location="Remote", extractor=mock_extractor)
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
 
 
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
-        from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
-        from linkedin_mcp_server.server import create_mcp_server
+        from linkedin_mcp_server.server import TOOL_TIMEOUT_SECONDS, create_mcp_server
 
         mcp = create_mcp_server()
 

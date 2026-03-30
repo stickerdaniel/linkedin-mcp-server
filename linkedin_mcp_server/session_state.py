@@ -1,13 +1,13 @@
-"""Runtime-aware authentication state for cross-platform profile reuse."""
+"""Authentication state for persistent browser profiles."""
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
 import json
 import logging
 import platform
-from pathlib import Path
 import shutil
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -15,10 +15,7 @@ from linkedin_mcp_server.common_utils import utcnow_iso
 from linkedin_mcp_server.config import get_config
 
 logger = logging.getLogger(__name__)
-
 _SOURCE_STATE_FILE = "source-state.json"
-_RUNTIME_STATE_FILE = "runtime-state.json"
-_RUNTIME_PROFILES_DIR = "runtime-profiles"
 
 
 @dataclass
@@ -31,188 +28,55 @@ class SourceState:
     cookies_path: str
 
 
-@dataclass
-class RuntimeState:
-    version: int
-    runtime_id: str
-    source_runtime_id: str
-    source_login_generation: str
-    created_at: str
-    committed_at: str
-    profile_path: str
-    storage_state_path: str
-    commit_method: str
-
-
 _SOURCE_STATE_FIELDS = frozenset(field.name for field in fields(SourceState))
-_RUNTIME_STATE_FIELDS = frozenset(field.name for field in fields(RuntimeState))
 
 
 def get_source_profile_dir() -> Path:
-    """Return the configured source profile directory."""
     return Path(get_config().browser.user_data_dir).expanduser()
 
 
 def auth_root_dir(source_profile_dir: Path | None = None) -> Path:
-    """Return the root directory containing auth artifacts."""
-    profile_dir = source_profile_dir or get_source_profile_dir()
-    return profile_dir.expanduser().resolve().parent
+    return (source_profile_dir or get_source_profile_dir()).expanduser().resolve().parent
 
 
 def portable_cookie_path(source_profile_dir: Path | None = None) -> Path:
-    """Return the portable cookie export path."""
     return auth_root_dir(source_profile_dir) / "cookies.json"
 
 
 def source_state_path(source_profile_dir: Path | None = None) -> Path:
-    """Return the source session metadata path."""
     return auth_root_dir(source_profile_dir) / _SOURCE_STATE_FILE
 
 
-def runtime_profiles_root(source_profile_dir: Path | None = None) -> Path:
-    """Return the root directory for derived runtime profiles."""
-    return auth_root_dir(source_profile_dir) / _RUNTIME_PROFILES_DIR
-
-
-def runtime_dir(runtime_id: str, source_profile_dir: Path | None = None) -> Path:
-    """Return the directory for one runtime's derived session."""
-    return runtime_profiles_root(source_profile_dir) / runtime_id
-
-
-def runtime_profile_dir(
-    runtime_id: str, source_profile_dir: Path | None = None
-) -> Path:
-    """Return the profile directory for one runtime's derived session."""
-    return runtime_dir(runtime_id, source_profile_dir) / "profile"
-
-
-def runtime_state_path(runtime_id: str, source_profile_dir: Path | None = None) -> Path:
-    """Return the metadata path for one runtime's derived session."""
-    return runtime_dir(runtime_id, source_profile_dir) / _RUNTIME_STATE_FILE
-
-
-def runtime_storage_state_path(
-    runtime_id: str, source_profile_dir: Path | None = None
-) -> Path:
-    """Return the storage-state snapshot path for one runtime's derived session."""
-    return runtime_dir(runtime_id, source_profile_dir) / "storage-state.json"
-
-
 def profile_exists(profile_dir: Path | None = None) -> bool:
-    """Check if a browser profile directory exists and is non-empty."""
     profile_dir = (profile_dir or get_source_profile_dir()).expanduser()
     return profile_dir.is_dir() and any(profile_dir.iterdir())
 
 
 def get_runtime_id() -> str:
-    """Return a deterministic identity for the current browser runtime."""
-    os_name = _normalize_os(platform.system())
-    arch = _normalize_arch(platform.machine())
-    runtime_kind = "container" if _is_container_runtime() else "host"
-    return f"{os_name}-{arch}-{runtime_kind}"
-
-
-def _normalize_os(system: str) -> str:
-    mapping = {
-        "Darwin": "macos",
-        "Linux": "linux",
-        "Windows": "windows",
-    }
-    return mapping.get(system, system.lower() or "unknown")
-
-
-def _normalize_arch(machine: str) -> str:
-    value = machine.lower()
-    if value in {"x86_64", "amd64"}:
-        return "amd64"
-    if value in {"arm64", "aarch64"}:
-        return "arm64"
-    return value or "unknown"
-
-
-def _is_container_runtime() -> bool:
-    if any(
-        path.exists()
-        for path in (
-            Path("/.dockerenv"),
-            Path("/run/.containerenv"),
-            Path("/run/containerenv"),
-        )
-    ):
-        return True
-
-    markers = ("docker", "containerd", "kubepods", "podman", "libpod")
-    for probe in (
-        Path("/proc/1/cgroup"),
-        Path("/proc/self/cgroup"),
-    ):
-        if _path_contains_markers(probe, markers):
-            return True
-
-    for probe in (
-        Path("/proc/1/mountinfo"),
-        Path("/proc/self/mountinfo"),
-    ):
-        if _path_contains_markers(probe, markers) or _root_mount_uses_overlay(probe):
-            return True
-
-    return False
-
-
-def _path_contains_markers(path: Path, markers: tuple[str, ...]) -> bool:
-    if not path.exists():
-        return False
-
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore").lower()
-    except OSError:
-        return False
-
-    return any(marker in text for marker in markers)
-
-
-def _root_mount_uses_overlay(path: Path) -> bool:
-    if not path.exists():
-        return False
-
-    try:
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except OSError:
-        return False
-
-    for line in lines:
-        if " - " not in line:
-            continue
-        left, right = line.split(" - ", maxsplit=1)
-        left_fields = left.split()
-        right_fields = right.split()
-        if len(left_fields) < 5 or not right_fields:
-            continue
-        if left_fields[4] == "/" and right_fields[0] == "overlay":
-            return True
-
-    return False
+    os_name = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}.get(
+        platform.system(), platform.system().lower() or "unknown"
+    )
+    arch = platform.machine().lower()
+    if arch in {"x86_64", "amd64"}:
+        arch = "amd64"
+    elif arch in {"arm64", "aarch64"}:
+        arch = "arm64"
+    return f"{os_name}-{arch}-host"
 
 
 def load_source_state(source_profile_dir: Path | None = None) -> SourceState | None:
-    """Load the source session metadata if present."""
     data = _load_json(source_state_path(source_profile_dir))
     if not data:
         return None
     try:
-        return SourceState(
-            **{key: value for key, value in data.items() if key in _SOURCE_STATE_FIELDS}
-        )
+        return SourceState(**{k: v for k, v in data.items() if k in _SOURCE_STATE_FIELDS})
     except TypeError:
         logger.warning("Ignoring invalid source-state.json")
         return None
 
 
 def write_source_state(source_profile_dir: Path | None = None) -> SourceState:
-    """Write a fresh source session generation after successful login."""
-    profile_dir = (
-        (source_profile_dir or get_source_profile_dir()).expanduser().resolve()
-    )
+    profile_dir = (source_profile_dir or get_source_profile_dir()).expanduser().resolve()
     state = SourceState(
         version=1,
         source_runtime_id=get_runtime_id(),
@@ -225,78 +89,13 @@ def write_source_state(source_profile_dir: Path | None = None) -> SourceState:
     return state
 
 
-def load_runtime_state(
-    runtime_id: str, source_profile_dir: Path | None = None
-) -> RuntimeState | None:
-    """Load one derived runtime's metadata if present."""
-    data = _load_json(runtime_state_path(runtime_id, source_profile_dir))
-    if not data:
-        return None
-    try:
-        return RuntimeState(
-            **{
-                key: value
-                for key, value in data.items()
-                if key in _RUNTIME_STATE_FIELDS
-            }
-        )
-    except TypeError:
-        logger.warning("Ignoring invalid runtime-state.json for %s", runtime_id)
-        return None
-
-
-def write_runtime_state(
-    runtime_id: str,
-    source_state: SourceState,
-    storage_state_path: Path,
-    source_profile_dir: Path | None = None,
-    *,
-    created_at: str | None = None,
-    commit_method: str = "checkpoint_restart",
-) -> RuntimeState:
-    """Write metadata for a derived runtime session."""
-    profile_dir = runtime_profile_dir(runtime_id, source_profile_dir).resolve()
-    committed_at = utcnow_iso()
-    state = RuntimeState(
-        version=1,
-        runtime_id=runtime_id,
-        source_runtime_id=source_state.source_runtime_id,
-        source_login_generation=source_state.login_generation,
-        created_at=created_at or committed_at,
-        committed_at=committed_at,
-        profile_path=str(profile_dir),
-        storage_state_path=str(storage_state_path.resolve()),
-        commit_method=commit_method,
-    )
-    _write_json(runtime_state_path(runtime_id, source_profile_dir), asdict(state))
-    return state
-
-
-def clear_runtime_profile(
-    runtime_id: str, source_profile_dir: Path | None = None
-) -> bool:
-    """Remove one derived runtime profile and its metadata."""
-    target = runtime_dir(runtime_id, source_profile_dir)
-    if not target.exists():
-        return True
-    try:
-        shutil.rmtree(target)
-        return True
-    except OSError as exc:
-        logger.warning("Could not clear runtime profile %s: %s", target, exc)
-        return False
-
-
 def clear_auth_state(source_profile_dir: Path | None = None) -> bool:
-    """Remove source auth artifacts and all derived runtime profiles."""
     profile_dir = (source_profile_dir or get_source_profile_dir()).expanduser()
     targets = [
         profile_dir,
         portable_cookie_path(profile_dir),
         source_state_path(profile_dir),
-        runtime_profiles_root(profile_dir),
     ]
-
     success = True
     for target in targets:
         if not target.exists():
@@ -329,3 +128,41 @@ def _load_json(path: Path) -> dict[str, Any] | None:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+_HW_CONCURRENCY_OPTIONS = (4, 8, 10, 12, 16)
+_DEVICE_MEMORY_OPTIONS = (4, 8, 16, 32)
+
+
+def fingerprint_path(source_profile_dir: Path | None = None) -> Path:
+    """Path to the pinned browser fingerprint file."""
+    return auth_root_dir(source_profile_dir) / "fingerprint.json"
+
+
+def get_or_create_fingerprint(
+    source_profile_dir: Path | None = None,
+) -> dict[str, int]:
+    """Load or generate a pinned browser fingerprint.
+
+    Values are randomized once on first login, then reused across every
+    browser launch so that login and server browsers present identical
+    hardware signals to LinkedIn.
+    """
+    import random as _rng  # local to avoid top-level import for one callsite
+
+    fp_file = fingerprint_path(source_profile_dir)
+    if fp_file.exists():
+        try:
+            data = json.loads(fp_file.read_text())
+            if "hardwareConcurrency" in data and "deviceMemory" in data:
+                return data
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Corrupt fingerprint file, regenerating: %s", fp_file)
+
+    fp: dict[str, int] = {
+        "hardwareConcurrency": _rng.choice(_HW_CONCURRENCY_OPTIONS),  # noqa: S311
+        "deviceMemory": _rng.choice(_DEVICE_MEMORY_OPTIONS),  # noqa: S311
+    }
+    _write_json(fp_file, fp)
+    logger.info("Pinned browser fingerprint created: %s", fp)
+    return fp

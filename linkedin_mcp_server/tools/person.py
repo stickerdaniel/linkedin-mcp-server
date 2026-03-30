@@ -42,8 +42,10 @@ def register_person_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The main profile page is always included.
-                Available sections: experience, education, interests, honors, languages, contact_info, posts
-                Examples: "experience,education", "contact_info", "honors,languages", "posts"
+                Available sections: experience, education, skills, recommendations, certifications,
+                    projects, publications, courses, organizations, volunteer, interests, honors,
+                    languages, contact_info, posts
+                Examples: "experience,education,skills", "contact_info", "publications,certifications"
                 Default (None) scrapes only the main profile page.
 
         Returns:
@@ -53,9 +55,7 @@ def register_person_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text in each section.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_person_profile"
-            )
+            extractor = extractor or await get_ready_extractor(ctx, tool_name="get_person_profile")
             requested, unknown = parse_person_sections(sections)
 
             logger.info(
@@ -106,18 +106,14 @@ def register_person_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text to extract individual people and their profiles.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_people"
-            )
+            extractor = extractor or await get_ready_extractor(ctx, tool_name="search_people")
             logger.info(
                 "Searching people: keywords='%s', location='%s'",
                 keywords,
                 location,
             )
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Starting people search"
-            )
+            await ctx.report_progress(progress=0, total=100, message="Starting people search")
 
             result = await extractor.search_people(keywords, location)
 

@@ -3,8 +3,6 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.auth import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
@@ -12,6 +10,7 @@ from linkedin_mcp_server.core.auth import (
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
+from linkedin_mcp_server.core.exceptions import AuthenticationError
 
 
 @pytest.mark.asyncio
@@ -19,9 +18,7 @@ async def test_detect_auth_barrier_for_account_picker():
     page = MagicMock()
     page.url = "https://www.linkedin.com/login"
     page.title = AsyncMock(return_value="LinkedIn Login, Sign in | LinkedIn")
-    page.evaluate = AsyncMock(
-        return_value="Welcome Back\nSign in using another account\nJoin now"
-    )
+    page.evaluate = AsyncMock(return_value="Welcome Back\nSign in using another account\nJoin now")
 
     result = await detect_auth_barrier(page)
 
@@ -48,9 +45,7 @@ async def test_detect_auth_barrier_for_choose_account_picker():
     page = MagicMock()
     page.url = "https://www.linkedin.com/checkpoint/lg/login-submit"
     page.title = AsyncMock(return_value="LinkedIn Sign In")
-    page.evaluate = AsyncMock(
-        return_value="Choose an account\nSign in using another account"
-    )
+    page.evaluate = AsyncMock(return_value="Choose an account\nSign in using another account")
 
     result = await detect_auth_barrier(page)
 
@@ -206,9 +201,7 @@ async def test_wait_for_manual_login_clicks_saved_account(monkeypatch):
     async def fake_is_logged_in(_page):
         return clicked["value"]
 
-    monkeypatch.setattr(
-        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt", fake_resolve
-    )
+    monkeypatch.setattr("linkedin_mcp_server.core.auth.resolve_remember_me_prompt", fake_resolve)
     monkeypatch.setattr("linkedin_mcp_server.core.auth.is_logged_in", fake_is_logged_in)
 
     await wait_for_manual_login(page, timeout=1000)

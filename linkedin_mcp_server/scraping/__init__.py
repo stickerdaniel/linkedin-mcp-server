@@ -10,8 +10,8 @@ from .fields import (
 
 __all__ = [
     "COMPANY_SECTIONS",
-    "LinkedInExtractor",
     "PERSON_SECTIONS",
+    "LinkedInExtractor",
     "parse_company_sections",
     "parse_person_sections",
 ]

@@ -1,7 +1,6 @@
 import json
 
 import pytest
-
 from linkedin_mcp_server.authentication import (
     clear_auth_state,
     clear_profile,
@@ -11,9 +10,6 @@ from linkedin_mcp_server.drivers.browser import profile_exists
 from linkedin_mcp_server.exceptions import CredentialsNotFoundError
 from linkedin_mcp_server.session_state import (
     portable_cookie_path,
-    runtime_profile_dir,
-    runtime_storage_state_path,
-    runtime_state_path,
     source_state_path,
 )
 
@@ -56,7 +52,7 @@ def test_profile_exists_file_path(tmp_path):
     assert profile_exists(file_path) is False
 
 
-def test_get_authentication_source_requires_metadata(profile_dir):
+def test_get_authentication_source_requires_metadata(profile_dir):  # noqa: ARG001
     with pytest.raises(CredentialsNotFoundError, match="source session metadata"):
         get_authentication_source()
 
@@ -66,7 +62,7 @@ def test_get_authentication_source_accepts_source_session(profile_dir):
     assert get_authentication_source() is True
 
 
-def test_get_authentication_source_none_raises(isolate_profile_dir):
+def test_get_authentication_source_none_raises(isolate_profile_dir):  # noqa: ARG001
     with pytest.raises(CredentialsNotFoundError):
         get_authentication_source()
 
@@ -78,33 +74,10 @@ def test_clear_profile_removes_dir(profile_dir):
     assert not profile_dir.exists()
 
 
-def test_clear_auth_state_removes_source_and_runtime_files(profile_dir):
+def test_clear_auth_state_removes_source_files(profile_dir):
     _write_source_metadata(profile_dir)
-    runtime_profile = runtime_profile_dir("linux-amd64-container", profile_dir)
-    runtime_profile.mkdir(parents=True)
-    storage_state_path = runtime_storage_state_path(
-        "linux-amd64-container", profile_dir
-    )
-    storage_state_path.parent.mkdir(parents=True, exist_ok=True)
-    storage_state_path.write_text("{}")
-    runtime_state_path("linux-amd64-container", profile_dir).write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "runtime_id": "linux-amd64-container",
-                "source_runtime_id": "macos-arm64-host",
-                "source_login_generation": "gen-1",
-                "created_at": "2026-03-12T17:10:00Z",
-                "committed_at": "2026-03-12T17:10:05Z",
-                "profile_path": str(runtime_profile),
-                "storage_state_path": str(storage_state_path),
-                "commit_method": "checkpoint_restart",
-            }
-        )
-    )
 
     assert clear_auth_state(profile_dir) is True
     assert not profile_dir.exists()
     assert not portable_cookie_path(profile_dir).exists()
     assert not source_state_path(profile_dir).exists()
-    assert not runtime_profile_dir("linux-amd64-container", profile_dir).exists()

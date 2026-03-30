@@ -3,7 +3,6 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from linkedin_mcp_server.core.exceptions import RateLimitError
 from linkedin_mcp_server.core.utils import detect_rate_limit
 
@@ -60,9 +59,7 @@ class TestDetectRateLimit:
         main_locator.count = AsyncMock(return_value=0)
 
         body_locator = MagicMock()
-        body_locator.inner_text = AsyncMock(
-            return_value="Too many requests. Slow down."
-        )
+        body_locator.inner_text = AsyncMock(return_value="Too many requests. Slow down.")
 
         def locator_side_effect(selector):
             if selector == "main":
@@ -82,9 +79,7 @@ class TestDetectRateLimit:
 
         body_locator = MagicMock()
         # Long body with a matching phrase buried in content
-        body_locator.inner_text = AsyncMock(
-            return_value="x" * 2000 + " try again later"
-        )
+        body_locator.inner_text = AsyncMock(return_value="x" * 2000 + " try again later")
 
         def locator_side_effect(selector):
             if selector == "main":
