@@ -65,6 +65,8 @@ gt create -m "chore: Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow
 ```
 
+The CI release workflow automatically updates `manifest.json` and `docker-compose.yml` with the new version — do not update them manually.
+
 After the workflow completes, file a PR in the MCP registry to update the version.
 
 ## Commit Messages
