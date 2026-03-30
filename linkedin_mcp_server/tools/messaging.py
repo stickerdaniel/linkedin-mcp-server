@@ -11,8 +11,11 @@ from fastmcp import Context, FastMCP
 from pydantic import Field
 
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
-from linkedin_mcp_server.dependencies import get_ready_extractor
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    LinkedInScraperException,
+)
+from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
@@ -59,6 +62,11 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_inbox")
         except Exception as e:
             raise_tool_error(e, "get_inbox")  # NoReturn
 
@@ -119,6 +127,11 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_conversation")
         except Exception as e:
             raise_tool_error(e, "get_conversation")  # NoReturn
 
@@ -160,6 +173,11 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "search_conversations")
         except Exception as e:
             raise_tool_error(e, "search_conversations")  # NoReturn
 
@@ -221,5 +239,10 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "send_message")
         except Exception as e:
             raise_tool_error(e, "send_message")  # NoReturn

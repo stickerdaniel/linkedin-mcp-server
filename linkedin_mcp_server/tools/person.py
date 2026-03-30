@@ -245,5 +245,10 @@ def register_person_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_sidebar_profiles")
         except Exception as e:
             raise_tool_error(e, "get_sidebar_profiles")  # NoReturn

@@ -90,8 +90,6 @@ _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
-_MESSAGING_THREAD_LINK_SELECTOR = 'main a[href*="/messaging/thread/"]'
-_MESSAGING_RESULT_ITEM_SELECTOR = "main [role='listitem'], main li"
 _MESSAGING_COMPOSE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]'
 _MESSAGING_COMPOSE_SELECTOR = (
     'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"]'
@@ -100,9 +98,6 @@ _MESSAGING_COMPOSE_FALLBACK_SELECTORS = (
     _MESSAGING_COMPOSE_SELECTOR,
     'main div[role="textbox"][contenteditable="true"]',
     'main [contenteditable="true"][aria-label*="message"]',
-)
-_MESSAGING_SEND_SELECTOR = (
-    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]'
 )
 _MESSAGING_ENABLED_SEND_SELECTOR = (
     'button[type="submit"]:not([disabled]), '
@@ -219,7 +214,6 @@ class LinkedInExtractor:
 
     def __init__(self, page: Page):
         self._page = page
-        self._conversation_thread_cache: dict[str, str] = {}
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -855,7 +849,7 @@ class LinkedInExtractor:
         """Scrape a person profile with configurable sections.
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {name: text}, profile_urn?: str}
         """
         requested = requested | {"main_profile"}
         base_url = f"https://www.linkedin.com/in/{username}"
@@ -1165,12 +1159,13 @@ class LinkedInExtractor:
 
                     // Walk up to find a section/aside container (max 5 levels)
                     let container = heading.parentElement;
+                    let foundSection = false;
                     for (let depth = 0; container && depth < 5; depth++) {
                         const tag = container.tagName.toLowerCase();
-                        if (tag === 'section' || tag === 'aside') break;
+                        if (tag === 'section' || tag === 'aside') { foundSection = true; break; }
                         container = container.parentElement;
                     }
-                    if (!container) continue;
+                    if (!container || !foundSection) continue;
 
                     // Collect /in/ profile links, deduplicated
                     const seen = new Set();
@@ -1285,7 +1280,7 @@ class LinkedInExtractor:
     async def _resolve_message_compose_href(self) -> str | None:
         """Return the direct recipient-specific compose URL from a profile page."""
         href = await self._page.evaluate(
-            f"""() => {{
+            """(selector) => {
                 const isVisible = element =>
                     !!(
                         element &&
@@ -1295,11 +1290,12 @@ class LinkedInExtractor:
                     );
 
                 const anchor = Array.from(
-                    document.querySelectorAll('{_MESSAGING_COMPOSE_LINK_SELECTOR}')
+                    document.querySelectorAll(selector)
                 ).find(isVisible);
                 if (!anchor) return null;
                 return anchor.getAttribute('href') || anchor.href || null;
-            }}"""
+            }""",
+            _MESSAGING_COMPOSE_LINK_SELECTOR,
         )
         if not isinstance(href, str) or not href.strip():
             return None
@@ -1613,13 +1609,6 @@ class LinkedInExtractor:
 
     async def _open_conversation_by_username(self, linkedin_username: str) -> None:
         """Open a conversation by resolving the profile name, then searching inbox."""
-        cached_thread_id = self._conversation_thread_cache.get(linkedin_username)
-        if cached_thread_id:
-            await self._navigate_to_page(
-                f"https://www.linkedin.com/messaging/thread/{cached_thread_id}/"
-            )
-            return
-
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
@@ -1642,10 +1631,6 @@ class LinkedInExtractor:
                 raise LinkedInScraperException(
                     f"Could not find a conversation for {linkedin_username}."
                 )
-
-            thread_id = self._extract_thread_id(thread_url)
-            if thread_id:
-                self._conversation_thread_cache[linkedin_username] = thread_id
 
             await self._navigate_to_page(thread_url)
         except PlaywrightTimeoutError as exc:
@@ -2342,12 +2327,8 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
 
-        await compose_box.focus()
         await compose_box.click()
-        await self._page.evaluate(
-            "(text) => document.execCommand('insertText', false, text)",
-            message,
-        )
+        await compose_box.press_sequentially(message, delay=30)
         await asyncio.sleep(0.3)
 
         try:
