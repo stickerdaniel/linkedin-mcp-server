@@ -199,3 +199,56 @@ def register_person_tools(mcp: FastMCP) -> None:
                 raise_tool_error(relogin_exc, "connect_with_person")
         except Exception as e:
             raise_tool_error(e, "connect_with_person")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Sidebar Profiles",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_sidebar_profiles(
+        linkedin_username: str,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get profile links from sidebar recommendation sections on a LinkedIn profile page.
+
+        Extracts profiles from "More profiles for you", "Explore premium profiles",
+        and "People you may know" sidebar sections. Follows "Show all" links to
+        return the full list from each section. Sections that redirect to
+        linkedin.com/premium are skipped.
+
+        Args:
+            linkedin_username: LinkedIn username of the profile page to scrape
+                (e.g., "stickerdaniel", "williamhgates")
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url and sidebar_profiles mapping section key to a list of
+            /in/username/ paths. Only sections present on the page are included.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_sidebar_profiles"
+            )
+            logger.info("Getting sidebar profiles for: %s", linkedin_username)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Extracting sidebar profiles"
+            )
+
+            result = await extractor.get_sidebar_profiles(linkedin_username)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_sidebar_profiles")
+        except Exception as e:
+            raise_tool_error(e, "get_sidebar_profiles")  # NoReturn
