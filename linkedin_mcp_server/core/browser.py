@@ -25,42 +25,24 @@ _PRIVATE_DIR_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 
 
-def _set_private_mode(path: Path, mode: int) -> None:
-    """Set owner-only permissions for sensitive files/directories."""
+def _harden_linkedin_tree(path: Path) -> None:
+    """Ensure dirs from *path* up to ``.linkedin-mcp`` are owner-only (``0o700``).
+
+    Complements :func:`secure_mkdir` by hardening pre-existing directories
+    that may have been created with default umask permissions.  No-op on
+    Windows or when *path* is not inside a ``.linkedin-mcp`` directory.
+    """
     if os.name == "nt":
         return
-
-    current_mode = stat.S_IMODE(path.stat().st_mode)
-    if current_mode != mode:
-        path.chmod(mode)
-
-
-def _secure_profile_dirs(profile_dir: Path) -> None:
-    """Ensure the profile directory tree is private (owner-only)."""
-    resolved_profile = profile_dir.expanduser()
-    resolved_profile.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIR_MODE)
-
-    dirs_to_secure = {resolved_profile}
-    linkedin_root = next(
-        (
-            p
-            for p in [resolved_profile, *resolved_profile.parents]
-            if p.name == ".linkedin-mcp"
-        ),
-        None,
-    )
-
-    if linkedin_root:
-        current = resolved_profile
-        while True:
-            dirs_to_secure.add(current)
-            if current == linkedin_root:
-                break
-            current = current.parent
-
-    for directory in dirs_to_secure:
-        if directory.exists():
-            _set_private_mode(directory, _PRIVATE_DIR_MODE)
+    d = path if path.is_dir() else path.parent
+    # Bail out early when the path is not inside a .linkedin-mcp tree.
+    if not any(p.name == ".linkedin-mcp" for p in (d, *d.parents)):
+        return
+    for p in (d, *d.parents):
+        if p.is_dir() and stat.S_IMODE(p.stat().st_mode) != _PRIVATE_DIR_MODE:
+            p.chmod(_PRIVATE_DIR_MODE)
+        if p.name == ".linkedin-mcp":
+            return
 
 
 class BrowserManager:
@@ -108,7 +90,8 @@ class BrowserManager:
         try:
             self._playwright = await async_playwright().start()
 
-            _secure_profile_dirs(Path(self.user_data_dir))
+            secure_mkdir(Path(self.user_data_dir))
+            _harden_linkedin_tree(Path(self.user_data_dir))
 
             context_options: dict[str, Any] = {
                 "headless": self.headless,
@@ -230,13 +213,8 @@ class BrowserManager:
                 for c in all_cookies
                 if "linkedin.com" in c.get("domain", "")
             ]
-            if any(
-                p.name == ".linkedin-mcp" for p in [path.parent, *path.parent.parents]
-            ):
-                _secure_profile_dirs(path.parent)
-            else:
-                secure_mkdir(path.parent)
-
+            secure_mkdir(path.parent)
+            _harden_linkedin_tree(path.parent)
             secure_write_text(
                 path, json.dumps(cookies, indent=2), mode=_PRIVATE_FILE_MODE
             )
@@ -256,11 +234,15 @@ class BrowserManager:
 
         storage_path = Path(path)
         secure_mkdir(storage_path.parent)
+        _harden_linkedin_tree(storage_path.parent)
         try:
             await self._context.storage_state(
                 path=storage_path,
                 indexed_db=indexed_db,
             )
+            # Playwright writes the file with default umask; tighten it.
+            if os.name != "nt" and storage_path.exists():
+                storage_path.chmod(_PRIVATE_FILE_MODE)
             logger.info(
                 "Exported runtime storage snapshot to %s (indexed_db=%s)",
                 storage_path,
