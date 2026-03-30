@@ -43,6 +43,10 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, contact_info, posts) | Working |
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note | Working |
 | `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | Working |
+| `get_inbox` | List recent conversations from the LinkedIn messaging inbox | Working |
+| `get_conversation` | Read a specific messaging conversation by username or thread ID | Working |
+| `search_conversations` | Search messages by keyword | Working |
+| `send_message` | Send a message to a LinkedIn user (requires confirmation) | Working |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | Working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | Working |
 | `search_jobs` | Search for jobs with keywords and location filters | Working |
