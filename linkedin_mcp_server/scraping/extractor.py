@@ -1521,8 +1521,10 @@ class LinkedInExtractor:
         await detect_rate_limit(self._page)
         await handle_modal_close(self._page)
         await self._wait_for_main_text(log_context="Messaging inbox")
-        baseline_url = self._page.url
-        baseline_thread_id = self._extract_thread_id(baseline_url)
+        # LinkedIn auto-redirects /messaging/ to the most recent thread;
+        # capture the baseline *after* the SPA settles so we can distinguish
+        # between the auto-opened thread and a search-selected one.
+        baseline_thread_id = self._extract_thread_id(self._page.url)
 
         search_input = self._page.get_by_role("searchbox")
         await search_input.wait_for(timeout=5000)
