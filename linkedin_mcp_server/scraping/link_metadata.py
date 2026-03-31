@@ -14,6 +14,7 @@ ReferenceKind = Literal[
     "article",
     "newsletter",
     "school",
+    "conversation",
     "external",
 ]
 
@@ -78,6 +79,8 @@ _SECTION_CONTEXTS = {
     "languages": "languages",
     "contact_info": "contact info",
     "job_posting": "job posting",
+    "inbox": "inbox",
+    "conversation": "conversation",
 }
 
 _DEFAULT_REFERENCE_CAP = 12
@@ -94,6 +97,8 @@ _REFERENCE_CAPS = {
     "search_results": 15,
     "job_posting": 8,
     "contact_info": 8,
+    "inbox": 30,
+    "conversation": 12,
 }
 
 _URL_LIKE_RE = re.compile(r"^(?:https?://|/)\S+$", re.IGNORECASE)
@@ -107,6 +112,7 @@ _JOB_PATH_RE = re.compile(r"^/jobs/view/(\d+)")
 _NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
 _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
+_MESSAGING_THREAD_PATH_RE = re.compile(r"^/messaging/thread/([^/?#]+)")
 _MAX_REDIRECT_UNWRAP_DEPTH = 5
 
 
@@ -145,7 +151,7 @@ def normalize_reference(
     kind, normalized_url = kind_url
 
     text = choose_reference_text(raw, kind)
-    if text is None and kind not in {"feed_post", "external"}:
+    if text is None and kind not in {"feed_post", "external", "conversation"}:
         return None
 
     context = derive_context(section_name, raw, kind)
@@ -228,6 +234,9 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
 
     if match := _FEED_PATH_RE.match(path):
         return "feed_post", f"/feed/update/{match.group(1)}/"
+
+    if match := _MESSAGING_THREAD_PATH_RE.match(path):
+        return "conversation", f"/messaging/thread/{match.group(1)}/"
 
     return None
 

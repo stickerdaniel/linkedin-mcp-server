@@ -1329,14 +1329,18 @@ class LinkedInExtractor:
         return display_name or None
 
     async def _wait_for_message_surface(
-        self, *, timeout: int = 5000
+        self,
     ) -> Literal["composer", "recipient_picker"] | None:
-        """Wait for either the recipient picker or the real composer to appear."""
+        """Wait for either the recipient picker or the real composer to appear.
+
+        Timeouts are governed by the page-level default (``BrowserConfig.default_timeout``)
+        so callers can tune them with the ``--timeout`` CLI flag.
+        """
         if await self._locator_is_visible(
-            _MESSAGING_RECIPIENT_PICKER_SELECTOR, timeout=timeout
+            _MESSAGING_RECIPIENT_PICKER_SELECTOR, timeout=2000
         ):
             return "recipient_picker"
-        if await self._wait_for_message_composer(timeout=timeout):
+        if await self._wait_for_message_composer():
             return "composer"
         return None
 
@@ -1405,12 +1409,16 @@ class LinkedInExtractor:
             await asyncio.sleep(0.75)
         return bool(selected)
 
-    async def _wait_for_message_composer(self, *, timeout: int = 5000) -> bool:
+    async def _wait_for_message_composer(self) -> bool:
         """Wait for the usable LinkedIn message composer to appear."""
-        return await self._resolve_message_compose_box(timeout=timeout) is not None
+        return await self._resolve_message_compose_box() is not None
 
-    async def _resolve_message_compose_box(self, *, timeout: int = 5000) -> Any | None:
-        """Resolve the visible compose box used for writing a LinkedIn message."""
+    async def _resolve_message_compose_box(self) -> Any | None:
+        """Resolve the visible compose box used for writing a LinkedIn message.
+
+        Uses the page-level default timeout (``BrowserConfig.default_timeout``)
+        so the ``--timeout`` CLI flag is respected.
+        """
         for selector in _MESSAGING_COMPOSE_FALLBACK_SELECTORS:
             locator = self._page.locator(selector)
             candidate_count: int | None = None
@@ -1431,7 +1439,7 @@ class LinkedInExtractor:
 
             candidate = locator.last
             try:
-                await candidate.wait_for(state="visible", timeout=timeout)
+                await candidate.wait_for(state="visible")
                 return candidate
             except PlaywrightTimeoutError:
                 continue
@@ -1482,8 +1490,11 @@ class LinkedInExtractor:
         )
         return bool(matched)
 
-    async def _message_text_visible(self, message: str, *, timeout: int = 5000) -> bool:
-        """Wait until the compose page visibly contains the just-sent message text."""
+    async def _message_text_visible(self, message: str) -> bool:
+        """Wait until the compose page visibly contains the just-sent message text.
+
+        Uses the page-level default timeout (``BrowserConfig.default_timeout``).
+        """
         try:
             await self._page.wait_for_function(
                 """({ expected }) => {
@@ -1493,7 +1504,6 @@ class LinkedInExtractor:
                     return bodyText.includes(normalize(expected));
                 }""",
                 arg={"expected": message},
-                timeout=timeout,
             )
             return True
         except PlaywrightTimeoutError:
@@ -1527,7 +1537,7 @@ class LinkedInExtractor:
         baseline_thread_id = self._extract_thread_id(self._page.url)
 
         search_input = self._page.get_by_role("searchbox")
-        await search_input.wait_for(timeout=5000)
+        await search_input.wait_for()
         await search_input.click()
         await self._page.keyboard.type(search_query, delay=30)
         await asyncio.sleep(1.0)
@@ -2180,7 +2190,7 @@ class LinkedInExtractor:
 
         try:
             search_input = self._page.get_by_role("searchbox")
-            await search_input.wait_for(timeout=5000)
+            await search_input.wait_for()
             await search_input.click()
             await self._page.keyboard.type(keywords, delay=30)
             await asyncio.sleep(1.0)
@@ -2228,7 +2238,7 @@ class LinkedInExtractor:
         await detect_rate_limit(self._page)
 
         try:
-            await self._page.wait_for_selector("main", timeout=5000)
+            await self._page.wait_for_selector("main")
         except PlaywrightTimeoutError:
             logger.debug("Profile page did not load for %s", linkedin_username)
 
@@ -2251,12 +2261,12 @@ class LinkedInExtractor:
         await detect_rate_limit(self._page)
 
         try:
-            await self._page.wait_for_selector("main", timeout=5000)
+            await self._page.wait_for_selector("main")
         except PlaywrightTimeoutError:
             logger.debug("Compose page did not fully load for %s", linkedin_username)
 
         await handle_modal_close(self._page)
-        message_surface = await self._wait_for_message_surface(timeout=5000)
+        message_surface = await self._wait_for_message_surface()
         logger.debug(
             "Message surface for %s before hydration was %s",
             linkedin_username,
@@ -2281,14 +2291,14 @@ class LinkedInExtractor:
                     "recipient_resolution_failed",
                     "LinkedIn opened a compose page, but the visible recipient did not match the requested profile.",
                 )
-            message_surface = await self._wait_for_message_surface(timeout=5000)
+            message_surface = await self._wait_for_message_surface()
             logger.debug(
                 "Message surface for %s after recipient selection was %s",
                 linkedin_username,
                 message_surface,
             )
 
-        compose_box = await self._resolve_message_compose_box(timeout=5000)
+        compose_box = await self._resolve_message_compose_box()
         if compose_box is None:
             await self._dismiss_message_ui()
             return self._message_action_result(
@@ -2349,7 +2359,6 @@ class LinkedInExtractor:
                         )
                     ).some(button => isVisible(button) && !button.disabled);
                 }""",
-                timeout=5000,
             )
         except PlaywrightTimeoutError:
             await self._dismiss_message_ui()
@@ -2362,7 +2371,7 @@ class LinkedInExtractor:
 
         send_button = self._page.locator(_MESSAGING_ENABLED_SEND_SELECTOR).last
         try:
-            await send_button.click(timeout=5000)
+            await send_button.click()
         except PlaywrightTimeoutError:
             await self._dismiss_message_ui()
             return self._message_action_result(
