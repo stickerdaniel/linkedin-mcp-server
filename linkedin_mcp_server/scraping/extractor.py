@@ -1362,6 +1362,224 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    # ------------------------------------------------------------------
+    # Messaging
+    # ------------------------------------------------------------------
+
+    async def get_inbox(self, *, limit: int = 20) -> dict[str, Any]:
+        """Scrape the LinkedIn messaging inbox.
+
+        Returns:
+            {url, sections: {inbox: raw text}, references?: {...}}
+        """
+        url = "https://www.linkedin.com/messaging/"
+        await self._navigate_to_page(url)
+
+        try:
+            await self._page.wait_for_selector(
+                '[class*="msg-conversations-container"], [class*="messaging"]',
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Messaging container not found, continuing with page text")
+
+        # Scroll the conversation list to load more entries
+        sidebar = self._page.locator(
+            '[class*="msg-conversations-container"], [class*="list-style-none"]'
+        ).first
+        try:
+            for _ in range(min(limit // 10, 5)):
+                await sidebar.evaluate("el => el.scrollTop = el.scrollHeight")
+                await asyncio.sleep(1)
+        except Exception:
+            logger.debug("Sidebar scroll failed, continuing with loaded content")
+
+        text = await self.get_page_text()
+        extracted = await self._extract_root_content(["main", "[role='main']", "body"])
+        refs = build_references(extracted.get("references", []), "inbox")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        if text:
+            sections["inbox"] = text
+        if refs:
+            references["inbox"] = refs
+
+        result: dict[str, Any] = {"url": url, "sections": sections}
+        if references:
+            result["references"] = references
+        return result
+
+    async def get_conversation(self, linkedin_username: str) -> dict[str, Any]:
+        """Scrape the conversation thread with a specific person.
+
+        Navigates to the messaging thread via the profile's Message button
+        or the direct messaging URL.
+
+        Returns:
+            {url, sections: {conversation: raw text}, references?: {...}}
+        """
+        url = f"https://www.linkedin.com/messaging/thread/new/?recipient={linkedin_username}"
+        await self._navigate_to_page(url)
+
+        # Wait for conversation content to load
+        try:
+            await self._page.wait_for_selector(
+                '[class*="msg-s-message-list"], [class*="msg-thread"]',
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Conversation thread not found, trying profile approach")
+            # Fall back: navigate to profile and click Message
+            profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+            await self._navigate_to_page(profile_url)
+            clicked = await self.click_button_by_text("Message")
+            if clicked:
+                try:
+                    await self._page.wait_for_selector(
+                        '[class*="msg-s-message-list"], [class*="msg-thread"]',
+                        timeout=10000,
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+
+        # Scroll up in conversation to load older messages
+        thread = self._page.locator(
+            '[class*="msg-s-message-list"], [class*="msg-thread"]'
+        ).first
+        try:
+            for _ in range(3):
+                await thread.evaluate("el => el.scrollTop = 0")
+                await asyncio.sleep(1)
+        except Exception:
+            logger.debug("Thread scroll failed, continuing with loaded content")
+
+        text = await self.get_page_text()
+        extracted = await self._extract_root_content(["main", "[role='main']", "body"])
+        refs = build_references(extracted.get("references", []), "conversation")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        if text:
+            sections["conversation"] = text
+        if refs:
+            references["conversation"] = refs
+
+        final_url = self._page.url
+        result: dict[str, Any] = {"url": final_url, "sections": sections}
+        if references:
+            result["references"] = references
+        return result
+
+    async def search_conversations(self, keywords: str) -> dict[str, Any]:
+        """Search LinkedIn messaging conversations by keywords.
+
+        Returns:
+            {url, sections: {search_results: raw text}, references?: {...}}
+        """
+        url = "https://www.linkedin.com/messaging/"
+        await self._navigate_to_page(url)
+
+        # Find and use the messaging search box
+        search_input = self._page.locator(
+            '[class*="msg-search-form"] input, '
+            'input[placeholder*="Search messages"], '
+            'input[aria-label*="Search messages"]'
+        ).first
+        try:
+            await search_input.click(timeout=5000)
+            await search_input.fill(keywords)
+            await self._page.keyboard.press("Enter")
+            await asyncio.sleep(2)
+        except Exception:
+            logger.debug("Search input interaction failed, trying URL approach")
+            # Fallback: navigate with search param
+            search_url = f"https://www.linkedin.com/messaging/?searchTerm={quote_plus(keywords)}"
+            await self._navigate_to_page(search_url)
+            await asyncio.sleep(2)
+
+        text = await self.get_page_text()
+        extracted = await self._extract_root_content(["main", "[role='main']", "body"])
+        refs = build_references(extracted.get("references", []), "search_results")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        if text:
+            sections["search_results"] = text
+        if refs:
+            references["search_results"] = refs
+
+        result: dict[str, Any] = {"url": self._page.url, "sections": sections}
+        if references:
+            result["references"] = references
+        return result
+
+    async def send_message(
+        self, linkedin_username: str, message: str
+    ) -> dict[str, Any]:
+        """Send a direct message to a LinkedIn connection.
+
+        Navigates to the user's profile, clicks "Message", types the message,
+        and clicks Send.
+
+        Returns:
+            {url, status, message}
+        """
+        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        await self._navigate_to_page(profile_url)
+
+        # Click the Message button on the profile
+        clicked = await self.click_button_by_text("Message")
+        if not clicked:
+            return {
+                "url": profile_url,
+                "status": "unavailable",
+                "message": f"Cannot message {linkedin_username}. Message button not found — may not be a 1st-degree connection.",
+            }
+
+        # Wait for the compose area
+        compose_selector = (
+            '[class*="msg-form__contenteditable"], '
+            '[role="textbox"][contenteditable="true"], '
+            'div[contenteditable="true"][aria-label*="message"]'
+        )
+        try:
+            await self._page.wait_for_selector(compose_selector, timeout=10000)
+        except PlaywrightTimeoutError:
+            return {
+                "url": profile_url,
+                "status": "send_failed",
+                "message": "Message compose area did not appear.",
+            }
+
+        # Type the message
+        compose_box = self._page.locator(compose_selector).first
+        await compose_box.click()
+        await compose_box.fill(message)
+        await asyncio.sleep(0.5)
+
+        # Click send
+        send_button = self._page.locator(
+            '[class*="msg-form__send-button"], '
+            'button[type="submit"][class*="msg-form"], '
+            'button:has-text("Send")'
+        ).first
+        try:
+            await send_button.click(timeout=5000)
+            await asyncio.sleep(1)
+            return {
+                "url": profile_url,
+                "status": "sent",
+                "message": f"Message sent to {linkedin_username}.",
+            }
+        except Exception as e:
+            logger.warning("Send button click failed: %s", e)
+            return {
+                "url": profile_url,
+                "status": "send_failed",
+                "message": f"Failed to send message: {e}",
+            }
+
     async def search_people(
         self,
         keywords: str,
