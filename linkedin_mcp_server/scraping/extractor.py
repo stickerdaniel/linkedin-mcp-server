@@ -532,15 +532,36 @@ class LinkedInExtractor:
     async def _open_more_menu(self) -> bool:
         """Open the profile's More (three-dot) menu and check for Connect.
 
-        Uses ``aria-label`` to find the More button (language-independent)
+        Uses multiple selector strategies to find the More button (language-independent)
         and ``[role="menu"]`` to detect the opened menu (structural).
         Returns True if the menu opened and contains a Connect option.
         """
-        more_btn = self._page.locator("main button[aria-label*='More']")
+        # Try multiple selectors for the More button
+        more_selectors = [
+            "main button[aria-label*='More']",
+            "main button:has-text('More')",
+            "button[aria-label*='More']",
+            "button.artdeco-button[aria-label*='More']",
+        ]
+
+        more_btn = None
+        for selector in more_selectors:
+            locator = self._page.locator(selector)
+            try:
+                if await locator.count() > 0:
+                    more_btn = locator.first
+                    logger.debug("Found More button with selector: %s", selector)
+                    break
+            except Exception:
+                continue
+
+        if more_btn is None:
+            logger.debug("Could not find More button with any selector")
+            return False
+
         try:
-            if await more_btn.count() == 0:
-                return False
-            await more_btn.first.click()
+            await more_btn.click()
+            logger.debug("Clicked More button")
         except Exception:
             logger.debug("Could not click More button", exc_info=True)
             return False
