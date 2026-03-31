@@ -1329,8 +1329,9 @@ class LinkedInExtractor:
     ) -> Literal["composer", "recipient_picker"] | None:
         """Wait for either the recipient picker or the real composer to appear.
 
-        Timeouts are governed by the page-level default (``BrowserConfig.default_timeout``)
-        so callers can tune them with the ``--timeout`` CLI flag.
+        The recipient-picker probe uses a short 2 s cap so we fall through
+        quickly to the composer check, which uses the page-level default
+        (``BrowserConfig.default_timeout``, configurable via ``--timeout``).
         """
         if await self._locator_is_visible(
             _MESSAGING_RECIPIENT_PICKER_SELECTOR, timeout=2000
@@ -2137,10 +2138,10 @@ class LinkedInExtractor:
         # conversation item and read the resulting SPA URL to build references.
         conversation_refs = await self._extract_conversation_thread_refs(limit)
         if conversation_refs:
-            references = conversation_refs + references
+            references = dedupe_references(conversation_refs + references)
 
         return self._single_section_result(
-            self._page.url,
+            url,
             "inbox",
             cleaned,
             references=references,
@@ -2153,21 +2154,26 @@ class LinkedInExtractor:
         handlers — no ``<a href>`` tags — so the only reliable way to obtain
         thread IDs is to click each item and read the SPA URL change.
         """
+        # The Ember click handler lives on an inner div; the <li> and <label>
+        # don't trigger SPA navigation.  No role/aria attributes exist on the
+        # clickable element, so class-name selectors are unavoidable here.
+        # Participant names are extracted from the <label aria-label> instead
+        # of innerText to avoid layout-dependent parsing.
         conversations: list[dict[str, str]] = await self._page.evaluate(
             """async ({ limit }) => {
-                const items = document.querySelectorAll(
-                    'li[class*="msg-conversation-listitem"]'
-                );
+                const labels = Array.from(document.querySelectorAll(
+                    'main label[aria-label^="Select conversation"]'
+                ));
                 const results = [];
-                for (let i = 0; i < Math.min(items.length, limit); i++) {
-                    const el = items[i];
-                    const h3 = el.querySelector('h3');
-                    const name = (h3 ? h3.innerText : '').trim();
-                    const target = el.querySelector(
-                        'div.msg-conversation-listitem__link'
-                    );
-                    if (!target) continue;
-                    target.click();
+                for (let i = 0; i < Math.min(labels.length, limit); i++) {
+                    const label = labels[i];
+                    const ariaLabel = label.getAttribute('aria-label') || '';
+                    const name = ariaLabel
+                        .replace(/^Select conversation with\\s*/i, '').trim();
+                    const clickTarget = label.closest('li')
+                        ?.querySelector('div[class*="listitem__link"]');
+                    if (!clickTarget) continue;
+                    clickTarget.click();
                     await new Promise(r => setTimeout(r, 300));
                     const match = location.href.match(
                         /\\/messaging\\/thread\\/([^/?#]+)/
