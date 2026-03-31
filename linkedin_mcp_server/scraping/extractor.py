@@ -540,7 +540,7 @@ class LinkedInExtractor:
         try:
             if await more_btn.count() == 0:
                 return False
-            await more_btn.first.click(timeout=5000)
+            await more_btn.first.click()
         except Exception:
             logger.debug("Could not click More button", exc_info=True)
             return False
@@ -696,7 +696,7 @@ class LinkedInExtractor:
 
         # Wait for main content to render
         try:
-            await self._page.wait_for_selector("main", timeout=5000)
+            await self._page.wait_for_selector("main")
         except PlaywrightTimeoutError:
             logger.debug("No <main> element found on %s", url)
 
@@ -810,9 +810,7 @@ class LinkedInExtractor:
 
         # Wait for the dialog/modal to render (LinkedIn uses native <dialog>)
         try:
-            await self._page.wait_for_selector(
-                "dialog[open], .artdeco-modal__content", timeout=5000
-            )
+            await self._page.wait_for_selector("dialog[open], .artdeco-modal__content")
         except PlaywrightTimeoutError:
             logger.debug("No modal overlay found on %s, falling back to main", url)
 
@@ -1023,7 +1021,7 @@ class LinkedInExtractor:
         # typically completes immediately without a dialog).
         if state == "connectable":
             try:
-                await self._page.wait_for_selector(_DIALOG_SELECTOR, timeout=5000)
+                await self._page.wait_for_selector(_DIALOG_SELECTOR)
             except PlaywrightTimeoutError:
                 logger.debug("No dialog appeared after clicking '%s'", button_text)
 
@@ -1037,7 +1035,7 @@ class LinkedInExtractor:
                     f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
                 )
                 if await buttons.count() > 1:
-                    await buttons.first.click(timeout=5000)
+                    await buttons.first.click()
 
             filled = await self._fill_dialog_textarea(note)
             if filled:
@@ -1060,9 +1058,7 @@ class LinkedInExtractor:
                 )
             # Wait for dialog to close
             try:
-                await self._page.wait_for_selector(
-                    _DIALOG_SELECTOR, state="hidden", timeout=5000
-                )
+                await self._page.wait_for_selector(_DIALOG_SELECTOR, state="hidden")
             except PlaywrightTimeoutError:
                 logger.debug("Dialog did not close after clicking send")
 
@@ -1230,7 +1226,7 @@ class LinkedInExtractor:
             await detect_rate_limit(self._page)
 
             try:
-                await self._page.wait_for_selector("main", timeout=5000)
+                await self._page.wait_for_selector("main")
             except PlaywrightTimeoutError:
                 logger.debug("No <main> on Show all page for section %s", section_key)
 
@@ -1626,7 +1622,7 @@ class LinkedInExtractor:
         await detect_rate_limit(self._page)
 
         try:
-            await self._page.wait_for_selector("main", timeout=5000)
+            await self._page.wait_for_selector("main")
         except PlaywrightTimeoutError:
             logger.debug("Profile page did not load for %s", linkedin_username)
 
@@ -1838,7 +1834,7 @@ class LinkedInExtractor:
 
         main_found = True
         try:
-            await self._page.wait_for_selector("main", timeout=5000)
+            await self._page.wait_for_selector("main")
         except PlaywrightTimeoutError:
             logger.debug("No <main> element found on %s", url)
             main_found = False
