@@ -2132,15 +2132,69 @@ class LinkedInExtractor:
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
         cleaned = strip_linkedin_noise(raw) if raw else ""
-        references = (
+        references: list[Reference] = (
             build_references(raw_result["references"], "inbox") if cleaned else []
         )
+
+        # LinkedIn's conversation sidebar uses JS click handlers instead of
+        # <a> tags, so anchor extraction cannot capture thread IDs.  Click each
+        # conversation item and read the resulting SPA URL to build references.
+        conversation_refs = await self._extract_conversation_thread_refs(limit)
+        if conversation_refs:
+            references = conversation_refs + references
+
         return self._single_section_result(
             self._page.url,
             "inbox",
             cleaned,
             references=references,
         )
+
+    async def _extract_conversation_thread_refs(self, limit: int) -> list[Reference]:
+        """Click each inbox conversation item and capture the thread URL.
+
+        LinkedIn's conversation sidebar renders ``<li>`` items with JS click
+        handlers — no ``<a href>`` tags — so the only reliable way to obtain
+        thread IDs is to click each item and read the SPA URL change.
+        """
+        conversations: list[dict[str, str]] = await self._page.evaluate(
+            """async ({ limit }) => {
+                const items = document.querySelectorAll(
+                    'li[class*="msg-conversation-listitem"]'
+                );
+                const results = [];
+                for (let i = 0; i < Math.min(items.length, limit); i++) {
+                    const el = items[i];
+                    const h3 = el.querySelector('h3');
+                    const name = (h3 ? h3.innerText : '').trim();
+                    const target = el.querySelector(
+                        'div.msg-conversation-listitem__link'
+                    );
+                    if (!target) continue;
+                    target.click();
+                    await new Promise(r => setTimeout(r, 300));
+                    const match = location.href.match(
+                        /\\/messaging\\/thread\\/([^/?#]+)/
+                    );
+                    if (match) {
+                        results.push({ name, threadId: match[1] });
+                    }
+                }
+                return results;
+            }""",
+            {"limit": limit},
+        )
+        refs: list[Reference] = []
+        for conv in conversations:
+            ref: Reference = {
+                "kind": "conversation",
+                "url": f"/messaging/thread/{conv['threadId']}/",
+                "context": "inbox",
+            }
+            if conv.get("name"):
+                ref["text"] = conv["name"]
+            refs.append(ref)
+        return refs
 
     async def get_conversation(
         self,
