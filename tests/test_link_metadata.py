@@ -5,6 +5,7 @@ from urllib.parse import quote
 from linkedin_mcp_server.scraping.link_metadata import (
     RawReference,
     build_references,
+    classify_link,
     dedupe_references,
     normalize_url,
 )
@@ -522,3 +523,58 @@ class TestBuildReferences:
                 "context": "job result",
             }
         ]
+
+
+class TestClassifyLink:
+    def test_messaging_thread_url(self):
+        result = classify_link(
+            "https://www.linkedin.com/messaging/thread/2-NjAwMDAyMDEtZWVh/"
+        )
+        assert result == (
+            "conversation",
+            "/messaging/thread/2-NjAwMDAyMDEtZWVh/",
+        )
+
+    def test_messaging_thread_url_with_query(self):
+        result = classify_link(
+            "https://www.linkedin.com/messaging/thread/2-abc123/?focusedMsgUrn=xyz"
+        )
+        assert result == ("conversation", "/messaging/thread/2-abc123/")
+
+    def test_inbox_references_include_threads(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/messaging/thread/2-abc123/",
+                    "text": "Tony Chan",
+                },
+                {
+                    "href": "https://www.linkedin.com/messaging/thread/2-def456/",
+                    "text": "Paul Jasper",
+                },
+            ],
+            "inbox",
+        )
+        assert len(references) == 2
+        assert references[0]["kind"] == "conversation"
+        assert references[0]["url"] == "/messaging/thread/2-abc123/"
+        assert references[0]["text"] == "Tony Chan"
+        assert references[0]["context"] == "inbox"
+        assert references[1]["kind"] == "conversation"
+        assert references[1]["url"] == "/messaging/thread/2-def456/"
+        assert references[1]["text"] == "Paul Jasper"
+
+    def test_inbox_conversation_without_text_still_captured(self):
+        """Conversation references are kept even without a usable text label."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/messaging/thread/2-xyz/",
+                    "text": "",
+                },
+            ],
+            "inbox",
+        )
+        assert len(references) == 1
+        assert references[0]["kind"] == "conversation"
+        assert references[0]["url"] == "/messaging/thread/2-xyz/"
