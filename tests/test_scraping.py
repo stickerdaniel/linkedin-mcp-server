@@ -2387,6 +2387,12 @@ class TestGetInbox:
                 "linkedin_mcp_server.scraping.extractor.build_references",
                 return_value=[],
             ),
+            patch.object(
+                extractor,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             result = await extractor.get_inbox(limit=10)
 
@@ -2421,10 +2427,80 @@ class TestGetInbox:
                 "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
                 return_value="",
             ),
+            patch.object(
+                extractor,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             result = await extractor.get_inbox(limit=5)
 
         assert result["sections"] == {}
+
+    async def test_includes_conversation_thread_refs(self, mock_page):
+        """get_inbox prepends conversation thread references from click extraction."""
+        extractor = LinkedInExtractor(mock_page)
+        thread_refs = [
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-abc123/",
+                "text": "Tony Chan",
+                "context": "inbox",
+            },
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-def456/",
+                "text": "Paul Jasper",
+                "context": "inbox",
+            },
+        ]
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={
+                    "text": "Tony Chan\nPaul Jasper",
+                    "references": [],
+                },
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="Tony Chan\nPaul Jasper",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=thread_refs,
+            ),
+        ):
+            result = await extractor.get_inbox(limit=10)
+
+        assert "references" in result
+        refs = result["references"]["inbox"]
+        assert len(refs) == 2
+        assert refs[0]["kind"] == "conversation"
+        assert refs[0]["url"] == "/messaging/thread/2-abc123/"
+        assert refs[0]["text"] == "Tony Chan"
 
 
 class TestGetConversation:
