@@ -654,16 +654,12 @@ class TestScrapePersonUrls:
 
     async def test_all_sections_visit_all_urls(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        all_sections = {
-            "main_profile",
-            "experience",
-            "education",
-            "interests",
-            "honors",
-            "languages",
-            "contact_info",
-            "posts",
-        }
+        from linkedin_mcp_server.scraping.fields import (
+            ALL_PERSON_SECTION_NAMES,
+            PERSON_SECTIONS,
+        )
+
+        all_sections = set(PERSON_SECTIONS)
         with (
             patch.object(
                 extractor,
@@ -687,13 +683,21 @@ class TestScrapePersonUrls:
         page_urls = [call.args[0] for call in mock_extract.call_args_list]
         overlay_urls = [call.args[0] for call in mock_overlay.call_args_list]
         all_urls = page_urls + overlay_urls
-        # 7 full-page sections + 1 overlay (contact_info)
-        assert len(page_urls) == 7
+        # 15 full-page sections + 1 overlay (contact_info)
+        assert len(page_urls) == 15
         assert len(overlay_urls) == 1
-        # Verify each expected suffix was navigated
+        # Verify core suffixes navigated
         assert any(u.endswith("/in/testuser/") for u in all_urls)
         assert any("/details/experience/" in u for u in all_urls)
         assert any("/details/education/" in u for u in all_urls)
+        assert any("/details/skills/" in u for u in all_urls)
+        assert any("/details/certifications/" in u for u in all_urls)
+        assert any("/details/volunteering-experiences/" in u for u in all_urls)
+        assert any("/details/projects/" in u for u in all_urls)
+        assert any("/details/publications/" in u for u in all_urls)
+        assert any("/details/courses/" in u for u in all_urls)
+        assert any("/details/recommendations/" in u for u in all_urls)
+        assert any("/details/organizations/" in u for u in all_urls)
         assert any("/details/interests/" in u for u in all_urls)
         assert any("/details/honors/" in u for u in all_urls)
         assert any("/details/languages/" in u for u in all_urls)
