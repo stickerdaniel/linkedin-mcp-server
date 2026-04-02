@@ -1795,13 +1795,9 @@ class LinkedInExtractor:
         btn_count = await easy_apply_btn.count()
 
         if btn_count == 0:
-            # Check if already applied — use specific LinkedIn UI selectors
-            applied_indicator = self._page.locator(
-                "li.jobs-unified-top-card__job-insight span, "
-                ".jobs-s-apply__application-status, "
-                "span.artdeco-inline-feedback"
-            ).filter(has_text=re.compile(r"^Applied$", re.IGNORECASE))
-            if await applied_indicator.count() > 0:
+            # Check if already applied via page text — avoids brittle class selectors
+            page_text = await self.get_page_text()
+            if re.search(r"\bApplied\b", page_text):
                 return {
                     "url": url,
                     "status": "already_applied",
@@ -1843,6 +1839,7 @@ class LinkedInExtractor:
 
         # Step through the multi-page Easy Apply form
         max_steps = 15
+        dialog_closed_early = False
         for step in range(max_steps):
             await asyncio.sleep(1.0)
 
@@ -1860,6 +1857,7 @@ class LinkedInExtractor:
                         "message": "Application dialog closed; page suggests it was submitted. Check your applications to confirm.",
                         "job_id": job_id,
                     }
+                dialog_closed_early = True
                 break
 
             # Look for a Submit button (final step)
@@ -1870,9 +1868,17 @@ class LinkedInExtractor:
                 await submit_btn.first.click()
                 await asyncio.sleep(2.0)
 
+                # Check both dialog (still open) and main page for confirmation text
+                dialog_text = await self._page.evaluate(
+                    """() => {
+                        const d = document.querySelector('dialog[open], [role="dialog"]');
+                        return d ? d.innerText : '';
+                    }"""
+                )
                 page_text = await self.get_page_text()
+                combined = (dialog_text or "") + " " + page_text
                 if re.search(
-                    r"application.*sent|applied|submitted", page_text, re.IGNORECASE
+                    r"application.*sent|applied|submitted", combined, re.IGNORECASE
                 ):
                     return {
                         "url": url,
@@ -1953,10 +1959,15 @@ class LinkedInExtractor:
         # Exhausted max steps
         if await self._dialog_is_open():
             await self._dismiss_dialog()
+        message = (
+            "Application dialog closed unexpectedly. Check your LinkedIn applications to confirm."
+            if dialog_closed_early
+            else "Application process exceeded maximum steps. It may require manual completion."
+        )
         return {
             "url": url,
             "status": "apply_failed",
-            "message": "Application process exceeded maximum steps. It may require manual completion.",
+            "message": message,
             "job_id": job_id,
         }
 
