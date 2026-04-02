@@ -179,7 +179,7 @@ def register_job_tools(mcp: FastMCP) -> None:
 
         Returns:
             Dict with url, status, message, and job_id.
-            Statuses: applied, already_applied, not_easy_apply,
+            Statuses: applied, applied_unconfirmed, already_applied, not_easy_apply,
             confirmation_required, requires_input, apply_failed.
         """
         try:

@@ -86,6 +86,7 @@ def register_connections_tools(mcp: FastMCP) -> None:
         ctx: Context,
         chunk_size: Annotated[int, Field(ge=1, le=20)] = 5,
         chunk_delay: float = 30.0,
+        include_raw: bool = False,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -99,6 +100,8 @@ def register_connections_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
             chunk_size: Profiles per chunk before pausing (default 5)
             chunk_delay: Seconds to pause between chunks (default 30)
+            include_raw: Include raw profile/contact innerText in each record (default false).
+                Warning: enabling this significantly increases response size.
 
         Returns:
             Dict with contacts list [{username, first_name, last_name, email,
@@ -138,6 +141,7 @@ def register_connections_tools(mcp: FastMCP) -> None:
                 chunk_size=chunk_size,
                 chunk_delay=chunk_delay,
                 progress_cb=on_progress,
+                include_raw=include_raw,
             )
 
             await ctx.report_progress(

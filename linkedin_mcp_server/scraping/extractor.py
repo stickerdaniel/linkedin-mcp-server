@@ -1866,7 +1866,10 @@ class LinkedInExtractor:
                             normalize(o.text).toLowerCase().includes(optionText.toLowerCase())
                         );
                         if (match) {
-                            select.value = match.value;
+                            const nativeSetter = Object.getOwnPropertyDescriptor(
+                                window.HTMLSelectElement.prototype, 'value'
+                            ).set;
+                            nativeSetter.call(select, match.value);
                             select.dispatchEvent(new Event('change', { bubbles: true }));
                             return true;
                         }
@@ -2652,8 +2655,8 @@ class LinkedInExtractor:
                     }
                 return {
                     "url": url,
-                    "status": "applied",
-                    "message": "Submit button clicked. Check your applications to confirm.",
+                    "status": "applied_unconfirmed",
+                    "message": "Submit button clicked but confirmation could not be verified. Check your applications to confirm.",
                     "job_id": job_id,
                 }
 
@@ -3747,6 +3750,7 @@ class LinkedInExtractor:
         chunk_size: int = 5,
         chunk_delay: float = 30.0,
         progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
+        include_raw: bool = False,
     ) -> dict[str, Any]:
         """Enrich profiles with contact details in chunked batches.
 
@@ -3785,14 +3789,14 @@ class LinkedInExtractor:
                         contact_text = ""
 
                     parsed = _parse_contact_record(profile_text, contact_text)
-                    contacts.append(
-                        {
-                            "username": username,
-                            **parsed,
-                            "profile_raw": profile_text,
-                            "contact_info_raw": contact_text,
-                        }
-                    )
+                    record: dict[str, Any] = {
+                        "username": username,
+                        **parsed,
+                    }
+                    if include_raw:
+                        record["profile_raw"] = profile_text
+                        record["contact_info_raw"] = contact_text
+                    contacts.append(record)
 
                 except RateLimitError:
                     logger.warning("Rate limited during contact batch at %s", username)
@@ -3864,6 +3868,64 @@ class LinkedInExtractor:
             url, "notifications", cleaned, references=references
         )
 
+    async def _resolve_company_id(self, company: str) -> str | None:
+        """Resolve a company name or slug to its LinkedIn numeric entity ID.
+
+        Navigates to the company page and extracts the entity URN from
+        the page's metadata. Returns None if the ID cannot be resolved.
+        """
+        company_url = f"https://www.linkedin.com/company/{quote_plus(company)}/"
+        try:
+            await self._navigate_to_page(company_url)
+            await detect_rate_limit(self._page)
+        except Exception:
+            logger.debug("Could not navigate to company page for %s", company)
+            return None
+
+        company_id: str | None = await self._page.evaluate(
+            """() => {
+                // Try meta tag with entity URN
+                const meta = document.querySelector(
+                    'meta[content*="urn:li:company:"], '
+                    + 'meta[content*="urn:li:fsd_company:"]'
+                );
+                if (meta) {
+                    const match = meta.content.match(
+                        /urn:li:(?:fsd_)?company:(\\d+)/
+                    );
+                    if (match) return match[1];
+                }
+
+                // Try data attributes
+                const codeEl = document.querySelector(
+                    'code[id*="company"], [data-company-id]'
+                );
+                if (codeEl) {
+                    const id = codeEl.getAttribute('data-company-id');
+                    if (id) return id;
+                    const text = codeEl.textContent || '';
+                    const match = text.match(/"objectUrn":"urn:li:company:(\\d+)"/);
+                    if (match) return match[1];
+                }
+
+                // Try any script/code block containing the company URN
+                for (const el of document.querySelectorAll('code')) {
+                    const text = el.textContent || '';
+                    const match = text.match(
+                        /(?:objectUrn|entityUrn).*?urn:li:(?:fsd_)?company:(\\d+)/
+                    );
+                    if (match) return match[1];
+                }
+
+                return null;
+            }"""
+        )
+        if company_id:
+            logger.debug("Resolved company %s to ID %s", company, company_id)
+        else:
+            logger.warning("Could not resolve company ID for %s", company)
+        return company_id
+
     async def search_connections_at_company(
         self,
         company: str,
@@ -3871,15 +3933,22 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Search 1st-degree connections filtered by current company.
 
-        Uses LinkedIn's people search with network=["F"] and
+        Resolves the company name to a numeric entity ID first, then
+        uses LinkedIn's people search with network=["F"] and
         currentCompany filter.
 
         Returns:
             {url, sections: {search_results: text}, references}
         """
-        params = (
-            f"network=%5B%22F%22%5D&currentCompany=%5B%22{quote_plus(company)}%22%5D"
-        )
+        company_id = await self._resolve_company_id(company)
+        if not company_id:
+            # Fall back to keyword-based search with company name
+            fallback_keywords = f"{company}"
+            if keywords:
+                fallback_keywords = f"{keywords} {company}"
+            return await self.search_people(fallback_keywords, network="F")
+
+        params = f"network=%5B%22F%22%5D&currentCompany=%5B%22{company_id}%22%5D"
         if keywords:
             params += f"&keywords={quote_plus(keywords)}"
 
