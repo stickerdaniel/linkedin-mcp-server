@@ -547,7 +547,6 @@ class LinkedInExtractor:
             "main button[aria-label*='More']",
             "main button:has-text('More')",
             "button[aria-label*='More']",
-            "button.artdeco-button[aria-label*='More']",
         ]
 
         more_btn = None
@@ -1675,30 +1674,30 @@ class LinkedInExtractor:
         search_candidates: list[str] = []
         if display_name:
             search_candidates.append(display_name)
+        else:
+            logger.debug(
+                "No display name found for %s, falling back to slug", linkedin_username
+            )
         slug_as_name = linkedin_username.replace("-", " ")
         if slug_as_name.lower() != (display_name or "").lower():
             search_candidates.append(slug_as_name)
 
-        if not search_candidates:
-            raise LinkedInScraperException(
-                f"Could not resolve a display name for {linkedin_username}."
-            )
-
-        try:
-            for candidate in search_candidates:
+        for candidate in search_candidates:
+            try:
                 thread_url = await self._resolve_conversation_thread_url(candidate)
-                if thread_url:
-                    await self._navigate_to_page(thread_url)
-                    return
+            except PlaywrightTimeoutError:
+                logger.debug("Timeout searching inbox for candidate %r", candidate)
+                continue
+            if thread_url:
+                await self._navigate_to_page(thread_url)
+                return
 
-            raise LinkedInScraperException(
-                f"Could not find a conversation for {linkedin_username}. "
-                f"Tried searching for: {', '.join(search_candidates)}. "
-                f"If multiple threads exist, use get_conversation with a "
-                f"specific thread_id from search_conversations results."
-            )
-        except PlaywrightTimeoutError as exc:
-            raise LinkedInScraperException("Messaging search input not found.") from exc
+        raise LinkedInScraperException(
+            f"Could not find a conversation for {linkedin_username}. "
+            f"Tried searching for: {', '.join(search_candidates)}. "
+            f"If multiple threads exist, use get_conversation with a "
+            f"specific thread_id from search_conversations results."
+        )
 
     async def scrape_company(
         self,
