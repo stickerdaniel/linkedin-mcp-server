@@ -19,6 +19,7 @@ from linkedin_mcp_server.core import (
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+    RateLimitError,
 )
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
@@ -248,10 +249,16 @@ def _parse_contact_record(
                 if candidate not in ("·", "Contact info"):
                     result["location"] = candidate
 
-        for i, ln in enumerate(non_empty):
-            if ln == "Contact info" and i + 1 < len(non_empty):
-                result["company"] = non_empty[i + 1]
-                break
+        # Company: look for "Current:" or "Experience" section header,
+        # or extract from headline if it contains " at "
+        headline_val = result.get("headline") or ""
+        if " at " in headline_val:
+            result["company"] = headline_val.split(" at ", 1)[1].strip()
+        else:
+            for i, ln in enumerate(non_empty):
+                if ln in ("Current:", "Experience") and i + 1 < len(non_empty):
+                    result["company"] = non_empty[i + 1]
+                    break
 
     if contact_text:
         for field, label in [
@@ -1807,11 +1814,13 @@ class LinkedInExtractor:
                         if (parent) input = parent.querySelector('input, textarea, select');
                     }
                     if (input) {
+                        const proto = input.tagName === 'TEXTAREA'
+                            ? window.HTMLTextAreaElement.prototype
+                            : input.tagName === 'SELECT'
+                                ? window.HTMLSelectElement.prototype
+                                : window.HTMLInputElement.prototype;
                         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-                            input.tagName === 'TEXTAREA'
-                                ? window.HTMLTextAreaElement.prototype
-                                : window.HTMLInputElement.prototype,
-                            'value'
+                            proto, 'value'
                         ).set;
                         nativeInputValueSetter.call(input, value);
                         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1909,14 +1918,7 @@ class LinkedInExtractor:
         Navigates to the intro edit overlay and fills in the provided fields.
         Fields set to None are left unchanged.
         """
-        # First resolve own username
-        await self._navigate_to_page("https://www.linkedin.com/in/me/")
-        current_url = self._page.url
-        match = re.search(r"/in/([^/?#]+)", current_url)
-        if not match:
-            raise LinkedInScraperException("Could not resolve own profile.")
-        username = match.group(1)
-
+        username = await self._resolve_my_username()
         url = f"https://www.linkedin.com/in/{username}/overlay/edit/intro/"
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
@@ -1977,13 +1979,7 @@ class LinkedInExtractor:
 
     async def edit_profile_about(self, about_text: str) -> dict[str, Any]:
         """Edit the About/Summary section of the profile."""
-        await self._navigate_to_page("https://www.linkedin.com/in/me/")
-        current_url = self._page.url
-        match = re.search(r"/in/([^/?#]+)", current_url)
-        if not match:
-            raise LinkedInScraperException("Could not resolve own profile.")
-        username = match.group(1)
-
+        username = await self._resolve_my_username()
         url = f"https://www.linkedin.com/in/{username}/overlay/edit/about/"
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
@@ -2584,10 +2580,12 @@ class LinkedInExtractor:
         btn_count = await easy_apply_btn.count()
 
         if btn_count == 0:
-            # Check if already applied
-            applied_indicator = self._page.locator("span, div, li").filter(
-                has_text=re.compile(r"Applied", re.IGNORECASE)
-            )
+            # Check if already applied — use specific LinkedIn UI selectors
+            applied_indicator = self._page.locator(
+                "li.jobs-unified-top-card__job-insight span, "
+                ".jobs-s-apply__application-status, "
+                "span.artdeco-inline-feedback"
+            ).filter(has_text=re.compile(r"^Applied$", re.IGNORECASE))
             if await applied_indicator.count() > 0:
                 return {
                     "url": url,
@@ -3174,6 +3172,12 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {name: text}}
         """
+        _VALID_NETWORK_FILTERS = {"F", "S", "O"}
+        if network and network not in _VALID_NETWORK_FILTERS:
+            raise ValueError(
+                f"network must be one of {_VALID_NETWORK_FILTERS}, got {network!r}"
+            )
+
         params = f"keywords={quote_plus(keywords)}"
         if location:
             params += f"&location={quote_plus(location)}"
@@ -3790,11 +3794,14 @@ class LinkedInExtractor:
                         }
                     )
 
-                except LinkedInScraperException:
+                except RateLimitError:
                     logger.warning("Rate limited during contact batch at %s", username)
                     failed.append(username)
                     rate_limited = True
                     break
+                except LinkedInScraperException as e:
+                    logger.warning("Scrape failed for %s: %s", username, e)
+                    failed.append(username)
                 except Exception as e:
                     logger.warning("Failed to scrape %s: %s", username, e)
                     failed.append(username)
