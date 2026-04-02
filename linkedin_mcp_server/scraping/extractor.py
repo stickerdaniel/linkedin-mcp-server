@@ -1649,8 +1649,10 @@ class LinkedInExtractor:
         """Navigate to /in/me/ and return the logged-in user's username."""
         await self._navigate_to_page("https://www.linkedin.com/in/me/")
         match = re.search(r"/in/([^/?#]+)", self._page.url)
-        if not match:
-            raise LinkedInScraperException("Could not resolve own profile username.")
+        if not match or match.group(1) == "me":
+            raise LinkedInScraperException(
+                f"Could not resolve own profile username from {self._page.url}"
+            )
         return match.group(1)
 
     async def get_my_profile(

@@ -32,6 +32,9 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
+    mock.get_my_profile = AsyncMock(return_value=scrape_result)
+    mock.get_saved_jobs = AsyncMock(return_value=scrape_result)
+    mock.get_my_applications = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -214,9 +217,7 @@ class TestPersonTool:
         )
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
-        mock_extractor.search_people.assert_awaited_once_with(
-            "AI engineer", "New York", network=None
-        )
+        mock_extractor.search_people.assert_awaited_once_with("AI engineer", "New York")
 
     async def test_connect_with_person(self, mock_context):
         expected = {
@@ -728,3 +729,77 @@ class TestToolTimeouts:
             tool = await mcp.get_tool(name)
             assert tool is not None
             assert tool.timeout == TOOL_TIMEOUT_SECONDS
+
+
+class TestAccountTool:
+    async def test_get_my_profile(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/in/johndoe/",
+            "sections": {"main_profile": "John Doe\nEngineer"},
+            "my_username": "johndoe",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.account import register_account_tools
+
+        mcp = FastMCP("test")
+        register_account_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_my_profile")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result["my_username"] == "johndoe"
+        assert "main_profile" in result["sections"]
+
+    async def test_get_my_profile_full(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/in/johndoe/",
+            "sections": {"main_profile": "John Doe", "skills": "Python"},
+            "my_username": "johndoe",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.account import register_account_tools
+
+        mcp = FastMCP("test")
+        register_account_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_my_profile_full")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result["my_username"] == "johndoe"
+        mock_extractor.get_my_profile.assert_awaited_once()
+
+    async def test_get_saved_jobs(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/my-items/saved-jobs/",
+            "sections": {"saved_jobs": "Senior Engineer at Acme\nApply"},
+            "job_ids": ["12345", "67890"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.account import register_account_tools
+
+        mcp = FastMCP("test")
+        register_account_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_saved_jobs")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result["job_ids"] == ["12345", "67890"]
+        mock_extractor.get_saved_jobs.assert_awaited_once()
+
+    async def test_get_my_applications(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/my-items/saved-jobs/?cardType=APPLIED",
+            "sections": {"applications": "Applied 5 jobs"},
+            "job_ids": ["11111"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.account import register_account_tools
+
+        mcp = FastMCP("test")
+        register_account_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_my_applications")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result["job_ids"] == ["11111"]
+        mock_extractor.get_my_applications.assert_awaited_once()

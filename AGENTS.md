@@ -29,7 +29,7 @@ Optional additional keys:
 - `references: {section_name: [{kind, url, text?, context?}]}` — LinkedIn URLs are relative paths
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
-- `job_ids: [id, ...]` (search_jobs only)
+- `job_ids: [id, ...]` (search_jobs, get_saved_jobs, get_my_applications)
 
 ## Verifying Bug Reports
 

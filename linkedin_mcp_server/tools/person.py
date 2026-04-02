@@ -44,10 +44,8 @@ def register_person_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The main profile page is always included.
-                Available sections: experience, education, skills, certifications,
-                    volunteer, projects, publications, courses, recommendations,
-                    organizations, interests, honors, languages, contact_info, posts
-                Examples: "experience,education,skills", "contact_info", "honors,languages", "posts"
+                Available sections: experience, education, interests, honors, languages, contact_info, posts
+                Examples: "experience,education", "contact_info", "honors,languages", "posts"
                 Default (None) scrapes only the main profile page.
 
         Returns:
@@ -97,7 +95,6 @@ def register_person_tools(mcp: FastMCP) -> None:
         keywords: str,
         ctx: Context,
         location: str | None = None,
-        network: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -107,8 +104,6 @@ def register_person_tools(mcp: FastMCP) -> None:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
             ctx: FastMCP context for progress reporting
             location: Optional location filter (e.g., "New York", "Remote")
-            network: Optional connection degree filter.
-                "F" = 1st degree (your connections), "S" = 2nd degree, "O" = 3rd+.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -119,17 +114,16 @@ def register_person_tools(mcp: FastMCP) -> None:
                 ctx, tool_name="search_people"
             )
             logger.info(
-                "Searching people: keywords='%s', location='%s', network='%s'",
+                "Searching people: keywords='%s', location='%s'",
                 keywords,
                 location,
-                network,
             )
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting people search"
             )
 
-            result = await extractor.search_people(keywords, location, network=network)
+            result = await extractor.search_people(keywords, location)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
