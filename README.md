@@ -73,14 +73,14 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
   "mcpServers": {
     "linkedin": {
       "command": "uvx",
-      "args": ["linkedin-scraper-mcp"],
+      "args": ["linkedin-scraper-mcp@latest"],
       "env": { "UV_HTTP_TIMEOUT": "300" }
     }
   }
 }
 ```
 
-The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
+The `@latest` tag ensures you always run the newest version — `uvx` checks PyPI on each client launch and updates automatically. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx linkedin-scraper-mcp --login`.
@@ -115,13 +115,13 @@ The server starts quickly, prepares the shared Patchright Chromium browser cache
 
 ```bash
 # Run with debug logging
-uvx linkedin-scraper-mcp --log-level DEBUG
+uvx linkedin-scraper-mcp@latest --log-level DEBUG
 ```
 
 **HTTP Mode Example (for web-based MCP clients):**
 
 ```bash
-uvx linkedin-scraper-mcp --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
+uvx linkedin-scraper-mcp@latest --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
