@@ -73,17 +73,17 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
   "mcpServers": {
     "linkedin": {
       "command": "uvx",
-      "args": ["linkedin-scraper-mcp"],
+      "args": ["linkedin-scraper-mcp@latest"],
       "env": { "UV_HTTP_TIMEOUT": "300" }
     }
   }
 }
 ```
 
-The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
+The `@latest` tag ensures you always run the newest version — `uvx` checks PyPI on each client launch and updates automatically. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
 
 > [!NOTE]
-> Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx linkedin-scraper-mcp --login`.
+> Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx linkedin-scraper-mcp@latest --login`.
 
 ### uvx Setup Help
 
@@ -115,13 +115,13 @@ The server starts quickly, prepares the shared Patchright Chromium browser cache
 
 ```bash
 # Run with debug logging
-uvx linkedin-scraper-mcp --log-level DEBUG
+uvx linkedin-scraper-mcp@latest --log-level DEBUG
 ```
 
 **HTTP Mode Example (for web-based MCP clients):**
 
 ```bash
-uvx linkedin-scraper-mcp --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
+uvx linkedin-scraper-mcp@latest --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
@@ -159,7 +159,7 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 **Login issues:**
 
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
-- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve it manually.
+- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp@latest --login` which opens a browser where you can solve it manually.
 
 **Timeout issues:**
 
@@ -204,7 +204,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
-- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
+- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp@latest --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 
 **Timeout issues:**
 
@@ -228,7 +228,7 @@ Docker runs headless (no browser window), so you need to create a browser profil
 **Step 1: Create profile on the host (one-time setup)**
 
 ```bash
-uvx linkedin-scraper-mcp --login
+uvx linkedin-scraper-mcp@latest --login
 ```
 
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. If you experience stability issues with Docker, consider using the [uvx setup](#-uvx-setup-recommended---universal) instead.
@@ -251,7 +251,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```
 
 > [!NOTE]
-> Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx linkedin-scraper-mcp --login` again if you encounter authentication issues.
+> Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx linkedin-scraper-mcp@latest --login` again if you encounter authentication issues.
 
 > [!NOTE]
 > **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
@@ -318,7 +318,7 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 
 - Make sure you have only one active LinkedIn session at a time
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
-- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
+- You might get a captcha challenge if you logged in frequently. Run `uvx linkedin-scraper-mcp@latest --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 - If Docker auth becomes stale after you re-login on the host, restart Docker once so it can fresh-bridge from the new source session generation.
 
 **Timeout issues:**
