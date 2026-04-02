@@ -1760,6 +1760,638 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    async def _fill_field_by_label(
+        self,
+        label_text: str,
+        value: str,
+        *,
+        scope: str = '[role="dialog"], dialog[open], main',
+        exact: bool = False,
+    ) -> bool:
+        """Find an input/textarea by its associated label text and fill it.
+
+        Searches for labels whose text matches (contains or exact), then locates
+        the associated input via the for attribute or by being a child element.
+        """
+        filled = await self._page.evaluate(
+            """({ labelText, value, scope, exact }) => {
+                const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
+                const root = document.querySelector(scope) || document.body;
+                const labels = Array.from(root.querySelectorAll('label'));
+                for (const label of labels) {
+                    const text = normalize(label.innerText || label.textContent);
+                    const match = exact
+                        ? text.toLowerCase() === labelText.toLowerCase()
+                        : text.toLowerCase().includes(labelText.toLowerCase());
+                    if (!match) continue;
+
+                    let input = null;
+                    const forAttr = label.getAttribute('for');
+                    if (forAttr) {
+                        input = document.getElementById(forAttr);
+                    }
+                    if (!input) {
+                        input = label.querySelector('input, textarea, select');
+                    }
+                    if (!input) {
+                        const parent = label.closest('.artdeco-text-input, .fb-text-input__wrapper, div');
+                        if (parent) input = parent.querySelector('input, textarea, select');
+                    }
+                    if (input) {
+                        const proto = input.tagName === 'TEXTAREA'
+                            ? window.HTMLTextAreaElement.prototype
+                            : input.tagName === 'SELECT'
+                                ? window.HTMLSelectElement.prototype
+                                : window.HTMLInputElement.prototype;
+                        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                            proto, 'value'
+                        ).set;
+                        nativeInputValueSetter.call(input, value);
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    }
+                }
+                return false;
+            }""",
+            {"labelText": label_text, "value": value, "scope": scope, "exact": exact},
+        )
+        return bool(filled)
+
+    async def _select_dropdown_by_label(
+        self,
+        label_text: str,
+        option_text: str,
+        *,
+        scope: str = '[role="dialog"], dialog[open], main',
+    ) -> bool:
+        """Find a dropdown (select or custom listbox) by label and choose an option."""
+        selected = await self._page.evaluate(
+            """({ labelText, optionText, scope }) => {
+                const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
+                const root = document.querySelector(scope) || document.body;
+                const labels = Array.from(root.querySelectorAll('label'));
+                for (const label of labels) {
+                    const text = normalize(label.innerText || label.textContent);
+                    if (!text.toLowerCase().includes(labelText.toLowerCase())) continue;
+
+                    let select = null;
+                    const forAttr = label.getAttribute('for');
+                    if (forAttr) select = document.getElementById(forAttr);
+                    if (!select) select = label.querySelector('select');
+                    if (!select) {
+                        const parent = label.closest('div');
+                        if (parent) select = parent.querySelector('select');
+                    }
+
+                    if (select && select.tagName === 'SELECT') {
+                        const options = Array.from(select.options);
+                        const match = options.find(o =>
+                            normalize(o.text).toLowerCase().includes(optionText.toLowerCase())
+                        );
+                        if (match) {
+                            const nativeSetter = Object.getOwnPropertyDescriptor(
+                                window.HTMLSelectElement.prototype, 'value'
+                            ).set;
+                            nativeSetter.call(select, match.value);
+                            select.dispatchEvent(new Event('change', { bubbles: true }));
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }""",
+            {"labelText": label_text, "optionText": option_text, "scope": scope},
+        )
+        return bool(selected)
+
+    async def _click_save_in_dialog(self, *, timeout: int = 5000) -> bool:
+        """Click the Save button inside an open dialog."""
+        for text in ["Save", "Apply", "Done"]:
+            btn = self._page.locator(f"{_DIALOG_SELECTOR} button, main button").filter(
+                has_text=re.compile(rf"^{text}$", re.IGNORECASE)
+            )
+            if await btn.count() > 0:
+                await btn.first.click(timeout=timeout)
+                await asyncio.sleep(1.5)
+                return True
+        return False
+
+    async def edit_profile_intro(
+        self,
+        *,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        headline: str | None = None,
+        location: str | None = None,
+        industry: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit the profile intro section (name, headline, location, industry).
+
+        Navigates to the intro edit overlay and fills in the provided fields.
+        Fields set to None are left unchanged.
+        """
+        username = await self._resolve_my_username()
+        url = f"https://www.linkedin.com/in/{username}/overlay/edit/intro/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        # Wait for the edit form to appear
+        try:
+            await self._page.wait_for_selector(
+                "dialog[open], [role='dialog'], main form", timeout=10000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Edit intro form did not open.",
+            }
+
+        await asyncio.sleep(1.0)
+        fields_updated: list[str] = []
+
+        if first_name is not None:
+            if await self._fill_field_by_label("First name", first_name):
+                fields_updated.append("first_name")
+        if last_name is not None:
+            if await self._fill_field_by_label("Last name", last_name):
+                fields_updated.append("last_name")
+        if headline is not None:
+            if await self._fill_field_by_label("Headline", headline):
+                fields_updated.append("headline")
+        if location is not None:
+            if (
+                await self._fill_field_by_label("Country/Region", location)
+                or await self._fill_field_by_label("City", location)
+                or await self._fill_field_by_label("Location", location)
+            ):
+                fields_updated.append("location")
+        if industry is not None:
+            if await self._fill_field_by_label("Industry", industry):
+                fields_updated.append("industry")
+
+        if not fields_updated:
+            return {
+                "url": url,
+                "status": "no_changes",
+                "message": "No fields were modified.",
+            }
+
+        saved = await self._click_save_in_dialog()
+        await asyncio.sleep(1.5)
+
+        return {
+            "url": url,
+            "status": "saved" if saved else "save_failed",
+            "message": f"Updated: {', '.join(fields_updated)}"
+            if saved
+            else "Could not find the Save button.",
+            "fields_updated": fields_updated,
+        }
+
+    async def edit_profile_about(self, about_text: str) -> dict[str, Any]:
+        """Edit the About/Summary section of the profile."""
+        username = await self._resolve_my_username()
+        url = f"https://www.linkedin.com/in/{username}/overlay/edit/about/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector(
+                "dialog[open], [role='dialog'], main form", timeout=10000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Edit about form did not open.",
+            }
+
+        await asyncio.sleep(1.0)
+
+        # The About section uses a textarea
+        textarea = self._page.locator(
+            'dialog textarea, [role="dialog"] textarea, main textarea'
+        ).first
+        try:
+            await textarea.wait_for(state="visible", timeout=5000)
+            await textarea.click()
+            await textarea.fill(about_text)
+        except Exception:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Could not locate the About text area.",
+            }
+
+        saved = await self._click_save_in_dialog()
+        await asyncio.sleep(1.5)
+
+        return {
+            "url": url,
+            "status": "saved" if saved else "save_failed",
+            "message": "About section updated."
+            if saved
+            else "Could not find the Save button.",
+        }
+
+    async def _resolve_my_username(self) -> str:
+        """Navigate to /in/me/ and return the logged-in user's username."""
+        await self._navigate_to_page("https://www.linkedin.com/in/me/")
+        match = re.search(r"/in/([^/?#]+)", self._page.url)
+        if not match:
+            raise LinkedInScraperException("Could not resolve own profile username.")
+        return match.group(1)
+
+    async def _edit_profile_section_entry(
+        self,
+        section_slug: str,
+        *,
+        fields: dict[str, str],
+        dropdowns: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Generic method to add a new entry in a profile section.
+
+        Opens the add-new form for a given section, fills fields by label,
+        and saves. Works for experience, education, certifications, etc.
+        """
+        username = await self._resolve_my_username()
+        url = f"https://www.linkedin.com/in/{username}/overlay/create/new/?profileFormEntryPoint=PROFILE_SECTION&profileSectionId={section_slug}"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector(
+                "dialog[open], [role='dialog'], main form", timeout=10000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": f"Add {section_slug} form did not open.",
+                "section": section_slug,
+            }
+
+        await asyncio.sleep(1.5)
+        fields_filled: list[str] = []
+
+        for label, value in fields.items():
+            if await self._fill_field_by_label(label, value):
+                fields_filled.append(label)
+
+        if dropdowns:
+            for label, value in dropdowns.items():
+                if await self._select_dropdown_by_label(label, value):
+                    fields_filled.append(label)
+
+        if not fields_filled:
+            return {
+                "url": url,
+                "status": "no_changes",
+                "message": f"Could not fill any fields for {section_slug}.",
+                "section": section_slug,
+            }
+
+        saved = await self._click_save_in_dialog()
+        await asyncio.sleep(1.5)
+
+        return {
+            "url": url,
+            "status": "saved" if saved else "save_failed",
+            "message": f"Added {section_slug} entry: {', '.join(fields_filled)}"
+            if saved
+            else "Could not find the Save button.",
+            "section": section_slug,
+            "fields_filled": fields_filled,
+        }
+
+    async def add_experience(
+        self,
+        *,
+        title: str,
+        company: str,
+        start_month: str | None = None,
+        start_year: str | None = None,
+        end_month: str | None = None,
+        end_year: str | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        employment_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a new experience entry to the profile."""
+        fields: dict[str, str] = {"Title": title, "Company name": company}
+        dropdowns: dict[str, str] = {}
+        if location:
+            fields["Location"] = location
+        if description:
+            fields["Description"] = description
+        if start_month:
+            dropdowns["Start date month"] = start_month
+        if start_year:
+            fields["Start date year"] = start_year
+        if end_month:
+            dropdowns["End date month"] = end_month
+        if end_year:
+            fields["End date year"] = end_year
+        if employment_type:
+            dropdowns["Employment type"] = employment_type
+
+        return await self._edit_profile_section_entry(
+            "EXPERIENCE", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_education(
+        self,
+        *,
+        school: str,
+        degree: str | None = None,
+        field_of_study: str | None = None,
+        start_year: str | None = None,
+        end_year: str | None = None,
+        description: str | None = None,
+        grade: str | None = None,
+        activities: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a new education entry to the profile."""
+        fields: dict[str, str] = {"School": school}
+        if degree:
+            fields["Degree"] = degree
+        if field_of_study:
+            fields["Field of study"] = field_of_study
+        if start_year:
+            fields["Start date year"] = start_year
+        if end_year:
+            fields["End date year"] = end_year
+        if grade:
+            fields["Grade"] = grade
+        if activities:
+            fields["Activities and societies"] = activities
+        if description:
+            fields["Description"] = description
+
+        return await self._edit_profile_section_entry("EDUCATION", fields=fields)
+
+    async def add_skill(self, skill_name: str) -> dict[str, Any]:
+        """Add a skill to the profile."""
+        username = await self._resolve_my_username()
+        url = f"https://www.linkedin.com/in/{username}/overlay/create/new/?profileFormEntryPoint=PROFILE_SECTION&profileSectionId=SKILLS"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector(
+                "dialog[open], [role='dialog'], main form", timeout=10000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Add skill form did not open.",
+            }
+
+        await asyncio.sleep(1.0)
+
+        # Fill the skill name field
+        filled = await self._fill_field_by_label("Skill", skill_name)
+        if not filled:
+            filled = await self._fill_field_by_label("skill", skill_name)
+        if not filled:
+            # Try the first input in the dialog
+            input_el = self._page.locator('dialog input, [role="dialog"] input').first
+            try:
+                await input_el.fill(skill_name)
+                filled = True
+            except Exception:
+                pass
+
+        if not filled:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Could not fill the skill name field.",
+            }
+
+        # Wait for typeahead suggestions and select if available
+        await asyncio.sleep(1.0)
+        typeahead = self._page.locator(
+            '[role="listbox"] [role="option"], [role="listbox"] li'
+        )
+        if await typeahead.count() > 0:
+            await typeahead.first.click()
+            await asyncio.sleep(0.5)
+
+        saved = await self._click_save_in_dialog()
+        await asyncio.sleep(1.0)
+
+        return {
+            "url": url,
+            "status": "saved" if saved else "save_failed",
+            "message": f"Skill '{skill_name}' added."
+            if saved
+            else "Could not save the skill.",
+        }
+
+    async def add_certification(
+        self,
+        *,
+        name: str,
+        issuing_organization: str,
+        issue_month: str | None = None,
+        issue_year: str | None = None,
+        expiration_month: str | None = None,
+        expiration_year: str | None = None,
+        credential_id: str | None = None,
+        credential_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a certification to the profile."""
+        fields: dict[str, str] = {
+            "Name": name,
+            "Issuing organization": issuing_organization,
+        }
+        dropdowns: dict[str, str] = {}
+        if credential_id:
+            fields["Credential ID"] = credential_id
+        if credential_url:
+            fields["Credential URL"] = credential_url
+        if issue_month:
+            dropdowns["Issue date month"] = issue_month
+        if issue_year:
+            fields["Issue date year"] = issue_year
+        if expiration_month:
+            dropdowns["Expiration date month"] = expiration_month
+        if expiration_year:
+            fields["Expiration date year"] = expiration_year
+
+        return await self._edit_profile_section_entry(
+            "CERTIFICATIONS", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_volunteer_experience(
+        self,
+        *,
+        organization: str,
+        role: str,
+        cause: str | None = None,
+        start_month: str | None = None,
+        start_year: str | None = None,
+        end_month: str | None = None,
+        end_year: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a volunteer experience entry to the profile."""
+        fields: dict[str, str] = {"Organization": organization, "Role": role}
+        dropdowns: dict[str, str] = {}
+        if cause:
+            dropdowns["Cause"] = cause
+        if description:
+            fields["Description"] = description
+        if start_month:
+            dropdowns["Start date month"] = start_month
+        if start_year:
+            fields["Start date year"] = start_year
+        if end_month:
+            dropdowns["End date month"] = end_month
+        if end_year:
+            fields["End date year"] = end_year
+
+        return await self._edit_profile_section_entry(
+            "VOLUNTEERING_EXPERIENCE", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_project(
+        self,
+        *,
+        name: str,
+        description: str | None = None,
+        start_month: str | None = None,
+        start_year: str | None = None,
+        end_month: str | None = None,
+        end_year: str | None = None,
+        project_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a project to the profile."""
+        fields: dict[str, str] = {"Name": name}
+        dropdowns: dict[str, str] = {}
+        if description:
+            fields["Description"] = description
+        if project_url:
+            fields["Project URL"] = project_url
+        if start_month:
+            dropdowns["Start date month"] = start_month
+        if start_year:
+            fields["Start date year"] = start_year
+        if end_month:
+            dropdowns["End date month"] = end_month
+        if end_year:
+            fields["End date year"] = end_year
+
+        return await self._edit_profile_section_entry(
+            "PROJECTS", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_publication(
+        self,
+        *,
+        title: str,
+        publisher: str | None = None,
+        publication_date_month: str | None = None,
+        publication_date_year: str | None = None,
+        description: str | None = None,
+        publication_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a publication to the profile."""
+        fields: dict[str, str] = {"Title": title}
+        dropdowns: dict[str, str] = {}
+        if publisher:
+            fields["Publisher"] = publisher
+        if description:
+            fields["Description"] = description
+        if publication_url:
+            fields["Publication URL"] = publication_url
+        if publication_date_month:
+            dropdowns["Publication date month"] = publication_date_month
+        if publication_date_year:
+            fields["Publication date year"] = publication_date_year
+
+        return await self._edit_profile_section_entry(
+            "PUBLICATIONS", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_course(
+        self,
+        *,
+        name: str,
+        number: str | None = None,
+        associated_with: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a course to the profile."""
+        fields: dict[str, str] = {"Course name": name}
+        if number:
+            fields["Number"] = number
+        if associated_with:
+            fields["Associated with"] = associated_with
+
+        return await self._edit_profile_section_entry("COURSES", fields=fields)
+
+    async def add_language(
+        self,
+        *,
+        name: str,
+        proficiency: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a language to the profile."""
+        fields: dict[str, str] = {"Name": name}
+        dropdowns: dict[str, str] = {}
+        if proficiency:
+            dropdowns["Proficiency"] = proficiency
+
+        return await self._edit_profile_section_entry(
+            "LANGUAGES", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_honor(
+        self,
+        *,
+        title: str,
+        issuer: str | None = None,
+        issue_month: str | None = None,
+        issue_year: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Add an honor or award to the profile."""
+        fields: dict[str, str] = {"Title": title}
+        dropdowns: dict[str, str] = {}
+        if issuer:
+            fields["Issuer"] = issuer
+        if description:
+            fields["Description"] = description
+        if issue_month:
+            dropdowns["Issue date month"] = issue_month
+        if issue_year:
+            fields["Issue date year"] = issue_year
+
+        return await self._edit_profile_section_entry(
+            "HONORS", fields=fields, dropdowns=dropdowns
+        )
+
+    async def get_my_profile(
+        self,
+        sections: set[str],
+        callbacks: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        """Scrape the logged-in user's own profile via /in/me/ redirect.
+
+        Uses _resolve_my_username() to get the authenticated user's
+        username, then delegates to scrape_person.
+
+        Returns:
+            {url, sections: {name: text}, my_username: str}
+        """
+        my_username = await self._resolve_my_username()
+        result = await self.scrape_person(my_username, sections, callbacks=callbacks)
+        result["my_username"] = my_username
+        return result
     async def _extract_job_ids(self) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
 
