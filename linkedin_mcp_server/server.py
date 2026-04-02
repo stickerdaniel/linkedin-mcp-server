@@ -22,6 +22,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
+from linkedin_mcp_server.tools.account import register_account_tools
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.messaging import register_messaging_tools
@@ -60,6 +61,7 @@ def create_mcp_server() -> FastMCP:
     register_company_tools(mcp)
     register_job_tools(mcp)
     register_messaging_tools(mcp)
+    register_account_tools(mcp)
 
     # Register session management tool
     @mcp.tool(

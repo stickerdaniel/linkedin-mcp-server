@@ -1645,6 +1645,86 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError as exc:
             raise LinkedInScraperException("Messaging search input not found.") from exc
 
+    async def _resolve_my_username(self) -> str:
+        """Navigate to /in/me/ and return the logged-in user's username."""
+        await self._navigate_to_page("https://www.linkedin.com/in/me/")
+        match = re.search(r"/in/([^/?#]+)", self._page.url)
+        if not match:
+            raise LinkedInScraperException("Could not resolve own profile username.")
+        return match.group(1)
+
+    async def get_my_profile(
+        self,
+        sections: set[str],
+        callbacks: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        """Scrape the logged-in user's own profile via /in/me/ redirect.
+
+        Uses _resolve_my_username() to get the authenticated user's
+        username, then delegates to scrape_person.
+
+        Returns:
+            {url, sections: {name: text}, my_username: str}
+        """
+        my_username = await self._resolve_my_username()
+        result = await self.scrape_person(my_username, sections, callbacks=callbacks)
+        result["my_username"] = my_username
+        return result
+
+    async def get_saved_jobs(self) -> dict[str, Any]:
+        """List the user's saved/bookmarked jobs.
+
+        Returns:
+            {url, sections: {saved_jobs: text}, job_ids: [str]}
+        """
+        url = "https://www.linkedin.com/my-items/saved-jobs/"
+        extracted = await self.extract_page(url, section_name="saved_jobs")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["saved_jobs"] = extracted.text
+            if extracted.references:
+                references["saved_jobs"] = extracted.references
+
+        job_ids = await self._extract_job_ids()
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+            "job_ids": job_ids,
+        }
+        if references:
+            result["references"] = references
+        return result
+
+    async def get_my_applications(self) -> dict[str, Any]:
+        """List jobs the user has applied to.
+
+        Returns:
+            {url, sections: {applications: text}, job_ids: [str]}
+        """
+        url = "https://www.linkedin.com/my-items/saved-jobs/?cardType=APPLIED"
+        extracted = await self.extract_page(url, section_name="applications")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["applications"] = extracted.text
+            if extracted.references:
+                references["applications"] = extracted.references
+
+        job_ids = await self._extract_job_ids()
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+            "job_ids": job_ids,
+        }
+        if references:
+            result["references"] = references
+        return result
+
     async def scrape_company(
         self,
         company_name: str,
