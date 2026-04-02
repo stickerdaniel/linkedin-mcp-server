@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 import re
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
@@ -19,6 +19,7 @@ from linkedin_mcp_server.core import (
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+    RateLimitError,
 )
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
@@ -207,6 +208,76 @@ def _truncate_linkedin_noise(text: str) -> str:
             earliest = match.start()
 
     return text[:earliest].strip()
+
+
+def _parse_contact_record(
+    profile_text: str, contact_text: str
+) -> dict[str, str | None]:
+    """Parse raw innerText blobs into structured contact fields."""
+    result: dict[str, str | None] = {
+        "first_name": None,
+        "last_name": None,
+        "headline": None,
+        "location": None,
+        "company": None,
+        "email": None,
+        "phone": None,
+        "website": None,
+        "birthday": None,
+    }
+
+    if profile_text:
+        lines = [ln.strip() for ln in profile_text.split("\n")]
+        non_empty = [ln for ln in lines if ln]
+
+        if non_empty:
+            full_name = non_empty[0]
+            parts = full_name.split(None, 1)
+            result["first_name"] = parts[0] if parts else full_name
+            result["last_name"] = parts[1] if len(parts) > 1 else None
+
+        degree_idx: int | None = None
+        for i, ln in enumerate(non_empty):
+            if re.match(r"^·\s*\d+(st|nd|rd|th)\+?$", ln):
+                degree_idx = i
+                break
+
+        if degree_idx is not None and degree_idx + 1 < len(non_empty):
+            result["headline"] = non_empty[degree_idx + 1]
+            if degree_idx + 2 < len(non_empty):
+                candidate = non_empty[degree_idx + 2]
+                if candidate not in ("·", "Contact info"):
+                    result["location"] = candidate
+
+        # Company: look for "Current:" or "Experience" section header,
+        # or extract from headline if it contains " at "
+        headline_val = result.get("headline") or ""
+        if " at " in headline_val:
+            result["company"] = headline_val.split(" at ", 1)[1].strip()
+        else:
+            for i, ln in enumerate(non_empty):
+                if ln in ("Current:", "Experience") and i + 1 < len(non_empty):
+                    result["company"] = non_empty[i + 1]
+                    break
+
+    if contact_text:
+        for field, label in [
+            ("email", "Email"),
+            ("phone", "Phone"),
+            ("birthday", "Birthday"),
+        ]:
+            match = re.search(
+                rf"(?:^|\n){re.escape(label)}\s*\n\s*\n\s*(.+)",
+                contact_text,
+            )
+            if match:
+                result[field] = match.group(1).strip()
+
+        match = re.search(r"(?:^|\n)Website\s*\n\s*\n\s*(.+)", contact_text)
+        if match:
+            result["website"] = match.group(1).strip()
+
+    return result
 
 
 class LinkedInExtractor:
@@ -2080,15 +2151,31 @@ class LinkedInExtractor:
         self,
         keywords: str,
         location: str | None = None,
+        *,
+        network: str | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results page.
+
+        Args:
+            keywords: Search keywords.
+            location: Optional location filter.
+            network: Optional connection degree filter.
+                "F" = 1st degree, "S" = 2nd degree, "O" = 3rd+.
 
         Returns:
             {url, sections: {name: text}}
         """
+        _VALID_NETWORK_FILTERS = {"F", "S", "O"}
+        if network and network not in _VALID_NETWORK_FILTERS:
+            raise ValueError(
+                f"network must be one of {_VALID_NETWORK_FILTERS}, got {network!r}"
+            )
+
         params = f"keywords={quote_plus(keywords)}"
         if location:
             params += f"&location={quote_plus(location)}"
+        if network:
+            params += f"&network=%5B%22{quote_plus(network)}%22%5D"
 
         url = f"https://www.linkedin.com/search/results/people/?{params}"
         extracted = await self.extract_page(url, section_name="search_results")
@@ -2562,3 +2649,305 @@ class LinkedInExtractor:
             {"selectors": selectors},
         )
         return result
+
+    async def scrape_connections_list(
+        self,
+        limit: int = 0,
+        max_scrolls: int = 50,
+    ) -> dict[str, Any]:
+        """Scrape the authenticated user's connections list via infinite scroll.
+
+        Args:
+            limit: Maximum connections to return (0 = unlimited).
+            max_scrolls: Maximum scroll iterations (~1s pause each).
+
+        Returns:
+            {connections: [{username, name, headline}, ...], total, url}
+        """
+        url = "https://www.linkedin.com/mynetwork/invite-connect/connections/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element on connections page")
+
+        await handle_modal_close(self._page)
+        await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=max_scrolls)
+
+        raw_connections: list[dict[str, str]] = await self._page.evaluate(
+            """() => {
+                const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
+                const results = [];
+                const seen = new Set();
+                const links = document.querySelectorAll('main a[href*="/in/"]');
+                for (const a of links) {
+                    const href = a.getAttribute('href') || '';
+                    const match = href.match(/\\/in\\/([^/?#]+)/);
+                    if (!match) continue;
+                    const username = match[1];
+                    if (seen.has(username)) continue;
+                    seen.add(username);
+
+                    const card = a.closest('li') || a.parentElement;
+
+                    // Extract name from link text (no class-name selectors)
+                    let name = normalize(a.innerText);
+                    if (!name || name.length > 80) {
+                        // Fallback: first non-empty line of the card
+                        if (card) {
+                            const lines = card.innerText
+                                .split('\\n').map(l => l.trim()).filter(Boolean);
+                            name = lines[0] || '';
+                        }
+                    }
+
+                    // Extract headline from card innerText lines
+                    let headline = '';
+                    if (card) {
+                        const lines = card.innerText
+                            .split('\\n').map(l => l.trim()).filter(Boolean);
+                        // Headline is typically the second non-empty line
+                        // (first is the name)
+                        if (lines.length >= 2) headline = lines[1];
+                    }
+
+                    results.push({ username, name, headline });
+                }
+                return results;
+            }"""
+        )
+
+        if limit > 0:
+            raw_connections = raw_connections[:limit]
+
+        return {
+            "connections": raw_connections,
+            "total": len(raw_connections),
+            "url": url,
+        }
+
+    async def scrape_contact_batch(
+        self,
+        usernames: list[str],
+        chunk_size: int = 5,
+        chunk_delay: float = 30.0,
+        progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
+        include_raw: bool = False,
+    ) -> dict[str, Any]:
+        """Enrich profiles with contact details in chunked batches.
+
+        For each username: scrapes main profile + contact_info overlay.
+        """
+        contacts: list[dict[str, Any]] = []
+        failed: list[str] = []
+        total = len(usernames)
+        rate_limited = False
+
+        for chunk_idx in range(0, total, chunk_size):
+            chunk = usernames[chunk_idx : chunk_idx + chunk_size]
+
+            for username in chunk:
+                profile_url = f"https://www.linkedin.com/in/{username}/"
+                contact_url = (
+                    f"https://www.linkedin.com/in/{username}/overlay/contact-info/"
+                )
+
+                try:
+                    profile_extracted = await self.extract_page(
+                        profile_url, section_name="profile"
+                    )
+                    profile_text = profile_extracted.text
+
+                    if profile_text == _RATE_LIMITED_MSG:
+                        failed.append(username)
+                        await asyncio.sleep(_NAV_DELAY)
+                        continue
+
+                    contact_extracted = await self._extract_overlay(
+                        contact_url, section_name="contact_info"
+                    )
+                    contact_text = contact_extracted.text
+                    if contact_text == _RATE_LIMITED_MSG:
+                        contact_text = ""
+
+                    parsed = _parse_contact_record(profile_text, contact_text)
+                    record: dict[str, Any] = {
+                        "username": username,
+                        **parsed,
+                    }
+                    if include_raw:
+                        record["profile_raw"] = profile_text
+                        record["contact_info_raw"] = contact_text
+                    contacts.append(record)
+
+                except RateLimitError:
+                    logger.warning("Rate limited during contact batch at %s", username)
+                    failed.append(username)
+                    rate_limited = True
+                    break
+                except LinkedInScraperException as e:
+                    logger.warning("Scrape failed for %s: %s", username, e)
+                    failed.append(username)
+                except Exception as e:
+                    logger.warning("Failed to scrape %s: %s", username, e)
+                    failed.append(username)
+
+                await asyncio.sleep(_NAV_DELAY)
+
+            if rate_limited:
+                break
+
+            completed = min(chunk_idx + len(chunk), total)
+            if progress_cb:
+                await progress_cb(completed, total)
+
+            if chunk_idx + chunk_size < total:
+                logger.info(
+                    "Chunk complete (%d/%d). Pausing %.0fs...",
+                    completed,
+                    total,
+                    chunk_delay,
+                )
+                await asyncio.sleep(chunk_delay)
+
+        return {
+            "contacts": contacts,
+            "total": len(contacts),
+            "failed": failed,
+            "rate_limited": rate_limited,
+        }
+
+    async def get_notifications(self, limit: int = 20) -> dict[str, Any]:
+        """Scrape the LinkedIn notifications page.
+
+        Returns:
+            {url, sections: {notifications: text}, references}
+        """
+        url = "https://www.linkedin.com/notifications/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> on notifications page")
+
+        await handle_modal_close(self._page)
+
+        scrolls = max(1, limit // 10)
+        await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+        references = (
+            build_references(raw_result["references"], "notifications")
+            if cleaned
+            else []
+        )
+
+        return self._single_section_result(
+            url, "notifications", cleaned, references=references
+        )
+
+    async def _resolve_company_id(self, company: str) -> str | None:
+        """Resolve a company name or slug to its LinkedIn numeric entity ID.
+
+        Navigates to the company page and extracts the entity URN from
+        the page's metadata. Returns None if the ID cannot be resolved.
+        """
+        company_url = f"https://www.linkedin.com/company/{quote_plus(company)}/"
+        try:
+            await self._navigate_to_page(company_url)
+            await detect_rate_limit(self._page)
+        except Exception:
+            logger.debug("Could not navigate to company page for %s", company)
+            return None
+
+        company_id: str | None = await self._page.evaluate(
+            """() => {
+                // Try meta tag with entity URN
+                const meta = document.querySelector(
+                    'meta[content*="urn:li:company:"], '
+                    + 'meta[content*="urn:li:fsd_company:"]'
+                );
+                if (meta) {
+                    const match = meta.content.match(
+                        /urn:li:(?:fsd_)?company:(\\d+)/
+                    );
+                    if (match) return match[1];
+                }
+
+                // Try data attributes
+                const codeEl = document.querySelector(
+                    'code[id*="company"], [data-company-id]'
+                );
+                if (codeEl) {
+                    const id = codeEl.getAttribute('data-company-id');
+                    if (id) return id;
+                    const text = codeEl.textContent || '';
+                    const match = text.match(/"objectUrn":"urn:li:company:(\\d+)"/);
+                    if (match) return match[1];
+                }
+
+                // Try any script/code block containing the company URN
+                for (const el of document.querySelectorAll('code')) {
+                    const text = el.textContent || '';
+                    const match = text.match(
+                        /(?:objectUrn|entityUrn).*?urn:li:(?:fsd_)?company:(\\d+)/
+                    );
+                    if (match) return match[1];
+                }
+
+                return null;
+            }"""
+        )
+        if company_id:
+            logger.debug("Resolved company %s to ID %s", company, company_id)
+        else:
+            logger.warning("Could not resolve company ID for %s", company)
+        return company_id
+
+    async def search_connections_at_company(
+        self,
+        company: str,
+        keywords: str | None = None,
+    ) -> dict[str, Any]:
+        """Search 1st-degree connections filtered by current company.
+
+        Resolves the company name to a numeric entity ID first, then
+        uses LinkedIn's people search with network=["F"] and
+        currentCompany filter.
+
+        Returns:
+            {url, sections: {search_results: text}, references}
+        """
+        company_id = await self._resolve_company_id(company)
+        if not company_id:
+            # Fall back to keyword-based search with company name
+            fallback_keywords = company
+            if keywords:
+                fallback_keywords = f"{keywords} {company}"
+            return await self.search_people(fallback_keywords, network="F")
+
+        params = f"network=%5B%22F%22%5D&currentCompany=%5B%22{company_id}%22%5D"
+        if keywords:
+            params += f"&keywords={quote_plus(keywords)}"
+
+        url = f"https://www.linkedin.com/search/results/people/?{params}"
+        extracted = await self.extract_page(url, section_name="search_results")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["search_results"] = extracted.text
+            if extracted.references:
+                references["search_results"] = extracted.references
+
+        return {
+            "url": url,
+            "sections": sections,
+            "references": references if references else {},
+        }
