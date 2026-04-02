@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 import re
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
@@ -207,6 +207,70 @@ def _truncate_linkedin_noise(text: str) -> str:
             earliest = match.start()
 
     return text[:earliest].strip()
+
+
+def _parse_contact_record(
+    profile_text: str, contact_text: str
+) -> dict[str, str | None]:
+    """Parse raw innerText blobs into structured contact fields."""
+    result: dict[str, str | None] = {
+        "first_name": None,
+        "last_name": None,
+        "headline": None,
+        "location": None,
+        "company": None,
+        "email": None,
+        "phone": None,
+        "website": None,
+        "birthday": None,
+    }
+
+    if profile_text:
+        lines = [ln.strip() for ln in profile_text.split("\n")]
+        non_empty = [ln for ln in lines if ln]
+
+        if non_empty:
+            full_name = non_empty[0]
+            parts = full_name.split(None, 1)
+            result["first_name"] = parts[0] if parts else full_name
+            result["last_name"] = parts[1] if len(parts) > 1 else None
+
+        degree_idx: int | None = None
+        for i, ln in enumerate(non_empty):
+            if re.match(r"^·\s*\d+(st|nd|rd|th)\+?$", ln):
+                degree_idx = i
+                break
+
+        if degree_idx is not None and degree_idx + 1 < len(non_empty):
+            result["headline"] = non_empty[degree_idx + 1]
+            if degree_idx + 2 < len(non_empty):
+                candidate = non_empty[degree_idx + 2]
+                if candidate not in ("·", "Contact info"):
+                    result["location"] = candidate
+
+        for i, ln in enumerate(non_empty):
+            if ln == "Contact info" and i + 1 < len(non_empty):
+                result["company"] = non_empty[i + 1]
+                break
+
+    if contact_text:
+        for field, label in [
+            ("email", "Email"),
+            ("phone", "Phone"),
+            ("birthday", "Birthday"),
+        ]:
+            match = re.search(
+                rf"(?:^|\n){re.escape(label)}\s*\n\s*\n\s*(.+)",
+                contact_text,
+            )
+            if match:
+                result[field] = match.group(1).strip()
+
+        match = re.search(r"(?:^|\n)Website\s*\n\s*\n\s*(.+)", contact_text)
+        if match:
+            result["website"] = match.group(1).strip()
+
+    return result
 
 
 class LinkedInExtractor:
@@ -480,7 +544,12 @@ class LinkedInExtractor:
             await target.click(timeout=timeout)
             return True
         except Exception:
-            logger.debug("Click failed for button '%s'", text, exc_info=True)
+            logger.debug("Click failed for button '%s', retrying with force", text, exc_info=True)
+        try:
+            await target.click(timeout=timeout, force=True)
+            return True
+        except Exception:
+            logger.debug("Force click also failed for button '%s'", text, exc_info=True)
             return False
 
     async def _dialog_is_open(self, *, timeout: int = 1000) -> bool:
@@ -532,18 +601,45 @@ class LinkedInExtractor:
     async def _open_more_menu(self) -> bool:
         """Open the profile's More (three-dot) menu and check for Connect.
 
-        Uses ``aria-label`` to find the More button (language-independent)
+        Uses multiple selector strategies to find the More button
         and ``[role="menu"]`` to detect the opened menu (structural).
         Returns True if the menu opened and contains a Connect option.
         """
-        more_btn = self._page.locator("main button[aria-label*='More']")
-        try:
-            if await more_btn.count() == 0:
-                return False
-            await more_btn.first.click()
-        except Exception:
-            logger.debug("Could not click More button", exc_info=True)
+        more_selectors = [
+            "main button[aria-label*='More']",
+            "main button:has-text('More')",
+            "button[aria-label*='More']",
+            "button.artdeco-button[aria-label*='More']",
+        ]
+
+        more_btn = None
+        for selector in more_selectors:
+            locator = self._page.locator(selector)
+            try:
+                if await locator.count() > 0:
+                    more_btn = locator.first
+                    logger.debug("Found More button with selector: %s", selector)
+                    break
+            except Exception:
+                continue
+
+        if more_btn is None:
+            logger.debug("Could not find More button with any selector")
             return False
+
+        try:
+            await more_btn.scroll_into_view_if_needed(timeout=5000)
+        except Exception:
+            logger.debug("Could not scroll More button into view", exc_info=True)
+        try:
+            await more_btn.click(timeout=5000)
+        except Exception:
+            logger.debug("Could not click More button, retrying with force", exc_info=True)
+            try:
+                await more_btn.click(timeout=5000, force=True)
+            except Exception:
+                logger.debug("Force click also failed for More button", exc_info=True)
+                return False
 
         try:
             await self._page.wait_for_selector("[role='menu']", timeout=3000)
@@ -1617,7 +1713,13 @@ class LinkedInExtractor:
         return href if isinstance(href, str) and href else None
 
     async def _open_conversation_by_username(self, linkedin_username: str) -> None:
-        """Open a conversation by resolving the profile name, then searching inbox."""
+        """Open a conversation by resolving the profile name, then searching inbox.
+
+        Tries the display name first, then falls back to searching by the
+        username slug itself. This handles cases where the display name has
+        changed (e.g., name change after marriage) and no longer matches
+        the URL slug that the user provided.
+        """
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
@@ -1629,21 +1731,707 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         display_name = await self._read_profile_display_name()
-        if not display_name:
+
+        search_candidates: list[str] = []
+        if display_name:
+            search_candidates.append(display_name)
+        # Also try the username slug with hyphens replaced by spaces
+        slug_as_name = linkedin_username.replace("-", " ")
+        if slug_as_name.lower() != (display_name or "").lower():
+            search_candidates.append(slug_as_name)
+
+        if not search_candidates:
             raise LinkedInScraperException(
                 f"Could not resolve a display name for {linkedin_username}."
             )
 
         try:
-            thread_url = await self._resolve_conversation_thread_url(display_name)
-            if not thread_url:
-                raise LinkedInScraperException(
-                    f"Could not find a conversation for {linkedin_username}."
-                )
+            for candidate in search_candidates:
+                thread_url = await self._resolve_conversation_thread_url(candidate)
+                if thread_url:
+                    await self._navigate_to_page(thread_url)
+                    return
 
-            await self._navigate_to_page(thread_url)
+            raise LinkedInScraperException(
+                f"Could not find a conversation for {linkedin_username}. "
+                f"Tried searching for: {', '.join(search_candidates)}. "
+                f"If multiple threads exist, use get_conversation with a "
+                f"specific thread_id from search_conversations results."
+            )
         except PlaywrightTimeoutError as exc:
             raise LinkedInScraperException("Messaging search input not found.") from exc
+
+    # ------------------------------------------------------------------
+    # Profile editing helpers
+    # ------------------------------------------------------------------
+
+    async def _fill_field_by_label(
+        self,
+        label_text: str,
+        value: str,
+        *,
+        scope: str = '[role="dialog"], dialog[open], main',
+        exact: bool = False,
+    ) -> bool:
+        """Find an input/textarea by its associated label text and fill it.
+
+        Searches for labels whose text matches (contains or exact), then locates
+        the associated input via the for attribute or by being a child element.
+        """
+        filled = await self._page.evaluate(
+            """({ labelText, value, scope, exact }) => {
+                const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
+                const root = document.querySelector(scope) || document.body;
+                const labels = Array.from(root.querySelectorAll('label'));
+                for (const label of labels) {
+                    const text = normalize(label.innerText || label.textContent);
+                    const match = exact
+                        ? text.toLowerCase() === labelText.toLowerCase()
+                        : text.toLowerCase().includes(labelText.toLowerCase());
+                    if (!match) continue;
+
+                    let input = null;
+                    const forAttr = label.getAttribute('for');
+                    if (forAttr) {
+                        input = document.getElementById(forAttr);
+                    }
+                    if (!input) {
+                        input = label.querySelector('input, textarea, select');
+                    }
+                    if (!input) {
+                        const parent = label.closest('.artdeco-text-input, .fb-text-input__wrapper, div');
+                        if (parent) input = parent.querySelector('input, textarea, select');
+                    }
+                    if (input) {
+                        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                            input.tagName === 'TEXTAREA'
+                                ? window.HTMLTextAreaElement.prototype
+                                : window.HTMLInputElement.prototype,
+                            'value'
+                        ).set;
+                        nativeInputValueSetter.call(input, value);
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    }
+                }
+                return false;
+            }""",
+            {"labelText": label_text, "value": value, "scope": scope, "exact": exact},
+        )
+        return bool(filled)
+
+    async def _select_dropdown_by_label(
+        self,
+        label_text: str,
+        option_text: str,
+        *,
+        scope: str = '[role="dialog"], dialog[open], main',
+    ) -> bool:
+        """Find a dropdown (select or custom listbox) by label and choose an option."""
+        selected = await self._page.evaluate(
+            """({ labelText, optionText, scope }) => {
+                const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
+                const root = document.querySelector(scope) || document.body;
+                const labels = Array.from(root.querySelectorAll('label'));
+                for (const label of labels) {
+                    const text = normalize(label.innerText || label.textContent);
+                    if (!text.toLowerCase().includes(labelText.toLowerCase())) continue;
+
+                    let select = null;
+                    const forAttr = label.getAttribute('for');
+                    if (forAttr) select = document.getElementById(forAttr);
+                    if (!select) select = label.querySelector('select');
+                    if (!select) {
+                        const parent = label.closest('div');
+                        if (parent) select = parent.querySelector('select');
+                    }
+
+                    if (select && select.tagName === 'SELECT') {
+                        const options = Array.from(select.options);
+                        const match = options.find(o =>
+                            normalize(o.text).toLowerCase().includes(optionText.toLowerCase())
+                        );
+                        if (match) {
+                            select.value = match.value;
+                            select.dispatchEvent(new Event('change', { bubbles: true }));
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }""",
+            {"labelText": label_text, "optionText": option_text, "scope": scope},
+        )
+        return bool(selected)
+
+    async def _click_save_in_dialog(self, *, timeout: int = 5000) -> bool:
+        """Click the Save button inside an open dialog."""
+        for text in ["Save", "Apply", "Done"]:
+            btn = (
+                self._page.locator(f"{_DIALOG_SELECTOR} button, main button")
+                .filter(has_text=re.compile(rf"^{text}$", re.IGNORECASE))
+            )
+            if await btn.count() > 0:
+                await btn.first.click(timeout=timeout)
+                await asyncio.sleep(1.5)
+                return True
+        return False
+
+    async def _open_edit_form(
+        self,
+        url: str,
+    ) -> bool:
+        """Navigate to a LinkedIn page and wait for the edit form/dialog."""
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            pass
+        await handle_modal_close(self._page)
+        return True
+
+    async def edit_profile_intro(
+        self,
+        *,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        headline: str | None = None,
+        location: str | None = None,
+        industry: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit the profile intro section (name, headline, location, industry).
+
+        Navigates to the intro edit overlay and fills in the provided fields.
+        Fields set to None are left unchanged.
+        """
+        # First resolve own username
+        await self._navigate_to_page("https://www.linkedin.com/in/me/")
+        current_url = self._page.url
+        match = re.search(r"/in/([^/?#]+)", current_url)
+        if not match:
+            raise LinkedInScraperException("Could not resolve own profile.")
+        username = match.group(1)
+
+        url = f"https://www.linkedin.com/in/{username}/overlay/edit/intro/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        # Wait for the edit form to appear
+        try:
+            await self._page.wait_for_selector(
+                "dialog[open], [role='dialog'], main form", timeout=10000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Edit intro form did not open.",
+            }
+
+        await asyncio.sleep(1.0)
+        fields_updated: list[str] = []
+
+        if first_name is not None:
+            if await self._fill_field_by_label("First name", first_name):
+                fields_updated.append("first_name")
+        if last_name is not None:
+            if await self._fill_field_by_label("Last name", last_name):
+                fields_updated.append("last_name")
+        if headline is not None:
+            if await self._fill_field_by_label("Headline", headline):
+                fields_updated.append("headline")
+        if location is not None:
+            if await self._fill_field_by_label("Country/Region", location) or \
+               await self._fill_field_by_label("City", location) or \
+               await self._fill_field_by_label("Location", location):
+                fields_updated.append("location")
+        if industry is not None:
+            if await self._fill_field_by_label("Industry", industry):
+                fields_updated.append("industry")
+
+        if not fields_updated:
+            return {
+                "url": url,
+                "status": "no_changes",
+                "message": "No fields were modified.",
+            }
+
+        saved = await self._click_save_in_dialog()
+        await asyncio.sleep(1.5)
+
+        return {
+            "url": url,
+            "status": "saved" if saved else "save_failed",
+            "message": f"Updated: {', '.join(fields_updated)}" if saved
+                       else "Could not find the Save button.",
+            "fields_updated": fields_updated,
+        }
+
+    async def edit_profile_about(self, about_text: str) -> dict[str, Any]:
+        """Edit the About/Summary section of the profile."""
+        await self._navigate_to_page("https://www.linkedin.com/in/me/")
+        current_url = self._page.url
+        match = re.search(r"/in/([^/?#]+)", current_url)
+        if not match:
+            raise LinkedInScraperException("Could not resolve own profile.")
+        username = match.group(1)
+
+        url = f"https://www.linkedin.com/in/{username}/overlay/edit/about/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector(
+                "dialog[open], [role='dialog'], main form", timeout=10000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Edit about form did not open.",
+            }
+
+        await asyncio.sleep(1.0)
+
+        # The About section uses a textarea
+        textarea = self._page.locator(
+            'dialog textarea, [role="dialog"] textarea, main textarea'
+        ).first
+        try:
+            await textarea.wait_for(state="visible", timeout=5000)
+            await textarea.click()
+            await textarea.fill(about_text)
+        except Exception:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Could not locate the About text area.",
+            }
+
+        saved = await self._click_save_in_dialog()
+        await asyncio.sleep(1.5)
+
+        return {
+            "url": url,
+            "status": "saved" if saved else "save_failed",
+            "message": "About section updated." if saved
+                       else "Could not find the Save button.",
+        }
+
+    async def _resolve_my_username(self) -> str:
+        """Navigate to /in/me/ and return the logged-in user's username."""
+        await self._navigate_to_page("https://www.linkedin.com/in/me/")
+        match = re.search(r"/in/([^/?#]+)", self._page.url)
+        if not match:
+            raise LinkedInScraperException("Could not resolve own profile username.")
+        return match.group(1)
+
+    async def _edit_profile_section_entry(
+        self,
+        section_slug: str,
+        *,
+        fields: dict[str, str],
+        dropdowns: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Generic method to add a new entry in a profile section.
+
+        Opens the add-new form for a given section, fills fields by label,
+        and saves. Works for experience, education, certifications, etc.
+        """
+        username = await self._resolve_my_username()
+        url = f"https://www.linkedin.com/in/{username}/overlay/create/new/?profileFormEntryPoint=PROFILE_SECTION&profileSectionId={section_slug}"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector(
+                "dialog[open], [role='dialog'], main form", timeout=10000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": f"Add {section_slug} form did not open.",
+                "section": section_slug,
+            }
+
+        await asyncio.sleep(1.5)
+        fields_filled: list[str] = []
+
+        for label, value in fields.items():
+            if await self._fill_field_by_label(label, value):
+                fields_filled.append(label)
+
+        if dropdowns:
+            for label, value in dropdowns.items():
+                if await self._select_dropdown_by_label(label, value):
+                    fields_filled.append(label)
+
+        if not fields_filled:
+            return {
+                "url": url,
+                "status": "no_changes",
+                "message": f"Could not fill any fields for {section_slug}.",
+                "section": section_slug,
+            }
+
+        saved = await self._click_save_in_dialog()
+        await asyncio.sleep(1.5)
+
+        return {
+            "url": url,
+            "status": "saved" if saved else "save_failed",
+            "message": f"Added {section_slug} entry: {', '.join(fields_filled)}" if saved
+                       else "Could not find the Save button.",
+            "section": section_slug,
+            "fields_filled": fields_filled,
+        }
+
+    async def add_experience(
+        self,
+        *,
+        title: str,
+        company: str,
+        start_month: str | None = None,
+        start_year: str | None = None,
+        end_month: str | None = None,
+        end_year: str | None = None,
+        description: str | None = None,
+        location: str | None = None,
+        employment_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a new experience entry to the profile."""
+        fields: dict[str, str] = {"Title": title, "Company name": company}
+        dropdowns: dict[str, str] = {}
+        if location:
+            fields["Location"] = location
+        if description:
+            fields["Description"] = description
+        if start_month:
+            dropdowns["Start date month"] = start_month
+        if start_year:
+            fields["Start date year"] = start_year
+        if end_month:
+            dropdowns["End date month"] = end_month
+        if end_year:
+            fields["End date year"] = end_year
+        if employment_type:
+            dropdowns["Employment type"] = employment_type
+
+        return await self._edit_profile_section_entry(
+            "EXPERIENCE", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_education(
+        self,
+        *,
+        school: str,
+        degree: str | None = None,
+        field_of_study: str | None = None,
+        start_year: str | None = None,
+        end_year: str | None = None,
+        description: str | None = None,
+        grade: str | None = None,
+        activities: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a new education entry to the profile."""
+        fields: dict[str, str] = {"School": school}
+        if degree:
+            fields["Degree"] = degree
+        if field_of_study:
+            fields["Field of study"] = field_of_study
+        if start_year:
+            fields["Start date year"] = start_year
+        if end_year:
+            fields["End date year"] = end_year
+        if grade:
+            fields["Grade"] = grade
+        if activities:
+            fields["Activities and societies"] = activities
+        if description:
+            fields["Description"] = description
+
+        return await self._edit_profile_section_entry(
+            "EDUCATION", fields=fields
+        )
+
+    async def add_skill(self, skill_name: str) -> dict[str, Any]:
+        """Add a skill to the profile."""
+        username = await self._resolve_my_username()
+        url = f"https://www.linkedin.com/in/{username}/overlay/create/new/?profileFormEntryPoint=PROFILE_SECTION&profileSectionId=SKILLS"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector(
+                "dialog[open], [role='dialog'], main form", timeout=10000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Add skill form did not open.",
+            }
+
+        await asyncio.sleep(1.0)
+
+        # Fill the skill name field
+        filled = await self._fill_field_by_label("Skill", skill_name)
+        if not filled:
+            filled = await self._fill_field_by_label("skill", skill_name)
+        if not filled:
+            # Try the first input in the dialog
+            input_el = self._page.locator(
+                'dialog input, [role="dialog"] input'
+            ).first
+            try:
+                await input_el.fill(skill_name)
+                filled = True
+            except Exception:
+                pass
+
+        if not filled:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Could not fill the skill name field.",
+            }
+
+        # Wait for typeahead suggestions and select if available
+        await asyncio.sleep(1.0)
+        typeahead = self._page.locator(
+            '[role="listbox"] [role="option"], [role="listbox"] li'
+        )
+        if await typeahead.count() > 0:
+            await typeahead.first.click()
+            await asyncio.sleep(0.5)
+
+        saved = await self._click_save_in_dialog()
+        await asyncio.sleep(1.0)
+
+        return {
+            "url": url,
+            "status": "saved" if saved else "save_failed",
+            "message": f"Skill '{skill_name}' added." if saved
+                       else "Could not save the skill.",
+        }
+
+    async def add_certification(
+        self,
+        *,
+        name: str,
+        issuing_organization: str,
+        issue_month: str | None = None,
+        issue_year: str | None = None,
+        expiration_month: str | None = None,
+        expiration_year: str | None = None,
+        credential_id: str | None = None,
+        credential_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a certification to the profile."""
+        fields: dict[str, str] = {
+            "Name": name,
+            "Issuing organization": issuing_organization,
+        }
+        dropdowns: dict[str, str] = {}
+        if credential_id:
+            fields["Credential ID"] = credential_id
+        if credential_url:
+            fields["Credential URL"] = credential_url
+        if issue_month:
+            dropdowns["Issue date month"] = issue_month
+        if issue_year:
+            fields["Issue date year"] = issue_year
+        if expiration_month:
+            dropdowns["Expiration date month"] = expiration_month
+        if expiration_year:
+            fields["Expiration date year"] = expiration_year
+
+        return await self._edit_profile_section_entry(
+            "CERTIFICATIONS", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_volunteer_experience(
+        self,
+        *,
+        organization: str,
+        role: str,
+        cause: str | None = None,
+        start_month: str | None = None,
+        start_year: str | None = None,
+        end_month: str | None = None,
+        end_year: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a volunteer experience entry to the profile."""
+        fields: dict[str, str] = {"Organization": organization, "Role": role}
+        dropdowns: dict[str, str] = {}
+        if cause:
+            dropdowns["Cause"] = cause
+        if description:
+            fields["Description"] = description
+        if start_month:
+            dropdowns["Start date month"] = start_month
+        if start_year:
+            fields["Start date year"] = start_year
+        if end_month:
+            dropdowns["End date month"] = end_month
+        if end_year:
+            fields["End date year"] = end_year
+
+        return await self._edit_profile_section_entry(
+            "VOLUNTEERING_EXPERIENCE", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_project(
+        self,
+        *,
+        name: str,
+        description: str | None = None,
+        start_month: str | None = None,
+        start_year: str | None = None,
+        end_month: str | None = None,
+        end_year: str | None = None,
+        project_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a project to the profile."""
+        fields: dict[str, str] = {"Name": name}
+        dropdowns: dict[str, str] = {}
+        if description:
+            fields["Description"] = description
+        if project_url:
+            fields["Project URL"] = project_url
+        if start_month:
+            dropdowns["Start date month"] = start_month
+        if start_year:
+            fields["Start date year"] = start_year
+        if end_month:
+            dropdowns["End date month"] = end_month
+        if end_year:
+            fields["End date year"] = end_year
+
+        return await self._edit_profile_section_entry(
+            "PROJECTS", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_publication(
+        self,
+        *,
+        title: str,
+        publisher: str | None = None,
+        publication_date_month: str | None = None,
+        publication_date_year: str | None = None,
+        description: str | None = None,
+        publication_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a publication to the profile."""
+        fields: dict[str, str] = {"Title": title}
+        dropdowns: dict[str, str] = {}
+        if publisher:
+            fields["Publisher"] = publisher
+        if description:
+            fields["Description"] = description
+        if publication_url:
+            fields["Publication URL"] = publication_url
+        if publication_date_month:
+            dropdowns["Publication date month"] = publication_date_month
+        if publication_date_year:
+            fields["Publication date year"] = publication_date_year
+
+        return await self._edit_profile_section_entry(
+            "PUBLICATIONS", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_course(
+        self,
+        *,
+        name: str,
+        number: str | None = None,
+        associated_with: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a course to the profile."""
+        fields: dict[str, str] = {"Course name": name}
+        if number:
+            fields["Number"] = number
+        if associated_with:
+            fields["Associated with"] = associated_with
+
+        return await self._edit_profile_section_entry(
+            "COURSES", fields=fields
+        )
+
+    async def add_language(
+        self,
+        *,
+        name: str,
+        proficiency: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a language to the profile."""
+        fields: dict[str, str] = {"Name": name}
+        dropdowns: dict[str, str] = {}
+        if proficiency:
+            dropdowns["Proficiency"] = proficiency
+
+        return await self._edit_profile_section_entry(
+            "LANGUAGES", fields=fields, dropdowns=dropdowns
+        )
+
+    async def add_honor(
+        self,
+        *,
+        title: str,
+        issuer: str | None = None,
+        issue_month: str | None = None,
+        issue_year: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Add an honor or award to the profile."""
+        fields: dict[str, str] = {"Title": title}
+        dropdowns: dict[str, str] = {}
+        if issuer:
+            fields["Issuer"] = issuer
+        if description:
+            fields["Description"] = description
+        if issue_month:
+            dropdowns["Issue date month"] = issue_month
+        if issue_year:
+            fields["Issue date year"] = issue_year
+
+        return await self._edit_profile_section_entry(
+            "HONORS", fields=fields, dropdowns=dropdowns
+        )
+
+    async def get_my_profile(
+        self,
+        sections: set[str],
+        callbacks: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        """Scrape the logged-in user's own profile via /in/me/ redirect.
+
+        Navigates to linkedin.com/in/me/ which redirects to the authenticated
+        user's profile, extracts the username from the redirect, then delegates
+        to scrape_person.
+
+        Returns:
+            {url, sections: {name: text}, my_username: str}
+        """
+        me_url = "https://www.linkedin.com/in/me/"
+        await self._navigate_to_page(me_url)
+
+        # Extract username from the redirected URL
+        current_url = self._page.url
+        match = re.search(r"/in/([^/?#]+)", current_url)
+        if not match:
+            raise LinkedInScraperException(
+                f"Could not resolve own profile username from {current_url}"
+            )
+        my_username = match.group(1)
+
+        result = await self.scrape_person(my_username, sections, callbacks=callbacks)
+        result["my_username"] = my_username
+        return result
 
     async def scrape_company(
         self,
@@ -1758,6 +2546,295 @@ class LinkedInExtractor:
             result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
+        return result
+
+    async def apply_to_job(
+        self,
+        job_id: str,
+        *,
+        confirm_apply: bool,
+    ) -> dict[str, Any]:
+        """Apply to a job via LinkedIn's Easy Apply flow.
+
+        Navigates to the job posting, clicks Easy Apply, and steps through
+        the multi-step application modal. Only submits when confirm_apply
+        is True; otherwise performs a dry run that reports the form state.
+
+        Returns:
+            {url, status, message, job_id}
+        """
+        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("Job page did not load for %s", job_id)
+
+        await handle_modal_close(self._page)
+
+        # Check if Easy Apply button exists
+        easy_apply_btn = self._page.locator(
+            "button"
+        ).filter(has_text=re.compile(r"Easy Apply", re.IGNORECASE))
+        btn_count = await easy_apply_btn.count()
+
+        if btn_count == 0:
+            # Check if already applied
+            applied_indicator = self._page.locator(
+                "span, div, li"
+            ).filter(has_text=re.compile(r"Applied", re.IGNORECASE))
+            if await applied_indicator.count() > 0:
+                return {
+                    "url": url,
+                    "status": "already_applied",
+                    "message": "You have already applied to this job.",
+                    "job_id": job_id,
+                }
+            return {
+                "url": url,
+                "status": "not_easy_apply",
+                "message": "This job does not support Easy Apply. You may need to apply on the company's website.",
+                "job_id": job_id,
+            }
+
+        if not confirm_apply:
+            return {
+                "url": url,
+                "status": "confirmation_required",
+                "message": "Easy Apply is available. Set confirm_apply=true to proceed with the application.",
+                "job_id": job_id,
+            }
+
+        # Click Easy Apply
+        await easy_apply_btn.first.click()
+
+        # Wait for the application modal to appear
+        try:
+            await self._page.wait_for_selector(
+                _DIALOG_SELECTOR, timeout=10000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "apply_failed",
+                "message": "Easy Apply modal did not open after clicking the button.",
+                "job_id": job_id,
+            }
+
+        # Step through the multi-page Easy Apply form
+        max_steps = 15
+        for step in range(max_steps):
+            await asyncio.sleep(1.0)
+
+            if not await self._dialog_is_open(timeout=3000):
+                # Dialog closed — likely submitted or dismissed
+                break
+
+            # Look for a Submit button (final step)
+            submit_btn = self._page.locator(
+                f"{_DIALOG_SELECTOR} button"
+            ).filter(has_text=re.compile(r"^Submit application$", re.IGNORECASE))
+            if await submit_btn.count() > 0:
+                await submit_btn.first.click()
+                await asyncio.sleep(2.0)
+
+                # Check for success confirmation
+                page_text = await self.get_page_text()
+                if re.search(r"application.*sent|applied|submitted", page_text, re.IGNORECASE):
+                    return {
+                        "url": url,
+                        "status": "applied",
+                        "message": "Application submitted successfully.",
+                        "job_id": job_id,
+                    }
+                return {
+                    "url": url,
+                    "status": "applied",
+                    "message": "Submit button clicked. Check your applications to confirm.",
+                    "job_id": job_id,
+                }
+
+            # Look for Review button (penultimate step)
+            review_btn = self._page.locator(
+                f"{_DIALOG_SELECTOR} button"
+            ).filter(has_text=re.compile(r"^Review$", re.IGNORECASE))
+            if await review_btn.count() > 0:
+                await review_btn.first.click()
+                continue
+
+            # Look for Next button to advance
+            next_btn = self._page.locator(
+                f"{_DIALOG_SELECTOR} button"
+            ).filter(has_text=re.compile(r"^Next$", re.IGNORECASE))
+            if await next_btn.count() > 0:
+                await next_btn.first.click()
+                continue
+
+            # Check for required fields that aren't filled
+            required_empty = await self._page.evaluate(
+                """() => {
+                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                    if (!dialog) return [];
+                    const fields = [];
+                    for (const input of dialog.querySelectorAll('input[required], select[required], textarea[required]')) {
+                        if (!input.value || input.value.trim() === '') {
+                            const label = input.closest('label')?.innerText
+                                || input.getAttribute('aria-label')
+                                || input.getAttribute('placeholder')
+                                || input.name
+                                || 'unknown field';
+                            fields.push(label.replace(/\\n.*/s, '').trim());
+                        }
+                    }
+                    return fields;
+                }"""
+            )
+
+            if required_empty:
+                await self._dismiss_dialog()
+                return {
+                    "url": url,
+                    "status": "requires_input",
+                    "message": f"Application requires manual input for: {', '.join(required_empty)}",
+                    "job_id": job_id,
+                    "missing_fields": required_empty,
+                }
+
+            # Try clicking Continue as a fallback
+            continue_btn = self._page.locator(
+                f"{_DIALOG_SELECTOR} button"
+            ).filter(has_text=re.compile(r"^Continue$", re.IGNORECASE))
+            if await continue_btn.count() > 0:
+                await continue_btn.first.click()
+                continue
+
+            # No recognizable button — stuck
+            await self._dismiss_dialog()
+            return {
+                "url": url,
+                "status": "apply_failed",
+                "message": f"Got stuck at step {step + 1} of the application. The form may require manual completion.",
+                "job_id": job_id,
+            }
+
+        # Exhausted max steps
+        if await self._dialog_is_open():
+            await self._dismiss_dialog()
+        return {
+            "url": url,
+            "status": "apply_failed",
+            "message": "Application process exceeded maximum steps. It may require manual completion.",
+            "job_id": job_id,
+        }
+
+    async def save_job(self, job_id: str) -> dict[str, Any]:
+        """Save (bookmark) a job posting on LinkedIn.
+
+        Navigates to the job page and clicks the Save button.
+
+        Returns:
+            {url, status, message, job_id}
+        """
+        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("Job page did not load for %s", job_id)
+
+        await handle_modal_close(self._page)
+
+        # Check for Save/Unsave button
+        save_btn = self._page.locator("button").filter(
+            has_text=re.compile(r"^Save$", re.IGNORECASE)
+        )
+        unsave_btn = self._page.locator("button").filter(
+            has_text=re.compile(r"^Saved$|^Unsave$", re.IGNORECASE)
+        )
+
+        if await unsave_btn.count() > 0:
+            return {
+                "url": url,
+                "status": "already_saved",
+                "message": "This job is already saved.",
+                "job_id": job_id,
+            }
+
+        if await save_btn.count() == 0:
+            return {
+                "url": url,
+                "status": "save_unavailable",
+                "message": "Could not find a Save button on this job posting.",
+                "job_id": job_id,
+            }
+
+        await save_btn.first.click()
+        await asyncio.sleep(1.0)
+
+        return {
+            "url": url,
+            "status": "saved",
+            "message": "Job saved successfully.",
+            "job_id": job_id,
+        }
+
+    async def get_saved_jobs(self) -> dict[str, Any]:
+        """List the user's saved/bookmarked jobs.
+
+        Returns:
+            {url, sections: {saved_jobs: text}, job_ids: [str]}
+        """
+        url = "https://www.linkedin.com/my-items/saved-jobs/"
+        extracted = await self.extract_page(url, section_name="saved_jobs")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["saved_jobs"] = extracted.text
+            if extracted.references:
+                references["saved_jobs"] = extracted.references
+
+        # Extract job IDs from the saved jobs page
+        job_ids = await self._extract_job_ids()
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+            "job_ids": job_ids,
+        }
+        if references:
+            result["references"] = references
+        return result
+
+    async def get_my_applications(self) -> dict[str, Any]:
+        """List jobs the user has applied to.
+
+        Returns:
+            {url, sections: {applications: text}, job_ids: [str]}
+        """
+        url = "https://www.linkedin.com/my-items/saved-jobs/?cardType=APPLIED"
+        extracted = await self.extract_page(url, section_name="applications")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["applications"] = extracted.text
+            if extracted.references:
+                references["applications"] = extracted.references
+
+        job_ids = await self._extract_job_ids()
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+            "job_ids": job_ids,
+        }
+        if references:
+            result["references"] = references
         return result
 
     async def _extract_job_ids(self) -> list[str]:
@@ -2080,8 +3157,16 @@ class LinkedInExtractor:
         self,
         keywords: str,
         location: str | None = None,
+        *,
+        network: str | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results page.
+
+        Args:
+            keywords: Search keywords.
+            location: Optional location filter.
+            network: Optional connection degree filter.
+                "F" = 1st degree, "S" = 2nd degree, "O" = 3rd+.
 
         Returns:
             {url, sections: {name: text}}
@@ -2089,6 +3174,8 @@ class LinkedInExtractor:
         params = f"keywords={quote_plus(keywords)}"
         if location:
             params += f"&location={quote_plus(location)}"
+        if network:
+            params += f"&network=%5B%22{quote_plus(network)}%22%5D"
 
         url = f"https://www.linkedin.com/search/results/people/?{params}"
         extracted = await self.extract_page(url, section_name="search_results")
@@ -2562,3 +3649,238 @@ class LinkedInExtractor:
             {"selectors": selectors},
         )
         return result
+
+    # ------------------------------------------------------------------
+    # Connections bulk export
+    # ------------------------------------------------------------------
+
+    async def scrape_connections_list(
+        self,
+        limit: int = 0,
+        max_scrolls: int = 50,
+    ) -> dict[str, Any]:
+        """Scrape the authenticated user's connections list via infinite scroll.
+
+        Args:
+            limit: Maximum connections to return (0 = unlimited).
+            max_scrolls: Maximum scroll iterations (~1s pause each).
+
+        Returns:
+            {connections: [{username, name, headline}, ...], total, url}
+        """
+        url = "https://www.linkedin.com/mynetwork/invite-connect/connections/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element on connections page")
+
+        await handle_modal_close(self._page)
+        await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=max_scrolls)
+
+        raw_connections: list[dict[str, str]] = await self._page.evaluate(
+            """() => {
+                const results = [];
+                const seen = new Set();
+                const links = document.querySelectorAll('main a[href*="/in/"]');
+                for (const a of links) {
+                    const href = a.getAttribute('href') || '';
+                    const match = href.match(/\\/in\\/([^/?#]+)/);
+                    if (!match) continue;
+                    const username = match[1];
+                    if (seen.has(username)) continue;
+                    seen.add(username);
+
+                    const card = a.closest('li') || a.parentElement;
+
+                    let name = '';
+                    if (card) {
+                        const nameEl = card.querySelector(
+                            '.mn-connection-card__name, .entity-result__title-text, span[dir="ltr"], span.t-bold'
+                        );
+                        if (nameEl) name = nameEl.innerText.trim();
+                    }
+                    if (!name) {
+                        const linkText = a.innerText.trim();
+                        if (linkText && linkText.length < 80) name = linkText;
+                    }
+
+                    let headline = '';
+                    if (card) {
+                        const headlineEl = card.querySelector(
+                            '.mn-connection-card__occupation, .entity-result__primary-subtitle, span.t-normal'
+                        );
+                        if (headlineEl) headline = headlineEl.innerText.trim();
+                    }
+                    if (!headline && card) {
+                        const lines = card.innerText.split('\\n').map(l => l.trim()).filter(Boolean);
+                        if (lines.length >= 2) headline = lines[1];
+                    }
+
+                    results.push({ username, name, headline });
+                }
+                return results;
+            }"""
+        )
+
+        if limit > 0:
+            raw_connections = raw_connections[:limit]
+
+        return {
+            "connections": raw_connections,
+            "total": len(raw_connections),
+            "url": url,
+        }
+
+    async def scrape_contact_batch(
+        self,
+        usernames: list[str],
+        chunk_size: int = 5,
+        chunk_delay: float = 30.0,
+        progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        """Enrich profiles with contact details in chunked batches.
+
+        For each username: scrapes main profile + contact_info overlay.
+        """
+        contacts: list[dict[str, Any]] = []
+        failed: list[str] = []
+        total = len(usernames)
+        rate_limited = False
+
+        for chunk_idx in range(0, total, chunk_size):
+            chunk = usernames[chunk_idx : chunk_idx + chunk_size]
+
+            for username in chunk:
+                profile_url = f"https://www.linkedin.com/in/{username}/"
+                contact_url = (
+                    f"https://www.linkedin.com/in/{username}/overlay/contact-info/"
+                )
+
+                try:
+                    profile_extracted = await self.extract_page(
+                        profile_url, section_name="profile"
+                    )
+                    profile_text = profile_extracted.text
+
+                    if profile_text == _RATE_LIMITED_MSG:
+                        failed.append(username)
+                        await asyncio.sleep(_NAV_DELAY)
+                        continue
+
+                    contact_extracted = await self._extract_overlay(
+                        contact_url, section_name="contact_info"
+                    )
+                    contact_text = contact_extracted.text
+                    if contact_text == _RATE_LIMITED_MSG:
+                        contact_text = ""
+
+                    parsed = _parse_contact_record(profile_text, contact_text)
+                    contacts.append(
+                        {
+                            "username": username,
+                            **parsed,
+                            "profile_raw": profile_text,
+                            "contact_info_raw": contact_text,
+                        }
+                    )
+
+                except LinkedInScraperException:
+                    logger.warning("Rate limited during contact batch at %s", username)
+                    failed.append(username)
+                    rate_limited = True
+                    break
+                except Exception as e:
+                    logger.warning("Failed to scrape %s: %s", username, e)
+                    failed.append(username)
+
+                await asyncio.sleep(_NAV_DELAY)
+
+            if rate_limited:
+                break
+
+            completed = min(chunk_idx + len(chunk), total)
+            if progress_cb:
+                await progress_cb(completed, total)
+
+            if chunk_idx + chunk_size < total:
+                logger.info(
+                    "Chunk complete (%d/%d). Pausing %.0fs...",
+                    completed, total, chunk_delay,
+                )
+                await asyncio.sleep(chunk_delay)
+
+        return {
+            "contacts": contacts,
+            "total": len(contacts),
+            "failed": failed,
+            "rate_limited": rate_limited,
+        }
+
+    async def get_notifications(self, limit: int = 20) -> dict[str, Any]:
+        """Scrape the LinkedIn notifications page.
+
+        Returns:
+            {url, sections: {notifications: text}, references}
+        """
+        url = "https://www.linkedin.com/notifications/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> on notifications page")
+
+        await handle_modal_close(self._page)
+
+        scrolls = max(1, limit // 10)
+        await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+        references = (
+            build_references(raw_result["references"], "notifications")
+            if cleaned
+            else []
+        )
+
+        return self._single_section_result(
+            url, "notifications", cleaned, references=references
+        )
+
+    async def search_connections_at_company(
+        self,
+        company: str,
+        keywords: str | None = None,
+    ) -> dict[str, Any]:
+        """Search 1st-degree connections filtered by current company.
+
+        Uses LinkedIn's people search with network=["F"] and
+        currentCompany filter.
+
+        Returns:
+            {url, sections: {search_results: text}, references}
+        """
+        params = f"network=%5B%22F%22%5D&currentCompany=%5B%22{quote_plus(company)}%22%5D"
+        if keywords:
+            params += f"&keywords={quote_plus(keywords)}"
+
+        url = f"https://www.linkedin.com/search/results/people/?{params}"
+        extracted = await self.extract_page(url, section_name="search_results")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["search_results"] = extracted.text
+            if extracted.references:
+                references["search_results"] = extracted.references
+
+        return {
+            "url": url,
+            "sections": sections,
+            "references": references if references else {},
+        }

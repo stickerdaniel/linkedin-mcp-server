@@ -214,7 +214,7 @@ class TestPersonTool:
         )
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
-        mock_extractor.search_people.assert_awaited_once_with("AI engineer", "New York")
+        mock_extractor.search_people.assert_awaited_once_with("AI engineer", "New York", network=None)
 
     async def test_connect_with_person(self, mock_context):
         expected = {

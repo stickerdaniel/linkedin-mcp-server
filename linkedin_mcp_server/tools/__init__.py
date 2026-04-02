@@ -9,8 +9,9 @@ while sharing common error handling and driver management patterns.
 Available Tools:
 - Person tools: LinkedIn profile scraping and analysis
 - Company tools: Company profile and information extraction
-- Job tools: Job posting details and search functionality
+- Job tools: Job posting details, search, Easy Apply, and save/bookmark
 - Messaging tools: Inbox, conversations, search, and sending messages
+- Account tools: Own profile, saved jobs, and application tracking
 
 Architecture:
 - FastMCP integration for MCP-compliant tool registration

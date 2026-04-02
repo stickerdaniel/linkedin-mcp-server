@@ -14,6 +14,14 @@ class TestPersonSections:
             "main_profile",
             "experience",
             "education",
+            "skills",
+            "certifications",
+            "volunteer",
+            "projects",
+            "publications",
+            "courses",
+            "recommendations",
+            "organizations",
             "interests",
             "honors",
             "languages",
@@ -88,7 +96,9 @@ class TestParsePersonSections:
 
     def test_all_sections(self):
         requested, unknown = parse_person_sections(
-            "experience,education,interests,honors,languages,contact_info,posts"
+            "experience,education,skills,certifications,volunteer,projects,"
+            "publications,courses,recommendations,organizations,"
+            "interests,honors,languages,contact_info,posts"
         )
         assert requested == set(PERSON_SECTIONS)
         assert unknown == []

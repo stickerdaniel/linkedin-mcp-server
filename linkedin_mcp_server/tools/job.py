@@ -147,3 +147,110 @@ def register_job_tools(mcp: FastMCP) -> None:
                 raise_tool_error(relogin_exc, "search_jobs")
         except Exception as e:
             raise_tool_error(e, "search_jobs")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Apply to Job",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"job", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def apply_to_job(
+        job_id: str,
+        ctx: Context,
+        confirm_apply: bool = False,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Apply to a job on LinkedIn using Easy Apply.
+
+        The tool is annotated with destructiveHint so MCP clients will
+        prompt for user confirmation before execution.
+
+        Only works for jobs that support Easy Apply. If the application
+        form requires additional manual input (like custom questions),
+        it will report which fields need to be filled.
+
+        Args:
+            job_id: LinkedIn job ID (e.g., "4252026496")
+            ctx: FastMCP context for progress reporting
+            confirm_apply: Must be True to actually submit. False does a dry run
+                that checks if Easy Apply is available.
+
+        Returns:
+            Dict with url, status, message, and job_id.
+            Statuses: applied, already_applied, not_easy_apply,
+            confirmation_required, requires_input, apply_failed.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="apply_to_job"
+            )
+            logger.info("Applying to job: %s (confirm=%s)", job_id, confirm_apply)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting job application"
+            )
+
+            result = await extractor.apply_to_job(
+                job_id, confirm_apply=confirm_apply
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "apply_to_job")
+        except Exception as e:
+            raise_tool_error(e, "apply_to_job")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Save Job",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"job", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def save_job(
+        job_id: str,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Save (bookmark) a job posting on LinkedIn for later.
+
+        Args:
+            job_id: LinkedIn job ID (e.g., "4252026496")
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, status, message, and job_id.
+            Statuses: saved, already_saved, save_unavailable.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="save_job"
+            )
+            logger.info("Saving job: %s", job_id)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Saving job"
+            )
+
+            result = await extractor.save_job(job_id)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "save_job")
+        except Exception as e:
+            raise_tool_error(e, "save_job")  # NoReturn
