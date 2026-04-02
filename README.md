@@ -147,6 +147,18 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 
 - Ensure you have uv installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Check uv version: `uv --version` (should be 0.4.0 or higher)
+- First-time `uvx` runs download all Python dependencies. On slow connections, uv's default 30s timeout may fail. Increase it with `UV_HTTP_TIMEOUT=300`:
+  ```json
+  {
+    "mcpServers": {
+      "linkedin": {
+        "command": "uvx",
+        "args": ["linkedin-scraper-mcp"],
+        "env": { "UV_HTTP_TIMEOUT": "300" }
+      }
+    }
+  }
+  ```
 
 **Session issues:**
 
