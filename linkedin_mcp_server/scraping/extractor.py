@@ -1760,6 +1760,271 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    async def apply_to_job(
+        self,
+        job_id: str,
+        *,
+        confirm_apply: bool,
+    ) -> dict[str, Any]:
+        """Apply to a job via LinkedIn's Easy Apply flow.
+
+        Navigates to the job posting, clicks Easy Apply, and steps through
+        the multi-step application modal. Only submits when confirm_apply
+        is True; otherwise performs a dry run that reports the form state.
+
+        Returns:
+            {url, status, message, job_id}
+            Statuses: applied, applied_unconfirmed, already_applied,
+            not_easy_apply, confirmation_required, requires_input, apply_failed.
+        """
+        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("Job page did not load for %s", job_id)
+
+        await handle_modal_close(self._page)
+
+        # Check if Easy Apply button exists
+        easy_apply_btn = self._page.locator("button").filter(
+            has_text=re.compile(r"Easy Apply", re.IGNORECASE)
+        )
+        btn_count = await easy_apply_btn.count()
+
+        if btn_count == 0:
+            # Check if already applied — use specific LinkedIn UI selectors
+            applied_indicator = self._page.locator(
+                "li.jobs-unified-top-card__job-insight span, "
+                ".jobs-s-apply__application-status, "
+                "span.artdeco-inline-feedback"
+            ).filter(has_text=re.compile(r"^Applied$", re.IGNORECASE))
+            if await applied_indicator.count() > 0:
+                return {
+                    "url": url,
+                    "status": "already_applied",
+                    "message": "You have already applied to this job.",
+                    "job_id": job_id,
+                }
+            return {
+                "url": url,
+                "status": "not_easy_apply",
+                "message": "This job does not support Easy Apply. You may need to apply on the company's website.",
+                "job_id": job_id,
+            }
+
+        if not confirm_apply:
+            return {
+                "url": url,
+                "status": "confirmation_required",
+                "message": "Easy Apply is available. Set confirm_apply=true to proceed with the application.",
+                "job_id": job_id,
+            }
+
+        # Click Easy Apply (scroll first to avoid sticky navbar)
+        try:
+            await easy_apply_btn.first.scroll_into_view_if_needed()
+        except Exception:
+            logger.debug("Could not scroll Easy Apply button into view")
+        await easy_apply_btn.first.click()
+
+        # Wait for the application modal to appear
+        try:
+            await self._page.wait_for_selector(_DIALOG_SELECTOR, timeout=10000)
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "apply_failed",
+                "message": "Easy Apply modal did not open after clicking the button.",
+                "job_id": job_id,
+            }
+
+        # Step through the multi-page Easy Apply form
+        max_steps = 15
+        for step in range(max_steps):
+            await asyncio.sleep(1.0)
+
+            if not await self._dialog_is_open(timeout=3000):
+                # Dialog closed — check if application was actually submitted
+                page_text = await self.get_page_text()
+                if re.search(
+                    r"application.*sent|applied|submitted",
+                    page_text,
+                    re.IGNORECASE,
+                ):
+                    return {
+                        "url": url,
+                        "status": "applied_unconfirmed",
+                        "message": "Application dialog closed; page suggests it was submitted. Check your applications to confirm.",
+                        "job_id": job_id,
+                    }
+                break
+
+            # Look for a Submit button (final step)
+            submit_btn = self._page.locator(f"{_DIALOG_SELECTOR} button").filter(
+                has_text=re.compile(r"^Submit application$", re.IGNORECASE)
+            )
+            if await submit_btn.count() > 0:
+                await submit_btn.first.click()
+                await asyncio.sleep(2.0)
+
+                page_text = await self.get_page_text()
+                if re.search(
+                    r"application.*sent|applied|submitted", page_text, re.IGNORECASE
+                ):
+                    return {
+                        "url": url,
+                        "status": "applied",
+                        "message": "Application submitted successfully.",
+                        "job_id": job_id,
+                    }
+                return {
+                    "url": url,
+                    "status": "applied_unconfirmed",
+                    "message": "Submit button clicked but confirmation could not be verified. Check your applications to confirm.",
+                    "job_id": job_id,
+                }
+
+            # Look for Review button (penultimate step)
+            review_btn = self._page.locator(f"{_DIALOG_SELECTOR} button").filter(
+                has_text=re.compile(r"^Review$", re.IGNORECASE)
+            )
+            if await review_btn.count() > 0:
+                await review_btn.first.click()
+                continue
+
+            # Look for Next button to advance
+            next_btn = self._page.locator(f"{_DIALOG_SELECTOR} button").filter(
+                has_text=re.compile(r"^Next$", re.IGNORECASE)
+            )
+            if await next_btn.count() > 0:
+                await next_btn.first.click()
+                continue
+
+            # Check for required fields that aren't filled
+            required_empty = await self._page.evaluate(
+                """() => {
+                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                    if (!dialog) return [];
+                    const fields = [];
+                    for (const input of dialog.querySelectorAll('input[required], select[required], textarea[required]')) {
+                        if (!input.value || input.value.trim() === '') {
+                            const label = input.closest('label')?.innerText
+                                || input.getAttribute('aria-label')
+                                || input.getAttribute('placeholder')
+                                || input.name
+                                || 'unknown field';
+                            fields.push(label.replace(/\\n.*/s, '').trim());
+                        }
+                    }
+                    return fields;
+                }"""
+            )
+
+            if required_empty:
+                await self._dismiss_dialog()
+                return {
+                    "url": url,
+                    "status": "requires_input",
+                    "message": f"Application requires manual input for: {', '.join(required_empty)}",
+                    "job_id": job_id,
+                    "missing_fields": required_empty,
+                }
+
+            # Try clicking Continue as a fallback
+            continue_btn = self._page.locator(f"{_DIALOG_SELECTOR} button").filter(
+                has_text=re.compile(r"^Continue$", re.IGNORECASE)
+            )
+            if await continue_btn.count() > 0:
+                await continue_btn.first.click()
+                continue
+
+            # No recognizable button — stuck
+            await self._dismiss_dialog()
+            return {
+                "url": url,
+                "status": "apply_failed",
+                "message": f"Got stuck at step {step + 1} of the application. The form may require manual completion.",
+                "job_id": job_id,
+            }
+
+        # Exhausted max steps
+        if await self._dialog_is_open():
+            await self._dismiss_dialog()
+        return {
+            "url": url,
+            "status": "apply_failed",
+            "message": "Application process exceeded maximum steps. It may require manual completion.",
+            "job_id": job_id,
+        }
+
+    async def save_job(self, job_id: str) -> dict[str, Any]:
+        """Save (bookmark) a job posting on LinkedIn.
+
+        Navigates to the job page and clicks the Save button, then verifies
+        the state changed.
+
+        Returns:
+            {url, status, message, job_id}
+            Statuses: saved, already_saved, save_unavailable.
+        """
+        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("Job page did not load for %s", job_id)
+
+        await handle_modal_close(self._page)
+
+        save_btn = self._page.locator("button").filter(
+            has_text=re.compile(r"^Save$", re.IGNORECASE)
+        )
+        unsave_btn = self._page.locator("button").filter(
+            has_text=re.compile(r"^Saved$|^Unsave$", re.IGNORECASE)
+        )
+
+        if await unsave_btn.count() > 0:
+            return {
+                "url": url,
+                "status": "already_saved",
+                "message": "This job is already saved.",
+                "job_id": job_id,
+            }
+
+        if await save_btn.count() == 0:
+            return {
+                "url": url,
+                "status": "save_unavailable",
+                "message": "Could not find a Save button on this job posting.",
+                "job_id": job_id,
+            }
+
+        await save_btn.first.click()
+        await asyncio.sleep(1.0)
+
+        # Verify the save took effect
+        saved_btn = self._page.locator("button").filter(
+            has_text=re.compile(r"^Saved$", re.IGNORECASE)
+        )
+        if await saved_btn.count() > 0 or await unsave_btn.count() > 0:
+            return {
+                "url": url,
+                "status": "saved",
+                "message": "Job saved successfully.",
+                "job_id": job_id,
+            }
+        return {
+            "url": url,
+            "status": "save_unavailable",
+            "message": "Save button clicked but state did not update.",
+            "job_id": job_id,
+        }
+
     async def _extract_job_ids(self) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
 
