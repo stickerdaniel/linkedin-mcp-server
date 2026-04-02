@@ -532,15 +532,36 @@ class LinkedInExtractor:
     async def _open_more_menu(self) -> bool:
         """Open the profile's More (three-dot) menu and check for Connect.
 
-        Uses ``aria-label`` to find the More button (language-independent)
+        Uses multiple selector strategies to find the More button (language-independent)
         and ``[role="menu"]`` to detect the opened menu (structural).
         Returns True if the menu opened and contains a Connect option.
         """
-        more_btn = self._page.locator("main button[aria-label*='More']")
+        # Try multiple selectors for the More button
+        more_selectors = [
+            "main button[aria-label*='More']",
+            "main button:has-text('More')",
+            "button[aria-label*='More']",
+            "button.artdeco-button[aria-label*='More']",
+        ]
+
+        more_btn = None
+        for selector in more_selectors:
+            locator = self._page.locator(selector)
+            try:
+                if await locator.count() > 0:
+                    more_btn = locator.first
+                    logger.debug("Found More button with selector: %s", selector)
+                    break
+            except Exception:
+                continue
+
+        if more_btn is None:
+            logger.debug("Could not find More button with any selector")
+            return False
+
         try:
-            if await more_btn.count() == 0:
-                return False
-            await more_btn.first.click()
+            await more_btn.click()
+            logger.debug("Clicked More button")
         except Exception:
             logger.debug("Could not click More button", exc_info=True)
             return False
@@ -2146,6 +2167,62 @@ class LinkedInExtractor:
             cleaned,
             references=references,
         )
+
+    async def get_inbox_thread_ids(self, limit: int = 10) -> list[str]:
+        """Get thread IDs from inbox for notification polling."""
+        url = "https://www.linkedin.com/messaging/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context="Messaging inbox")
+
+        threads: list[dict[str, str]] = await self._page.evaluate(
+            """async ({ limit }) => {
+                const labels = Array.from(document.querySelectorAll(
+                    'main label[aria-label^="Select conversation"]'
+                ));
+                const results = [];
+                for (let i = 0; i < Math.min(labels.length, limit); i++) {
+                    const label = labels[i];
+                    const ariaLabel = label.getAttribute('aria-label') || '';
+                    const name = ariaLabel
+                        .replace(/^Select conversation with\\s*/i, '').trim();
+                    const clickTarget = label.closest('li')
+                        ?.querySelector('div[class*="listitem__link"]');
+                    if (!clickTarget) continue;
+                    clickTarget.click();
+                    await new Promise(r => setTimeout(r, 300));
+                    const match = location.href.match(
+                        /\\/messaging\\/thread\\/([^/?#]+)/
+                    );
+                    if (match) {
+                        results.push({ name, threadId: match[1] });
+                    }
+                }
+                return results;
+            }""",
+            {"limit": limit},
+        )
+        return [conv["threadId"] for conv in threads if conv.get("threadId")]
+
+    async def get_connection_approval_notifications(self) -> list[str]:
+        """Get connection approval notification texts from LinkedIn notifications page."""
+        url = "https://www.linkedin.com/notifications/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context="Notifications")
+        await handle_modal_close(self._page)
+
+        raw_result = await self._extract_root_content(["main"])
+        raw_text = raw_result.get("text", "")
+
+        snippets: list[str] = []
+        if raw_text:
+            for line in raw_text.split("\n"):
+                if "accepted" in line.lower() or "connected" in line.lower():
+                    cleaned = line.strip()
+                    if cleaned and len(cleaned) > 10:
+                        snippets.append(cleaned[:200])
+        return snippets
 
     async def _extract_conversation_thread_refs(self, limit: int) -> list[Reference]:
         """Click each inbox conversation item and capture the thread URL.
