@@ -1893,20 +1893,6 @@ class LinkedInExtractor:
                 return True
         return False
 
-    async def _open_edit_form(
-        self,
-        url: str,
-    ) -> bool:
-        """Navigate to a LinkedIn page and wait for the edit form/dialog."""
-        await self._navigate_to_page(url)
-        await detect_rate_limit(self._page)
-        try:
-            await self._page.wait_for_selector("main", timeout=10000)
-        except PlaywrightTimeoutError:
-            pass
-        await handle_modal_close(self._page)
-        return True
-
     async def edit_profile_intro(
         self,
         *,
@@ -2412,25 +2398,13 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Scrape the logged-in user's own profile via /in/me/ redirect.
 
-        Navigates to linkedin.com/in/me/ which redirects to the authenticated
-        user's profile, extracts the username from the redirect, then delegates
-        to scrape_person.
+        Uses _resolve_my_username() to get the authenticated user's
+        username, then delegates to scrape_person.
 
         Returns:
             {url, sections: {name: text}, my_username: str}
         """
-        me_url = "https://www.linkedin.com/in/me/"
-        await self._navigate_to_page(me_url)
-
-        # Extract username from the redirected URL
-        current_url = self._page.url
-        match = re.search(r"/in/([^/?#]+)", current_url)
-        if not match:
-            raise LinkedInScraperException(
-                f"Could not resolve own profile username from {current_url}"
-            )
-        my_username = match.group(1)
-
+        my_username = await self._resolve_my_username()
         result = await self.scrape_person(my_username, sections, callbacks=callbacks)
         result["my_username"] = my_username
         return result
@@ -2635,7 +2609,19 @@ class LinkedInExtractor:
             await asyncio.sleep(1.0)
 
             if not await self._dialog_is_open(timeout=3000):
-                # Dialog closed — likely submitted or dismissed
+                # Dialog closed — check if application was actually submitted
+                page_text = await self.get_page_text()
+                if re.search(
+                    r"application.*sent|applied|submitted",
+                    page_text,
+                    re.IGNORECASE,
+                ):
+                    return {
+                        "url": url,
+                        "status": "applied_unconfirmed",
+                        "message": "Application dialog closed; page suggests it was submitted. Check your applications to confirm.",
+                        "job_id": job_id,
+                    }
                 break
 
             # Look for a Submit button (final step)
