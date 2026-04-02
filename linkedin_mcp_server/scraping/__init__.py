@@ -2,6 +2,7 @@
 
 from .extractor import LinkedInExtractor
 from .fields import (
+    ALL_PERSON_SECTION_NAMES,
     COMPANY_SECTIONS,
     PERSON_SECTIONS,
     parse_company_sections,
@@ -9,6 +10,7 @@ from .fields import (
 )
 
 __all__ = [
+    "ALL_PERSON_SECTION_NAMES",
     "COMPANY_SECTIONS",
     "LinkedInExtractor",
     "PERSON_SECTIONS",

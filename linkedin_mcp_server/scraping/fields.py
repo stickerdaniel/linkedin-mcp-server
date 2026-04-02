@@ -9,12 +9,24 @@ PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
     "main_profile": ("/", False),
     "experience": ("/details/experience/", False),
     "education": ("/details/education/", False),
+    "skills": ("/details/skills/", False),
+    "certifications": ("/details/certifications/", False),
+    "volunteer": ("/details/volunteering-experiences/", False),
+    "projects": ("/details/projects/", False),
+    "publications": ("/details/publications/", False),
+    "courses": ("/details/courses/", False),
+    "recommendations": ("/details/recommendations/", False),
+    "organizations": ("/details/organizations/", False),
     "interests": ("/details/interests/", False),
     "honors": ("/details/honors/", False),
     "languages": ("/details/languages/", False),
     "contact_info": ("/overlay/contact-info/", True),
     "posts": ("/recent-activity/all/", False),
 }
+
+ALL_PERSON_SECTION_NAMES: list[str] = [
+    name for name in PERSON_SECTIONS if name != "main_profile"
+]
 
 COMPANY_SECTIONS: dict[str, tuple[str, bool]] = {
     "about": ("/about/", False),
