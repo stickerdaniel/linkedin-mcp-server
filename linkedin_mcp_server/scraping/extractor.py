@@ -1797,7 +1797,9 @@ class LinkedInExtractor:
         if btn_count == 0:
             # Check if already applied via page text — avoids brittle class selectors
             page_text = await self.get_page_text()
-            if re.search(r"\bApplied\b", page_text):
+            if re.search(
+                r"\bYou applied\b|Application submitted", page_text, re.IGNORECASE
+            ):
                 return {
                     "url": url,
                     "status": "already_applied",
@@ -1915,7 +1917,10 @@ class LinkedInExtractor:
                     const dialog = document.querySelector('dialog[open], [role="dialog"]');
                     if (!dialog) return [];
                     const fields = [];
+
+                    // Check text/select/textarea required fields
                     for (const input of dialog.querySelectorAll('input[required], select[required], textarea[required]')) {
+                        if (input.type === 'radio') continue; // handled separately below
                         if (!input.value || input.value.trim() === '') {
                             const label = input.closest('label')?.innerText
                                 || input.getAttribute('aria-label')
@@ -1925,6 +1930,17 @@ class LinkedInExtractor:
                             fields.push(label.replace(/\\n.*/s, '').trim());
                         }
                     }
+
+                    // Check required radio groups at the group level
+                    const radioNames = new Set(
+                        [...dialog.querySelectorAll('input[type="radio"][required]')].map(r => r.name)
+                    );
+                    for (const name of radioNames) {
+                        if (!dialog.querySelector(`input[type="radio"][name="${name}"]:checked`)) {
+                            fields.push(name || 'unknown radio group');
+                        }
+                    }
+
                     return fields;
                 }"""
             )
