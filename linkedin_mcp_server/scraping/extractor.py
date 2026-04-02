@@ -545,7 +545,7 @@ class LinkedInExtractor:
         """
         more_selectors = [
             "main button[aria-label*='More']",
-            "main button:has-text('More')",
+            "main button:text-is('More')",
             "button[aria-label*='More']",
         ]
 
