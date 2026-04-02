@@ -1684,10 +1684,13 @@ class LinkedInExtractor:
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
         if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["saved_jobs"] = extracted.text
             if extracted.references:
                 references["saved_jobs"] = extracted.references
+        elif extracted.error:
+            section_errors["saved_jobs"] = extracted.error
 
         job_ids = await self._extract_job_ids()
 
@@ -1698,6 +1701,8 @@ class LinkedInExtractor:
         }
         if references:
             result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
         return result
 
     async def get_my_applications(self) -> dict[str, Any]:
@@ -1711,10 +1716,13 @@ class LinkedInExtractor:
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
         if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["applications"] = extracted.text
             if extracted.references:
                 references["applications"] = extracted.references
+        elif extracted.error:
+            section_errors["applications"] = extracted.error
 
         job_ids = await self._extract_job_ids()
 
@@ -1725,6 +1733,8 @@ class LinkedInExtractor:
         }
         if references:
             result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
         return result
 
     async def scrape_company(
