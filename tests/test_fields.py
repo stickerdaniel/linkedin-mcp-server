@@ -1,6 +1,7 @@
 """Tests for scraping section config dicts and section parsers."""
 
 from linkedin_mcp_server.scraping.fields import (
+    ALL_PERSON_SECTION_NAMES,
     COMPANY_SECTIONS,
     PERSON_SECTIONS,
     parse_company_sections,
@@ -95,11 +96,7 @@ class TestParsePersonSections:
         assert unknown == []
 
     def test_all_sections(self):
-        requested, unknown = parse_person_sections(
-            "experience,education,skills,certifications,volunteer,projects,"
-            "publications,courses,recommendations,organizations,"
-            "interests,honors,languages,contact_info,posts"
-        )
+        requested, unknown = parse_person_sections(",".join(ALL_PERSON_SECTION_NAMES))
         assert requested == set(PERSON_SECTIONS)
         assert unknown == []
 
@@ -155,3 +152,7 @@ class TestConfigCompleteness:
             assert isinstance(suffix, str) and len(suffix) > 0, (
                 f"{name} has empty suffix"
             )
+
+    def test_all_person_section_names_excludes_main_profile(self):
+        assert "main_profile" not in ALL_PERSON_SECTION_NAMES
+        assert set(ALL_PERSON_SECTION_NAMES) == set(PERSON_SECTIONS) - {"main_profile"}
