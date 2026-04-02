@@ -128,7 +128,8 @@ def register_connections_tools(mcp: FastMCP) -> None:
 
             async def on_progress(completed: int, total: int) -> None:
                 await ctx.report_progress(
-                    progress=completed, total=total,
+                    progress=completed,
+                    total=total,
                     message=f"Enriched {completed}/{total} profiles",
                 )
 

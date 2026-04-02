@@ -192,9 +192,7 @@ def register_job_tools(mcp: FastMCP) -> None:
                 progress=0, total=100, message="Starting job application"
             )
 
-            result = await extractor.apply_to_job(
-                job_id, confirm_apply=confirm_apply
-            )
+            result = await extractor.apply_to_job(job_id, confirm_apply=confirm_apply)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -237,9 +235,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             )
             logger.info("Saving job: %s", job_id)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Saving job"
-            )
+            await ctx.report_progress(progress=0, total=100, message="Saving job")
 
             result = await extractor.save_job(job_id)
 

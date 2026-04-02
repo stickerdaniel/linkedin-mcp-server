@@ -544,7 +544,9 @@ class LinkedInExtractor:
             await target.click(timeout=timeout)
             return True
         except Exception:
-            logger.debug("Click failed for button '%s', retrying with force", text, exc_info=True)
+            logger.debug(
+                "Click failed for button '%s', retrying with force", text, exc_info=True
+            )
         try:
             await target.click(timeout=timeout, force=True)
             return True
@@ -634,7 +636,9 @@ class LinkedInExtractor:
         try:
             await more_btn.click(timeout=5000)
         except Exception:
-            logger.debug("Could not click More button, retrying with force", exc_info=True)
+            logger.debug(
+                "Could not click More button, retrying with force", exc_info=True
+            )
             try:
                 await more_btn.click(timeout=5000, force=True)
             except Exception:
@@ -1868,9 +1872,8 @@ class LinkedInExtractor:
     async def _click_save_in_dialog(self, *, timeout: int = 5000) -> bool:
         """Click the Save button inside an open dialog."""
         for text in ["Save", "Apply", "Done"]:
-            btn = (
-                self._page.locator(f"{_DIALOG_SELECTOR} button, main button")
-                .filter(has_text=re.compile(rf"^{text}$", re.IGNORECASE))
+            btn = self._page.locator(f"{_DIALOG_SELECTOR} button, main button").filter(
+                has_text=re.compile(rf"^{text}$", re.IGNORECASE)
             )
             if await btn.count() > 0:
                 await btn.first.click(timeout=timeout)
@@ -1943,9 +1946,11 @@ class LinkedInExtractor:
             if await self._fill_field_by_label("Headline", headline):
                 fields_updated.append("headline")
         if location is not None:
-            if await self._fill_field_by_label("Country/Region", location) or \
-               await self._fill_field_by_label("City", location) or \
-               await self._fill_field_by_label("Location", location):
+            if (
+                await self._fill_field_by_label("Country/Region", location)
+                or await self._fill_field_by_label("City", location)
+                or await self._fill_field_by_label("Location", location)
+            ):
                 fields_updated.append("location")
         if industry is not None:
             if await self._fill_field_by_label("Industry", industry):
@@ -1964,8 +1969,9 @@ class LinkedInExtractor:
         return {
             "url": url,
             "status": "saved" if saved else "save_failed",
-            "message": f"Updated: {', '.join(fields_updated)}" if saved
-                       else "Could not find the Save button.",
+            "message": f"Updated: {', '.join(fields_updated)}"
+            if saved
+            else "Could not find the Save button.",
             "fields_updated": fields_updated,
         }
 
@@ -2016,8 +2022,9 @@ class LinkedInExtractor:
         return {
             "url": url,
             "status": "saved" if saved else "save_failed",
-            "message": "About section updated." if saved
-                       else "Could not find the Save button.",
+            "message": "About section updated."
+            if saved
+            else "Could not find the Save button.",
         }
 
     async def _resolve_my_username(self) -> str:
@@ -2083,8 +2090,9 @@ class LinkedInExtractor:
         return {
             "url": url,
             "status": "saved" if saved else "save_failed",
-            "message": f"Added {section_slug} entry: {', '.join(fields_filled)}" if saved
-                       else "Could not find the Save button.",
+            "message": f"Added {section_slug} entry: {', '.join(fields_filled)}"
+            if saved
+            else "Could not find the Save button.",
             "section": section_slug,
             "fields_filled": fields_filled,
         }
@@ -2153,9 +2161,7 @@ class LinkedInExtractor:
         if description:
             fields["Description"] = description
 
-        return await self._edit_profile_section_entry(
-            "EDUCATION", fields=fields
-        )
+        return await self._edit_profile_section_entry("EDUCATION", fields=fields)
 
     async def add_skill(self, skill_name: str) -> dict[str, Any]:
         """Add a skill to the profile."""
@@ -2183,9 +2189,7 @@ class LinkedInExtractor:
             filled = await self._fill_field_by_label("skill", skill_name)
         if not filled:
             # Try the first input in the dialog
-            input_el = self._page.locator(
-                'dialog input, [role="dialog"] input'
-            ).first
+            input_el = self._page.locator('dialog input, [role="dialog"] input').first
             try:
                 await input_el.fill(skill_name)
                 filled = True
@@ -2214,8 +2218,9 @@ class LinkedInExtractor:
         return {
             "url": url,
             "status": "saved" if saved else "save_failed",
-            "message": f"Skill '{skill_name}' added." if saved
-                       else "Could not save the skill.",
+            "message": f"Skill '{skill_name}' added."
+            if saved
+            else "Could not save the skill.",
         }
 
     async def add_certification(
@@ -2358,9 +2363,7 @@ class LinkedInExtractor:
         if associated_with:
             fields["Associated with"] = associated_with
 
-        return await self._edit_profile_section_entry(
-            "COURSES", fields=fields
-        )
+        return await self._edit_profile_section_entry("COURSES", fields=fields)
 
     async def add_language(
         self,
@@ -2575,16 +2578,16 @@ class LinkedInExtractor:
         await handle_modal_close(self._page)
 
         # Check if Easy Apply button exists
-        easy_apply_btn = self._page.locator(
-            "button"
-        ).filter(has_text=re.compile(r"Easy Apply", re.IGNORECASE))
+        easy_apply_btn = self._page.locator("button").filter(
+            has_text=re.compile(r"Easy Apply", re.IGNORECASE)
+        )
         btn_count = await easy_apply_btn.count()
 
         if btn_count == 0:
             # Check if already applied
-            applied_indicator = self._page.locator(
-                "span, div, li"
-            ).filter(has_text=re.compile(r"Applied", re.IGNORECASE))
+            applied_indicator = self._page.locator("span, div, li").filter(
+                has_text=re.compile(r"Applied", re.IGNORECASE)
+            )
             if await applied_indicator.count() > 0:
                 return {
                     "url": url,
@@ -2612,9 +2615,7 @@ class LinkedInExtractor:
 
         # Wait for the application modal to appear
         try:
-            await self._page.wait_for_selector(
-                _DIALOG_SELECTOR, timeout=10000
-            )
+            await self._page.wait_for_selector(_DIALOG_SELECTOR, timeout=10000)
         except PlaywrightTimeoutError:
             return {
                 "url": url,
@@ -2633,16 +2634,18 @@ class LinkedInExtractor:
                 break
 
             # Look for a Submit button (final step)
-            submit_btn = self._page.locator(
-                f"{_DIALOG_SELECTOR} button"
-            ).filter(has_text=re.compile(r"^Submit application$", re.IGNORECASE))
+            submit_btn = self._page.locator(f"{_DIALOG_SELECTOR} button").filter(
+                has_text=re.compile(r"^Submit application$", re.IGNORECASE)
+            )
             if await submit_btn.count() > 0:
                 await submit_btn.first.click()
                 await asyncio.sleep(2.0)
 
                 # Check for success confirmation
                 page_text = await self.get_page_text()
-                if re.search(r"application.*sent|applied|submitted", page_text, re.IGNORECASE):
+                if re.search(
+                    r"application.*sent|applied|submitted", page_text, re.IGNORECASE
+                ):
                     return {
                         "url": url,
                         "status": "applied",
@@ -2657,17 +2660,17 @@ class LinkedInExtractor:
                 }
 
             # Look for Review button (penultimate step)
-            review_btn = self._page.locator(
-                f"{_DIALOG_SELECTOR} button"
-            ).filter(has_text=re.compile(r"^Review$", re.IGNORECASE))
+            review_btn = self._page.locator(f"{_DIALOG_SELECTOR} button").filter(
+                has_text=re.compile(r"^Review$", re.IGNORECASE)
+            )
             if await review_btn.count() > 0:
                 await review_btn.first.click()
                 continue
 
             # Look for Next button to advance
-            next_btn = self._page.locator(
-                f"{_DIALOG_SELECTOR} button"
-            ).filter(has_text=re.compile(r"^Next$", re.IGNORECASE))
+            next_btn = self._page.locator(f"{_DIALOG_SELECTOR} button").filter(
+                has_text=re.compile(r"^Next$", re.IGNORECASE)
+            )
             if await next_btn.count() > 0:
                 await next_btn.first.click()
                 continue
@@ -2703,9 +2706,9 @@ class LinkedInExtractor:
                 }
 
             # Try clicking Continue as a fallback
-            continue_btn = self._page.locator(
-                f"{_DIALOG_SELECTOR} button"
-            ).filter(has_text=re.compile(r"^Continue$", re.IGNORECASE))
+            continue_btn = self._page.locator(f"{_DIALOG_SELECTOR} button").filter(
+                has_text=re.compile(r"^Continue$", re.IGNORECASE)
+            )
             if await continue_btn.count() > 0:
                 await continue_btn.first.click()
                 continue
@@ -3808,7 +3811,9 @@ class LinkedInExtractor:
             if chunk_idx + chunk_size < total:
                 logger.info(
                     "Chunk complete (%d/%d). Pausing %.0fs...",
-                    completed, total, chunk_delay,
+                    completed,
+                    total,
+                    chunk_delay,
                 )
                 await asyncio.sleep(chunk_delay)
 
@@ -3865,7 +3870,9 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {search_results: text}, references}
         """
-        params = f"network=%5B%22F%22%5D&currentCompany=%5B%22{quote_plus(company)}%22%5D"
+        params = (
+            f"network=%5B%22F%22%5D&currentCompany=%5B%22{quote_plus(company)}%22%5D"
+        )
         if keywords:
             params += f"&keywords={quote_plus(keywords)}"
 

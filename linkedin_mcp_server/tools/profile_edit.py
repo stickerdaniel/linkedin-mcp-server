@@ -299,9 +299,7 @@ def register_profile_edit_tools(mcp: FastMCP) -> None:
             )
             logger.info("Adding skill: %s", skill_name)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Adding skill"
-            )
+            await ctx.report_progress(progress=0, total=100, message="Adding skill")
 
             result = await extractor.add_skill(skill_name)
 
@@ -611,9 +609,7 @@ def register_profile_edit_tools(mcp: FastMCP) -> None:
             )
             logger.info("Adding course: %s", name)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Adding course"
-            )
+            await ctx.report_progress(progress=0, total=100, message="Adding course")
 
             result = await extractor.add_course(
                 name=name,
@@ -664,9 +660,7 @@ def register_profile_edit_tools(mcp: FastMCP) -> None:
             )
             logger.info("Adding language: %s", name)
 
-            await ctx.report_progress(
-                progress=0, total=100, message="Adding language"
-            )
+            await ctx.report_progress(progress=0, total=100, message="Adding language")
 
             result = await extractor.add_language(
                 name=name,
