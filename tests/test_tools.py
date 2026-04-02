@@ -35,6 +35,23 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
+    _edit_result = {
+        "url": "https://www.linkedin.com/in/me/",
+        "status": "saved",
+        "fields_filled": ["Title"],
+    }
+    mock.edit_profile_intro = AsyncMock(return_value=_edit_result)
+    mock.edit_profile_about = AsyncMock(return_value=_edit_result)
+    mock.add_experience = AsyncMock(return_value=_edit_result)
+    mock.add_education = AsyncMock(return_value=_edit_result)
+    mock.add_skill = AsyncMock(return_value=_edit_result)
+    mock.add_certification = AsyncMock(return_value=_edit_result)
+    mock.add_volunteer_experience = AsyncMock(return_value=_edit_result)
+    mock.add_project = AsyncMock(return_value=_edit_result)
+    mock.add_publication = AsyncMock(return_value=_edit_result)
+    mock.add_course = AsyncMock(return_value=_edit_result)
+    mock.add_language = AsyncMock(return_value=_edit_result)
+    mock.add_honor = AsyncMock(return_value=_edit_result)
     return mock
 
 
@@ -726,3 +743,101 @@ class TestToolTimeouts:
             tool = await mcp.get_tool(name)
             assert tool is not None
             assert tool.timeout == TOOL_TIMEOUT_SECONDS
+
+
+class TestProfileEditTool:
+    """Tests for the 13 profile editing tools."""
+
+    async def _run_edit_tool(self, mock_context, tool_name, extractor_method, **kwargs):
+        """Helper: register profile_edit tools, call a tool, assert extractor called."""
+        result = {
+            "url": "https://www.linkedin.com/in/me/",
+            "status": "saved",
+            "fields_filled": ["Title"],
+        }
+        mock_extractor = _make_mock_extractor({})
+
+        from linkedin_mcp_server.tools.profile_edit import register_profile_edit_tools
+
+        mcp = FastMCP("test")
+        register_profile_edit_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, tool_name)
+        res = await tool_fn(ctx=mock_context, extractor=mock_extractor, **kwargs)
+        getattr(mock_extractor, extractor_method).assert_awaited_once()
+        return res
+
+    async def test_edit_profile_intro(self, mock_context):
+        await self._run_edit_tool(
+            mock_context,
+            "edit_profile_intro",
+            "edit_profile_intro",
+            headline="Engineer",
+        )
+
+    async def test_edit_profile_about(self, mock_context):
+        await self._run_edit_tool(
+            mock_context, "edit_profile_about", "edit_profile_about", about_text="Bio"
+        )
+
+    async def test_add_experience(self, mock_context):
+        await self._run_edit_tool(
+            mock_context,
+            "add_experience",
+            "add_experience",
+            title="Engineer",
+            company="Acme",
+        )
+
+    async def test_add_education(self, mock_context):
+        await self._run_edit_tool(
+            mock_context, "add_education", "add_education", school="MIT"
+        )
+
+    async def test_add_skill(self, mock_context):
+        await self._run_edit_tool(
+            mock_context, "add_skill", "add_skill", skill_name="Python"
+        )
+
+    async def test_add_certification(self, mock_context):
+        await self._run_edit_tool(
+            mock_context,
+            "add_certification",
+            "add_certification",
+            name="AWS SAA",
+            issuing_organization="AWS",
+        )
+
+    async def test_add_volunteer_experience(self, mock_context):
+        await self._run_edit_tool(
+            mock_context,
+            "add_volunteer_experience",
+            "add_volunteer_experience",
+            organization="Red Cross",
+            role="Volunteer",
+        )
+
+    async def test_add_project(self, mock_context):
+        await self._run_edit_tool(
+            mock_context, "add_project", "add_project", name="My Project"
+        )
+
+    async def test_add_publication(self, mock_context):
+        await self._run_edit_tool(
+            mock_context, "add_publication", "add_publication", title="My Paper"
+        )
+
+    async def test_add_course(self, mock_context):
+        await self._run_edit_tool(
+            mock_context, "add_course", "add_course", name="Python 101"
+        )
+
+    async def test_add_language(self, mock_context):
+        await self._run_edit_tool(
+            mock_context, "add_language", "add_language", name="Spanish"
+        )
+
+    async def test_add_honor(self, mock_context):
+        await self._run_edit_tool(
+            mock_context, "add_honor", "add_honor", title="Best Engineer Award"
+        )

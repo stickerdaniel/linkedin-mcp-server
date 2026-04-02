@@ -1776,8 +1776,9 @@ class LinkedInExtractor:
         filled = await self._page.evaluate(
             """({ labelText, value, scope, exact }) => {
                 const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
-                const root = document.querySelector(scope) || document.body;
-                const labels = Array.from(root.querySelectorAll('label'));
+                const roots = Array.from(document.querySelectorAll(scope));
+                const searchRoots = roots.length ? roots : [document.body];
+                const labels = searchRoots.flatMap(r => Array.from(r.querySelectorAll('label')));
                 for (const label of labels) {
                     const text = normalize(label.innerText || label.textContent);
                     const match = exact
@@ -1829,8 +1830,9 @@ class LinkedInExtractor:
         selected = await self._page.evaluate(
             """({ labelText, optionText, scope }) => {
                 const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
-                const root = document.querySelector(scope) || document.body;
-                const labels = Array.from(root.querySelectorAll('label'));
+                const roots = Array.from(document.querySelectorAll(scope));
+                const searchRoots = roots.length ? roots : [document.body];
+                const labels = searchRoots.flatMap(r => Array.from(r.querySelectorAll('label')));
                 for (const label of labels) {
                     const text = normalize(label.innerText || label.textContent);
                     if (!text.toLowerCase().includes(labelText.toLowerCase())) continue;
@@ -2251,7 +2253,10 @@ class LinkedInExtractor:
             fields["Expiration date year"] = expiration_year
 
         return await self._edit_profile_section_entry(
-            "CERTIFICATIONS", fields=fields, dropdowns=dropdowns
+            "CERTIFICATIONS",
+            fields=fields,
+            dropdowns=dropdowns,
+            required_fields={"Name", "Issuing organization"},
         )
 
     async def add_volunteer_experience(
