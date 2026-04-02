@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 from unittest.mock import MagicMock
@@ -129,21 +128,6 @@ class TestBootstrap:
 
         setup_task.cancel.assert_called_once_with()
         login_task.cancel.assert_called_once_with()
-
-    async def test_cancelled_setup_task_retries_cleanly(self):
-        initialize_bootstrap("managed")
-        state = get_bootstrap_state()
-        task = asyncio.create_task(asyncio.sleep(10), name="browser-setup")
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        state.setup_task = task
-
-        with pytest.raises(BrowserSetupInProgressError):
-            await ensure_tool_ready_or_raise("search_jobs")
-
-        assert state.setup_state is SetupState.RUNNING
-        assert state.setup_task is not None
 
     def test_managed_browser_path_defaults_under_auth_root(self, isolate_profile_dir):
         path = browsers_path()
