@@ -480,7 +480,14 @@ class LinkedInExtractor:
             await target.click(timeout=timeout)
             return True
         except Exception:
-            logger.debug("Click failed for button '%s'", text, exc_info=True)
+            logger.debug(
+                "Click failed for button '%s', retrying with force", text, exc_info=True
+            )
+        try:
+            await target.click(timeout=timeout, force=True)
+            return True
+        except Exception:
+            logger.debug("Force click also failed for button '%s'", text, exc_info=True)
             return False
 
     async def _dialog_is_open(self, *, timeout: int = 1000) -> bool:
@@ -532,18 +539,47 @@ class LinkedInExtractor:
     async def _open_more_menu(self) -> bool:
         """Open the profile's More (three-dot) menu and check for Connect.
 
-        Uses ``aria-label`` to find the More button (language-independent)
+        Uses multiple selector strategies to find the More button
         and ``[role="menu"]`` to detect the opened menu (structural).
         Returns True if the menu opened and contains a Connect option.
         """
-        more_btn = self._page.locator("main button[aria-label*='More']")
-        try:
-            if await more_btn.count() == 0:
-                return False
-            await more_btn.first.click()
-        except Exception:
-            logger.debug("Could not click More button", exc_info=True)
+        more_selectors = [
+            "main button[aria-label*='More']",
+            "main button:has-text('More')",
+            "button[aria-label*='More']",
+            "button.artdeco-button[aria-label*='More']",
+        ]
+
+        more_btn = None
+        for selector in more_selectors:
+            locator = self._page.locator(selector)
+            try:
+                if await locator.count() > 0:
+                    more_btn = locator.first
+                    logger.debug("Found More button with selector: %s", selector)
+                    break
+            except Exception:
+                continue
+
+        if more_btn is None:
+            logger.debug("Could not find More button with any selector")
             return False
+
+        try:
+            await more_btn.scroll_into_view_if_needed(timeout=5000)
+        except Exception:
+            logger.debug("Could not scroll More button into view", exc_info=True)
+        try:
+            await more_btn.click(timeout=5000)
+        except Exception:
+            logger.debug(
+                "Could not click More button, retrying with force", exc_info=True
+            )
+            try:
+                await more_btn.click(timeout=5000, force=True)
+            except Exception:
+                logger.debug("Force click also failed for More button", exc_info=True)
+                return False
 
         try:
             await self._page.wait_for_selector("[role='menu']", timeout=3000)
@@ -1617,7 +1653,13 @@ class LinkedInExtractor:
         return href if isinstance(href, str) and href else None
 
     async def _open_conversation_by_username(self, linkedin_username: str) -> None:
-        """Open a conversation by resolving the profile name, then searching inbox."""
+        """Open a conversation by resolving the profile name, then searching inbox.
+
+        Tries the display name first, then falls back to searching by the
+        username slug itself. This handles cases where the display name has
+        changed (e.g., name change after marriage) and no longer matches
+        the URL slug that the user provided.
+        """
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
@@ -1629,19 +1671,32 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         display_name = await self._read_profile_display_name()
-        if not display_name:
+
+        search_candidates: list[str] = []
+        if display_name:
+            search_candidates.append(display_name)
+        slug_as_name = linkedin_username.replace("-", " ")
+        if slug_as_name.lower() != (display_name or "").lower():
+            search_candidates.append(slug_as_name)
+
+        if not search_candidates:
             raise LinkedInScraperException(
                 f"Could not resolve a display name for {linkedin_username}."
             )
 
         try:
-            thread_url = await self._resolve_conversation_thread_url(display_name)
-            if not thread_url:
-                raise LinkedInScraperException(
-                    f"Could not find a conversation for {linkedin_username}."
-                )
+            for candidate in search_candidates:
+                thread_url = await self._resolve_conversation_thread_url(candidate)
+                if thread_url:
+                    await self._navigate_to_page(thread_url)
+                    return
 
-            await self._navigate_to_page(thread_url)
+            raise LinkedInScraperException(
+                f"Could not find a conversation for {linkedin_username}. "
+                f"Tried searching for: {', '.join(search_candidates)}. "
+                f"If multiple threads exist, use get_conversation with a "
+                f"specific thread_id from search_conversations results."
+            )
         except PlaywrightTimeoutError as exc:
             raise LinkedInScraperException("Messaging search input not found.") from exc
 
