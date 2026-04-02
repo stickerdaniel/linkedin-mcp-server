@@ -2611,7 +2611,11 @@ class LinkedInExtractor:
                 "job_id": job_id,
             }
 
-        # Click Easy Apply
+        # Click Easy Apply (scroll first to avoid sticky navbar)
+        try:
+            await easy_apply_btn.first.scroll_into_view_if_needed()
+        except Exception:
+            logger.debug("Could not scroll Easy Apply button into view")
         await easy_apply_btn.first.click()
 
         # Wait for the application modal to appear
@@ -2779,10 +2783,21 @@ class LinkedInExtractor:
         await save_btn.first.click()
         await asyncio.sleep(1.0)
 
+        # Verify the save took effect
+        saved_btn = self._page.locator("button").filter(
+            has_text=re.compile(r"^Saved$", re.IGNORECASE)
+        )
+        if await saved_btn.count() > 0 or await unsave_btn.count() > 0:
+            return {
+                "url": url,
+                "status": "saved",
+                "message": "Job saved successfully.",
+                "job_id": job_id,
+            }
         return {
             "url": url,
-            "status": "saved",
-            "message": "Job saved successfully.",
+            "status": "save_unavailable",
+            "message": "Save button clicked but state did not update.",
             "job_id": job_id,
         }
 
@@ -3692,6 +3707,7 @@ class LinkedInExtractor:
 
         raw_connections: list[dict[str, str]] = await self._page.evaluate(
             """() => {
+                const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
                 const results = [];
                 const seen = new Set();
                 const links = document.querySelectorAll('main a[href*="/in/"]');
@@ -3705,27 +3721,24 @@ class LinkedInExtractor:
 
                     const card = a.closest('li') || a.parentElement;
 
-                    let name = '';
-                    if (card) {
-                        const nameEl = card.querySelector(
-                            '.mn-connection-card__name, .entity-result__title-text, span[dir="ltr"], span.t-bold'
-                        );
-                        if (nameEl) name = nameEl.innerText.trim();
-                    }
-                    if (!name) {
-                        const linkText = a.innerText.trim();
-                        if (linkText && linkText.length < 80) name = linkText;
+                    // Extract name from link text (no class-name selectors)
+                    let name = normalize(a.innerText);
+                    if (!name || name.length > 80) {
+                        // Fallback: first non-empty line of the card
+                        if (card) {
+                            const lines = card.innerText
+                                .split('\\n').map(l => l.trim()).filter(Boolean);
+                            name = lines[0] || '';
+                        }
                     }
 
+                    // Extract headline from card innerText lines
                     let headline = '';
                     if (card) {
-                        const headlineEl = card.querySelector(
-                            '.mn-connection-card__occupation, .entity-result__primary-subtitle, span.t-normal'
-                        );
-                        if (headlineEl) headline = headlineEl.innerText.trim();
-                    }
-                    if (!headline && card) {
-                        const lines = card.innerText.split('\\n').map(l => l.trim()).filter(Boolean);
+                        const lines = card.innerText
+                            .split('\\n').map(l => l.trim()).filter(Boolean);
+                        // Headline is typically the second non-empty line
+                        // (first is the name)
                         if (lines.length >= 2) headline = lines[1];
                     }
 
@@ -3943,7 +3956,7 @@ class LinkedInExtractor:
         company_id = await self._resolve_company_id(company)
         if not company_id:
             # Fall back to keyword-based search with company name
-            fallback_keywords = f"{company}"
+            fallback_keywords = company
             if keywords:
                 fallback_keywords = f"{keywords} {company}"
             return await self.search_people(fallback_keywords, network="F")
