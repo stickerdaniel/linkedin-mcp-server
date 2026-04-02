@@ -1794,7 +1794,7 @@ class LinkedInExtractor:
                         input = label.querySelector('input, textarea, select');
                     }
                     if (!input) {
-                        const parent = label.closest('.artdeco-text-input, .fb-text-input__wrapper, div');
+                        const parent = label.closest('div');
                         if (parent) input = parent.querySelector('input, textarea, select');
                     }
                     if (input) {
@@ -1997,12 +1997,17 @@ class LinkedInExtractor:
         }
 
     async def _resolve_my_username(self) -> str:
-        """Navigate to /in/me/ and return the logged-in user's username."""
+        """Navigate to /in/me/ and return the logged-in user's username (cached)."""
+        if getattr(self, "_my_username_cache", None):
+            return self._my_username_cache
         await self._navigate_to_page("https://www.linkedin.com/in/me/")
         match = re.search(r"/in/([^/?#]+)", self._page.url)
-        if not match:
-            raise LinkedInScraperException("Could not resolve own profile username.")
-        return match.group(1)
+        if not match or match.group(1) == "me":
+            raise LinkedInScraperException(
+                f"Could not resolve own profile username from {self._page.url}"
+            )
+        self._my_username_cache: str = match.group(1)
+        return self._my_username_cache
 
     async def _edit_profile_section_entry(
         self,
@@ -2010,11 +2015,16 @@ class LinkedInExtractor:
         *,
         fields: dict[str, str],
         dropdowns: dict[str, str] | None = None,
+        required_fields: set[str] | None = None,
     ) -> dict[str, Any]:
         """Generic method to add a new entry in a profile section.
 
         Opens the add-new form for a given section, fills fields by label,
         and saves. Works for experience, education, certifications, etc.
+
+        Args:
+            required_fields: Field labels that must be filled before saving.
+                If any required field is not filled, save is aborted.
         """
         username = await self._resolve_my_username()
         url = f"https://www.linkedin.com/in/{username}/overlay/create/new/?profileFormEntryPoint=PROFILE_SECTION&profileSectionId={section_slug}"
@@ -2052,6 +2062,18 @@ class LinkedInExtractor:
                 "message": f"Could not fill any fields for {section_slug}.",
                 "section": section_slug,
             }
+
+        # Check required fields are filled before saving to avoid partial entries
+        if required_fields:
+            missing = required_fields - set(fields_filled)
+            if missing:
+                return {
+                    "url": url,
+                    "status": "edit_failed",
+                    "message": f"Required fields could not be filled: {', '.join(sorted(missing))}",
+                    "section": section_slug,
+                    "fields_filled": fields_filled,
+                }
 
         saved = await self._click_save_in_dialog()
         await asyncio.sleep(1.5)
@@ -2098,7 +2120,10 @@ class LinkedInExtractor:
             dropdowns["Employment type"] = employment_type
 
         return await self._edit_profile_section_entry(
-            "EXPERIENCE", fields=fields, dropdowns=dropdowns
+            "EXPERIENCE",
+            fields=fields,
+            dropdowns=dropdowns,
+            required_fields={"Title", "Company name"},
         )
 
     async def add_education(
@@ -2130,7 +2155,9 @@ class LinkedInExtractor:
         if description:
             fields["Description"] = description
 
-        return await self._edit_profile_section_entry("EDUCATION", fields=fields)
+        return await self._edit_profile_section_entry(
+            "EDUCATION", fields=fields, required_fields={"School"}
+        )
 
     async def add_skill(self, skill_name: str) -> dict[str, Any]:
         """Add a skill to the profile."""
@@ -2375,23 +2402,6 @@ class LinkedInExtractor:
             "HONORS", fields=fields, dropdowns=dropdowns
         )
 
-    async def get_my_profile(
-        self,
-        sections: set[str],
-        callbacks: ProgressCallback | None = None,
-    ) -> dict[str, Any]:
-        """Scrape the logged-in user's own profile via /in/me/ redirect.
-
-        Uses _resolve_my_username() to get the authenticated user's
-        username, then delegates to scrape_person.
-
-        Returns:
-            {url, sections: {name: text}, my_username: str}
-        """
-        my_username = await self._resolve_my_username()
-        result = await self.scrape_person(my_username, sections, callbacks=callbacks)
-        result["my_username"] = my_username
-        return result
     async def _extract_job_ids(self) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
 
