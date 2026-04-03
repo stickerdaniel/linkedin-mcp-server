@@ -750,11 +750,6 @@ class TestProfileEditTool:
 
     async def _run_edit_tool(self, mock_context, tool_name, extractor_method, **kwargs):
         """Helper: register profile_edit tools, call a tool, assert extractor called."""
-        result = {
-            "url": "https://www.linkedin.com/in/me/",
-            "status": "saved",
-            "fields_filled": ["Title"],
-        }
         mock_extractor = _make_mock_extractor({})
 
         from linkedin_mcp_server.tools.profile_edit import register_profile_edit_tools
