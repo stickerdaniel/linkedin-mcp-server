@@ -1923,11 +1923,22 @@ class LinkedInExtractor:
             if await self._fill_field_by_label("Headline", headline):
                 fields_updated.append("headline")
         if location is not None:
-            if (
-                await self._fill_field_by_label("Country/Region", location)
-                or await self._fill_field_by_label("City", location)
-                or await self._fill_field_by_label("Location", location)
-            ):
+            # Try City first (plain text input) — fills directly without typeahead.
+            # Country/Region is a typeahead; trying it first would short-circuit City
+            # and silently fail since LinkedIn ignores unconfirmed typeahead values.
+            if await self._fill_field_by_label("City", location):
+                fields_updated.append("location")
+            elif await self._fill_field_by_label("Country/Region", location):
+                # Country/Region requires selecting from typeahead suggestions
+                await asyncio.sleep(1.0)
+                typeahead = self._page.locator(
+                    '[role="listbox"] [role="option"], [role="listbox"] li'
+                )
+                if await typeahead.count() > 0:
+                    await typeahead.first.click()
+                    await asyncio.sleep(0.5)
+                    fields_updated.append("location")
+            elif await self._fill_field_by_label("Location", location):
                 fields_updated.append("location")
         if industry is not None:
             if await self._fill_field_by_label("Industry", industry):
