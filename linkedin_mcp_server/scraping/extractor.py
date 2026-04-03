@@ -2207,9 +2207,8 @@ class LinkedInExtractor:
         await asyncio.sleep(1.0)
 
         # Fill the skill name field
+        # Note: _fill_field_by_label is case-insensitive so one call is sufficient
         filled = await self._fill_field_by_label("Skill", skill_name)
-        if not filled:
-            filled = await self._fill_field_by_label("skill", skill_name)
         if not filled:
             # Try the first input in the dialog
             input_el = self._page.locator('dialog input, [role="dialog"] input').first
