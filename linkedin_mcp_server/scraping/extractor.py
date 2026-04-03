@@ -2137,11 +2137,11 @@ class LinkedInExtractor:
         if start_month:
             dropdowns["Start date month"] = start_month
         if start_year:
-            fields["Start date year"] = start_year
+            dropdowns["Start date year"] = start_year
         if end_month:
             dropdowns["End date month"] = end_month
         if end_year:
-            fields["End date year"] = end_year
+            dropdowns["End date year"] = end_year
         if employment_type:
             dropdowns["Employment type"] = employment_type
 
@@ -2166,14 +2166,15 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Add a new education entry to the profile."""
         fields: dict[str, str] = {"School": school}
+        dropdowns: dict[str, str] = {}
         if degree:
             fields["Degree"] = degree
         if field_of_study:
             fields["Field of study"] = field_of_study
         if start_year:
-            fields["Start date year"] = start_year
+            dropdowns["Start date year"] = start_year
         if end_year:
-            fields["End date year"] = end_year
+            dropdowns["End date year"] = end_year
         if grade:
             fields["Grade"] = grade
         if activities:
@@ -2182,7 +2183,7 @@ class LinkedInExtractor:
             fields["Description"] = description
 
         return await self._edit_profile_section_entry(
-            "EDUCATION", fields=fields, required_fields={"School"}
+            "EDUCATION", fields=fields, dropdowns=dropdowns, required_fields={"School"}
         )
 
     async def add_skill(self, skill_name: str) -> dict[str, Any]:
@@ -2270,11 +2271,11 @@ class LinkedInExtractor:
         if issue_month:
             dropdowns["Issue date month"] = issue_month
         if issue_year:
-            fields["Issue date year"] = issue_year
+            dropdowns["Issue date year"] = issue_year
         if expiration_month:
             dropdowns["Expiration date month"] = expiration_month
         if expiration_year:
-            fields["Expiration date year"] = expiration_year
+            dropdowns["Expiration date year"] = expiration_year
 
         return await self._edit_profile_section_entry(
             "CERTIFICATIONS",
@@ -2305,11 +2306,11 @@ class LinkedInExtractor:
         if start_month:
             dropdowns["Start date month"] = start_month
         if start_year:
-            fields["Start date year"] = start_year
+            dropdowns["Start date year"] = start_year
         if end_month:
             dropdowns["End date month"] = end_month
         if end_year:
-            fields["End date year"] = end_year
+            dropdowns["End date year"] = end_year
 
         return await self._edit_profile_section_entry(
             "VOLUNTEERING_EXPERIENCE",
@@ -2339,11 +2340,11 @@ class LinkedInExtractor:
         if start_month:
             dropdowns["Start date month"] = start_month
         if start_year:
-            fields["Start date year"] = start_year
+            dropdowns["Start date year"] = start_year
         if end_month:
             dropdowns["End date month"] = end_month
         if end_year:
-            fields["End date year"] = end_year
+            dropdowns["End date year"] = end_year
 
         return await self._edit_profile_section_entry(
             "PROJECTS",
@@ -2374,7 +2375,7 @@ class LinkedInExtractor:
         if publication_date_month:
             dropdowns["Publication date month"] = publication_date_month
         if publication_date_year:
-            fields["Publication date year"] = publication_date_year
+            dropdowns["Publication date year"] = publication_date_year
 
         return await self._edit_profile_section_entry(
             "PUBLICATIONS",
@@ -2413,18 +2414,65 @@ class LinkedInExtractor:
         name: str,
         proficiency: str | None = None,
     ) -> dict[str, Any]:
-        """Add a language to the profile."""
-        fields: dict[str, str] = {"Name": name}
-        dropdowns: dict[str, str] = {}
-        if proficiency:
-            dropdowns["Proficiency"] = proficiency
+        """Add a language to the profile.
 
-        return await self._edit_profile_section_entry(
-            "LANGUAGES",
-            fields=fields,
-            dropdowns=dropdowns,
-            required_fields={"Name"},
+        LinkedIn's language name field is an autocomplete — must select from
+        the suggestions list for the value to persist (same pattern as add_skill).
+        """
+        username = await self._resolve_my_username()
+        url = f"https://www.linkedin.com/in/{username}/overlay/create/new/?profileFormEntryPoint=PROFILE_SECTION&profileSectionId=LANGUAGES"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector(
+                "dialog[open], [role='dialog'], main form", timeout=10000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Add language form did not open.",
+            }
+
+        await asyncio.sleep(1.0)
+
+        # Fill the language name autocomplete and select from suggestions
+        filled = await self._fill_field_by_label("Language", name)
+        if not filled:
+            filled = await self._fill_field_by_label("Name", name)
+        if not filled:
+            return {
+                "url": url,
+                "status": "edit_failed",
+                "message": "Could not fill the language name field.",
+            }
+
+        # Language name requires typeahead selection — same as Skills and Industry
+        await asyncio.sleep(1.0)
+        typeahead = self._page.locator(
+            '[role="listbox"] [role="option"], [role="listbox"] li'
         )
+        if await typeahead.count() > 0:
+            await typeahead.first.click()
+            await asyncio.sleep(0.5)
+        else:
+            logger.debug("No typeahead suggestions for language %r", name)
+
+        # Select proficiency level if provided
+        if proficiency:
+            await self._select_dropdown_by_label("Proficiency", proficiency)
+
+        saved = await self._click_save_in_dialog()
+        await asyncio.sleep(1.0)
+
+        return {
+            "url": url,
+            "status": "saved" if saved else "save_failed",
+            "message": f"Language '{name}' added."
+            if saved
+            else "Could not save the language.",
+        }
 
     async def add_honor(
         self,
@@ -2445,7 +2493,7 @@ class LinkedInExtractor:
         if issue_month:
             dropdowns["Issue date month"] = issue_month
         if issue_year:
-            fields["Issue date year"] = issue_year
+            dropdowns["Issue date year"] = issue_year
 
         return await self._edit_profile_section_entry(
             "HONORS",
