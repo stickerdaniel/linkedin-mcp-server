@@ -733,27 +733,27 @@ class TestDetectConnectionState:
 
     def test_already_connected(self):
         text = "Collin Pfeifer\n\n· 1st\n\nAI Engineer\n\nMessage\nMore"
-        assert detect_connection_state(text) == "already_connected"
+        assert detect_connection_state(text) == ("already_connected", False)
 
     def test_pending(self):
         text = "Marinus Prey\n\n· 2nd\n\nStudent\n\nMessage\nPending\nMore"
-        assert detect_connection_state(text) == "pending"
+        assert detect_connection_state(text) == ("pending", False)
 
     def test_incoming_request(self):
         text = "Aklasur Rahman\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore"
-        assert detect_connection_state(text) == "incoming_request"
+        assert detect_connection_state(text) == ("incoming_request", False)
 
     def test_connectable(self):
         text = "Jane Doe\n\n· 3rd\n\nEngineer\n\nConnect\nMore"
-        assert detect_connection_state(text) == "connectable"
+        assert detect_connection_state(text) == ("connectable", False)
 
     def test_follow_only(self):
         text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMore"
-        assert detect_connection_state(text) == "follow_only"
+        assert detect_connection_state(text) == ("follow_only", False)
 
     def test_unavailable(self):
         text = "Unknown Person\n\nSome text here"
-        assert detect_connection_state(text) == "unavailable"
+        assert detect_connection_state(text) == ("unavailable", False)
 
     def test_follow_in_interests_not_matched(self):
         """Follow in the Interests section should not cause a false positive."""
@@ -762,7 +762,31 @@ class TestDetectConnectionState:
             "About\n\nSome bio\n\nInterests\n\n"
             "Elon Musk\n101,000 followers\nFollow"
         )
-        assert detect_connection_state(text) == "connectable"
+        assert detect_connection_state(text) == ("connectable", False)
+
+    # --- French locale tests ---
+
+    def test_already_connected_fr(self):
+        text = "Laurent Delade\n\n· 1er\n\nChannel Account Manager\n\nMessage\nPlus"
+        assert detect_connection_state(text) == ("already_connected", False)
+
+    def test_connectable_fr(self):
+        text = "Laurent Delade\n\n· 2e\n\nChannel Account Manager\n\nSe connecter\nEnregistrer\nPlus"
+        assert detect_connection_state(text) == ("connectable", True)
+
+    def test_follow_only_fr(self):
+        text = "Dragan Radulović\n\n· 3e\n\nPresident\n\nSuivre\nEnregistrer\nPlus"
+        assert detect_connection_state(text) == ("follow_only", True)
+
+    def test_pending_fr(self):
+        text = "Jane Doe\n\n· 2e\n\nEngineer\n\nEn attente\nPlus"
+        assert detect_connection_state(text) == ("pending", True)
+
+    def test_action_area_cuts_at_french_headings(self):
+        text = "Name\n\nSe connecter\nPlus\nInfos\n\nSuivre\nSe connecter"
+        area = _extract_action_area(text)
+        assert "Infos" not in area
+        assert "Se connecter" in area
 
     def test_action_area_cuts_at_about(self):
         text = "Name\n\nConnect\nMore\nAbout\n\nFollow\nConnect"

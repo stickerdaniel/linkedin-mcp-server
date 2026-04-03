@@ -536,7 +536,10 @@ class LinkedInExtractor:
         and ``[role="menu"]`` to detect the opened menu (structural).
         Returns True if the menu opened and contains a Connect option.
         """
-        more_btn = self._page.locator("main button[aria-label*='More']")
+        # aria-label varies by locale: "More" (en), "Plus" (fr)
+        more_btn = self._page.locator(
+            "main button[aria-label*='More'], main button[aria-label*='Plus']"
+        )
         try:
             if await more_btn.count() == 0:
                 return False
@@ -551,11 +554,11 @@ class LinkedInExtractor:
             logger.debug("More menu did not appear")
             return False
 
-        # Check if Connect is in the menu
+        # Check if Connect / Se connecter is in the menu
         menu_connect = (
             self._page.locator("[role='menu']")
             .locator("button, a, li, [role='menuitem'], [role='button']")
-            .filter(has_text=re.compile(r"^Connect$"))
+            .filter(has_text=re.compile(r"^(?:Connect|Se connecter)$"))
         )
         count = await menu_connect.count()
         logger.debug("More menu Connect matches: %d", count)
@@ -944,6 +947,7 @@ class LinkedInExtractor:
         """
         from linkedin_mcp_server.scraping.connection import (
             STATE_BUTTON_MAP,
+            STATE_BUTTON_MAP_FR,
             detect_connection_state,
         )
 
@@ -958,8 +962,8 @@ class LinkedInExtractor:
             )
 
         # Detect state from the scraped text
-        state = detect_connection_state(page_text)
-        logger.info("Connection state for %s: %s", username, state)
+        state, is_french = detect_connection_state(page_text)
+        logger.info("Connection state for %s: %s (fr=%s)", username, state, is_french)
 
         if state == "already_connected":
             return _connection_result(
@@ -998,7 +1002,8 @@ class LinkedInExtractor:
             )
 
         # state is "connectable" or "incoming_request"
-        button_text = STATE_BUTTON_MAP.get(state)
+        btn_map = STATE_BUTTON_MAP_FR if is_french else STATE_BUTTON_MAP
+        button_text = btn_map.get(state)
         if not button_text:
             return _connection_result(
                 url,
