@@ -1931,6 +1931,15 @@ class LinkedInExtractor:
                 fields_updated.append("location")
         if industry is not None:
             if await self._fill_field_by_label("Industry", industry):
+                # Industry is a custom autocomplete — must select from the suggestions
+                # list so LinkedIn registers the value; DOM value alone is ignored on save
+                await asyncio.sleep(1.0)
+                typeahead = self._page.locator(
+                    '[role="listbox"] [role="option"], [role="listbox"] li'
+                )
+                if await typeahead.count() > 0:
+                    await typeahead.first.click()
+                    await asyncio.sleep(0.5)
                 fields_updated.append("industry")
 
         if not fields_updated:
@@ -1972,19 +1981,21 @@ class LinkedInExtractor:
 
         await asyncio.sleep(1.0)
 
-        # The About section uses a textarea
-        textarea = self._page.locator(
+        # LinkedIn's About editor is a contenteditable div, not a native textarea.
+        # Include textarea as fallback for resilience.
+        editor = self._page.locator(
+            'dialog [contenteditable="true"], [role="dialog"] [contenteditable="true"], '
             'dialog textarea, [role="dialog"] textarea, main textarea'
         ).first
         try:
-            await textarea.wait_for(state="visible", timeout=5000)
-            await textarea.click()
-            await textarea.fill(about_text)
+            await editor.wait_for(state="visible", timeout=5000)
+            await editor.click()
+            await editor.fill(about_text)
         except Exception:
             return {
                 "url": url,
                 "status": "edit_failed",
-                "message": "Could not locate the About text area.",
+                "message": "Could not locate the About editor (contenteditable or textarea).",
             }
 
         saved = await self._click_save_in_dialog()
@@ -2359,12 +2370,17 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Add a course to the profile."""
         fields: dict[str, str] = {"Course name": name}
+        dropdowns: dict[str, str] = {}
         if number:
             fields["Number"] = number
         if associated_with:
-            fields["Associated with"] = associated_with
+            # "Associated with" is a <select> of existing education entries;
+            # route through _select_dropdown_by_label which searches by option text
+            dropdowns["Associated with"] = associated_with
 
-        return await self._edit_profile_section_entry("COURSES", fields=fields)
+        return await self._edit_profile_section_entry(
+            "COURSES", fields=fields, dropdowns=dropdowns
+        )
 
     async def add_language(
         self,
