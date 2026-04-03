@@ -20,6 +20,7 @@ from linkedin_mcp_server.scraping.extractor import (
     _truncate_linkedin_noise,
     strip_linkedin_noise,
 )
+from linkedin_mcp_server.scraping.fields import PERSON_SECTIONS
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
 
@@ -654,10 +655,6 @@ class TestScrapePersonUrls:
 
     async def test_all_sections_visit_all_urls(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        from linkedin_mcp_server.scraping.fields import (
-            PERSON_SECTIONS,
-        )
-
         all_sections = set(PERSON_SECTIONS)
         with (
             patch.object(
