@@ -1890,8 +1890,9 @@ class LinkedInExtractor:
                         [...dialog.querySelectorAll('input[type="radio"][required]')].map(r => r.name)
                     );
                     for (const name of radioNames) {
-                        // Escape CSS-special chars before interpolating into selector
-                        const escaped = name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                        // Escape CSS-special chars before interpolating into selector.
+                        // Four Python backslashes → two in the string → JS sees /\\/g (match backslash)
+                        const escaped = name.replace(/\\\\/g, '\\\\\\\\').replace(/"/g, '\\"');
                         if (!dialog.querySelector(`input[type="radio"][name="${escaped}"]:checked`)) {
                             fields.push(name || 'unknown radio group');
                         }
@@ -1926,10 +1927,16 @@ class LinkedInExtractor:
                         return d ? d.innerText : '';
                     }"""
                 )
-                page_text = await self.get_page_text()
-                combined = (dialog_text or "") + " " + page_text
+                # Prefer dialog_text as the confirmation signal — it contains
+                # LinkedIn's explicit "Application sent" screen before auto-closing.
+                # Fall back to page_text only when the dialog has already closed.
+                # Use multi-word phrases to avoid matching job titles like
+                # "Applied Machine Learning Engineer" in the page body.
+                confirmation_text = dialog_text or await self.get_page_text()
                 if re.search(
-                    r"application.*sent|applied|submitted", combined, re.IGNORECASE
+                    r"application.*sent|your application was submitted|successfully applied",
+                    confirmation_text,
+                    re.IGNORECASE,
                 ):
                     return {
                         "url": url,
