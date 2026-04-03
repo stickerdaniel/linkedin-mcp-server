@@ -214,6 +214,7 @@ class LinkedInExtractor:
 
     def __init__(self, page: Page):
         self._page = page
+        self._my_username_cache: str | None = None
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -2023,7 +2024,7 @@ class LinkedInExtractor:
 
     async def _resolve_my_username(self) -> str:
         """Navigate to /in/me/ and return the logged-in user's username (cached)."""
-        if getattr(self, "_my_username_cache", None):
+        if self._my_username_cache:
             return self._my_username_cache
         await self._navigate_to_page("https://www.linkedin.com/in/me/")
         match = re.search(r"/in/([^/?#]+)", self._page.url)
@@ -2031,7 +2032,7 @@ class LinkedInExtractor:
             raise LinkedInScraperException(
                 f"Could not resolve own profile username from {self._page.url}"
             )
-        self._my_username_cache: str = match.group(1)
+        self._my_username_cache = match.group(1)
         return self._my_username_cache
 
     async def _edit_profile_section_entry(
@@ -2345,7 +2346,10 @@ class LinkedInExtractor:
             fields["End date year"] = end_year
 
         return await self._edit_profile_section_entry(
-            "PROJECTS", fields=fields, dropdowns=dropdowns
+            "PROJECTS",
+            fields=fields,
+            dropdowns=dropdowns,
+            required_fields={"Name"},
         )
 
     async def add_publication(
@@ -2373,7 +2377,10 @@ class LinkedInExtractor:
             fields["Publication date year"] = publication_date_year
 
         return await self._edit_profile_section_entry(
-            "PUBLICATIONS", fields=fields, dropdowns=dropdowns
+            "PUBLICATIONS",
+            fields=fields,
+            dropdowns=dropdowns,
+            required_fields={"Title"},
         )
 
     async def add_course(
@@ -2394,7 +2401,10 @@ class LinkedInExtractor:
             dropdowns["Associated with"] = associated_with
 
         return await self._edit_profile_section_entry(
-            "COURSES", fields=fields, dropdowns=dropdowns
+            "COURSES",
+            fields=fields,
+            dropdowns=dropdowns,
+            required_fields={"Course name"},
         )
 
     async def add_language(
@@ -2410,7 +2420,10 @@ class LinkedInExtractor:
             dropdowns["Proficiency"] = proficiency
 
         return await self._edit_profile_section_entry(
-            "LANGUAGES", fields=fields, dropdowns=dropdowns
+            "LANGUAGES",
+            fields=fields,
+            dropdowns=dropdowns,
+            required_fields={"Name"},
         )
 
     async def add_honor(
@@ -2435,7 +2448,10 @@ class LinkedInExtractor:
             fields["Issue date year"] = issue_year
 
         return await self._edit_profile_section_entry(
-            "HONORS", fields=fields, dropdowns=dropdowns
+            "HONORS",
+            fields=fields,
+            dropdowns=dropdowns,
+            required_fields={"Title"},
         )
 
     async def _extract_job_ids(self) -> list[str]:
