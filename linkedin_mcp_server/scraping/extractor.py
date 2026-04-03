@@ -1877,6 +1877,7 @@ class LinkedInExtractor:
                         'input[aria-required="true"], select[aria-required="true"], textarea[aria-required="true"]';
                     for (const input of dialog.querySelectorAll(reqSel)) {
                         if (input.type === 'radio') continue; // handled separately below
+                        if (input.type === 'file') continue; // file.value is always '' in browsers
                         if (!input.value || input.value.trim() === '') {
                             const label = input.closest('label')?.innerText
                                 || input.getAttribute('aria-label')
@@ -1946,6 +1947,8 @@ class LinkedInExtractor:
                         "message": "Application submitted successfully.",
                         "job_id": job_id,
                     }
+                if await self._dialog_is_open():
+                    await self._dismiss_dialog()
                 return {
                     "url": url,
                     "status": "applied_unconfirmed",
