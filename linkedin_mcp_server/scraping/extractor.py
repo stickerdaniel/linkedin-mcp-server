@@ -1932,7 +1932,8 @@ class LinkedInExtractor:
         if industry is not None:
             if await self._fill_field_by_label("Industry", industry):
                 # Industry is a custom autocomplete — must select from the suggestions
-                # list so LinkedIn registers the value; DOM value alone is ignored on save
+                # list so LinkedIn registers the value; DOM value alone is ignored on save.
+                # Only count it as updated when a suggestion was actually selected.
                 await asyncio.sleep(1.0)
                 typeahead = self._page.locator(
                     '[role="listbox"] [role="option"], [role="listbox"] li'
@@ -1940,7 +1941,7 @@ class LinkedInExtractor:
                 if await typeahead.count() > 0:
                     await typeahead.first.click()
                     await asyncio.sleep(0.5)
-                fields_updated.append("industry")
+                    fields_updated.append("industry")
 
         if not fields_updated:
             return {
@@ -2299,7 +2300,10 @@ class LinkedInExtractor:
             fields["End date year"] = end_year
 
         return await self._edit_profile_section_entry(
-            "VOLUNTEERING_EXPERIENCE", fields=fields, dropdowns=dropdowns
+            "VOLUNTEERING_EXPERIENCE",
+            fields=fields,
+            dropdowns=dropdowns,
+            required_fields={"Organization", "Role"},
         )
 
     async def add_project(
