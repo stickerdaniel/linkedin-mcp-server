@@ -546,9 +546,9 @@ class LinkedInExtractor:
         more_selectors = [
             "main button[aria-label*='More']",
             "main button:text-is('More')",
-            # Last-resort fallback: intentionally drops main scope in case the
-            # button is rendered outside the profile content area by LinkedIn's SPA
-            "button[aria-label*='More']",
+            # Fallback: scoped to section elements to avoid matching nav/overlay
+            # "More options" buttons that exist outside the profile card
+            "section button[aria-label*='More']",
         ]
 
         more_btn = None
