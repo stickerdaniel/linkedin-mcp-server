@@ -1992,9 +1992,12 @@ class LinkedInExtractor:
             if dialog_closed_early
             else "Application process exceeded maximum steps. It may require manual completion."
         )
+        # dialog_closed_early means ambiguous outcome — applied_unconfirmed is
+        # more accurate than apply_failed which implies definitive failure
+        status = "applied_unconfirmed" if dialog_closed_early else "apply_failed"
         return {
             "url": url,
-            "status": "apply_failed",
+            "status": status,
             "message": message,
             "job_id": job_id,
         }
