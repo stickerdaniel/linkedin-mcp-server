@@ -2938,13 +2938,17 @@ class LinkedInExtractor:
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
         if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references
+        elif extracted.error:
+            section_errors["search_results"] = extracted.error
 
-        return {
-            "url": url,
-            "sections": sections,
-            "references": references if references else {},
-        }
+        result: dict[str, Any] = {"url": url, "sections": sections}
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
