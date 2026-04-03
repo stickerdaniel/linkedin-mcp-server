@@ -1846,10 +1846,11 @@ class LinkedInExtractor:
             await asyncio.sleep(1.0)
 
             if not await self._dialog_is_open(timeout=3000):
-                # Dialog closed — check if application was actually submitted
+                # Dialog closed — use multi-word phrases to avoid false positives
+                # from job titles like "Applied Machine Learning Engineer"
                 page_text = await self.get_page_text()
                 if re.search(
-                    r"application.*sent|applied|submitted",
+                    r"application.*sent|your application was submitted|successfully applied",
                     page_text,
                     re.IGNORECASE,
                 ):
@@ -1861,6 +1862,54 @@ class LinkedInExtractor:
                     }
                 dialog_closed_early = True
                 break
+
+            # Check required fields BEFORE any button click, including Submit.
+            # EEO/disclosure questions can appear on the final page alongside Submit;
+            # checking here ensures requires_input fires instead of applied_unconfirmed.
+            required_empty = await self._page.evaluate(
+                """() => {
+                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                    if (!dialog) return [];
+                    const fields = [];
+
+                    // Check text/select/textarea required fields
+                    for (const input of dialog.querySelectorAll('input[required], select[required], textarea[required]')) {
+                        if (input.type === 'radio') continue; // handled separately below
+                        if (!input.value || input.value.trim() === '') {
+                            const label = input.closest('label')?.innerText
+                                || input.getAttribute('aria-label')
+                                || input.getAttribute('placeholder')
+                                || input.name
+                                || 'unknown field';
+                            fields.push(label.replace(/\\n.*/s, '').trim());
+                        }
+                    }
+
+                    // Check required radio groups at the group level
+                    const radioNames = new Set(
+                        [...dialog.querySelectorAll('input[type="radio"][required]')].map(r => r.name)
+                    );
+                    for (const name of radioNames) {
+                        // Escape CSS-special chars before interpolating into selector
+                        const escaped = name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                        if (!dialog.querySelector(`input[type="radio"][name="${escaped}"]:checked`)) {
+                            fields.push(name || 'unknown radio group');
+                        }
+                    }
+
+                    return fields;
+                }"""
+            )
+
+            if required_empty:
+                await self._dismiss_dialog()
+                return {
+                    "url": url,
+                    "status": "requires_input",
+                    "message": f"Application requires manual input for: {', '.join(required_empty)}",
+                    "job_id": job_id,
+                    "missing_fields": required_empty,
+                }
 
             # Look for a Submit button (final step)
             submit_btn = self._page.locator(f"{_DIALOG_SELECTOR} button").filter(
@@ -1893,52 +1942,6 @@ class LinkedInExtractor:
                     "status": "applied_unconfirmed",
                     "message": "Submit button clicked but confirmation could not be verified. Check your applications to confirm.",
                     "job_id": job_id,
-                }
-
-            # Check required fields BEFORE clicking navigation buttons.
-            # LinkedIn always renders Next even when required fields are unfilled,
-            # so checking last makes requires_input unreachable in practice.
-            required_empty = await self._page.evaluate(
-                """() => {
-                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
-                    if (!dialog) return [];
-                    const fields = [];
-
-                    // Check text/select/textarea required fields
-                    for (const input of dialog.querySelectorAll('input[required], select[required], textarea[required]')) {
-                        if (input.type === 'radio') continue; // handled separately below
-                        if (!input.value || input.value.trim() === '') {
-                            const label = input.closest('label')?.innerText
-                                || input.getAttribute('aria-label')
-                                || input.getAttribute('placeholder')
-                                || input.name
-                                || 'unknown field';
-                            fields.push(label.replace(/\\n.*/s, '').trim());
-                        }
-                    }
-
-                    // Check required radio groups at the group level
-                    const radioNames = new Set(
-                        [...dialog.querySelectorAll('input[type="radio"][required]')].map(r => r.name)
-                    );
-                    for (const name of radioNames) {
-                        if (!dialog.querySelector(`input[type="radio"][name="${name}"]:checked`)) {
-                            fields.push(name || 'unknown radio group');
-                        }
-                    }
-
-                    return fields;
-                }"""
-            )
-
-            if required_empty:
-                await self._dismiss_dialog()
-                return {
-                    "url": url,
-                    "status": "requires_input",
-                    "message": f"Application requires manual input for: {', '.join(required_empty)}",
-                    "job_id": job_id,
-                    "missing_fields": required_empty,
                 }
 
             # Look for Review button (penultimate step)
