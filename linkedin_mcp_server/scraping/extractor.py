@@ -1872,8 +1872,10 @@ class LinkedInExtractor:
                     if (!dialog) return [];
                     const fields = [];
 
-                    // Check text/select/textarea required fields
-                    for (const input of dialog.querySelectorAll('input[required], select[required], textarea[required]')) {
+                    // Check text/select/textarea required fields (HTML5 required + ARIA)
+                    const reqSel = 'input[required], select[required], textarea[required], ' +
+                        'input[aria-required="true"], select[aria-required="true"], textarea[aria-required="true"]';
+                    for (const input of dialog.querySelectorAll(reqSel)) {
                         if (input.type === 'radio') continue; // handled separately below
                         if (!input.value || input.value.trim() === '') {
                             const label = input.closest('label')?.innerText
@@ -1885,9 +1887,9 @@ class LinkedInExtractor:
                         }
                     }
 
-                    // Check required radio groups at the group level
+                    // Check required radio groups at the group level (HTML5 + ARIA)
                     const radioNames = new Set(
-                        [...dialog.querySelectorAll('input[type="radio"][required]')].map(r => r.name)
+                        [...dialog.querySelectorAll('input[type="radio"][required], input[type="radio"][aria-required="true"]')].map(r => r.name)
                     );
                     for (const name of radioNames) {
                         // Escape CSS-special chars before interpolating into selector.
@@ -2053,11 +2055,9 @@ class LinkedInExtractor:
         await save_btn.first.click()
         await asyncio.sleep(1.0)
 
-        # Verify the save took effect
-        saved_btn = self._page.locator("button").filter(
-            has_text=re.compile(r"^Saved$", re.IGNORECASE)
-        )
-        if await saved_btn.count() > 0 or await unsave_btn.count() > 0:
+        # Verify the save took effect — unsave_btn matches both "Saved" and "Unsave"
+        # so checking it alone covers all post-save states
+        if await unsave_btn.count() > 0:
             return {
                 "url": url,
                 "status": "saved",
