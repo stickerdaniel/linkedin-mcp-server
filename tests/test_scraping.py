@@ -655,7 +655,6 @@ class TestScrapePersonUrls:
     async def test_all_sections_visit_all_urls(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         from linkedin_mcp_server.scraping.fields import (
-            ALL_PERSON_SECTION_NAMES,
             PERSON_SECTIONS,
         )
 
