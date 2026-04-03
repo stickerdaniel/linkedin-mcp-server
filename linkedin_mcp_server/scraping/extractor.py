@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import logging
 import re
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
-from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, urljoin, urlparse
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -265,6 +265,7 @@ def _parse_contact_record(
             ("email", "Email"),
             ("phone", "Phone"),
             ("birthday", "Birthday"),
+            ("website", "Website"),
         ]:
             match = re.search(
                 rf"(?:^|\n){re.escape(label)}\s*\n\s*\n\s*(.+)",
@@ -272,10 +273,6 @@ def _parse_contact_record(
             )
             if match:
                 result[field] = match.group(1).strip()
-
-        match = re.search(r"(?:^|\n)Website\s*\n\s*\n\s*(.+)", contact_text)
-        if match:
-            result["website"] = match.group(1).strip()
 
     return result
 
@@ -2858,7 +2855,7 @@ class LinkedInExtractor:
         Navigates to the company page and extracts the entity URN from
         the page's metadata. Returns None if the ID cannot be resolved.
         """
-        company_url = f"https://www.linkedin.com/company/{quote_plus(company)}/"
+        company_url = f"https://www.linkedin.com/company/{quote(company, safe='-')}/"
         try:
             await self._navigate_to_page(company_url)
             await detect_rate_limit(self._page)

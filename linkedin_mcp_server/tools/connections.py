@@ -158,7 +158,7 @@ def register_connections_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "extract_contact_details")
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=TOOL_TIMEOUT_SECONDS * 2,
         title="Get Connections at Company",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"connections", "search"},

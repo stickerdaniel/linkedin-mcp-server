@@ -35,6 +35,25 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
+    mock.scrape_connections_list = AsyncMock(
+        return_value={
+            "connections": [
+                {"username": "johndoe", "name": "John", "headline": "Engineer"}
+            ],
+            "total": 1,
+            "url": "https://www.linkedin.com/mynetwork/invite-connect/connections/",
+        }
+    )
+    mock.scrape_contact_batch = AsyncMock(
+        return_value={
+            "contacts": [{"username": "johndoe", "email": "john@example.com"}],
+            "total": 1,
+            "failed": [],
+            "rate_limited": False,
+        }
+    )
+    mock.search_connections_at_company = AsyncMock(return_value=scrape_result)
+    mock.get_notifications = AsyncMock(return_value=scrape_result)
     return mock
 
 
@@ -728,3 +747,70 @@ class TestToolTimeouts:
             tool = await mcp.get_tool(name)
             assert tool is not None
             assert tool.timeout == TOOL_TIMEOUT_SECONDS
+
+
+class TestConnectionsTool:
+    async def test_get_my_connections(self, mock_context):
+        mock_extractor = _make_mock_extractor({})
+
+        from linkedin_mcp_server.tools.connections import register_connections_tools
+
+        mcp = FastMCP("test")
+        register_connections_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_my_connections")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result["total"] == 1
+        assert result["connections"][0]["username"] == "johndoe"
+        mock_extractor.scrape_connections_list.assert_awaited_once()
+
+    async def test_extract_contact_details(self, mock_context):
+        mock_extractor = _make_mock_extractor({})
+
+        from linkedin_mcp_server.tools.connections import register_connections_tools
+
+        mcp = FastMCP("test")
+        register_connections_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "extract_contact_details")
+        result = await tool_fn(
+            "johndoe,janedoe", mock_context, extractor=mock_extractor
+        )
+        assert result["total"] == 1
+        mock_extractor.scrape_contact_batch.assert_awaited_once()
+
+    async def test_get_connections_at_company(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/search/results/people/?network=%5B%22F%22%5D",
+            "sections": {"search_results": "Jane Doe at Google"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.connections import register_connections_tools
+
+        mcp = FastMCP("test")
+        register_connections_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_connections_at_company")
+        result = await tool_fn("Google", mock_context, extractor=mock_extractor)
+        assert "search_results" in result["sections"]
+        mock_extractor.search_connections_at_company.assert_awaited_once_with(
+            "Google", keywords=None
+        )
+
+    async def test_get_notifications(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/notifications/",
+            "sections": {"notifications": "John accepted your connection request"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.connections import register_connections_tools
+
+        mcp = FastMCP("test")
+        register_connections_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_notifications")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert "notifications" in result["sections"]
+        mock_extractor.get_notifications.assert_awaited_once()
