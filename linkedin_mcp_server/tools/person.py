@@ -95,6 +95,12 @@ def register_person_tools(mcp: FastMCP) -> None:
         keywords: str,
         ctx: Context,
         location: str | None = None,
+        current_company: str | None = None,
+        past_company: str | None = None,
+        school: str | None = None,
+        title: str | None = None,
+        network: str | None = None,
+        industry: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -104,6 +110,20 @@ def register_person_tools(mcp: FastMCP) -> None:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
             ctx: FastMCP context for progress reporting
             location: Optional location filter (e.g., "New York", "Remote")
+            current_company: LinkedIn company ID(s) to filter by current employer.
+                Comma-separated for multiple (e.g., "103334640" or "103334640,162479").
+                Get company IDs from get_company_profile references or job posting URLs.
+            past_company: LinkedIn company ID(s) to filter by past employer.
+                Same format as current_company.
+            school: LinkedIn school ID(s) to filter by education.
+                Comma-separated for multiple (e.g., "1790" for Stanford).
+                Get school IDs from get_person_profile education references.
+            title: Free-text title filter (e.g., "product manager", "VP engineering").
+                More reliable than putting titles in keywords.
+            network: Connection degree filter. Accepts "first", "second", "third"
+                or comma-separated (e.g., "first,second").
+            industry: LinkedIn industry ID(s) to filter by industry.
+                Comma-separated for multiple.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -114,16 +134,27 @@ def register_person_tools(mcp: FastMCP) -> None:
                 ctx, tool_name="search_people"
             )
             logger.info(
-                "Searching people: keywords='%s', location='%s'",
+                "Searching people: keywords='%s', location='%s', company='%s', title='%s'",
                 keywords,
                 location,
+                current_company,
+                title,
             )
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting people search"
             )
 
-            result = await extractor.search_people(keywords, location)
+            result = await extractor.search_people(
+                keywords,
+                location=location,
+                current_company=current_company,
+                past_company=past_company,
+                school=school,
+                title=title,
+                network=network,
+                industry=industry,
+            )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
