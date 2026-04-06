@@ -661,6 +661,7 @@ class TestScrapePersonUrls:
             "interests",
             "honors",
             "languages",
+            "certifications",
             "contact_info",
             "posts",
         }
@@ -687,8 +688,8 @@ class TestScrapePersonUrls:
         page_urls = [call.args[0] for call in mock_extract.call_args_list]
         overlay_urls = [call.args[0] for call in mock_overlay.call_args_list]
         all_urls = page_urls + overlay_urls
-        # 7 full-page sections + 1 overlay (contact_info)
-        assert len(page_urls) == 7
+        # 8 full-page sections + 1 overlay (contact_info)
+        assert len(page_urls) == 8
         assert len(overlay_urls) == 1
         # Verify each expected suffix was navigated
         assert any(u.endswith("/in/testuser/") for u in all_urls)
@@ -697,6 +698,7 @@ class TestScrapePersonUrls:
         assert any("/details/interests/" in u for u in all_urls)
         assert any("/details/honors/" in u for u in all_urls)
         assert any("/details/languages/" in u for u in all_urls)
+        assert any("/details/certifications/" in u for u in all_urls)
         assert any("/overlay/contact-info/" in u for u in overlay_urls)
         assert any("/recent-activity/all/" in u for u in all_urls)
         assert set(result["sections"]) == all_sections
@@ -726,6 +728,32 @@ class TestScrapePersonUrls:
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/recent-activity/all/" in url for url in urls)
         assert "posts" in result["sections"]
+
+    async def test_certifications_visits_details_page(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Python for Data Science\nIBM"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("test-user", {"certifications"})
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert any("/details/certifications/" in url for url in urls)
+        assert "certifications" in result["sections"]
 
 
 class TestDetectConnectionState:
