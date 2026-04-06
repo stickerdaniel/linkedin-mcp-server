@@ -1,8 +1,9 @@
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastmcp import FastMCP
+from fastmcp.tools import FunctionTool
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.scraping.extractor import ExtractedSection, _RATE_LIMITED_MSG
@@ -15,7 +16,7 @@ async def get_tool_fn(
     tool = await mcp.get_tool(name)
     if tool is None:
         raise ValueError(f"Tool '{name}' not found")
-    return tool.fn  # type: ignore[attr-defined]
+    return cast(FunctionTool, tool).fn
 
 
 def _make_mock_extractor(scrape_result: dict) -> MagicMock:
