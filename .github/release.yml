@@ -1,0 +1,20 @@
+changelog:
+  exclude:
+    labels:
+      - dependencies
+      - chore
+      - skip-changelog
+    authors:
+      - renovate[bot]
+  categories:
+    - title: "🚀 Features"
+      labels:
+        - enhancement
+        - feature
+    - title: "🐛 Bug Fixes"
+      labels:
+        - bug
+        - fix
+    - title: "📖 Other Changes"
+      labels:
+        - "*"
