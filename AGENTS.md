@@ -80,7 +80,7 @@ After the workflow completes, file a PR in the MCP registry to update the versio
 Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or working on this repository.
 
 - Include the model used for code generation in PR descriptions (e.g. "Generated with Claude Opus 4.6")
-- Include a short prompt from the user messages that reproduces the PR diff. This tells the maintainer what was intended, which is often more useful than reviewing the full diff.
+- Write a short synthetic prompt that would reproduce the PR diff if given to a fresh Claude Code session. Don't copy the user's first message — distill the conversation into a single instruction that captures the full scope of changes. This tells the maintainer what was intended, which is often more useful than reviewing the full diff.
 - When implementing a new feature/fix:
   1. Check open issues. If no issue exists, create one following the templates in `.github/ISSUE_TEMPLATE/`. Fill in every section; delete optional sections if not applicable.
   2. Branch from `main`: `feature/issue-number-short-description`
