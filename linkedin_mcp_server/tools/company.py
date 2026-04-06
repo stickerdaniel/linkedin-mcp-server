@@ -133,7 +133,7 @@ def register_company_tools(mcp: FastMCP) -> None:
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            result = {
+            result: dict[str, Any] = {
                 "url": url,
                 "sections": sections,
             }
