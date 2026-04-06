@@ -74,7 +74,7 @@ def build_issue_diagnostics(
         "log_path": str(log_path) if log_path and log_path.exists() else None,
         "suggested_gist_command": gist_command,
     }
-    payload = {
+    payload: dict[str, Any] = {
         "created_at": timestamp,
         "context": context,
         "section_name": section_name,
