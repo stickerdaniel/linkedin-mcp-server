@@ -30,8 +30,11 @@ OUTPUT_DIR = Path(__file__).parent / "snapshot_dumps"
 
 # Targets using the same section strings as prod tool calls
 PERSON_TARGETS: list[tuple[str, str]] = [
-    ("williamhgates", "experience,education,interests,honors,languages,contact_info"),
-    ("anistji", "experience,education,honors,languages,contact_info"),
+    (
+        "williamhgates",
+        "experience,education,interests,honors,languages,certifications,contact_info",
+    ),
+    ("anistji", "experience,education,honors,languages,certifications,contact_info"),
 ]
 
 COMPANY_TARGETS: list[tuple[str, str]] = [
