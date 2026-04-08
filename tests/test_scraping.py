@@ -1709,7 +1709,14 @@ class TestSearchJobs:
 class TestScrapeSavedJobs:
     async def test_scrape_saved_jobs_single_page(self, mock_page):
         """Single page of results — no Next button. Progress callback fires."""
-        mock_page.evaluate = AsyncMock(return_value=["111", "222"])
+        async def evaluate_side_effect(js, *args):
+            if 'button[aria-label^="Page "]' in js:
+                return 1
+            if "jobs/view" in js:
+                return ["111", "222"]
+            return None
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
         mock_next = MagicMock()
         mock_next.count = AsyncMock(return_value=0)
         mock_page.locator = MagicMock(return_value=mock_next)
@@ -1725,14 +1732,21 @@ class TestScrapeSavedJobs:
 
         assert result["url"] == "https://www.linkedin.com/jobs-tracker/"
         assert "saved_jobs" in result["sections"]
-        assert result["sections_requested"] == ["saved_jobs"]
+        assert "sections_requested" not in result
         assert result["job_ids"] == ["111", "222"]
         assert "Job ID: 111" in result["sections"]["saved_jobs"]
         assert "Job ID: 222" in result["sections"]["saved_jobs"]
         on_progress.assert_awaited_once_with(1, 1, "Fetched saved jobs page 1")
 
     async def test_scrape_saved_jobs_passes_saved_jobs_section_name(self, mock_page):
-        mock_page.evaluate = AsyncMock(return_value=["111", "222"])
+        async def evaluate_side_effect(js, *args):
+            if 'button[aria-label^="Page "]' in js:
+                return 1
+            if "jobs/view" in js:
+                return ["111", "222"]
+            return None
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
         mock_next = MagicMock()
         mock_next.count = AsyncMock(return_value=0)
         mock_page.locator = MagicMock(return_value=mock_next)
@@ -1752,16 +1766,18 @@ class TestScrapeSavedJobs:
         )
 
     async def test_scrape_saved_jobs_paginates(self, mock_page):
-        """Clicks page buttons, collects IDs, fires progress, caps total_pages."""
+        """Clicks page buttons, collects IDs, and refreshes progress totals."""
         # Page 1 returns IDs 111, 222; page 2 returns 333, 444
         call_count = 0
 
         async def evaluate_side_effect(js, *args):
             nonlocal call_count
             call_count += 1
+            if 'button[aria-label^="Page "]' in js:
+                return 1 if call_count == 2 else 4
             if "jobs/view" in js:
                 # First call: page 1 IDs; second call: page 2 IDs
-                if call_count <= 2:
+                if call_count <= 3:
                     return ["111", "222"]
                 return ["333", "444"]
             if "innerText" in js:
@@ -1815,12 +1831,29 @@ class TestScrapeSavedJobs:
             assert f"Job ID: {jid}" in result["sections"]["saved_jobs"]
         # Progress was reported for both pages
         assert on_progress.await_count == 2
+        assert on_progress.await_args_list[0].args == (
+            1,
+            1,
+            "Fetched saved jobs page 1",
+        )
+        assert on_progress.await_args_list[1].args == (
+            2,
+            4,
+            "Fetched saved jobs page 2",
+        )
 
     async def test_scrape_saved_jobs_timeout_stops_gracefully(self, mock_page):
         """PlaywrightTimeoutError on page 2 returns page 1 results only."""
         from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-        mock_page.evaluate = AsyncMock(return_value=["111", "222"])
+        async def evaluate_side_effect(js, *args):
+            if 'button[aria-label^="Page "]' in js:
+                return 2
+            if "jobs/view" in js:
+                return ["111", "222"]
+            return None
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
 
         mock_page_btn = MagicMock()
         mock_page_btn.count = AsyncMock(return_value=1)
@@ -1854,7 +1887,14 @@ class TestScrapeSavedJobs:
         self, mock_page
     ):
         """max_pages=1 stops after page 1 even if more buttons exist."""
-        mock_page.evaluate = AsyncMock(return_value=["111", "222"])
+        async def evaluate_side_effect(js, *args):
+            if 'button[aria-label^="Page "]' in js:
+                return 3
+            if "jobs/view" in js:
+                return ["111", "222"]
+            return None
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
 
         # Simulate page buttons existing (count=3) but max_pages=1
         mock_page_btn = MagicMock()
@@ -1875,7 +1915,14 @@ class TestScrapeSavedJobs:
         mock_page_btn.click.assert_not_called()
 
     async def test_scrape_saved_jobs_empty(self, mock_page):
-        mock_page.evaluate = AsyncMock(return_value=[])
+        async def evaluate_side_effect(js, *args):
+            if 'button[aria-label^="Page "]' in js:
+                return 1
+            if "jobs/view" in js:
+                return []
+            return None
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
         mock_next = MagicMock()
         mock_next.count = AsyncMock(return_value=0)
         mock_page.locator = MagicMock(return_value=mock_next)
@@ -1890,7 +1937,7 @@ class TestScrapeSavedJobs:
 
         assert result["url"] == "https://www.linkedin.com/jobs-tracker/"
         assert result["sections"] == {}
-        assert result["sections_requested"] == ["saved_jobs"]
+        assert "sections_requested" not in result
         assert result["job_ids"] == []
 
 

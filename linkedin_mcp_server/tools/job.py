@@ -88,8 +88,8 @@ def register_job_tools(mcp: FastMCP) -> None:
             max_pages: Maximum number of saved-jobs pages to scrape (1-10, default 10)
 
         Returns:
-            Dict with url, sections (name -> raw text), pages_visited, sections_requested,
-            and job_ids (list of LinkedIn job ID strings).
+            Dict with url, sections (name -> raw text), and job_ids (list of
+            LinkedIn job ID strings).
             The LLM should parse the raw text to extract saved job listings.
         """
         try:

@@ -483,8 +483,6 @@ class TestJobTools:
         expected = {
             "url": "https://www.linkedin.com/jobs-tracker/",
             "sections": {"saved_jobs": "Saved Job 1\nSaved Job 2"},
-            "pages_visited": ["https://www.linkedin.com/jobs-tracker/"],
-            "sections_requested": ["saved_jobs"],
             "job_ids": ["111", "222"],
         }
         mock_extractor = _make_mock_extractor(expected)
@@ -498,6 +496,8 @@ class TestJobTools:
         result = await tool_fn(mock_context, extractor=mock_extractor)
         assert "saved_jobs" in result["sections"]
         assert result["url"] == "https://www.linkedin.com/jobs-tracker/"
+        assert "pages_visited" not in result
+        assert "sections_requested" not in result
 
     async def test_search_jobs(self, mock_context):
         expected = {

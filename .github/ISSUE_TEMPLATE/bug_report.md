@@ -18,6 +18,7 @@ assignees: ''
   - [ ] get_person_profile
   - [ ] get_company_profile
   - [ ] get_job_details
+  - [ ] get_saved_jobs
   - [ ] search_jobs
   - [ ] close_session
 

@@ -2113,6 +2113,19 @@ class LinkedInExtractor:
         return main ? main.innerText : document.body.innerText;
     }"""
 
+    _EXTRACT_MAX_PAGE_JS = """() => {
+        const pageNumbers = Array.from(
+            document.querySelectorAll('button[aria-label^="Page "]')
+        )
+            .map(button => {
+                const label = button.getAttribute('aria-label') || '';
+                const match = label.match(/^Page (\\d+)$/);
+                return match ? Number(match[1]) : null;
+            })
+            .filter(page => Number.isInteger(page));
+        return pageNumbers.length ? Math.max(...pageNumbers) : 1;
+    }"""
+
     async def scrape_saved_jobs(
         self,
         max_pages: int = 10,
@@ -2130,8 +2143,7 @@ class LinkedInExtractor:
                 invoked after each page is scraped.
 
         Returns:
-            {url, sections: {name: text}, pages_visited, sections_requested,
-             job_ids: list[str]}
+            {url, sections: {name: text}, job_ids: list[str]}
         """
         url = "https://www.linkedin.com/jobs-tracker/"
         extracted = await self.extract_page(url, "saved_jobs")
@@ -2147,9 +2159,12 @@ class LinkedInExtractor:
         all_job_ids.extend(page_ids)
         logger.info("Page 1: found %d job IDs", len(page_ids))
 
-        # Determine total pages from pagination buttons (10 jobs per page).
-        page_buttons = self._page.locator('button[aria-label^="Page "]')
-        total_pages = min(max(await page_buttons.count(), 1), max_pages)
+        # LinkedIn can render a sliding window of numbered buttons, so refresh
+        # the largest visible page number as pagination advances.
+        total_pages = min(
+            max(await self._page.evaluate(self._EXTRACT_MAX_PAGE_JS), 1),
+            max_pages,
+        )
         logger.info("Total pages detected: %d", total_pages)
 
         if on_progress:
@@ -2206,6 +2221,15 @@ class LinkedInExtractor:
                 break
             all_job_ids.extend(new_ids)
 
+            total_pages = max(
+                total_pages,
+                page_num,
+                min(
+                    max(await self._page.evaluate(self._EXTRACT_MAX_PAGE_JS), 1),
+                    max_pages,
+                ),
+            )
+
             if on_progress:
                 await on_progress(
                     page_num, total_pages, f"Fetched saved jobs page {page_num}"
@@ -2228,8 +2252,6 @@ class LinkedInExtractor:
         return {
             "url": url,
             "sections": sections,
-            "pages_visited": [url],
-            "sections_requested": ["saved_jobs"],
             "job_ids": all_job_ids,
         }
 
