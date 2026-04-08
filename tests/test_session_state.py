@@ -152,7 +152,7 @@ def test_get_runtime_id_marks_container(monkeypatch):
     )
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.Path.exists",
-        lambda self: str(self) == "/.dockerenv",
+        lambda self: self.as_posix() == "/.dockerenv",
     )
 
     assert get_runtime_id() == "linux-amd64-container"
@@ -167,7 +167,7 @@ def test_get_runtime_id_marks_container_from_cgroup_v2_mountinfo(monkeypatch):
     )
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.Path.exists",
-        lambda self: str(self) == "/proc/1/mountinfo",
+        lambda self: self.as_posix() == "/proc/1/mountinfo",
     )
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.Path.read_text",
@@ -189,7 +189,7 @@ def test_get_runtime_id_ignores_non_root_overlay_mounts(monkeypatch):
     )
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.Path.exists",
-        lambda self: str(self) == "/proc/1/mountinfo",
+        lambda self: self.as_posix() == "/proc/1/mountinfo",
     )
     monkeypatch.setattr(
         "linkedin_mcp_server.session_state.Path.read_text",
