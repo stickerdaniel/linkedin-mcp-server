@@ -1795,7 +1795,7 @@ class TestScrapeSavedJobs:
                 extractor,
                 "extract_page",
                 new_callable=AsyncMock,
-                return_value="Page 1 jobs",
+                return_value=extracted("Page 1 jobs"),
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
@@ -1837,7 +1837,7 @@ class TestScrapeSavedJobs:
                 extractor,
                 "extract_page",
                 new_callable=AsyncMock,
-                return_value="Page 1 jobs",
+                return_value=extracted("Page 1 jobs"),
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -1866,7 +1866,7 @@ class TestScrapeSavedJobs:
             extractor,
             "extract_page",
             new_callable=AsyncMock,
-            return_value="Page 1 jobs",
+            return_value=extracted("Page 1 jobs"),
         ):
             result = await extractor.scrape_saved_jobs(max_pages=1)
 
@@ -1884,7 +1884,7 @@ class TestScrapeSavedJobs:
             extractor,
             "extract_page",
             new_callable=AsyncMock,
-            return_value="",
+            return_value=extracted(""),
         ):
             result = await extractor.scrape_saved_jobs()
 
