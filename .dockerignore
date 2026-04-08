@@ -150,7 +150,6 @@ cython_debug/
 # Docker-specific exclusions
 .git
 .github
-README.md
 .DS_Store
 
 # DXT Extension
