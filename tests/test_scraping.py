@@ -1719,7 +1719,7 @@ class TestScrapeSavedJobs:
             extractor,
             "extract_page",
             new_callable=AsyncMock,
-            return_value="Saved Job 1\nSaved Job 2",
+            return_value=extracted("Saved Job 1\nSaved Job 2"),
         ):
             result = await extractor.scrape_saved_jobs(on_progress=on_progress)
 
@@ -1730,6 +1730,29 @@ class TestScrapeSavedJobs:
         assert "Job ID: 111" in result["sections"]["saved_jobs"]
         assert "Job ID: 222" in result["sections"]["saved_jobs"]
         on_progress.assert_awaited_once_with(1, 1, "Fetched saved jobs page 1")
+
+    async def test_scrape_saved_jobs_passes_saved_jobs_section_name(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value=["111", "222"])
+        mock_next = MagicMock()
+        mock_next.count = AsyncMock(return_value=0)
+        mock_page.locator = MagicMock(return_value=mock_next)
+        extractor = LinkedInExtractor(mock_page)
+
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=ExtractedPage(
+                text="Saved Job 1\nSaved Job 2",
+                references=[],
+            ),
+        ) as mock_extract_page:
+            await extractor.scrape_saved_jobs()
+
+        mock_extract_page.assert_awaited_once_with(
+            "https://www.linkedin.com/jobs-tracker/",
+            "saved_jobs",
+        )
 
     async def test_scrape_saved_jobs_paginates(self, mock_page):
         """Clicks page buttons, collects IDs, fires progress, caps total_pages."""
@@ -1887,7 +1910,7 @@ class TestScrapeSavedJobs:
             extractor,
             "extract_page",
             new_callable=AsyncMock,
-            return_value="Saved Job 1\nSaved Job 2",
+            return_value=extracted("Saved Job 1\nSaved Job 2"),
         ):
             result = await extractor.scrape_saved_jobs(on_progress=on_progress)
 
@@ -1898,6 +1921,26 @@ class TestScrapeSavedJobs:
         assert "Job ID: 111" in result["sections"]["saved_jobs"]
         assert "Job ID: 222" in result["sections"]["saved_jobs"]
         on_progress.assert_awaited_once_with(1, 1, "Fetched saved jobs page 1")
+
+    async def test_scrape_saved_jobs_passes_saved_jobs_section_name(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value=["111", "222"])
+        mock_next = MagicMock()
+        mock_next.count = AsyncMock(return_value=0)
+        mock_page.locator = MagicMock(return_value=mock_next)
+        extractor = LinkedInExtractor(mock_page)
+
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("Saved Job 1\nSaved Job 2"),
+        ) as mock_extract_page:
+            await extractor.scrape_saved_jobs()
+
+        mock_extract_page.assert_awaited_once_with(
+            "https://www.linkedin.com/jobs-tracker/",
+            "saved_jobs",
+        )
 
     async def test_scrape_saved_jobs_paginates(self, mock_page):
         """Clicks page buttons, collects IDs, fires progress, caps total_pages."""
@@ -1943,7 +1986,7 @@ class TestScrapeSavedJobs:
                 extractor,
                 "extract_page",
                 new_callable=AsyncMock,
-                return_value="Page 1 jobs",
+                return_value=extracted("Page 1 jobs"),
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
@@ -1985,7 +2028,7 @@ class TestScrapeSavedJobs:
                 extractor,
                 "extract_page",
                 new_callable=AsyncMock,
-                return_value="Page 1 jobs",
+                return_value=extracted("Page 1 jobs"),
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -2014,7 +2057,7 @@ class TestScrapeSavedJobs:
             extractor,
             "extract_page",
             new_callable=AsyncMock,
-            return_value="Page 1 jobs",
+            return_value=extracted("Page 1 jobs"),
         ):
             result = await extractor.scrape_saved_jobs(max_pages=1)
 
@@ -2032,7 +2075,7 @@ class TestScrapeSavedJobs:
             extractor,
             "extract_page",
             new_callable=AsyncMock,
-            return_value="",
+            return_value=extracted(""),
         ):
             result = await extractor.scrape_saved_jobs()
 
