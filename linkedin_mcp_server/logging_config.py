@@ -7,9 +7,17 @@ JSON format for production MCP integration, compact format for development.
 Includes proper logger hierarchy and external library noise reduction.
 """
 
+import atexit
 import json
 import logging
+import os
 from typing import Any, Dict
+
+from linkedin_mcp_server.common_utils import secure_mkdir
+from linkedin_mcp_server.debug_trace import cleanup_trace_dir, get_trace_dir
+
+_TRACE_FILE_HANDLER: logging.Handler | None = None
+_TRACE_CLEANUP_REGISTERED = False
 
 
 class MCPJSONFormatter(logging.Formatter):
@@ -101,14 +109,57 @@ def configure_logging(log_level: str = "WARNING", json_format: bool = False) -> 
     # Remove existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+    global _TRACE_CLEANUP_REGISTERED, _TRACE_FILE_HANDLER
+    _TRACE_FILE_HANDLER = None
 
     # Add console handler
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 
+    trace_dir = get_trace_dir()
+    if trace_dir is not None:
+        secure_mkdir(trace_dir)
+        log_path = trace_dir / "server.log"
+        try:
+            fd = os.open(str(log_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            pass
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
+        _TRACE_FILE_HANDLER = file_handler
+        if not _TRACE_CLEANUP_REGISTERED:
+            # The atexit fallback intentionally delegates the keep/delete
+            # decision to teardown_trace_logging(), which re-checks runtime
+            # trace retention state via cleanup_trace_dir().
+            atexit.register(teardown_trace_logging)
+            _TRACE_CLEANUP_REGISTERED = True
+
     # Set specific loggers to reduce noise
     logging.getLogger("urllib3").setLevel(logging.ERROR)
     logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
     logging.getLogger("fakeredis").setLevel(logging.WARNING)
     logging.getLogger("docket").setLevel(logging.WARNING)
+
+
+def teardown_trace_logging(*, keep_traces: bool = False) -> None:
+    """Close trace logging handlers and cleanup ephemeral traces when allowed."""
+    global _TRACE_FILE_HANDLER
+
+    if _TRACE_FILE_HANDLER is not None:
+        root_logger = logging.getLogger()
+        root_logger.removeHandler(_TRACE_FILE_HANDLER)
+        try:
+            _TRACE_FILE_HANDLER.close()
+        finally:
+            _TRACE_FILE_HANDLER = None
+
+    if not keep_traces:
+        cleanup_trace_dir()

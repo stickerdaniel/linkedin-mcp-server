@@ -5,17 +5,15 @@ Uses innerText extraction for resilient job data capture.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
-from mcp.types import ToolAnnotations
+from pydantic import Field
 
-from linkedin_mcp_server.drivers.browser import (
-    ensure_authenticated,
-    get_or_create_browser,
-)
-from linkedin_mcp_server.error_handler import handle_tool_error
-from linkedin_mcp_server.scraping import LinkedInExtractor
+from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
+from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +22,17 @@ def register_job_tools(mcp: FastMCP) -> None:
     """Register all job-related tools with the MCP server."""
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Job Details",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Job Details",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "scraping"},
+        exclude_args=["extractor"],
     )
-    async def get_job_details(job_id: str, ctx: Context) -> dict[str, Any]:
+    async def get_job_details(
+        job_id: str,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
         """
         Get job details for a specific job posting on LinkedIn.
 
@@ -40,16 +41,14 @@ def register_job_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
 
         Returns:
-            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
+            Dict with url, sections (name -> raw text), and optional references.
             The LLM should parse the raw text to extract job details.
         """
         try:
-            await ensure_authenticated()
-
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_job_details"
+            )
             logger.info("Scraping job: %s", job_id)
-
-            browser = await get_or_create_browser()
-            extractor = LinkedInExtractor(browser.page)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting job scrape"
@@ -61,23 +60,32 @@ def register_job_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_job_details")
         except Exception as e:
-            return handle_tool_error(e, "get_job_details")
+            raise_tool_error(e, "get_job_details")  # NoReturn
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Get Saved Jobs",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Saved Jobs",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "scraping"},
+        exclude_args=["extractor"],
     )
-    async def get_saved_jobs(ctx: Context, max_pages: int = 10) -> dict[str, Any]:
+    async def get_saved_jobs(
+        ctx: Context,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 10,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
         """
         Get the user's saved/bookmarked jobs from LinkedIn's job tracker.
 
         Args:
-            max_pages: Maximum number of pages to scrape (default 10, ~10 jobs/page).
+            ctx: FastMCP context for progress reporting
+            max_pages: Maximum number of saved-jobs pages to scrape (1-10, default 10)
 
         Returns:
             Dict with url, sections (name -> raw text), pages_visited, sections_requested,
@@ -85,12 +93,10 @@ def register_job_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text to extract saved job listings.
         """
         try:
-            await ensure_authenticated()
-
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_saved_jobs"
+            )
             logger.info("Scraping saved jobs (max_pages=%d)", max_pages)
-
-            browser = await get_or_create_browser()
-            extractor = LinkedInExtractor(browser.page)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Fetching saved jobs"
@@ -108,55 +114,90 @@ def register_job_tools(mcp: FastMCP) -> None:
 
             return result
 
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_saved_jobs")
         except Exception as e:
-            return handle_tool_error(e, "get_saved_jobs")
+            raise_tool_error(e, "get_saved_jobs")  # NoReturn
 
     @mcp.tool(
-        annotations=ToolAnnotations(
-            title="Search Jobs",
-            readOnlyHint=True,
-            destructiveHint=False,
-            openWorldHint=True,
-        )
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Search Jobs",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "search"},
+        exclude_args=["extractor"],
     )
     async def search_jobs(
         keywords: str,
         ctx: Context,
         location: str | None = None,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        date_posted: str | None = None,
+        job_type: str | None = None,
+        experience_level: str | None = None,
+        work_type: str | None = None,
+        easy_apply: bool = False,
+        sort_by: str | None = None,
+        extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
+
+        Returns job_ids that can be passed to get_job_details for full info.
 
         Args:
             keywords: Search keywords (e.g., "software engineer", "data scientist")
             ctx: FastMCP context for progress reporting
             location: Optional location filter (e.g., "San Francisco", "Remote")
+            max_pages: Maximum number of result pages to load (1-10, default 3)
+            date_posted: Filter by posting date (past_hour, past_24_hours, past_week, past_month)
+            job_type: Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other)
+            experience_level: Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive)
+            work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
+            easy_apply: Only show Easy Apply jobs (default false)
+            sort_by: Sort results (date, relevance)
 
         Returns:
-            Dict with url, sections (name -> raw text), pages_visited, and sections_requested.
-            The LLM should parse the raw text to extract job listings.
+            Dict with url, sections (name -> raw text), job_ids (list of
+            numeric job ID strings usable with get_job_details), and optional references.
         """
         try:
-            await ensure_authenticated()
-
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="search_jobs"
+            )
             logger.info(
-                "Searching jobs: keywords='%s', location='%s'",
+                "Searching jobs: keywords='%s', location='%s', max_pages=%d",
                 keywords,
                 location,
+                max_pages,
             )
-
-            browser = await get_or_create_browser()
-            extractor = LinkedInExtractor(browser.page)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting job search"
             )
 
-            result = await extractor.search_jobs(keywords, location)
+            result = await extractor.search_jobs(
+                keywords,
+                location=location,
+                max_pages=max_pages,
+                date_posted=date_posted,
+                job_type=job_type,
+                experience_level=experience_level,
+                work_type=work_type,
+                easy_apply=easy_apply,
+                sort_by=sort_by,
+            )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
             return result
 
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "search_jobs")
         except Exception as e:
-            return handle_tool_error(e, "search_jobs")
+            raise_tool_error(e, "search_jobs")  # NoReturn

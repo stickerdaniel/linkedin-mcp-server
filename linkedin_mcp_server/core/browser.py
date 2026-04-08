@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +14,35 @@ from patchright.async_api import (
     async_playwright,
 )
 
+from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text
+
 from .exceptions import NetworkError
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_USER_DATA_DIR = Path.home() / ".linkedin-mcp" / "profile"
+_PRIVATE_DIR_MODE = 0o700
+_PRIVATE_FILE_MODE = 0o600
+
+
+def _harden_linkedin_tree(path: Path) -> None:
+    """Ensure dirs from *path* up to ``.linkedin-mcp`` are owner-only (``0o700``).
+
+    Complements :func:`secure_mkdir` by hardening pre-existing directories
+    that may have been created with default umask permissions.  No-op on
+    Windows or when *path* is not inside a ``.linkedin-mcp`` directory.
+    """
+    if os.name == "nt":
+        return
+    d = path if path.is_dir() else path.parent
+    # Bail out early when the path is not inside a .linkedin-mcp tree.
+    if not any(p.name == ".linkedin-mcp" for p in (d, *d.parents)):
+        return
+    for p in (d, *d.parents):
+        if p.is_dir() and stat.S_IMODE(p.stat().st_mode) != _PRIVATE_DIR_MODE:
+            p.chmod(_PRIVATE_DIR_MODE)
+        if p.name == ".linkedin-mcp":
+            return
 
 
 class BrowserManager:
@@ -64,13 +90,15 @@ class BrowserManager:
         try:
             self._playwright = await async_playwright().start()
 
-            Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
+            secure_mkdir(Path(self.user_data_dir))
+            _harden_linkedin_tree(Path(self.user_data_dir))
 
             context_options: dict[str, Any] = {
                 "headless": self.headless,
                 "slow_mo": self.slow_mo,
                 "viewport": self.viewport,
                 **self.launch_options,
+                "locale": "en-US",
             }
 
             if self.user_agent:
@@ -100,20 +128,28 @@ class BrowserManager:
 
     async def close(self) -> None:
         """Close persistent context and cleanup resources."""
-        try:
-            if self._context:
-                await self._context.close()
-                self._context = None
-                self._page = None
+        context = self._context
+        playwright = self._playwright
+        self._context = None
+        self._page = None
+        self._playwright = None
 
-            if self._playwright:
-                await self._playwright.stop()
-                self._playwright = None
+        if context is None and playwright is None:
+            return
 
-            logger.info("Browser closed")
+        if context is not None:
+            try:
+                await context.close()
+            except Exception as exc:
+                logger.error("Error closing browser context: %s", exc)
 
-        except Exception as e:
-            logger.error("Error closing browser: %s", e)
+        if playwright is not None:
+            try:
+                await playwright.stop()
+            except Exception as exc:
+                logger.error("Error stopping playwright: %s", exc)
+
+        logger.info("Browser closed")
 
     @property
     def page(self) -> Page:
@@ -177,21 +213,106 @@ class BrowserManager:
                 for c in all_cookies
                 if "linkedin.com" in c.get("domain", "")
             ]
-            path.write_text(json.dumps(cookies, indent=2))
+            secure_mkdir(path.parent)
+            _harden_linkedin_tree(path.parent)
+            secure_write_text(
+                path, json.dumps(cookies, indent=2), mode=_PRIVATE_FILE_MODE
+            )
             logger.info("Exported %d LinkedIn cookies to %s", len(cookies), path)
             return True
         except Exception:
             logger.exception("Failed to export cookies")
             return False
 
-    _AUTH_COOKIE_NAMES = frozenset({"li_at", "li_rm"})
+    async def export_storage_state(
+        self, path: str | Path, *, indexed_db: bool = True
+    ) -> bool:
+        """Export the current browser storage state for diagnostics and recovery."""
+        if not self._context:
+            logger.warning("Cannot export storage state: no browser context")
+            return False
 
-    async def import_cookies(self, cookie_path: str | Path | None = None) -> bool:
-        """Import auth cookies (li_at, li_rm) from a portable JSON file.
+        storage_path = Path(path)
+        secure_mkdir(storage_path.parent)
+        _harden_linkedin_tree(storage_path.parent)
+        try:
+            await self._context.storage_state(
+                path=storage_path,
+                indexed_db=indexed_db,
+            )
+            # Playwright writes the file with default umask; tighten it.
+            if os.name != "nt" and storage_path.exists():
+                storage_path.chmod(_PRIVATE_FILE_MODE)
+            logger.info(
+                "Exported runtime storage snapshot to %s (indexed_db=%s)",
+                storage_path,
+                indexed_db,
+            )
+            return True
+        except Exception:
+            logger.exception("Failed to export storage state to %s", storage_path)
+            return False
 
-        Clears all existing browser cookies before importing to avoid
-        undecryptable cookie conflicts in the persistent store.
-        Only li_at and li_rm cookies are imported; others are ignored.
+    _BRIDGE_COOKIE_PRESETS = {
+        "bridge_core": frozenset(
+            {
+                "li_at",
+                "li_rm",
+                "JSESSIONID",
+                "bcookie",
+                "bscookie",
+                "liap",
+                "lidc",
+                "li_gc",
+                "lang",
+                "timezone",
+                "li_mc",
+            }
+        ),
+        "auth_minimal": frozenset(
+            {
+                "li_at",
+                "JSESSIONID",
+                "bcookie",
+                "bscookie",
+                "lidc",
+            }
+        ),
+    }
+
+    @classmethod
+    def _bridge_cookie_names(
+        cls, preset_name: str | None = None
+    ) -> tuple[str, frozenset[str]]:
+        preset_name = (
+            preset_name
+            or os.getenv(
+                "LINKEDIN_DEBUG_BRIDGE_COOKIE_SET",
+                "auth_minimal",
+            ).strip()
+            or "auth_minimal"
+        )
+        preset = cls._BRIDGE_COOKIE_PRESETS.get(preset_name)
+        if preset is None:
+            logger.warning(
+                "Unknown LINKEDIN_DEBUG_BRIDGE_COOKIE_SET=%r, falling back to auth_minimal",
+                preset_name,
+            )
+            preset_name = "auth_minimal"
+            preset = cls._BRIDGE_COOKIE_PRESETS[preset_name]
+        return preset_name, preset
+
+    async def import_cookies(
+        self,
+        cookie_path: str | Path | None = None,
+        *,
+        preset_name: str | None = None,
+    ) -> bool:
+        """Import the portable LinkedIn bridge cookie subset.
+
+        Fresh browser-side cookies are preserved. The imported subset is the
+        smallest known set that can reconstruct a usable authenticated page in
+        a fresh profile.
         """
         if not self._context:
             logger.warning("Cannot import cookies: no browser context")
@@ -208,22 +329,29 @@ class BrowserManager:
                 logger.debug("Cookie file is empty")
                 return False
 
+            resolved_preset_name, bridge_cookie_names = self._bridge_cookie_names(
+                preset_name
+            )
+
             cookies = [
                 self._normalize_cookie_domain(c)
                 for c in all_cookies
-                if c.get("name") in self._AUTH_COOKIE_NAMES
+                if "linkedin.com" in c.get("domain", "")
+                and c.get("name") in bridge_cookie_names
             ]
-            if not cookies:
-                logger.warning("No auth cookies (li_at/li_rm) found in %s", path)
+
+            has_li_at = any(c.get("name") == "li_at" for c in cookies)
+            if not has_li_at:
+                logger.warning("No li_at cookie found in %s", path)
                 return False
 
-            # Clear undecryptable cookies from the persistent store first.
-            await self._context.clear_cookies()
             await self._context.add_cookies(cookies)  # type: ignore[arg-type]
             logger.info(
-                "Imported %d auth cookies from %s: %s",
+                "Imported %d LinkedIn bridge cookies from %s (preset=%s, li_at=%s): %s",
                 len(cookies),
                 path,
+                resolved_preset_name,
+                has_li_at,
                 ", ".join(c["name"] for c in cookies),
             )
             return True

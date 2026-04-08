@@ -5,9 +5,12 @@ Defines the dataclass schemas that represent the application's configuration
 structure with type-safe configuration objects and default values.
 """
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigurationError(Exception):
@@ -91,6 +94,14 @@ class AppConfig:
             raise ConfigurationError("HTTP transport requires a valid host")
         if not self.server.port:
             raise ConfigurationError("HTTP transport requires a valid port")
+        if self.server.host in ("0.0.0.0", "::"):
+            logger.warning(
+                "HTTP transport is binding to %s which exposes the server to "
+                "all network interfaces. The MCP endpoint has no authentication "
+                "— anyone on your network can use your LinkedIn session. "
+                "Use 127.0.0.1 (default) unless you understand the risk.",
+                self.server.host,
+            )
 
     def _validate_port_range(self) -> None:
         """Validate port is in valid range."""

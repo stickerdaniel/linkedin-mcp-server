@@ -4,155 +4,107 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Development Commands
 
-**Environment Setup:**
-
-- Use `uv` for dependency management: `uv sync` (installs all dependencies)
-- Development dependencies: `uv sync --group dev`
-- Bump version: `uv version --bump minor` (or `major`, `patch`) - this is the **only manual step** for a release. The GitHub Actions release workflow (`.github/workflows/release.yml`) automatically handles: manifest.json/docker-compose.yml version updates, git tag, Docker build & push, DXT extension, GitHub release, and PyPI publish. After the workflow completes, manually file a PR in the MCP registry to update the version.
-- Install browser: `uv run patchright install chromium`
-- Run server locally: `uv run -m linkedin_mcp_server --no-headless`
-- Run via uvx (PyPI): `uvx linkedin-scraper-mcp`
-- Run in Docker: `docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp stickerdaniel/linkedin-mcp-server:latest`
-
-**Code Quality:**
-
+- Use `uv` for dependency management: `uv sync` (dev: `uv sync --group dev`)
 - Lint: `uv run ruff check .` (auto-fix with `--fix`)
 - Format: `uv run ruff format .`
 - Type check: `uv run ty check` (using ty, not mypy)
 - Tests: `uv run pytest` (with coverage: `uv run pytest --cov`)
-- Pre-commit hooks: `uv run pre-commit install` then `uv run pre-commit run --all-files`
+- Pre-commit: `uv run pre-commit install` then `uv run pre-commit run --all-files`
+- Run server locally: `uv run -m linkedin_mcp_server --no-headless`
+- Run via uvx (PyPI/package verification only): `uvx linkedin-scraper-mcp`
+- Docker build: `docker build -t linkedin-mcp-server .`
+- Install browser: `uv run patchright install chromium`
 
-**Docker Commands:**
+## Scraping Rules
 
-- Build: `docker build -t linkedin-mcp-server .`
-- Login: Use uvx locally first: `uvx linkedin-scraper-mcp --login`
+- **One section = one navigation.** Each entry in `PERSON_SECTIONS` / `COMPANY_SECTIONS` (`scraping/fields.py`) maps to exactly one page navigation. Never combine multiple URLs behind a single section.
+- **Minimize DOM dependence.** Prefer innerText and URL navigation over DOM selectors. When DOM access is unavoidable, use minimal generic selectors (`a[href*="/jobs/view/"]`) — never class names tied to LinkedIn's layout.
 
-## Architecture Overview
+## Tool Return Format
 
-This is a **LinkedIn MCP (Model Context Protocol) Server** that enables AI assistants to interact with LinkedIn through web scraping. The codebase follows a two-phase startup pattern:
+All scraping tools return: `{url, sections: {name: raw_text}}`.
 
-1. **Authentication Phase** (`authentication.py`) - Validates LinkedIn browser profile exists
-2. **Server Runtime Phase** (`server.py`) - Runs FastMCP server with tool registration
+Optional additional keys:
 
-**Core Components:**
+- `references: {section_name: [{kind, url, text?, context?}]}` — LinkedIn URLs are relative paths
+- `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
+- `unknown_sections: [name, ...]`
+- `job_ids: [id, ...]` (search_jobs only)
 
-- `cli_main.py` - Entry point with CLI argument parsing and orchestration
-- `server.py` - FastMCP server setup and tool registration
-- `tools/` - LinkedIn scraping tools (person, company, job profiles)
-- `drivers/browser.py` - Patchright browser management with persistent profile (singleton)
-- `core/` - Inlined browser, auth, and utility code (replaces `linkedin_scraper` dependency)
-- `scraping/` - innerText extraction engine with Flag-based section selection
-- `config/` - Configuration management (schema, loaders)
-- `authentication.py` - LinkedIn profile-based authentication
+## Verifying Bug Reports
 
-**Tool Categories:**
+Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. Use `uv run`, not `uvx`, so the running process reflects your workspace. Use `uvx` only for packaged distribution verification. For live Docker investigations, refresh the source session first with `uv run -m linkedin_mcp_server --login` before testing each materially different approach. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`.
 
-- **Person Tools** (`tools/person.py`) - Profile scraping with explicit section selection
-- **Company Tools** (`tools/company.py`) - Company profile and posts extraction
-- **Job Tools** (`tools/job.py`) - Job posting details and search functionality
+```bash
+# Start server
+uv run -m linkedin_mcp_server --transport streamable-http --log-level DEBUG
 
-**Available MCP Tools:**
+# Initialize MCP session (grab Mcp-Session-Id from response headers)
+curl -s -D /tmp/mcp-headers -X POST http://127.0.0.1:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
 
-| Tool | Description |
-|------|-------------|
-| `get_person_profile` | Get profile with explicit `sections` selection (experience, education, interests, honors, languages, contact_info) |
-| `get_company_profile` | Get company info with explicit `sections` selection (posts, jobs) |
-| `get_company_posts` | Get recent posts from company feed |
-| `get_job_details` | Get job posting details |
-| `search_jobs` | Search jobs by keywords and location |
-| `get_saved_jobs` | Get saved/bookmarked jobs from the job tracker (paginated, optional `max_pages`) |
-| `close_session` | Close browser session and clean up resources |
-| `search_people` | Search for people by keywords and location |
+# Extract the session ID from saved headers
+SESSION_ID=$(grep -i 'Mcp-Session-Id' /tmp/mcp-headers | awk '{print $2}' | tr -d '\r')
 
-**Tool Return Format:**
+# Call a tool
+curl -s -X POST http://127.0.0.1:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_person_profile","arguments":{"linkedin_username":"williamhgates","sections":"posts"}}}'
+```
 
-All scraping tools return: `{url, sections: {name: raw_text}, pages_visited, sections_requested}`
+## Release Process
 
-**Scraping Architecture (`scraping/`):**
+```bash
+git checkout main && git pull
+uv version --bump minor          # or: major, patch — updates pyproject.toml AND uv.lock
+gt create -m "chore: Bump version to X.Y.Z"
+gt submit                        # merge PR to trigger release workflow
+```
 
-- `fields.py` - `PersonScrapingFields` and `CompanyScrapingFields` Flag enums
-- `extractor.py` - `LinkedInExtractor` class using navigate-scroll-innerText pattern
-- **One flag = one navigation.** Each `PersonScrapingFields` / `CompanyScrapingFields` flag must map to exactly one page navigation. Never combine multiple URLs behind a single flag.
+The CI release workflow automatically updates `manifest.json` and `docker-compose.yml` with the new version — do not update them manually.
 
-**Core Subpackage (`core/`):**
+After the workflow completes, file a PR in the MCP registry to update the version.
 
-- `exceptions.py` - Exception hierarchy (AuthenticationError, RateLimitError, etc.)
-- `browser.py` - `BrowserManager` with persistent context and cookie import/export
-- `auth.py` - `is_logged_in()`, `wait_for_manual_login()`, `warm_up_browser()`
-- `utils.py` - `detect_rate_limit()`, `scroll_to_bottom()`, `handle_modal_close()`
-
-**Authentication Flow:**
-
-- Uses persistent browser profile at `~/.linkedin-mcp/profile/`
-- Run with `--login` to create a profile via browser login
-
-**Transport Modes:**
-
-- `stdio` (default) - Standard I/O for CLI MCP clients
-- `streamable-http` - HTTP server mode for web-based MCP clients
-
-## Development Notes
-
-- **Python Version:** Requires Python 3.12+
-- **Package Manager:** Uses `uv` for fast dependency resolution
-- **Browser:** Uses Patchright (anti-detection Playwright fork) with Chromium
-- **Logging:** Configurable levels, JSON format for non-interactive mode
-- **Error Handling:** Comprehensive exception handling for LinkedIn rate limits, captchas, etc.
-
-**Key Dependencies:**
-
-- `fastmcp` - MCP server framework
-- `patchright` - Anti-detection browser automation (Playwright fork)
-
-**Configuration:**
-
-- CLI arguments with comprehensive help (`--help`)
-- Browser profile stored at `~/.linkedin-mcp/profile/`
-
-**Commit Message Format:**
+## Commit Messages
 
 - Follow conventional commits: `type(scope): subject`
 - Types: feat, fix, docs, style, refactor, test, chore, perf, ci
 - Keep subject <50 chars, imperative mood
 
-## Commit Message Guidelines
+## Development Workflow
 
-**Commit Message Rules:**
+Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or working on this repository.
 
-- Always use the commit message format type(scope): subject
-- Types: feat, fix, docs, style, refactor, test, chore, perf, ci
-- Keep subject <50 chars, imperative mood
+- Include the model used for code generation in PR descriptions (e.g. "Generated with Claude Opus 4.6")
+- Write a short synthetic prompt that would reproduce the PR diff if given to a fresh Claude Code session. Don't copy the user's first message — distill the conversation into a single instruction that captures the full scope of changes. This tells the maintainer what was intended, which is often more useful than reviewing the full diff.
+- When implementing a new feature/fix:
+  1. Check open issues. If no issue exists, create one following the templates in `.github/ISSUE_TEMPLATE/`. Fill in every section; delete optional sections if not applicable.
+  2. Branch from `main`: `feature/issue-number-short-description`
+  3. Implement and test
+  4. Update README.md and docs/docker-hub.md if relevant
+  5. Create a draft PR; only convert to regular PR when ready to merge
+  6. Review with AI agents first, then manual review. Do not squash commits.
 
-## Important Development Notes
+## PR Reviews
 
-### Development Workflow
+Greptile posts initial reviews as PR review comments, but follow-ups as **issue comments**. Always check both.
 
-- Never sign a PR or commit with Claude Code
-- When implementing a new feature/fix, follow this process:
-  1. Check open issues. If no issue exists for the feature, create one that follows the feature issue template.
-  2. Create a new branch from `main` and name it `feature/issue-number-short-description`
-  3. Implement the feature
-  4. Test the feature
-  5. Make sure the README.md, docs/docker-hub.md and AGENTS.md is updated with the new feature
-  6. Create a PR with a short description of the feature/fix
-  7. First review the PR with ai agents.
-  8. Manually review the PR and merge it if it's approved. Do not squash the commits.
-  9. Delete the branch after the PR is merged.
+```bash
+gh api repos/{owner}/{repo}/pulls/{pr}/reviews    # initial reviews
+gh api repos/{owner}/{repo}/pulls/{pr}/comments   # inline comments
+gh api repos/{owner}/{repo}/issues/{pr}/comments   # follow-up reviews
+```
 
 ## btca
 
 When you need up-to-date information about technologies used in this project, use btca to query source repositories directly.
 
-**Available resources**: fastmcp, patchright, pytest, ruff, ty, uv, inquirer, pythonDotenv, pyperclip, preCommit
-
-### Usage
-
 ```bash
+btca resources                           # list available resources
 btca ask -r <resource> -q "<question>"
-```
-
-Use multiple `-r` flags to query multiple resources at once:
-
-```bash
-btca ask -r fastmcp -r patchright -q "How do I set up browser context with FastMCP tools?"
+btca ask -r fastmcp -r playwright -q "How do I set up browser context with FastMCP tools?"
 ```

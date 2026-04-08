@@ -1,5 +1,12 @@
 For an installation guide, refer to the [README](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/README.md).
 
+## 📦 Update MCP Bundle Installation
+**For Claude Desktop users:**
+1. [Download the `.mcpb` bundle](https://github.com/stickerdaniel/linkedin-mcp-server/releases/download/v${VERSION}/linkedin-mcp-server-v${VERSION}.mcpb)
+2. Click the downloaded file to install in Claude Desktop
+
+> **Note:** MCP Bundles do not auto-update. You need to download and install the latest `.mcpb` file for each new release.
+
 ## 🐳 Update Docker Installation
 **For users with Docker-based MCP client configurations:**
 ```bash
@@ -10,15 +17,3 @@ To pull this specific version, run:
 ```bash
 docker pull stickerdaniel/linkedin-mcp-server:${VERSION}
 ```
-
-## 📦 Update DXT Extension Installation
-**For Claude Desktop users:**
-1. Download the `.dxt` file below
-2. Pre-pull the Docker image to avoid timeout issues:
-   ```bash
-   docker pull stickerdaniel/linkedin-mcp-server:${VERSION}
-   ```
-3. Double-click the `.dxt` file to install in Claude Desktop
-4. Restart Claude Desktop
-
-> **Note:** The pre-pull step is important because Claude Desktop has a ~60 second connection timeout. Without pre-pulling, the initial image download may exceed this limit.

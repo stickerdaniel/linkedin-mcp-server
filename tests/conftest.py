@@ -4,12 +4,15 @@ import pytest
 @pytest.fixture(autouse=True)
 def reset_singletons():
     """Reset global state for test isolation."""
+    from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
 
+    reset_bootstrap_for_testing()
     reset_browser_for_testing()
     reset_config()
     yield
+    reset_bootstrap_for_testing()
     reset_browser_for_testing()
     reset_config()
 
@@ -18,6 +21,7 @@ def reset_singletons():
 def isolate_profile_dir(tmp_path, monkeypatch):
     """Redirect profile directory to tmp_path via config and DEFAULT_PROFILE_DIR."""
     fake_profile = tmp_path / "profile"
+    monkeypatch.setenv("USER_DATA_DIR", str(fake_profile))
 
     # Patch DEFAULT_PROFILE_DIR for any code still referencing the constant
     for module in [
@@ -25,6 +29,7 @@ def isolate_profile_dir(tmp_path, monkeypatch):
         "linkedin_mcp_server.authentication",
         "linkedin_mcp_server.cli_main",
         "linkedin_mcp_server.setup",
+        "linkedin_mcp_server.session_state",
     ]:
         try:
             monkeypatch.setattr(f"{module}.DEFAULT_PROFILE_DIR", fake_profile)
@@ -40,6 +45,28 @@ def isolate_profile_dir(tmp_path, monkeypatch):
     ]:
         try:
             monkeypatch.setattr(f"{gp_module}.get_profile_dir", lambda: fake_profile)
+        except AttributeError:
+            pass
+
+    try:
+        monkeypatch.setattr(
+            "linkedin_mcp_server.session_state.get_source_profile_dir",
+            lambda: fake_profile,
+        )
+    except AttributeError:
+        pass
+
+    for source_module in [
+        "linkedin_mcp_server.authentication",
+        "linkedin_mcp_server.drivers.browser",
+        "linkedin_mcp_server.debug_trace",
+        "linkedin_mcp_server.error_diagnostics",
+    ]:
+        try:
+            monkeypatch.setattr(
+                f"{source_module}.get_source_profile_dir",
+                lambda: fake_profile,
+            )
         except AttributeError:
             pass
 

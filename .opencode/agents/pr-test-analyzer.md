@@ -2,9 +2,9 @@
 name: pr-test-analyzer
 mode: subagent
 # https://models.dev/
-model: 'openai/gpt-5.3-codex'
+model: 'openai/gpt-5.4'
 variant: 'high'
-# model: 'github-copilot/gpt-5.3-codex'
+# model: 'github-copilot/gpt-5.4'
 color: '#06b6d4'
 description: |
   Use this agent when you need to review a pull request for test coverage quality and completeness. This agent should be invoked after a PR is created or updated to ensure tests adequately cover new functionality and edge cases. Examples:
