@@ -30,6 +30,13 @@
       "matchPackageNames": ["fastmcp", "mcp"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "MCP ecosystem"
+    },
+    {
+      "description": "Python runtime upgrades need manual validation",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["python"],
+      "matchUpdateTypes": ["major", "minor"],
+      "enabled": false
     }
   ]
 }
