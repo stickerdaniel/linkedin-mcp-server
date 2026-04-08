@@ -746,8 +746,7 @@ class LinkedInExtractor:
                         const main = document.querySelector('main');
                         if (!main) return false;
                         const text = main.innerText.trimStart();
-                        return text.length > 200
-                            && !text.startsWith('Load more')
+                        return !text.startsWith('Load more')
                             && !text.startsWith('More profiles for you')
                             && !text.startsWith('Explore premium profiles');
                     }""",
