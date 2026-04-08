@@ -1988,10 +1988,49 @@ class TestActivityFeedExtraction:
         assert kwargs["max_scrolls"] == 10
         assert len(result.text) > 200
 
-    async def test_non_activity_page_skips_wait_and_uses_fast_scroll(self, mock_page):
-        """Non-activity URLs should not call wait_for_function and use fast scroll."""
+    async def test_non_activity_non_details_page_skips_wait_and_uses_fast_scroll(
+        self, mock_page
+    ):
+        """Plain profile URLs (not activity, search, or details) skip wait_for_function."""
         mock_page.evaluate = AsyncMock(
             return_value={"source": "root", "text": "Profile text", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/",
+                section_name="main_profile",
+            )
+
+        mock_page.wait_for_function.assert_not_awaited()
+        mock_scroll.assert_awaited_once()
+        _, kwargs = mock_scroll.call_args
+        assert kwargs["pause_time"] == 0.5
+        assert kwargs["max_scrolls"] == 5
+
+    async def test_details_page_waits_for_panel_content(self, mock_page):
+        """Detail pages (/details/experience/ etc.) call wait_for_function to wait for the panel."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Experience\nSoftware Engineer",
+                "references": [],
+            }
         )
         mock_page.wait_for_function = AsyncMock()
         extractor = LinkedInExtractor(mock_page)
@@ -2015,7 +2054,7 @@ class TestActivityFeedExtraction:
                 section_name="experience",
             )
 
-        mock_page.wait_for_function.assert_not_awaited()
+        mock_page.wait_for_function.assert_awaited_once()
         mock_scroll.assert_awaited_once()
         _, kwargs = mock_scroll.call_args
         assert kwargs["pause_time"] == 0.5
