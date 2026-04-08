@@ -734,6 +734,27 @@ class LinkedInExtractor:
             except PlaywrightTimeoutError:
                 logger.debug("Search results content did not appear on %s", url)
 
+        # Profile detail pages (/details/experience/, /details/education/, etc.)
+        # initially render sidebar recommendations into <main> while the section
+        # panel loads asynchronously. Wait until the panel replaces the sidebar.
+        # The sidebar placeholder starts with "Load more" or "More profiles for you".
+        is_details = "/details/" in url
+        if is_details:
+            try:
+                await self._page.wait_for_function(
+                    """() => {
+                        const main = document.querySelector('main');
+                        if (!main) return false;
+                        const text = main.innerText.trimStart();
+                        return !text.startsWith('Load more')
+                            && !text.startsWith('More profiles for you')
+                            && !text.startsWith('Explore premium profiles');
+                    }""",
+                    timeout=10000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Detail section content did not appear on %s", url)
+
         # Scroll to trigger lazy loading
         if is_activity:
             await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=10)
