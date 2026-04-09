@@ -52,6 +52,8 @@ class EnvironmentKeys:
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
     USER_DATA_DIR = "USER_DATA_DIR"
+    LINKEDIN_CLIENT_ID = "LINKEDIN_CLIENT_ID"
+    LINKEDIN_CLIENT_SECRET = "LINKEDIN_CLIENT_SECRET"
 
 
 def is_interactive_environment() -> bool:
@@ -154,6 +156,25 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Custom Chrome/Chromium executable path
     if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
+
+    # LinkedIn app credentials — env vars take precedence, file is the fallback
+    if client_id := os.environ.get(EnvironmentKeys.LINKEDIN_CLIENT_ID):
+        config.linkedin_api.client_id = client_id
+    if client_secret := os.environ.get(EnvironmentKeys.LINKEDIN_CLIENT_SECRET):
+        config.linkedin_api.client_secret = client_secret
+
+    if not config.linkedin_api.client_id or not config.linkedin_api.client_secret:
+        try:
+            from linkedin_mcp_server.api.app_credentials import load_app_credentials
+
+            stored = load_app_credentials()
+            if stored:
+                if not config.linkedin_api.client_id:
+                    config.linkedin_api.client_id = stored.client_id
+                if not config.linkedin_api.client_secret:
+                    config.linkedin_api.client_secret = stored.client_secret
+        except Exception:
+            pass
 
     return config
 
@@ -264,6 +285,12 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
+        "--linkedin-auth",
+        action="store_true",
+        help="Authenticate with the LinkedIn API via browser OAuth and save tokens",
+    )
+
+    parser.add_argument(
         "--user-data-dir",
         type=str,
         default=None,
@@ -326,6 +353,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.logout:
         config.server.logout = True
+
+    if args.linkedin_auth:
+        config.server.linkedin_auth = True
 
     if args.user_data_dir:
         config.browser.user_data_dir = args.user_data_dir

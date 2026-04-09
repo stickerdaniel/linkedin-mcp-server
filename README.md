@@ -53,6 +53,13 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `search_people` | Search for people by keywords and location | working |
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `close_session` | Close browser session and clean up resources | working |
+| `create_post` | Publish a text or link post to your feed (requires LinkedIn API token†) | working |
+| `delete_post` | Delete one of your posts by URN (requires LinkedIn API token†) | working |
+| `create_comment` | Comment on a post (requires LinkedIn API token†) | working |
+| `reply_to_comment` | Reply to an existing comment (requires LinkedIn API token†) | working |
+| `delete_comment` | Delete one of your comments by ID (requires LinkedIn API token†) | working |
+
+† Requires a LinkedIn Developer app with **Share on LinkedIn** product and an OAuth token obtained via `--linkedin-auth`. See [LinkedIn API Setup](#-linkedin-api-setup) below.
 
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
@@ -66,7 +73,13 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 ### Installation
 
-**Client Configuration**
+**Claude Code**
+
+```bash
+claude mcp add linkedin uvx linkedin-scraper-mcp@latest -e UV_HTTP_TIMEOUT=300
+```
+
+**Other clients (Claude Desktop, Cursor, etc.)**
 
 ```json
 {
@@ -453,6 +466,51 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 </details>
 
+
+<br/>
+<br/>
+
+## 🔑 LinkedIn API Setup
+
+Required for `create_post`, `delete_post`, `create_comment`, `reply_to_comment`, `delete_comment`.
+
+### Step 1 — Create a LinkedIn Developer app
+
+1. Go to [linkedin.com/developers/apps](https://www.linkedin.com/developers/apps) → **Create app**
+2. Fill in app name, a LinkedIn Page, and a privacy policy URL (your GitHub repo URL works for personal use)
+3. Go to the **Auth** tab → under **Authorized redirect URLs** add: `http://localhost:8397/callback`
+4. Note your **Client ID** and **Client Secret**
+
+### Step 2 — Add the required products
+
+On the **Products** tab of your app, request both (instant approval, no review):
+
+- **Share on LinkedIn** — grants `w_member_social` for creating posts and comments
+- **Sign In with LinkedIn using OpenID Connect** — grants `openid profile` for resolving your person ID
+
+> [!IMPORTANT]
+> Do **not** add Marketing Developer Platform products (e.g. Community Management API) to this same app — LinkedIn does not allow consumer and marketing products on the same app.
+
+### Step 3 — Authenticate
+
+```bash
+uv run -m linkedin_mcp_server --linkedin-auth
+```
+
+This prompts for your Client ID and Secret (saved to `~/.linkedin-mcp/app-credentials.json`), opens your browser to LinkedIn's consent page, and saves your OAuth tokens to `~/.linkedin-mcp/user-tokens.json`. You only need to do this once — tokens refresh automatically.
+
+### File locations
+
+| File | Contents |
+|---|---|
+| `~/.linkedin-mcp/app-credentials.json` | Client ID + Secret (your Developer app) |
+| `~/.linkedin-mcp/user-tokens.json` | OAuth access + refresh token + person ID |
+
+### Re-authenticating
+
+```bash
+uv run -m linkedin_mcp_server --linkedin-auth   # re-runs the full OAuth flow
+```
 
 <br/>
 <br/>

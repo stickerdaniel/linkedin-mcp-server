@@ -231,6 +231,95 @@ def profile_info_and_exit() -> None:
     sys.exit(1)
 
 
+def linkedin_auth_and_exit() -> None:
+    """Run the LinkedIn API OAuth flow, persist tokens, and exit."""
+    config = get_config()
+
+    configure_logging(
+        log_level=config.server.log_level,
+        json_format=not config.is_interactive and config.server.log_level != "DEBUG",
+    )
+
+    version = get_version()
+    logger.info(f"LinkedIn MCP Server v{version} - LinkedIn API Auth mode")
+
+    from linkedin_mcp_server.api.app_credentials import (
+        AppCredentials,
+        credentials_path,
+        save_app_credentials,
+    )
+    from linkedin_mcp_server.api.auth import run_oauth_flow
+    from linkedin_mcp_server.api.tokens import token_path
+
+    cfg = config.linkedin_api
+
+    # Prompt for app credentials if not already stored
+    if not cfg.client_id or not cfg.client_secret:
+        print("LinkedIn Developer app credentials not found.")
+        print("Find them at: https://www.linkedin.com/developers/apps")
+        print("(Auth tab → Client ID and Client Secret)\n")
+        try:
+            client_id = input("Client ID     : ").strip()
+            client_secret = input("Client Secret : ").strip()
+        except KeyboardInterrupt:
+            print("\n❌ Cancelled")
+            sys.exit(0)
+
+        if not client_id or not client_secret:
+            print("❌ Both Client ID and Client Secret are required")
+            sys.exit(1)
+
+        save_app_credentials(
+            AppCredentials(client_id=client_id, client_secret=client_secret)
+        )
+        print(f"   App credentials saved to: {credentials_path()}\n")
+        cfg.client_id = client_id
+        cfg.client_secret = client_secret
+
+    try:
+        tokens = run_oauth_flow(cfg.client_id, cfg.client_secret)
+        print("✅ LinkedIn API authentication successful!")
+
+        if not tokens.person_id:
+            print("\n⚠️  Could not resolve your LinkedIn person ID automatically.")
+            print("   To fix this, add 'Sign In with LinkedIn using OpenID Connect'")
+            print("   to your app in the Developer Portal and re-run --linkedin-auth.")
+            print(
+                "   Or enter your person ID manually now (find it at linkedin.com/in/me"
+            )
+            print(
+                "   → right-click your profile picture → 'Copy link' — the numeric ID"
+            )
+            print("   is at the end of the URL, e.g. linkedin.com/in/ACoAA... or in")
+            print("   Developer Tools under Network → v2/me → response → 'id' field).")
+            try:
+                person_id_input = input(
+                    "   Person ID (or press Enter to skip): "
+                ).strip()
+                if person_id_input:
+                    raw = (
+                        person_id_input.split(":")[-1]
+                        if ":" in person_id_input
+                        else person_id_input
+                    )
+                    tokens.person_id = f"urn:li:person:{raw}"
+                    from linkedin_mcp_server.api.tokens import save_tokens
+
+                    save_tokens(tokens)
+            except KeyboardInterrupt:
+                pass
+
+        print(
+            f"   Person ID : {tokens.person_id or 'unknown (post/comment tools will not work)'}"
+        )
+        print(f"   User tokens saved to: {token_path()}")
+    except Exception as e:
+        print(f"❌ Authentication failed: {e}")
+        sys.exit(1)
+
+    sys.exit(0)
+
+
 def get_version() -> str:
     """Get version from installed metadata with a source fallback."""
     try:
@@ -295,6 +384,10 @@ def main() -> None:
         # Handle --login flag
         if config.server.login:
             get_profile_and_exit()
+
+        # Handle --linkedin-auth flag
+        if config.server.linkedin_auth:
+            linkedin_auth_and_exit()
 
         # Handle --status flag
         if config.server.status:
