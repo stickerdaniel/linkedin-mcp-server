@@ -10,7 +10,9 @@ from .tokens import TokenData, is_expired, load_tokens, refresh_access_token
 logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.linkedin.com"
-# Keep in sync with the LinkedIn API version used across requests
+# LinkedIn versioned API date — update when LinkedIn deprecates this version.
+# LinkedIn typically supports each version for ~2 years.
+# See: https://learn.microsoft.com/en-us/linkedin/shared/api-guide/versioning
 LINKEDIN_VERSION = "202504"
 
 
@@ -76,14 +78,16 @@ class LinkedInApiClient:
     def post(self, path: str, body: Any = None) -> httpx.Response:
         tokens = self._resolve_tokens()
         resp = httpx.post(
-            f"{_API_BASE}{path}", headers=self._headers(tokens), json=body
+            f"{_API_BASE}{path}", headers=self._headers(tokens), json=body, timeout=30.0
         )
         self._check(resp)
         return resp
 
     def delete(self, path: str) -> httpx.Response:
         tokens = self._resolve_tokens()
-        resp = httpx.delete(f"{_API_BASE}{path}", headers=self._headers(tokens))
+        resp = httpx.delete(
+            f"{_API_BASE}{path}", headers=self._headers(tokens), timeout=30.0
+        )
         self._check(resp)
         return resp
 
