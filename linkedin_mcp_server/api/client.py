@@ -10,10 +10,10 @@ from .tokens import TokenData, is_expired, load_tokens, refresh_access_token
 logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.linkedin.com"
-# LinkedIn versioned API date — update when LinkedIn deprecates this version.
-# LinkedIn typically supports each version for ~2 years.
-# See: https://learn.microsoft.com/en-us/linkedin/shared/api-guide/versioning
-LINKEDIN_VERSION = "202504"
+# LinkedIn versioned API date — LinkedIn supports each version for ~1 year from release.
+# Check https://learn.microsoft.com/en-us/linkedin/marketing/versioning for sunset dates.
+# Last updated: 202603 (March 2026)
+LINKEDIN_VERSION = "202603"
 
 
 class LinkedInApiError(Exception):
