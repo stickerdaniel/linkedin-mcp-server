@@ -16,6 +16,16 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 [![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup)
 [![Development](https://img.shields.io/badge/Development-Local-ffdc53?style=for-the-badge&logo=python&logoColor=ffdc53)](#-local-setup-develop--contribute)
 
+### Cross-host install via agent-add
+
+Install to any supported AI host (Claude Code, Cursor, Windsurf, and [15+ more](https://github.com/pea3nut/agent-get)) with one command:
+
+```bash
+npx -y agent-add --mcp '{"linkedin":{"command":"uvx","args":["linkedin-scraper-mcp@latest"],"env":{"UV_HTTP_TIMEOUT":"300"}}}'
+```
+
+> Requires [Node.js](https://nodejs.org/) 18+ and [uv](https://docs.astral.sh/uv/getting-started/installation/). `agent-add` auto-detects your AI host and writes the correct config file.
+
 <https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680>
 
 ## Usage Examples
@@ -60,7 +70,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 <br/>
 <br/>
 
-## 🚀 uvx Setup (Recommended - Universal)
+## ð uvx Setup (Recommended - Universal)
 
 **Prerequisites:** [Install uv](https://docs.astral.sh/uv/getting-started/installation/).
 
@@ -80,7 +90,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 }
 ```
 
-The `@latest` tag ensures you always run the newest version — `uvx` checks PyPI on each client launch and updates automatically. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
+The `@latest` tag ensures you always run the newest version â `uvx` checks PyPI on each client launch and updates automatically. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx linkedin-scraper-mcp@latest --login`.
@@ -88,7 +98,7 @@ The `@latest` tag ensures you always run the newest version — `uvx` checks PyP
 ### uvx Setup Help
 
 <details>
-<summary><b>🔧 Configuration</b></summary>
+<summary><b>ð§ Configuration</b></summary>
 
 **Transport Modes:**
 
@@ -142,7 +152,7 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 </details>
 
 <details>
-<summary><b>❗ Troubleshooting</b></summary>
+<summary><b>â Troubleshooting</b></summary>
 
 **Installation issues:**
 
@@ -177,7 +187,7 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 <br/>
 <br/>
 
-## 📦 Claude Desktop MCP Bundle (formerly DXT)
+## ð¦ Claude Desktop MCP Bundle (formerly DXT)
 
 **Prerequisites:** [Claude Desktop](https://claude.ai/download).
 
@@ -192,7 +202,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 ### MCP Bundle Setup Help
 
 <details>
-<summary><b>❗ Troubleshooting</b></summary>
+<summary><b>â Troubleshooting</b></summary>
 
 **First-time setup behavior:**
 
@@ -217,7 +227,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 <br/>
 <br/>
 
-## 🐳 Docker Setup
+## ð³ Docker Setup
 
 **Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running, and [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on the host for the one-time `--login` step.
 
@@ -251,7 +261,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```
 
 > [!NOTE]
-> Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx linkedin-scraper-mcp@latest --login` again if you encounter authentication issues.
+> Docker creates a fresh session on each startup. Sessions may expire over time â run `uvx linkedin-scraper-mcp@latest --login` again if you encounter authentication issues.
 
 > [!NOTE]
 > **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
@@ -259,7 +269,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ### Docker Setup Help
 
 <details>
-<summary><b>🔧 Configuration</b></summary>
+<summary><b>ð§ Configuration</b></summary>
 
 **Transport Modes:**
 
@@ -307,7 +317,7 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 </details>
 
 <details>
-<summary><b>❗ Troubleshooting</b></summary>
+<summary><b>â Troubleshooting</b></summary>
 
 **Docker issues:**
 
@@ -337,7 +347,7 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 <br/>
 <br/>
 
-## 🐍 Local Setup (Develop & Contribute)
+## ð Local Setup (Develop & Contribute)
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture guidelines and checklists. Please [open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) first to discuss the feature or bug fix before submitting a PR.
 
@@ -369,7 +379,7 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 ### Local Setup Help
 
 <details>
-<summary><b>🔧 Configuration</b></summary>
+<summary><b>ð§ Configuration</b></summary>
 
 **CLI Options:**
 
@@ -416,7 +426,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 </details>
 
 <details>
-<summary><b>❗ Troubleshooting</b></summary>
+<summary><b>â Troubleshooting</b></summary>
 
 **Login issues:**
 
