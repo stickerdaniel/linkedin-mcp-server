@@ -16,6 +16,16 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 [![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup)
 [![Development](https://img.shields.io/badge/Development-Local-ffdc53?style=for-the-badge&logo=python&logoColor=ffdc53)](#-local-setup-develop--contribute)
 
+### Cross-host install via agent-add
+
+Install to any supported AI host (Claude Code, Cursor, Windsurf, and [15+ more](https://github.com/pea3nut/agent-get)) with one command:
+
+```bash
+npx -y agent-add --mcp '{"linkedin":{"command":"uvx","args":["linkedin-scraper-mcp@latest"],"env":{"UV_HTTP_TIMEOUT":"300"}}}'
+```
+
+> Requires [Node.js](https://nodejs.org/) 18+ and [uv](https://docs.astral.sh/uv/getting-started/installation/). `agent-add` auto-detects your AI host and writes the correct config file.
+
 <https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680>
 
 ## Usage Examples
