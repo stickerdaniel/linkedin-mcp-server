@@ -63,6 +63,7 @@ def run_oauth_flow(client_id: str, client_secret: str) -> TokenData:
             "client_id": client_id,
             "client_secret": client_secret,
         },
+        timeout=30.0,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -161,9 +162,16 @@ def _wait_for_callback(expected_state: str, port: int) -> str:
             pass  # suppress access logs
 
     server = HTTPServer(("localhost", port), _Handler)
-    server.timeout = _CALLBACK_TIMEOUT_SECONDS
+    deadline = time.monotonic() + _CALLBACK_TIMEOUT_SECONDS
     try:
         while not received:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"LinkedIn OAuth timed out — no callback received within "
+                    f"{_CALLBACK_TIMEOUT_SECONDS} seconds"
+                )
+            server.timeout = remaining
             server.handle_request()
     finally:
         server.server_close()
