@@ -42,6 +42,8 @@ Approach: **Official LinkedIn API (Option B)**, hybrid with browser fallback if 
 - [x] `delete_comment` — delete a comment by URN
 
 ### Phase 2 — Articles
+Note: uses `POST /rest/posts` with `w_member_social` scope — no Community Management API needed.
+Endpoint requires explicit title, description, source URL, and thumbnail ImageUrn (uploaded separately).
 - [ ] `create_article` — publish a long-form LinkedIn article (title, body, thumbnail)
 - [ ] `edit_article` — update an existing article (commentary / lifecycle state)
 - [ ] `delete_article` — delete a published article
