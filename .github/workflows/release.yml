@@ -178,13 +178,13 @@ jobs:
 
       - name: Generate release notes
         run: |
-          # Build a dynamic ASCII download button sized to the version string
+          # Build a dynamic Unicode box-drawing download button sized to the version string
           # Add +1 to WIDTH to compensate for the emoji taking 2 columns in monospace
           LABEL="  ⬇  Download linkedin-mcp-server-v${VERSION}.mcpb  "
           WIDTH=$(( ${#LABEL} + 1 ))
           TOP="╔$(printf '═%.0s' $(seq 1 $WIDTH))╗"
           PAD="║$(printf ' %.0s' $(seq 1 $WIDTH))║"
-          MID="║${LABEL} ║"
+          MID="║${LABEL}║"
           BOT="╚$(printf '═%.0s' $(seq 1 $WIDTH))╝"
           export DOWNLOAD_BTN=$(printf '%s\n%s\n%s\n%s\n%s' "$TOP" "$PAD" "$MID" "$PAD" "$BOT")
           envsubst < RELEASE_NOTES_TEMPLATE.md > RELEASE_NOTES.md
