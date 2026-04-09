@@ -64,6 +64,7 @@ class ServerConfig:
     transport_explicitly_set: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "WARNING"
     login: bool = False
+    linkedin_auth: bool = False  # Run LinkedIn API OAuth flow and exit
     status: bool = False  # Check session validity and exit
     logout: bool = False
     # HTTP transport configuration
@@ -73,11 +74,28 @@ class ServerConfig:
 
 
 @dataclass
+class LinkedInApiConfig:
+    """
+    LinkedIn Developer app credentials (not user tokens).
+
+    These identify YOUR app in the LinkedIn Developer Portal.
+    Set via LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET env vars (or .env file).
+
+    The user's OAuth tokens (access token, refresh token, person ID) are separate —
+    they are obtained via `--linkedin-auth` and stored in ~/.linkedin-mcp/user-tokens.json.
+    """
+
+    client_id: str | None = None  # env: LINKEDIN_CLIENT_ID  — app credential
+    client_secret: str | None = None  # env: LINKEDIN_CLIENT_SECRET — app credential
+
+
+@dataclass
 class AppConfig:
     """Main application configuration."""
 
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    linkedin_api: LinkedInApiConfig = field(default_factory=LinkedInApiConfig)
     is_interactive: bool = field(default=False)
 
     def validate(self) -> None:

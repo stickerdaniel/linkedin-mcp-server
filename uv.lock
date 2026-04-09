@@ -955,6 +955,7 @@ version = "4.8.3"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
+    { name = "httpx" },
     { name = "inquirer" },
     { name = "patchright" },
     { name = "python-dotenv" },
@@ -975,6 +976,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastmcp", specifier = ">=3.0.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "inquirer", specifier = ">=3.4.0" },
     { name = "patchright", specifier = ">=1.40.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
