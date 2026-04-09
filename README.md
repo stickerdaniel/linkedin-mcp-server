@@ -16,16 +16,6 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 [![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup)
 [![Development](https://img.shields.io/badge/Development-Local-ffdc53?style=for-the-badge&logo=python&logoColor=ffdc53)](#-local-setup-develop--contribute)
 
-### Cross-host install via agent-add
-
-Install to any supported AI host (Claude Code, Cursor, Windsurf, and [15+ more](https://github.com/pea3nut/agent-get)) with one command:
-
-```bash
-npx -y agent-add --mcp '{"linkedin":{"command":"uvx","args":["linkedin-scraper-mcp@latest"],"env":{"UV_HTTP_TIMEOUT":"300"}}}'
-```
-
-> Requires [Node.js](https://nodejs.org/) 18+ and [uv](https://docs.astral.sh/uv/getting-started/installation/). `agent-add` auto-detects your AI host and writes the correct config file.
-
 <https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680>
 
 ## Usage Examples
@@ -91,6 +81,13 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 ```
 
 The `@latest` tag ensures you always run the newest version — `uvx` checks PyPI on each client launch and updates automatically. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
+
+
+Or auto-configure with [agent-add](https://github.com/pea3nut/agent-get) (supports [18 AI hosts](https://github.com/pea3nut/agent-get) including Claude Code, Cursor, Windsurf):
+
+```bash
+npx -y agent-add --mcp '{"linkedin":{"command":"uvx","args":["linkedin-scraper-mcp@latest"],"env":{"UV_HTTP_TIMEOUT":"300"}}}'
+```
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx linkedin-scraper-mcp@latest --login`.
