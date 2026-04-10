@@ -66,7 +66,17 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 ### Installation
 
-**Client Configuration**
+Install to any supported AI host ([18 hosts](https://github.com/pea3nut/agent-get) including Claude Code, Cursor, Windsurf, Claude Desktop, and more) with one command:
+
+```bash
+npx -y agent-add --mcp '{"linkedin":{"command":"uvx","args":["linkedin-scraper-mcp@latest"],"env":{"UV_HTTP_TIMEOUT":"300"}}}'
+```
+
+> Requires [Node.js](https://nodejs.org/) 18+. `agent-add` auto-detects your AI host and writes the config to the correct file.
+
+**Manual Configuration**
+
+Alternatively, add the following JSON to your MCP client's config file:
 
 ```json
 {
@@ -82,16 +92,8 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 The `@latest` tag ensures you always run the newest version — `uvx` checks PyPI on each client launch and updates automatically. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
 
-
-Or auto-configure with [agent-add](https://github.com/pea3nut/agent-get) (supports [18 AI hosts](https://github.com/pea3nut/agent-get) including Claude Code, Cursor, Windsurf):
-
-```bash
-npx -y agent-add --mcp '{"linkedin":{"command":"uvx","args":["linkedin-scraper-mcp@latest"],"env":{"UV_HTTP_TIMEOUT":"300"}}}'
-```
-
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx linkedin-scraper-mcp@latest --login`.
-
 ### uvx Setup Help
 
 <details>
