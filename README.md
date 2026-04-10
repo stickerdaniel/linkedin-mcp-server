@@ -66,7 +66,7 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 ### Installation
 
-Install to any supported AI host ([18 hosts](https://github.com/pea3nut/agent-get) including Claude Code, Cursor, Windsurf, Claude Desktop, and more) with one command:
+Install to any supported AI host ([18 hosts](https://github.com/pea3nut/agent-add) including Claude Code, Cursor, Windsurf, Claude Desktop, and more) with one command:
 
 ```bash
 npx -y agent-add --mcp '{"linkedin":{"command":"uvx","args":["linkedin-scraper-mcp@latest"],"env":{"UV_HTTP_TIMEOUT":"300"}}}'
@@ -94,6 +94,7 @@ The `@latest` tag ensures you always run the newest version — `uvx` checks PyP
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx linkedin-scraper-mcp@latest --login`.
+
 ### uvx Setup Help
 
 <details>
