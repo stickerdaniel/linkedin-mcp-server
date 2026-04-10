@@ -1709,6 +1709,7 @@ class TestSearchJobs:
 class TestScrapeSavedJobs:
     async def test_scrape_saved_jobs_single_page(self, mock_page):
         """Single page of results — no Next button. Progress callback fires."""
+
         async def evaluate_side_effect(js, *args):
             if 'button[aria-label^="Page "]' in js:
                 return 1
@@ -1887,6 +1888,7 @@ class TestScrapeSavedJobs:
         self, mock_page
     ):
         """max_pages=1 stops after page 1 even if more buttons exist."""
+
         async def evaluate_side_effect(js, *args):
             if 'button[aria-label^="Page "]' in js:
                 return 3
