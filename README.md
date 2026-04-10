@@ -40,19 +40,19 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 
 | Tool | Description | Status |
 |------|-------------|--------|
-| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, contact_info, posts) | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#304](https://github.com/stickerdaniel/linkedin-mcp-server/issues/304) [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_inbox` | List recent conversations from the LinkedIn messaging inbox | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_conversation` | Read a specific messaging conversation by username or thread ID | [#307](https://github.com/stickerdaniel/linkedin-mcp-server/issues/307) [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `search_conversations` | Search messages by keyword | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_company_posts` | Get recent posts from a company's LinkedIn feed | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `search_jobs` | Search for jobs with keywords and location filters | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `search_people` | Search for people by keywords and location | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_job_details` | Get detailed information about a specific job posting | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `close_session` | Close browser session and clean up resources | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
+| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, contact_info, posts) | working |
+| `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#304](https://github.com/stickerdaniel/linkedin-mcp-server/issues/304) |
+| `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
+| `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
+| `get_conversation` | Read a specific messaging conversation by username or thread ID | [#307](https://github.com/stickerdaniel/linkedin-mcp-server/issues/307) |
+| `search_conversations` | Search messages by keyword | working |
+| `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#344](https://github.com/stickerdaniel/linkedin-mcp-server/issues/344) |
+| `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | working |
+| `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
+| `search_jobs` | Search for jobs with keywords and location filters | working |
+| `search_people` | Search for people by keywords and location | working |
+| `get_job_details` | Get detailed information about a specific job posting | working |
+| `close_session` | Close browser session and clean up resources | working |
 
 > [!IMPORTANT]
 > **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
