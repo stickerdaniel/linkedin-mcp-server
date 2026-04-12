@@ -1042,21 +1042,41 @@ class LinkedInExtractor:
         # typically completes immediately without a dialog).
         if state == "connectable":
             try:
-                await self._page.wait_for_selector(_DIALOG_SELECTOR)
+                await self._page.wait_for_selector(
+                    _DIALOG_SELECTOR, state="visible", timeout=10000
+                )
             except PlaywrightTimeoutError:
                 logger.debug("No dialog appeared after clicking '%s'", button_text)
 
         note_sent = False
-        if note and await self._dialog_is_open():
-            # Try to find textarea directly; if not visible, click the first
-            # button in the dialog (typically "Add a note") to reveal it
+        if note and await self._dialog_is_open(timeout=3000):
+            # Try to find textarea directly; if not visible, look for an
+            # "Add a note" button to reveal it
             textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
             if textarea_count == 0:
-                buttons = self._page.locator(
-                    f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-                )
-                if await buttons.count() > 1:
-                    await buttons.first.click()
+                # Look for "Add a note" button by text first
+                add_note_btn = self._page.locator(
+                    f"{_DIALOG_SELECTOR} button"
+                ).filter(has_text=re.compile(r"add a note", re.IGNORECASE))
+                if await add_note_btn.count() > 0:
+                    await add_note_btn.first.click()
+                    logger.debug("Clicked 'Add a note' button")
+                else:
+                    # Fallback: click first button in dialog (may be "Add a note")
+                    buttons = self._page.locator(
+                        f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+                    )
+                    if await buttons.count() > 0:
+                        await buttons.first.click()
+                        logger.debug("Clicked first dialog button as fallback")
+
+                # Wait for textarea to appear after clicking "Add a note"
+                try:
+                    await self._page.wait_for_selector(
+                        _DIALOG_TEXTAREA_SELECTOR, timeout=5000
+                    )
+                except PlaywrightTimeoutError:
+                    logger.debug("Textarea did not appear after clicking note button")
 
             filled = await self._fill_dialog_textarea(note)
             if filled:
