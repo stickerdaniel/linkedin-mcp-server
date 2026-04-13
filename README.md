@@ -46,24 +46,6 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `close_session` | Close browser session and clean up resources | working |
 
-## Usage Examples
-
-```
-Research the background of this candidate https://www.linkedin.com/in/stickerdaniel/
-```
-
-```
-Get this company profile for partnership discussions https://www.linkedin.com/company/inframs/
-```
-
-```
-Suggest improvements for my CV to target this job posting https://www.linkedin.com/jobs/view/4252026496
-```
-
-```
-What has Anthropic been posting about recently? https://www.linkedin.com/company/anthropicresearch/
-```
-
 <br/>
 <br/>
 
