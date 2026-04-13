@@ -9,6 +9,16 @@
 
 Through this LinkedIn MCP server, AI assistants like Claude can connect to your LinkedIn. Access profiles and companies, search for jobs, or get job details.
 
+
+> [!IMPORTANT]
+> **FAQ**
+>
+> **Is this safe to use? Will I get banned?**
+> This tool controls a real browser session; it doesn't exploit undocumented APIs or bypass authentication. That said, LinkedIn's TOS prohibit automated tools. With normal usage (not bulk scraping!) you're not risking a ban. So far, no users have been banned for using this MCP. If you encounter any issues, let me know in the [Discussions](https://github.com/stickerdaniel/linkedin-mcp-server/discussions).
+>
+> **What if my agents execute too many actions?**
+> LinkedIn may send you a warning about automated tool usage. If that happens, reduce your automation volume. This MCP executes tool calls sequentially via a queue but has no built-in rate limits. Prompt your agents responsibly.
+
 ## Installation Methods
 
 [![uvx](https://img.shields.io/badge/uvx-Quick_Install-de5fe9?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDEiIGhlaWdodD0iNDEiIHZpZXdCb3g9IjAgMCA0MSA0MSIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTS01LjI4NjE5ZS0wNiAwLjE2ODYyOUwwLjA4NDMwOTggMjAuMTY4NUwwLjE1MTc2MiAzNi4xNjgzQzAuMTYxMDc1IDM4LjM3NzQgMS45NTk0NyA0MC4xNjA3IDQuMTY4NTkgNDAuMTUxNEwyMC4xNjg0IDQwLjA4NEwzMC4xNjg0IDQwLjA0MThMMzEuMTg1MiA0MC4wMzc1QzMzLjM4NzcgNDAuMDI4MiAzNS4xNjgzIDM4LjIwMjYgMzUuMTY4MyAzNlYzNkwzNy4wMDAzIDM2TDM3LjAwMDMgMzkuOTk5Mkw0MC4xNjgzIDM5Ljk5OTZMMzkuOTk5NiAtOS45NDY1M2UtMDdMMjEuNTk5OCAwLjA3NzU2ODlMMjEuNjc3NCAxNi4wMTg1TDIxLjY3NzQgMjUuOTk5OEwyMC4wNzc0IDI1Ljk5OThMMTguMzk5OCAyNS45OTk4TDE4LjQ3NzQgMTYuMDMyTDE4LjM5OTggMC4wOTEwNTkzTC01LjI4NjE5ZS0wNiAwLjE2ODYyOVoiIGZpbGw9IiNERTVGRTkiLz4KPC9zdmc+Cg==)](#-uvx-setup-recommended---universal)
@@ -17,24 +27,6 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 [![Development](https://img.shields.io/badge/Development-Local-ffdc53?style=for-the-badge&logo=python&logoColor=ffdc53)](#-local-setup-develop--contribute)
 
 <https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680>
-
-## Usage Examples
-
-```
-Research the background of this candidate https://www.linkedin.com/in/stickerdaniel/
-```
-
-```
-Get this company profile for partnership discussions https://www.linkedin.com/company/inframs/
-```
-
-```
-Suggest improvements for my CV to target this job posting https://www.linkedin.com/jobs/view/4252026496
-```
-
-```
-What has Anthropic been posting about recently? https://www.linkedin.com/company/anthropicresearch/
-```
 
 ## Features & Tool Status
 
@@ -54,8 +46,23 @@ What has Anthropic been posting about recently? https://www.linkedin.com/company
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `close_session` | Close browser session and clean up resources | working |
 
-> [!IMPORTANT]
-> **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
+## Usage Examples
+
+```
+Research the background of this candidate https://www.linkedin.com/in/stickerdaniel/
+```
+
+```
+Get this company profile for partnership discussions https://www.linkedin.com/company/inframs/
+```
+
+```
+Suggest improvements for my CV to target this job posting https://www.linkedin.com/jobs/view/4252026496
+```
+
+```
+What has Anthropic been posting about recently? https://www.linkedin.com/company/anthropicresearch/
+```
 
 <br/>
 <br/>
