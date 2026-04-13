@@ -2219,6 +2219,86 @@ class LinkedInExtractor:
             refs.append(ref)
         return refs
 
+
+    async def get_saved_posts(self, limit: int = 20) -> dict[str, Any]:
+        """Get saved posts (bookmarks) from the LinkedIn saved items page."""
+        url = "https://www.linkedin.com/my-items/saved-posts/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context="Saved posts")
+        await handle_modal_close(self._page)
+
+        # Expand truncated posts by clicking "see more" buttons
+        await self._expand_see_more_buttons()
+
+        # Scroll to load more posts up to the limit
+        scrolls = max(1, limit // 5)
+        await self._scroll_main_scrollable_region(
+            position="bottom", attempts=scrolls, pause_time=0.8
+        )
+
+        # Click additional "Show more results" buttons if present
+        await self._click_show_more_results()
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+        references: list[Reference] = (
+            build_references(raw_result["references"], "saved_posts") if cleaned else []
+        )
+
+        # Filter references to keep post URLs and profile URLs only
+        post_refs = [
+            ref for ref in references
+            if "/feed/update/" in ref.get("url", "")
+            or "/in/" in ref.get("url", "")
+        ]
+        if post_refs:
+            references = dedupe_references(post_refs)
+
+        return self._single_section_result(
+            url,
+            "saved_posts",
+            cleaned,
+            references=references,
+        )
+
+    async def _expand_see_more_buttons(self) -> None:
+        """Click all visible see-more buttons to expand truncated post content."""
+        try:
+            await self._page.evaluate(
+                """() => {
+                    const buttons = Array.from(document.querySelectorAll('button'))
+                        .filter(btn => {
+                            const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+                            return text === 'see more' || text === 'voir plus' || text === 'plus';
+                        });
+                    buttons.forEach(btn => btn.click());
+                }"""
+            )
+            import asyncio
+            await asyncio.sleep(0.5)
+        except Exception:
+            pass  # Non-critical: proceed even if expansion fails
+
+    async def _click_show_more_results(self) -> None:
+        """Click the show-more-results button if present to load additional posts."""
+        try:
+            await self._page.evaluate(
+                """() => {
+                    const buttons = Array.from(document.querySelectorAll('button'))
+                        .filter(btn => {
+                            const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+                            return text.includes('show more') || text.includes('afficher plus');
+                        });
+                    if (buttons.length > 0) buttons[0].click();
+                }"""
+            )
+            import asyncio
+            await asyncio.sleep(1.0)
+        except Exception:
+            pass  # Non-critical
+
     async def get_conversation(
         self,
         linkedin_username: str | None = None,
