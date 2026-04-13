@@ -759,29 +759,31 @@ class TestScrapePersonUrls:
 class TestDetectConnectionState:
     """Tests for connection state detection from profile text."""
 
+    # --- English locale (default for en-US accounts) -----------------------
+
     def test_already_connected(self):
         text = "Collin Pfeifer\n\n· 1st\n\nAI Engineer\n\nMessage\nMore"
-        assert detect_connection_state(text) == "already_connected"
+        assert detect_connection_state(text) == ("already_connected", "en")
 
     def test_pending(self):
         text = "Marinus Prey\n\n· 2nd\n\nStudent\n\nMessage\nPending\nMore"
-        assert detect_connection_state(text) == "pending"
+        assert detect_connection_state(text) == ("pending", "en")
 
     def test_incoming_request(self):
         text = "Aklasur Rahman\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore"
-        assert detect_connection_state(text) == "incoming_request"
+        assert detect_connection_state(text) == ("incoming_request", "en")
 
     def test_connectable(self):
         text = "Jane Doe\n\n· 3rd\n\nEngineer\n\nConnect\nMore"
-        assert detect_connection_state(text) == "connectable"
+        assert detect_connection_state(text) == ("connectable", "en")
 
     def test_follow_only(self):
         text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMore"
-        assert detect_connection_state(text) == "follow_only"
+        assert detect_connection_state(text) == ("follow_only", "en")
 
     def test_unavailable(self):
         text = "Unknown Person\n\nSome text here"
-        assert detect_connection_state(text) == "unavailable"
+        assert detect_connection_state(text) == ("unavailable", "en")
 
     def test_follow_in_interests_not_matched(self):
         """Follow in the Interests section should not cause a false positive."""
@@ -790,7 +792,7 @@ class TestDetectConnectionState:
             "About\n\nSome bio\n\nInterests\n\n"
             "Elon Musk\n101,000 followers\nFollow"
         )
-        assert detect_connection_state(text) == "connectable"
+        assert detect_connection_state(text) == ("connectable", "en")
 
     def test_action_area_cuts_at_about(self):
         text = "Name\n\nConnect\nMore\nAbout\n\nFollow\nConnect"
@@ -803,6 +805,67 @@ class TestDetectConnectionState:
         area = _extract_action_area(text)
         assert "Follow" not in area
         assert "Pending" in area
+
+    # --- German locale (account display language = Deutsch) ---------------
+
+    def test_already_connected_de(self):
+        text = "Eva Müller\n\n· 1.\n\nHead of AI @ Beispiel\n\nNachricht\nMehr"
+        assert detect_connection_state(text) == ("already_connected", "en")
+
+    def test_connectable_de(self):
+        text = (
+            "Eric Martin\n\n· 2.\n\nHead of AI @ ebm-papst\n\n"
+            "Abstatt, Baden-Württemberg, Deutschland\n\n"
+            "Vernetzen\nNachricht\nMehr"
+        )
+        assert detect_connection_state(text) == ("connectable", "de")
+
+    def test_follow_only_de(self):
+        text = "Oscar Morillo\n\n· 2.\n\nHead of AI @Finmas\n\nNachricht\nFolgen\nMehr"
+        assert detect_connection_state(text) == ("follow_only", "de")
+
+    def test_pending_de(self):
+        text = "Jane Doe\n\n· 2.\n\nEngineer\n\nNachricht\nAusstehend\nMehr"
+        assert detect_connection_state(text) == ("pending", "de")
+
+    def test_incoming_request_de(self):
+        text = "Jane Doe\n\n--\n\nBerlin\n\nAnnehmen\nIgnorieren\nMehr"
+        assert detect_connection_state(text) == ("incoming_request", "de")
+
+    def test_action_area_cuts_at_german_heading(self):
+        """A German ``Info`` heading should end the action area."""
+        text = "Name\n\nVernetzen\nMehr\nInfo\n\nFolgen\nVernetzen"
+        area = _extract_action_area(text)
+        assert "Info" not in area
+        assert "Vernetzen" in area
+        assert "Folgen" not in area
+
+    # --- French locale (parity with existing PR #319) ---------------------
+
+    def test_already_connected_fr(self):
+        text = "Laurent Delade\n\n· 1er\n\nChannel Account Manager\n\nMessage\nPlus"
+        assert detect_connection_state(text) == ("already_connected", "en")
+
+    def test_connectable_fr(self):
+        text = (
+            "Laurent Delade\n\n· 2e\n\nChannel Account Manager\n\n"
+            "Se connecter\nEnregistrer\nPlus"
+        )
+        assert detect_connection_state(text) == ("connectable", "fr")
+
+    def test_follow_only_fr(self):
+        text = "Dragan Radulović\n\n· 3e\n\nPresident\n\nSuivre\nEnregistrer\nPlus"
+        assert detect_connection_state(text) == ("follow_only", "fr")
+
+    def test_pending_fr(self):
+        text = "Jane Doe\n\n· 2e\n\nEngineer\n\nEn attente\nPlus"
+        assert detect_connection_state(text) == ("pending", "fr")
+
+    def test_action_area_cuts_at_french_heading(self):
+        text = "Name\n\nSe connecter\nPlus\nInfos\n\nSuivre\nSe connecter"
+        area = _extract_action_area(text)
+        assert "Infos" not in area
+        assert "Se connecter" in area
 
 
 class TestConnectWithPerson:
