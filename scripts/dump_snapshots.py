@@ -32,9 +32,12 @@ OUTPUT_DIR = Path(__file__).parent / "snapshot_dumps"
 PERSON_TARGETS: list[tuple[str, str]] = [
     (
         "williamhgates",
-        "experience,education,interests,honors,languages,certifications,contact_info",
+        "experience,education,interests,honors,languages,certifications,skills,projects,contact_info",
     ),
-    ("anistji", "experience,education,honors,languages,certifications,contact_info"),
+    (
+        "anistji",
+        "experience,education,honors,languages,certifications,skills,projects,contact_info",
+    ),
 ]
 
 COMPANY_TARGETS: list[tuple[str, str]] = [
