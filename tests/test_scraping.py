@@ -811,6 +811,33 @@ class TestScrapePersonUrls:
         assert any("/details/projects/" in url for url in urls)
         assert "projects" in result["sections"]
 
+    async def test_scrape_person_passes_max_scrolls(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.scrape_person(
+                "test-user", {"certifications"}, max_scrolls=15
+            )
+
+        for call in mock_extract.call_args_list:
+            assert call.kwargs.get("max_scrolls") == 15
+
 
 class TestDetectConnectionState:
     """Tests for connection state detection from profile text."""
@@ -1946,6 +1973,77 @@ class TestActivityFeedExtraction:
         mock_scroll.assert_awaited_once()
         _, kwargs = mock_scroll.call_args
         assert kwargs["pause_time"] == 0.5
+        assert kwargs["max_scrolls"] == 5
+
+    async def test_max_scrolls_override_passed_to_scroll_to_bottom(self, mock_page):
+        """Custom max_scrolls on a detail page overrides the default of 5."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Experience\nSoftware Engineer",
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/details/certifications/",
+                section_name="certifications",
+                max_scrolls=20,
+            )
+
+        mock_scroll.assert_awaited_once()
+        _, kwargs = mock_scroll.call_args
+        assert kwargs["max_scrolls"] == 20
+
+    async def test_default_scrolls_without_max_scrolls_override(self, mock_page):
+        """Without max_scrolls, detail pages use the default of 5."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Experience\nSoftware Engineer",
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/details/certifications/",
+                section_name="certifications",
+            )
+
+        mock_scroll.assert_awaited_once()
+        _, kwargs = mock_scroll.call_args
         assert kwargs["max_scrolls"] == 5
 
     async def test_activity_page_timeout_proceeds_gracefully(self, mock_page):
