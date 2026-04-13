@@ -3,10 +3,7 @@ For an installation guide, refer to the [README](https://github.com/stickerdanie
 ## 📦 Update MCP Bundle Installation
 **For Claude Desktop users:**
 
-```
-${DOWNLOAD_BTN}
-```
-**👆 [Click here to download](https://github.com/stickerdaniel/linkedin-mcp-server/releases/download/v${VERSION}/linkedin-mcp-server-v${VERSION}.mcpb)**
+→ [Download linkedin-mcp-server-v${VERSION}.mcpb](https://github.com/stickerdaniel/linkedin-mcp-server/releases/download/v${VERSION}/linkedin-mcp-server-v${VERSION}.mcpb)
 
 Then click the downloaded file to install in Claude Desktop.
 
