@@ -1466,6 +1466,10 @@ class LinkedInExtractor:
             if candidate_count and candidate_count > 0:
                 return locator.last
 
+            # Fallback: when count() raised an exception above (candidate_count
+            # is None), attempt the original wait_for path.  This is unlikely to
+            # succeed given the same patchright quirk, but preserves the prior
+            # behaviour for non-patchright drivers where wait_for works normally.
             candidate = locator.last
             try:
                 await candidate.wait_for(state="visible")
