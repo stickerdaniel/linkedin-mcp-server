@@ -13,6 +13,8 @@ PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
     "honors": ("/details/honors/", False),
     "languages": ("/details/languages/", False),
     "certifications": ("/details/certifications/", False),
+    "skills": ("/details/skills/", False),
+    "projects": ("/details/projects/", False),
     "contact_info": ("/overlay/contact-info/", True),
     "posts": ("/recent-activity/all/", False),
 }
