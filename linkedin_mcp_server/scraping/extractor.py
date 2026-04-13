@@ -649,6 +649,7 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
+        max_scrolls: int | None = None,
     ) -> ExtractedSection:
         """Navigate to a URL, scroll to load lazy content, and extract innerText.
 
@@ -661,14 +662,14 @@ class LinkedInExtractor:
         Returns empty string for unexpected non-domain failures (error isolation).
         """
         try:
-            result = await self._extract_page_once(url, section_name)
+            result = await self._extract_page_once(url, section_name, max_scrolls)
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
             # Retry once after backoff
             logger.info("Retrying %s after %.0fs backoff", url, _RATE_LIMIT_RETRY_DELAY)
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            return await self._extract_page_once(url, section_name)
+            return await self._extract_page_once(url, section_name, max_scrolls)
 
         except LinkedInScraperException:
             raise
@@ -689,6 +690,7 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
+        max_scrolls: int | None = None,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll, and extract innerText."""
         await self._navigate_to_page(url)
@@ -757,9 +759,11 @@ class LinkedInExtractor:
 
         # Scroll to trigger lazy loading
         if is_activity:
-            await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=10)
+            scrolls = max_scrolls if max_scrolls is not None else 10
+            await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=scrolls)
         else:
-            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+            scrolls = max_scrolls if max_scrolls is not None else 5
+            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
 
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])
@@ -864,6 +868,7 @@ class LinkedInExtractor:
         username: str,
         requested: set[str],
         callbacks: ProgressCallback | None = None,
+        max_scrolls: int | None = None,
     ) -> dict[str, Any]:
         """Scrape a person profile with configurable sections.
 
@@ -900,7 +905,9 @@ class LinkedInExtractor:
                         )
                     else:
                         extracted = await self.extract_page(
-                            url, section_name=section_name
+                            url,
+                            section_name=section_name,
+                            max_scrolls=max_scrolls,
                         )
 
                     if extracted.text and extracted.text != _RATE_LIMITED_MSG:
