@@ -757,6 +757,31 @@ class LinkedInExtractor:
             except PlaywrightTimeoutError:
                 logger.debug("Detail section content did not appear on %s", url)
 
+        # Detail pages paginate with a "Show more" button inside <main>, not scroll.
+        # Click it until it disappears or the budget runs out.
+        if is_details:
+            max_clicks = max_scrolls if max_scrolls is not None else 5
+            for i in range(max_clicks):
+                button = self._page.locator("main button").filter(
+                    has_text=re.compile(r"^Show (more|all)\b", re.IGNORECASE)
+                )
+                try:
+                    if await button.count() == 0:
+                        logger.debug("No 'Show more' button after %d clicks", i)
+                        break
+                    target = button.first
+                    if not await target.is_visible():
+                        break
+                    await target.scroll_into_view_if_needed(timeout=2000)
+                    await target.click(timeout=2000)
+                    await asyncio.sleep(1.0)
+                except PlaywrightTimeoutError:
+                    logger.debug("Show more click timed out after %d clicks", i)
+                    break
+                except Exception as e:
+                    logger.debug("Show more click failed: %s", e)
+                    break
+
         # Scroll to trigger lazy loading
         if is_activity:
             scrolls = max_scrolls if max_scrolls is not None else 10
