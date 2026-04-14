@@ -113,6 +113,45 @@ class TestPersonTool:
         assert "callbacks" in call_kwargs
         assert isinstance(call_kwargs["callbacks"], MCPContextProgressCallback)
 
+    async def test_get_person_profile_passes_max_scrolls(self, mock_context):
+        """Verify max_scrolls parameter is forwarded to scrape_person."""
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "sections": {"main_profile": "John Doe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_person_profile")
+        await tool_fn(
+            "test-user",
+            mock_context,
+            max_scrolls=15,
+            extractor=mock_extractor,
+        )
+
+        call_kwargs = mock_extractor.scrape_person.call_args.kwargs
+        assert call_kwargs["max_scrolls"] == 15
+
+    async def test_get_person_profile_rejects_invalid_max_scrolls(self, mock_context):
+        """Verify max_scrolls=0 is rejected by Field(ge=1) validation."""
+        from pydantic import ValidationError
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        with pytest.raises(ValidationError, match="max_scrolls"):
+            await mcp.call_tool(
+                "get_person_profile",
+                {"linkedin_username": "test-user", "max_scrolls": 0},
+            )
+
     async def test_get_person_profile_unknown_section(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/in/test-user/",
