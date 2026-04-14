@@ -138,6 +138,7 @@ def mock_page():
     mock_locator.is_visible = AsyncMock(return_value=False)
     mock_locator.first = mock_locator
     mock_locator.inner_text = AsyncMock(return_value="normal page content")
+    mock_locator.filter = MagicMock(return_value=mock_locator)
     page.locator.return_value = mock_locator
     page.main_frame = object()
     page.on = MagicMock()
