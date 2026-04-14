@@ -3191,15 +3191,17 @@ class TestResolveMessageComposeBox:
         mock_locator = MagicMock()
         mock_locator.count = AsyncMock(return_value=1)
         sentinel = MagicMock(name="last_locator")
+        sentinel.wait_for = AsyncMock()
         mock_locator.last = sentinel
+        mock_locator.wait_for = AsyncMock()
         mock_page.locator = MagicMock(return_value=mock_locator)
 
         result = await extractor._resolve_message_compose_box()
 
         assert result is sentinel
-        # wait_for should NOT be called — the early return bypasses it
-        mock_locator.last.wait_for = AsyncMock()
-        mock_locator.wait_for = AsyncMock()
+        # wait_for should NOT be called on the early-return path
+        sentinel.wait_for.assert_not_called()
+        mock_locator.wait_for.assert_not_called()
 
     async def test_returns_none_when_all_selectors_miss(self, mock_page):
         """_resolve_message_compose_box returns None when no selector matches."""
@@ -3286,6 +3288,10 @@ class TestSendMessageComposerInteraction:
                 "_dismiss_message_ui",
                 new_callable=AsyncMock,
             ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         )
 
     async def test_focus_and_type_via_evaluate_and_keyboard(self, mock_page):
@@ -3309,6 +3315,7 @@ class TestSendMessageComposerInteraction:
             patches[6],
             patches[7],
             patches[8],
+            patches[9],
             patch.object(
                 extractor,
                 "_message_text_visible",
@@ -3345,6 +3352,7 @@ class TestSendMessageComposerInteraction:
             patches[6],
             patches[7],
             patches[8],
+            patches[9],
         ):
             result = await extractor.send_message(
                 "testuser", "Hello!", confirm_send=True
@@ -3374,6 +3382,7 @@ class TestSendMessageComposerInteraction:
             patches[6],
             patches[7],
             patches[8],
+            patches[9],
             patch.object(
                 extractor,
                 "_message_text_visible",
