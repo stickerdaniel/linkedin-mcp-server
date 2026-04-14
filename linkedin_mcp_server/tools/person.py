@@ -6,9 +6,10 @@ with configurable section selection.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from pydantic import Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
@@ -34,6 +35,7 @@ def register_person_tools(mcp: FastMCP) -> None:
         linkedin_username: str,
         ctx: Context,
         sections: str | None = None,
+        max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -47,6 +49,14 @@ def register_person_tools(mcp: FastMCP) -> None:
                 Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts
                 Examples: "experience,education", "contact_info", "skills,projects", "honors,languages", "posts"
                 Default (None) scrapes only the main profile page.
+            max_scrolls: Maximum pagination attempts per section to load more content.
+                On detail sections (experience, certifications, skills, etc.) this
+                is the max number of "Show more" button clicks. On activity/posts
+                it is the max scroll-to-bottom iterations. Applies to all sections
+                in this call. Default (None) uses 5 for detail sections and 10 for
+                posts. Increase when a profile has many items in a section
+                (e.g., 30+ certifications, max_scrolls=20). To avoid slowing down
+                other sections, request heavy sections in a separate call.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -68,7 +78,10 @@ def register_person_tools(mcp: FastMCP) -> None:
 
             cb = MCPContextProgressCallback(ctx)
             result = await extractor.scrape_person(
-                linkedin_username, requested, callbacks=cb
+                linkedin_username,
+                requested,
+                callbacks=cb,
+                max_scrolls=max_scrolls,
             )
 
             if unknown:
