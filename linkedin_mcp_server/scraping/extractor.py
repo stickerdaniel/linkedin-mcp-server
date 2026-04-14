@@ -2487,7 +2487,6 @@ class LinkedInExtractor:
             """() => {
                 const el = document.querySelector(
                     'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
-                    + 'div[role="textbox"][contenteditable="true"][aria-label*="Escribe un mensaje"],'
                     + 'div[role="textbox"][contenteditable="true"]'
                 );
                 if (!el) return false;
