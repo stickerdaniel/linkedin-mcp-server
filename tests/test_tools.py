@@ -146,7 +146,7 @@ class TestPersonTool:
         mcp = FastMCP("test")
         register_person_tools(mcp)
 
-        with pytest.raises(ValidationError, match="greater_than_equal"):
+        with pytest.raises(ValidationError, match="max_scrolls"):
             await mcp.call_tool(
                 "get_person_profile",
                 {"linkedin_username": "test-user", "max_scrolls": 0},
