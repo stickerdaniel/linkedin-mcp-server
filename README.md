@@ -9,6 +9,16 @@
 
 Through this LinkedIn MCP server, AI assistants like Claude can connect to your LinkedIn. Access profiles and companies, search for jobs, or get job details.
 
+
+> [!IMPORTANT]
+> **FAQ**
+>
+> **Is this safe to use? Will I get banned?**
+> This tool controls a real browser session; it doesn't exploit undocumented APIs or bypass authentication. That said, LinkedIn's TOS prohibit automated tools. With normal usage (not bulk scraping!) you're not risking a ban. So far, no users have been banned for using this MCP. If you encounter any issues, let me know in the [Discussions](https://github.com/stickerdaniel/linkedin-mcp-server/discussions).
+>
+> **What if my agents execute too many actions?**
+> LinkedIn may send you a warning about automated tool usage. If that happens, reduce your automation volume. This MCP executes tool calls sequentially via a queue but has no built-in rate limits. Prompt your agents responsibly.
+
 ## Installation Methods
 
 [![uvx](https://img.shields.io/badge/uvx-Quick_Install-de5fe9?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDEiIGhlaWdodD0iNDEiIHZpZXdCb3g9IjAgMCA0MSA0MSIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTS01LjI4NjE5ZS0wNiAwLjE2ODYyOUwwLjA4NDMwOTggMjAuMTY4NUwwLjE1MTc2MiAzNi4xNjgzQzAuMTYxMDc1IDM4LjM3NzQgMS45NTk0NyA0MC4xNjA3IDQuMTY4NTkgNDAuMTUxNEwyMC4xNjg0IDQwLjA4NEwzMC4xNjg0IDQwLjA0MThMMzEuMTg1MiA0MC4wMzc1QzMzLjM4NzcgNDAuMDI4MiAzNS4xNjgzIDM4LjIwMjYgMzUuMTY4MyAzNlYzNkwzNy4wMDAzIDM2TDM3LjAwMDMgMzkuOTk5Mkw0MC4xNjgzIDM5Ljk5OTZMMzkuOTk5NiAtOS45NDY1M2UtMDdMMjEuNTk5OCAwLjA3NzU2ODlMMjEuNjc3NCAxNi4wMTg1TDIxLjY3NzQgMjUuOTk5OEwyMC4wNzc0IDI1Ljk5OThMMTguMzk5OCAyNS45OTk4TDE4LjQ3NzQgMTYuMDMyTDE4LjM5OTggMC4wOTEwNTkzTC01LjI4NjE5ZS0wNiAwLjE2ODYyOVoiIGZpbGw9IiNERTVGRTkiLz4KPC9zdmc+Cg==)](#-uvx-setup-recommended---universal)
@@ -18,45 +28,24 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 
 <https://github.com/user-attachments/assets/eb84419a-6eaf-47bd-ac52-37bc59c83680>
 
-## Usage Examples
-
-```
-Research the background of this candidate https://www.linkedin.com/in/stickerdaniel/
-```
-
-```
-Get this company profile for partnership discussions https://www.linkedin.com/company/inframs/
-```
-
-```
-Suggest improvements for my CV to target this job posting https://www.linkedin.com/jobs/view/4252026496
-```
-
-```
-What has Anthropic been posting about recently? https://www.linkedin.com/company/anthropicresearch/
-```
-
 ## Features & Tool Status
 
 | Tool | Description | Status |
 |------|-------------|--------|
-| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, contact_info, posts) | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#304](https://github.com/stickerdaniel/linkedin-mcp-server/issues/304) [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_inbox` | List recent conversations from the LinkedIn messaging inbox | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_conversation` | Read a specific messaging conversation by username or thread ID | [#307](https://github.com/stickerdaniel/linkedin-mcp-server/issues/307) [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `search_conversations` | Search messages by keyword | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_company_posts` | Get recent posts from a company's LinkedIn feed | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `search_jobs` | Search for jobs with keywords and location filters | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `search_people` | Search for people by keywords and location | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `get_job_details` | Get detailed information about a specific job posting | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
+| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) | working |
+| `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#304](https://github.com/stickerdaniel/linkedin-mcp-server/issues/304) |
+| `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
+| `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
+| `get_conversation` | Read a specific messaging conversation by username or thread ID | [#307](https://github.com/stickerdaniel/linkedin-mcp-server/issues/307) |
+| `search_conversations` | Search messages by keyword | working |
+| `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#344](https://github.com/stickerdaniel/linkedin-mcp-server/issues/344) |
+| `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | working |
+| `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
+| `search_jobs` | Search for jobs with keywords and location filters | working |
+| `search_people` | Search for people by keywords and location | working |
+| `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_saved_jobs` | Get saved/bookmarked jobs from your LinkedIn job tracker | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-| `close_session` | Close browser session and clean up resources | [#330](https://github.com/stickerdaniel/linkedin-mcp-server/issues/330) |
-
-> [!IMPORTANT]
-> **Breaking change:** LinkedIn recently made some changes to prevent scraping. The newest version uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) with persistent browser profiles instead of Playwright with session files. Old `session.json` files and `LINKEDIN_COOKIE` env vars are no longer supported. Run `--login` again to create a new profile + cookie file that can be mounted in docker. 02/2026
+| `close_session` | Close browser session and clean up resources | working |
 
 <br/>
 <br/>
