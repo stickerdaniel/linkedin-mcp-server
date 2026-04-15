@@ -483,7 +483,7 @@ class LinkedInExtractor:
             logger.debug("Click failed for button '%s'", text, exc_info=True)
             return False
 
-    async def _dialog_is_open(self, *, timeout: int = 3000) -> bool:
+    async def _dialog_is_open(self, *, timeout: int = 1000) -> bool:
         """Return whether a dialog is currently open (structural check)."""
         locator = self._page.locator(_DIALOG_SELECTOR)
         try:
@@ -1087,7 +1087,7 @@ class LinkedInExtractor:
             except PlaywrightTimeoutError:
                 logger.debug("No dialog appeared after clicking '%s'", button_text)
 
-        if await self._dialog_is_open():
+        if await self._dialog_is_open(timeout=3000):
             # Locate all buttons inside the dialog.  LinkedIn's modal
             # typically has: [0] dismiss/X, [1] secondary, [2] primary.
             # We address action buttons from the end so the dismiss
@@ -1121,6 +1121,15 @@ class LinkedInExtractor:
                         "note_not_supported",
                         "LinkedIn did not offer note entry for this connection flow.",
                     )
+            elif note:
+                # Modal present but no secondary button — note not
+                # supported in this connection flow.
+                await self._dismiss_dialog()
+                return _connection_result(
+                    url,
+                    "note_not_supported",
+                    "LinkedIn did not offer note entry for this connection flow.",
+                )
 
             # Click the primary (last) button to send.
             # Re-query buttons as the modal content may have changed.
