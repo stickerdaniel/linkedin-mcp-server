@@ -901,43 +901,57 @@ class TestConnectWithPerson:
 
     async def test_connectable_clicks_connect(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        initial_text = "Jane\n\n\u00b7 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        verified_text = "Jane\n\n\u00b7 3rd\n\nEngineer\n\nMessage\nPending\nMore\nAbout\n"
 
         with (
-            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
             patch.object(
                 extractor,
-                "click_button_by_text",
+                "_get_profile_connection_state",
                 new_callable=AsyncMock,
-                return_value=True,
-            ) as mock_click,
-            patch.object(
-                extractor,
-                "_dialog_is_open",
-                new_callable=AsyncMock,
-                return_value=False,
+                side_effect=[
+                    ("connectable", initial_text, {}),
+                    ("pending", verified_text, {}),
+                ],
             ),
+            patch.object(
+                extractor,
+                "_send_connection_invite_via_deeplink",
+                new_callable=AsyncMock,
+                return_value=("submitted", False),
+            ) as mock_invite,
         ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "connected"
         assert result["url"] == "https://www.linkedin.com/in/testuser/"
-        mock_click.assert_awaited_once_with("Connect", scope="main")
+        assert result["message"] == "Connection request sent and verified pending."
+        mock_invite.assert_awaited_once_with("testuser", note=None)
 
     async def test_returns_already_connected(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        text = "Collin\n\n· 1st\n\nEngineer\n\nMessage\nMore\nAbout\n"
+        text = "Collin\n\n\u00b7 1st\n\nEngineer\n\nMessage\nMore\nAbout\n"
 
-        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
+        with patch.object(
+            extractor,
+            "_get_profile_connection_state",
+            new_callable=AsyncMock,
+            return_value=("already_connected", text, {}),
+        ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "already_connected"
 
     async def test_returns_pending(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        text = "Marinus\n\n· 2nd\n\nStudent\n\nMessage\nPending\nMore\nAbout\n"
+        text = "Marinus\n\n\u00b7 2nd\n\nStudent\n\nMessage\nPending\nMore\nAbout\n"
 
-        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
+        with patch.object(
+            extractor,
+            "_get_profile_connection_state",
+            new_callable=AsyncMock,
+            return_value=("pending", text, {}),
+        ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "pending"
@@ -945,51 +959,83 @@ class TestConnectWithPerson:
     async def test_returns_incoming_request_accepted(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         text = "Aklasur\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore\nAbout\n"
+        verified_text = "Aklasur\n\n\u00b7 1st\n\nDhaka\n\nMessage\nMore\nAbout\n"
 
         with (
-            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_get_profile_connection_state",
+                new_callable=AsyncMock,
+                side_effect=[
+                    ("incoming_request", text, {}),
+                    ("already_connected", verified_text, {}),
+                ],
+            ),
             patch.object(
                 extractor,
                 "click_button_by_text",
                 new_callable=AsyncMock,
                 return_value=True,
             ) as mock_click,
-            patch.object(
-                extractor,
-                "_dialog_is_open",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
         ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "accepted"
+        assert result["message"] == "Connection request accepted and verified."
         mock_click.assert_awaited_once_with("Accept", scope="main")
 
     async def test_returns_follow_only(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMore\nAbout\n"
+        text = "Public Figure\n\n\u00b7 3rd+\n\nCEO\n\nFollow\nMore\nAbout\n"
+        verified_text = "Public Figure\n\n\u00b7 3rd+\n\nCEO\n\nMessage\nPending\nMore\nAbout\n"
 
-        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
+        with (
+            patch.object(
+                extractor,
+                "_get_profile_connection_state",
+                new_callable=AsyncMock,
+                side_effect=[
+                    ("follow_only", text, {}),
+                    ("pending", verified_text, {}),
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_send_connection_invite_via_deeplink",
+                new_callable=AsyncMock,
+                return_value=("submitted", False),
+            ) as mock_invite,
+        ):
             result = await extractor.connect_with_person("testuser")
 
-        assert result["status"] == "follow_only"
+        assert result["status"] == "connected"
+        mock_invite.assert_awaited_once_with("testuser", note=None)
 
     async def test_returns_unavailable(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         text = "Unknown\n\nSome text\nAbout\n"
 
-        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
+        with patch.object(
+            extractor,
+            "_get_profile_connection_state",
+            new_callable=AsyncMock,
+            return_value=("unavailable", text, {}),
+        ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "connect_unavailable"
 
     async def test_returns_send_failed_when_button_not_found(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        text = "Aklasur\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore\nAbout\n"
 
         with (
-            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_get_profile_connection_state",
+                new_callable=AsyncMock,
+                return_value=("incoming_request", text, {}),
+            ),
             patch.object(
                 extractor,
                 "click_button_by_text",
@@ -1001,18 +1047,41 @@ class TestConnectWithPerson:
 
         assert result["status"] == "send_failed"
 
+    async def test_returns_send_failed_when_pending_verification_fails(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        initial_text = "Jane\n\n\u00b7 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        verified_text = "Jane\n\n\u00b7 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+
+        with (
+            patch.object(
+                extractor,
+                "_get_profile_connection_state",
+                new_callable=AsyncMock,
+                side_effect=[
+                    ("connectable", initial_text, {}),
+                    ("connectable", verified_text, {}),
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_send_connection_invite_via_deeplink",
+                new_callable=AsyncMock,
+                return_value=("submitted", False),
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "send_failed"
+        assert "did not confirm a pending invitation" in result["message"]
+
     async def test_returns_unavailable_on_empty_page(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
 
         with patch.object(
             extractor,
-            "scrape_person",
-            AsyncMock(
-                return_value={
-                    "url": "https://www.linkedin.com/in/testuser/",
-                    "sections": {},
-                }
-            ),
+            "_get_profile_connection_state",
+            new_callable=AsyncMock,
+            return_value=("unavailable", "", {}),
         ):
             result = await extractor.connect_with_person("testuser")
 

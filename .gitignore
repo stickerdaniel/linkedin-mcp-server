@@ -208,3 +208,4 @@ scripts/snapshot_dumps/
 
 # Debug artifacts
 .debug/
+/.serena

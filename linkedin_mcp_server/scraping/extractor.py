@@ -508,6 +508,81 @@ class LinkedInExtractor:
         await buttons.nth(count - 1).click(timeout=timeout)
         return True
 
+    async def _click_send_without_note_button(self, *, timeout: int = 5000) -> bool:
+        """Click LinkedIn's send-without-note action when it is present."""
+        matches = (
+            self._page.locator(
+                f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+            ).filter(has_text=re.compile(r"^Send without(?: a)? note$", re.IGNORECASE))
+        )
+        count = await matches.count()
+        if count == 0:
+            return False
+        await matches.first.click(timeout=timeout)
+        return True
+
+    async def _get_profile_connection_state(
+        self, username: str
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Read the profile page and infer the current connection state."""
+        from linkedin_mcp_server.scraping.connection import detect_connection_state
+
+        profile = await self.scrape_person(username, {"main_profile"})
+        page_text = profile.get("sections", {}).get("main_profile", "")
+        if not page_text:
+            return "unavailable", "", profile
+        return detect_connection_state(page_text), page_text, profile
+
+    async def _send_connection_invite_via_deeplink(
+        self,
+        username: str,
+        *,
+        note: str | None = None,
+    ) -> tuple[str, bool]:
+        """Open LinkedIn's invite deeplink and submit the request dialog."""
+        invite_url = (
+            "https://www.linkedin.com/preload/custom-invite/"
+            f"?vanityName={quote_plus(username)}"
+        )
+        await self._navigate_to_page(invite_url)
+
+        if not await self._dialog_is_open(timeout=3000):
+            return "connect_unavailable", False
+
+        note_sent = False
+        if note:
+            textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
+            if textarea_count == 0:
+                buttons = self._page.locator(
+                    f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+                )
+                if await buttons.count() > 1:
+                    await buttons.first.click()
+
+            filled = await self._fill_dialog_textarea(note)
+            if filled:
+                note_sent = True
+            else:
+                await self._dismiss_dialog()
+                return "note_not_supported", False
+
+        if note:
+            sent = await self._click_dialog_primary_button()
+        else:
+            sent = await self._click_send_without_note_button()
+            if not sent:
+                sent = await self._click_dialog_primary_button()
+        if not sent:
+            await self._dismiss_dialog()
+            return "send_failed", note_sent
+
+        try:
+            await self._page.wait_for_selector(_DIALOG_SELECTOR, state="hidden")
+        except PlaywrightTimeoutError:
+            logger.debug("Invite dialog did not close after clicking send")
+
+        return "submitted", note_sent
+
     async def _fill_dialog_textarea(self, value: str, *, timeout: int = 5000) -> bool:
         """Fill the first textarea inside the open dialog (structural)."""
         locator = self._page.locator(_DIALOG_TEXTAREA_SELECTOR).first
@@ -991,27 +1066,21 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Send a LinkedIn connection request or accept an incoming one.
 
-        Scrapes the profile page, parses the action area text to detect
-        the connection state, then clicks the appropriate button.  Dialog
-        interaction uses structural CSS selectors — no hardcoded button text.
+        Verifies the current profile state first, then either accepts an
+        incoming request on-profile or opens LinkedIn's direct invite deeplink.
+        Success is only reported after a fresh profile read confirms the
+        expected post-action state.
         """
-        from linkedin_mcp_server.scraping.connection import (
-            STATE_BUTTON_MAP,
-            detect_connection_state,
-        )
+        from linkedin_mcp_server.scraping.connection import STATE_BUTTON_MAP
 
         url = f"https://www.linkedin.com/in/{username}/"
 
-        # Scrape the profile to get the page text
-        profile = await self.scrape_person(username, {"main_profile"})
-        page_text = profile.get("sections", {}).get("main_profile", "")
+        state, page_text, _profile = await self._get_profile_connection_state(username)
         if not page_text:
             return _connection_result(
                 url, "unavailable", "Could not read profile page."
             )
 
-        # Detect state from the scraped text
-        state = detect_connection_state(page_text)
         logger.info("Connection state for %s: %s", username, state)
 
         if state == "already_connected":
@@ -1028,20 +1097,6 @@ class LinkedInExtractor:
                 "A connection request is already pending for this profile.",
                 profile=page_text,
             )
-        via_more_menu = False
-        if state == "follow_only":
-            # Connect may be hidden behind the More (three-dot) menu
-            if await self._open_more_menu():
-                state = "connectable"
-                via_more_menu = True
-            else:
-                return _connection_result(
-                    url,
-                    "follow_only",
-                    "This profile currently exposes Follow but not Connect.",
-                    profile=page_text,
-                )
-
         if state == "unavailable":
             return _connection_result(
                 url,
@@ -1050,83 +1105,91 @@ class LinkedInExtractor:
                 profile=page_text,
             )
 
-        # state is "connectable" or "incoming_request"
-        button_text = STATE_BUTTON_MAP.get(state)
-        if not button_text:
+        if state == "incoming_request":
+            button_text = STATE_BUTTON_MAP.get(state)
+            if not button_text:
+                return _connection_result(
+                    url,
+                    "connect_unavailable",
+                    f"No button mapping for state '{state}'.",
+                )
+            clicked = await self.click_button_by_text(button_text, scope="main")
+            if not clicked:
+                return _connection_result(
+                    url,
+                    "send_failed",
+                    f"Could not find or click button '{button_text}'.",
+                )
+
+            verified_state, verified_text, _verified_profile = (
+                await self._get_profile_connection_state(username)
+            )
+            if verified_state != "already_connected":
+                return _connection_result(
+                    url,
+                    "send_failed",
+                    "Clicked 'Accept' but profile verification did not confirm a 1st-degree connection.",
+                    profile=verified_text or page_text,
+                )
+
+            return _connection_result(
+                url,
+                "accepted",
+                "Connection request accepted and verified.",
+                profile=verified_text,
+            )
+
+        if state not in {"connectable", "follow_only"}:
             return _connection_result(
                 url,
                 "connect_unavailable",
-                f"No button mapping for state '{state}'.",
+                f"Unsupported connection state '{state}'.",
+                profile=page_text,
             )
 
-        # Click the button (page is already loaded from scrape_person)
-        click_scope = "[role='menu']" if via_more_menu else "main"
-        clicked = await self.click_button_by_text(button_text, scope=click_scope)
-        if not clicked:
+        deeplink_status, note_sent = await self._send_connection_invite_via_deeplink(
+            username,
+            note=note,
+        )
+        if deeplink_status == "note_not_supported":
+            return _connection_result(
+                url,
+                "note_not_supported",
+                "LinkedIn did not offer note entry for this connection flow.",
+            )
+        if deeplink_status == "connect_unavailable":
+            return _connection_result(
+                url,
+                "connect_unavailable",
+                "LinkedIn did not open a usable invite dialog for this profile.",
+                profile=page_text,
+            )
+        if deeplink_status != "submitted":
             return _connection_result(
                 url,
                 "send_failed",
-                f"Could not find or click button '{button_text}'.",
+                "Could not submit the connection dialog.",
+                note_sent=note_sent,
             )
 
-        # ---- Handle dialog (structural selectors only) ----
-        # Only wait for a dialog when sending a Connect request (Accept
-        # typically completes immediately without a dialog).
-        if state == "connectable":
-            try:
-                await self._page.wait_for_selector(_DIALOG_SELECTOR)
-            except PlaywrightTimeoutError:
-                logger.debug("No dialog appeared after clicking '%s'", button_text)
+        verified_state, verified_text, _verified_profile = (
+            await self._get_profile_connection_state(username)
+        )
+        if verified_state != "pending":
+            return _connection_result(
+                url,
+                "send_failed",
+                "Invite dialog completed but profile verification did not confirm a pending invitation.",
+                note_sent=note_sent,
+                profile=verified_text or page_text,
+            )
 
-        note_sent = False
-        if note and await self._dialog_is_open():
-            # Try to find textarea directly; if not visible, click the first
-            # button in the dialog (typically "Add a note") to reveal it
-            textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
-            if textarea_count == 0:
-                buttons = self._page.locator(
-                    f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-                )
-                if await buttons.count() > 1:
-                    await buttons.first.click()
-
-            filled = await self._fill_dialog_textarea(note)
-            if filled:
-                note_sent = True
-            else:
-                await self._dismiss_dialog()
-                return _connection_result(
-                    url,
-                    "note_not_supported",
-                    "LinkedIn did not offer note entry for this connection flow.",
-                )
-
-        # Click the primary (Send) button if a dialog is still open
-        if await self._dialog_is_open():
-            sent = await self._click_dialog_primary_button()
-            if not sent:
-                await self._dismiss_dialog()
-                return _connection_result(
-                    url, "send_failed", "Could not find the send button in the dialog."
-                )
-            # Wait for dialog to close
-            try:
-                await self._page.wait_for_selector(_DIALOG_SELECTOR, state="hidden")
-            except PlaywrightTimeoutError:
-                logger.debug("Dialog did not close after clicking send")
-
-        # Read the current page text (already on the profile after the action)
-        updated_text = await self.get_page_text()
-
-        status = "accepted" if state == "incoming_request" else "connected"
         return _connection_result(
             url,
-            status,
-            "Connection request sent."
-            if status == "connected"
-            else "Connection request accepted.",
+            "connected",
+            "Connection request sent and verified pending.",
             note_sent=note_sent,
-            profile=updated_text,
+            profile=verified_text,
         )
 
     async def _extract_profile_urn(self) -> str | None:
