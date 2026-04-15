@@ -483,7 +483,7 @@ class LinkedInExtractor:
             logger.debug("Click failed for button '%s'", text, exc_info=True)
             return False
 
-    async def _dialog_is_open(self, *, timeout: int = 1000) -> bool:
+    async def _dialog_is_open(self, *, timeout: int = 3000) -> bool:
         """Return whether a dialog is currently open (structural check)."""
         locator = self._page.locator(_DIALOG_SELECTOR)
         try:
@@ -1072,46 +1072,71 @@ class LinkedInExtractor:
         # ---- Handle dialog (structural selectors only) ----
         # Only wait for a dialog when sending a Connect request (Accept
         # typically completes immediately without a dialog).
+        #
+        # LinkedIn's invitation modal uses role="dialog" on the inner
+        # container, so _DIALOG_SELECTOR matches it.  The modal has two
+        # buttons (secondary = first, primary = last).  All interaction
+        # uses structural/positional selectors only.
+        note_sent = False
+
         if state == "connectable":
             try:
-                await self._page.wait_for_selector(_DIALOG_SELECTOR)
+                await self._page.wait_for_selector(
+                    _DIALOG_SELECTOR, state="visible", timeout=5000
+                )
             except PlaywrightTimeoutError:
                 logger.debug("No dialog appeared after clicking '%s'", button_text)
 
-        note_sent = False
-        if note and await self._dialog_is_open():
-            # Try to find textarea directly; if not visible, click the first
-            # button in the dialog (typically "Add a note") to reveal it
-            textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
-            if textarea_count == 0:
-                buttons = self._page.locator(
-                    f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-                )
-                if await buttons.count() > 1:
-                    await buttons.first.click()
-
-            filled = await self._fill_dialog_textarea(note)
-            if filled:
-                note_sent = True
-            else:
-                await self._dismiss_dialog()
-                return _connection_result(
-                    url,
-                    "note_not_supported",
-                    "LinkedIn did not offer note entry for this connection flow.",
-                )
-
-        # Click the primary (Send) button if a dialog is still open
         if await self._dialog_is_open():
+            # Locate all buttons inside the dialog.  LinkedIn's modal
+            # typically has: [0] dismiss/X, [1] secondary, [2] primary.
+            # We address action buttons from the end so the dismiss
+            # button position doesn't matter.
+            dialog_buttons = self._page.locator(
+                f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+            )
+            btn_count = await dialog_buttons.count()
+
+            if note and btn_count > 2:
+                # Click the second-to-last button (secondary action) to
+                # reveal the note textarea, then fill and send.
+                await dialog_buttons.nth(btn_count - 2).click()
+                # Wait for the textarea to render
+                try:
+                    await self._page.wait_for_selector(
+                        _DIALOG_TEXTAREA_SELECTOR,
+                        state="visible",
+                        timeout=3000,
+                    )
+                except PlaywrightTimeoutError:
+                    logger.debug("Textarea did not appear after note button")
+
+                filled = await self._fill_dialog_textarea(note)
+                if filled:
+                    note_sent = True
+                else:
+                    await self._dismiss_dialog()
+                    return _connection_result(
+                        url,
+                        "note_not_supported",
+                        "LinkedIn did not offer note entry for this connection flow.",
+                    )
+
+            # Click the primary (last) button to send.
+            # Re-query buttons as the modal content may have changed.
             sent = await self._click_dialog_primary_button()
             if not sent:
                 await self._dismiss_dialog()
                 return _connection_result(
-                    url, "send_failed", "Could not find the send button in the dialog."
+                    url,
+                    "send_failed",
+                    "Could not find the send button in the dialog.",
                 )
             # Wait for dialog to close
             try:
-                await self._page.wait_for_selector(_DIALOG_SELECTOR, state="hidden")
+                await self._page.wait_for_selector(
+                    _DIALOG_SELECTOR, state="hidden", timeout=5000
+                )
             except PlaywrightTimeoutError:
                 logger.debug("Dialog did not close after clicking send")
 
