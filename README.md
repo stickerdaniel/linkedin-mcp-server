@@ -38,7 +38,7 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 | `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID | [#307](https://github.com/stickerdaniel/linkedin-mcp-server/issues/307) |
 | `search_conversations` | Search messages by keyword | working |
-| `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#344](https://github.com/stickerdaniel/linkedin-mcp-server/issues/344) |
+| `send_message` | Send a message to a LinkedIn user (requires confirmation) | working (fixed by [#362](https://github.com/stickerdaniel/linkedin-mcp-server/pull/362)) |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
 | `search_jobs` | Search for jobs with keywords and location filters | working |
