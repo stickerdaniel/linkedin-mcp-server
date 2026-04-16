@@ -649,6 +649,7 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
+        max_scrolls: int | None = None,
     ) -> ExtractedSection:
         """Navigate to a URL, scroll to load lazy content, and extract innerText.
 
@@ -661,14 +662,14 @@ class LinkedInExtractor:
         Returns empty string for unexpected non-domain failures (error isolation).
         """
         try:
-            result = await self._extract_page_once(url, section_name)
+            result = await self._extract_page_once(url, section_name, max_scrolls)
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
             # Retry once after backoff
             logger.info("Retrying %s after %.0fs backoff", url, _RATE_LIMIT_RETRY_DELAY)
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            return await self._extract_page_once(url, section_name)
+            return await self._extract_page_once(url, section_name, max_scrolls)
 
         except LinkedInScraperException:
             raise
@@ -689,6 +690,7 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
+        max_scrolls: int | None = None,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll, and extract innerText."""
         await self._navigate_to_page(url)
@@ -755,11 +757,38 @@ class LinkedInExtractor:
             except PlaywrightTimeoutError:
                 logger.debug("Detail section content did not appear on %s", url)
 
+        # Detail pages paginate with a "Show more" button inside <main>, not scroll.
+        # Click it until it disappears or the budget runs out.
+        if is_details:
+            max_clicks = max_scrolls if max_scrolls is not None else 5
+            for i in range(max_clicks):
+                button = self._page.locator("main button").filter(
+                    has_text=re.compile(r"^Show (more|all)\b", re.IGNORECASE)
+                )
+                try:
+                    if await button.count() == 0:
+                        logger.debug("No 'Show more' button after %d clicks", i)
+                        break
+                    target = button.first
+                    if not await target.is_visible():
+                        break
+                    await target.scroll_into_view_if_needed(timeout=2000)
+                    await target.click(timeout=2000)
+                    await asyncio.sleep(1.0)
+                except PlaywrightTimeoutError:
+                    logger.debug("Show more click timed out after %d clicks", i)
+                    break
+                except Exception as e:
+                    logger.debug("Show more click failed: %s", e)
+                    break
+
         # Scroll to trigger lazy loading
         if is_activity:
-            await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=10)
+            scrolls = max_scrolls if max_scrolls is not None else 10
+            await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=scrolls)
         else:
-            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+            scrolls = max_scrolls if max_scrolls is not None else 5
+            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
 
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])
@@ -864,6 +893,7 @@ class LinkedInExtractor:
         username: str,
         requested: set[str],
         callbacks: ProgressCallback | None = None,
+        max_scrolls: int | None = None,
     ) -> dict[str, Any]:
         """Scrape a person profile with configurable sections.
 
@@ -900,7 +930,9 @@ class LinkedInExtractor:
                         )
                     else:
                         extracted = await self.extract_page(
-                            url, section_name=section_name
+                            url,
+                            section_name=section_name,
+                            max_scrolls=max_scrolls,
                         )
 
                     if extracted.text and extracted.text != _RATE_LIMITED_MSG:
@@ -1455,6 +1487,21 @@ class LinkedInExtractor:
                 candidate_count if candidate_count is not None else "unknown",
             )
 
+            # patchright quirk: locator.wait_for(state="visible") times out on
+            # the contenteditable compose div even though count() > 0 and the
+            # element is fully visible by every CSS/DOM criterion (display:block,
+            # visibility:visible, opacity:1, non-zero bbox, no inert ancestor).
+            # This appears to be a patchright bug with React-hydrated contenteditable
+            # elements in isolated worlds. Skip the actionability wait when count()
+            # already confirmed the element is present — downstream interactions
+            # use page.evaluate() which bypasses the same check.
+            if candidate_count and candidate_count > 0:
+                return locator.last
+
+            # Fallback: when count() raised an exception above (candidate_count
+            # is None), attempt the original wait_for path.  This is unlikely to
+            # succeed given the same patchright quirk, but preserves the prior
+            # behaviour for non-patchright drivers where wait_for works normally.
             candidate = locator.last
             try:
                 await candidate.wait_for(state="visible")
@@ -2322,8 +2369,18 @@ class LinkedInExtractor:
         await handle_modal_close(self._page)
         display_name = await self._read_profile_display_name()
         if profile_urn:
+            # Build the full compose URL that LinkedIn's own Message button
+            # generates. The minimal ?recipient=<URN> form works for established
+            # connections but shows a "Say hello" widget (no compose box) for new
+            # connections. Adding profileUrn + screenContext + interop=msgOverlay
+            # consistently opens the real composer regardless of connection age.
+            _encoded = quote_plus(f"urn:li:fsd_profile:{profile_urn}")
             compose_url: str | None = (
-                f"https://www.linkedin.com/messaging/compose/?recipient={profile_urn}"
+                f"https://www.linkedin.com/messaging/compose/"
+                f"?profileUrn={_encoded}"
+                f"&recipient={profile_urn}"
+                f"&screenContext=NON_SELF_PROFILE_VIEW"
+                f"&interop=msgOverlay"
             )
         else:
             compose_url = await self._resolve_message_compose_href()
@@ -2416,47 +2473,60 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
 
-        await compose_box.click()
-        await compose_box.press_sequentially(message, delay=30)
+        # patchright quirk: compose_box.click() and press_sequentially() use
+        # actionability checks internally and hit the same wait_for timeout.
+        # Instead: focus via page.evaluate() (no actionability check) and type
+        # via page.keyboard.type() which operates on the active element directly
+        # and fires the real keydown/input/keyup events React needs to enable Send.
+        #
+        # DOM dependency: innerText extraction is not applicable here — we need
+        # to call .focus() on the element reference, which requires querySelector.
+        # Selectors use only role + contenteditable + aria-label (ARIA attributes,
+        # not layout class names) so they are stable across LinkedIn UI changes.
+        focused = await self._page.evaluate(
+            """() => {
+                const el = document.querySelector(
+                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
+                    + 'div[role="textbox"][contenteditable="true"]'
+                );
+                if (!el) return false;
+                el.focus();
+                return true;
+            }"""
+        )
+        if not focused:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "compose_interact_failed",
+                "Could not focus compose box via JavaScript.",
+                recipient_selected=recipient_selected,
+            )
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(message, delay=15)
         await asyncio.sleep(0.3)
 
-        try:
-            await self._page.wait_for_function(
-                """() => {
-                    const isVisible = element =>
-                        !!(
-                            element &&
-                            (element.offsetWidth ||
-                                element.offsetHeight ||
-                                element.getClientRects().length)
-                        );
-                    return Array.from(
-                        document.querySelectorAll(
-                            'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]'
-                        )
-                    ).some(button => isVisible(button) && !button.disabled);
-                }""",
-            )
-        except PlaywrightTimeoutError:
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "send_unavailable",
-                "LinkedIn did not expose an enabled Send action for this draft.",
-                recipient_selected=recipient_selected,
-            )
-
-        send_button = self._page.locator(_MESSAGING_ENABLED_SEND_SELECTOR).last
-        try:
-            await send_button.click()
-        except PlaywrightTimeoutError:
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "send_unavailable",
-                "LinkedIn did not confirm that the message was sent.",
-                recipient_selected=recipient_selected,
-            )
+        # patchright actionability also blocks send_button.click(). Use JS click
+        # on any visible, enabled send button; fall back to Enter key which
+        # LinkedIn's composer also accepts for submission.
+        #
+        # DOM dependency: we need btn.click() on the element reference — not
+        # achievable via innerText or URL navigation. Selectors use only type,
+        # aria-label, and data attributes (no layout class names).
+        await asyncio.sleep(1.0)  # allow React to process keyboard input
+        sent_via_js = await self._page.evaluate(
+            """() => {
+                const btn = Array.from(document.querySelectorAll(
+                    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
+                    + 'button[data-control-name="send"]'
+                )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not sent_via_js:
+            await self._page.keyboard.press("Enter")
 
         if not await self._message_text_visible(message):
             await self._dismiss_message_ui()
