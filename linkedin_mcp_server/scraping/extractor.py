@@ -693,9 +693,9 @@ class LinkedInExtractor:
         # The feed has its own scroll container — window.scrollTo is a no-op.
         # mouse.wheel over the viewport center triggers the real scroll.
         _POST_MARKER = "Feed post"
-        _MAX_SCROLLS = 20
+        _MAX_SCROLLS = 12
         _MAX_STALE = 3
-        _BATCH_WAIT = 10.0
+        _BATCH_WAIT = 6.0
         _WHEEL_DELTA = 2000
         stale_count = 0
 
