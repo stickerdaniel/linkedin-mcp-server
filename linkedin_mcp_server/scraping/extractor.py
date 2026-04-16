@@ -532,11 +532,20 @@ class LinkedInExtractor:
     async def _open_more_menu(self) -> bool:
         """Open the profile's More (three-dot) menu and check for Connect.
 
-        Uses ``aria-label`` to find the More button (language-independent)
-        and ``[role="menu"]`` to detect the opened menu (structural).
+        Uses ``aria-label`` to find the More button and ``[role="menu"]``
+        to detect the opened menu (structural). The aria-label and menu-
+        item text are locale-dependent: we try every known translation.
         Returns True if the menu opened and contains a Connect option.
         """
-        more_btn = self._page.locator("main button[aria-label*='More']")
+        from linkedin_mcp_server.scraping.connection import (
+            _MORE_ARIA_LABELS,
+            all_button_texts,
+        )
+
+        more_selector = ", ".join(
+            f"main button[aria-label*='{label}']" for label in _MORE_ARIA_LABELS
+        )
+        more_btn = self._page.locator(more_selector)
         try:
             if await more_btn.count() == 0:
                 return False
@@ -551,11 +560,15 @@ class LinkedInExtractor:
             logger.debug("More menu did not appear")
             return False
 
-        # Check if Connect is in the menu
+        # Check if a Connect-equivalent is in the menu (any locale's label).
+        connect_labels = all_button_texts("connectable")
+        connect_re = re.compile(
+            r"^(?:" + "|".join(re.escape(t) for t in connect_labels) + r")$"
+        )
         menu_connect = (
             self._page.locator("[role='menu']")
             .locator("button, a, li, [role='menuitem'], [role='button']")
-            .filter(has_text=re.compile(r"^Connect$"))
+            .filter(has_text=connect_re)
         )
         count = await menu_connect.count()
         logger.debug("More menu Connect matches: %d", count)
@@ -996,7 +1009,7 @@ class LinkedInExtractor:
         interaction uses structural CSS selectors — no hardcoded button text.
         """
         from linkedin_mcp_server.scraping.connection import (
-            STATE_BUTTON_MAP,
+            STATE_BUTTON_MAP_BY_LOCALE,
             detect_connection_state,
         )
 
@@ -1010,9 +1023,9 @@ class LinkedInExtractor:
                 url, "unavailable", "Could not read profile page."
             )
 
-        # Detect state from the scraped text
-        state = detect_connection_state(page_text)
-        logger.info("Connection state for %s: %s", username, state)
+        # Detect state + rendered locale from the scraped text
+        state, locale = detect_connection_state(page_text)
+        logger.info("Connection state for %s: %s (locale=%s)", username, state, locale)
 
         if state == "already_connected":
             return _connection_result(
@@ -1051,12 +1064,12 @@ class LinkedInExtractor:
             )
 
         # state is "connectable" or "incoming_request"
-        button_text = STATE_BUTTON_MAP.get(state)
+        button_text = STATE_BUTTON_MAP_BY_LOCALE.get(locale, {}).get(state)
         if not button_text:
             return _connection_result(
                 url,
                 "connect_unavailable",
-                f"No button mapping for state '{state}'.",
+                f"No button mapping for state '{state}' (locale '{locale}').",
             )
 
         # Click the button (page is already loaded from scrape_person)
