@@ -698,7 +698,6 @@ class LinkedInExtractor:
         _BATCH_WAIT = 10.0
         _WHEEL_DELTA = 2000
         stale_count = 0
-        prev_count = 0
 
         viewport = self._page.viewport_size or {"width": 1280, "height": 720}
         cx, cy = viewport["width"] // 2, viewport["height"] // 2
@@ -733,7 +732,7 @@ class LinkedInExtractor:
                 if new_count > count:
                     break
 
-            if new_count > prev_count:
+            if new_count > count:
                 stale_count = 0
             else:
                 stale_count += 1
@@ -746,7 +745,6 @@ class LinkedInExtractor:
                 if stale_count >= _MAX_STALE:
                     logger.debug("Feed stopped producing new posts")
                     break
-            prev_count = new_count
 
         # Expand "… more" buttons via JS click (Playwright clicks time out on obscured buttons).
         expanded = await self._page.evaluate(
