@@ -70,6 +70,60 @@ def register_job_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(
         timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Saved Jobs",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_saved_jobs(
+        ctx: Context,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 10,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get the user's saved/bookmarked jobs from LinkedIn's job tracker.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            max_pages: Maximum number of saved-jobs pages to scrape (1-10, default 10)
+
+        Returns:
+            Dict with url, sections (name -> raw text), and job_ids (list of
+            LinkedIn job ID strings).
+            The LLM should parse the raw text to extract saved job listings.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_saved_jobs"
+            )
+            logger.info("Scraping saved jobs (max_pages=%d)", max_pages)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Fetching saved jobs"
+            )
+
+            async def _report(page: int, total: int, msg: str) -> None:
+                pct = min(int(page / max(total, 1) * 100), 99)
+                await ctx.report_progress(progress=pct, total=100, message=msg)
+
+            result = await extractor.scrape_saved_jobs(
+                max_pages=max_pages, on_progress=_report
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_saved_jobs")
+        except Exception as e:
+            raise_tool_error(e, "get_saved_jobs")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
         title="Search Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},

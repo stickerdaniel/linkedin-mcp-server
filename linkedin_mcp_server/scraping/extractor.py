@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
@@ -2176,6 +2177,163 @@ class LinkedInExtractor:
         if section_errors:
             result["section_errors"] = section_errors
         return result
+
+    _EXTRACT_JOB_IDS_JS = """() => {
+        const seen = new Set();
+        const ids = [];
+        document.querySelectorAll('a[href*="/jobs/view/"]').forEach(a => {
+            const match = a.href.match(/\\/jobs\\/view\\/(\\d+)/);
+            if (match && !seen.has(match[1])) { seen.add(match[1]); ids.push(match[1]); }
+        });
+        return ids;
+    }"""
+
+    _EXTRACT_MAIN_TEXT_JS = """() => {
+        const main = document.querySelector('main');
+        return main ? main.innerText : document.body.innerText;
+    }"""
+
+    _EXTRACT_MAX_PAGE_JS = """() => {
+        const pageNumbers = Array.from(
+            document.querySelectorAll('button[aria-label^="Page "]')
+        )
+            .map(button => {
+                const label = button.getAttribute('aria-label') || '';
+                const match = label.match(/^Page (\\d+)$/);
+                return match ? Number(match[1]) : null;
+            })
+            .filter(page => Number.isInteger(page));
+        return pageNumbers.length ? Math.max(...pageNumbers) : 1;
+    }"""
+
+    async def scrape_saved_jobs(
+        self,
+        max_pages: int = 10,
+        on_progress: Callable[[int, int, str], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        """Scrape the user's saved/bookmarked jobs from the jobs tracker page.
+
+        Automatically paginates through all pages using numbered page buttons.
+        Extracts job IDs from link hrefs (``/jobs/view/<id>/``) since they are
+        not present in the page's innerText.
+
+        Args:
+            max_pages: Safety cap on pages to scrape (default 10).
+            on_progress: Optional async callback ``(page, total, message)``
+                invoked after each page is scraped.
+
+        Returns:
+            {url, sections: {name: text}, job_ids: list[str]}
+        """
+        url = "https://www.linkedin.com/jobs-tracker/"
+        extracted = await self.extract_page(url, "saved_jobs")
+
+        all_text_parts: list[str] = []
+        all_job_ids: list[str] = []
+
+        if extracted.text:
+            all_text_parts.append(extracted.text)
+
+        # Collect job IDs from page 1.
+        page_ids: list[str] = await self._page.evaluate(self._EXTRACT_JOB_IDS_JS)
+        all_job_ids.extend(page_ids)
+        logger.info("Page 1: found %d job IDs", len(page_ids))
+
+        # LinkedIn can render a sliding window of numbered buttons, so refresh
+        # the largest visible page number as pagination advances.
+        total_pages = min(
+            max(await self._page.evaluate(self._EXTRACT_MAX_PAGE_JS), 1),
+            max_pages,
+        )
+        logger.info("Total pages detected: %d", total_pages)
+
+        if on_progress:
+            await on_progress(1, total_pages, "Fetched saved jobs page 1")
+
+        # Paginate through remaining pages using numbered page buttons.
+        for page_num in range(2, max_pages + 1):
+            page_btn = self._page.locator(f'button[aria-label="Page {page_num}"]')
+            if not await page_btn.count():
+                logger.info(
+                    "No page %d button found — stopping at page %d",
+                    page_num,
+                    page_num - 1,
+                )
+                break
+
+            logger.info("Navigating to saved jobs page %d", page_num)
+            prev_ids = set(all_job_ids)
+            await page_btn.scroll_into_view_if_needed()
+            await page_btn.click()
+            await asyncio.sleep(_NAV_DELAY)
+
+            # Wait for the DOM to reflect new job links.
+            try:
+                await self._page.wait_for_function(
+                    """(prevIds) => {
+                        const prev = new Set(prevIds);
+                        const links = document.querySelectorAll('a[href*="/jobs/view/"]');
+                        for (const a of links) {
+                            const match = a.href.match(/\\/jobs\\/view\\/(\\d+)/);
+                            if (match && !prev.has(match[1])) return true;
+                        }
+                        return false;
+                    }""",
+                    arg=list(prev_ids),
+                    timeout=15000,
+                )
+            except PlaywrightTimeoutError:
+                logger.info("No new job IDs appeared on page %d — stopping", page_num)
+                break
+
+            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=3)
+
+            raw = await self._page.evaluate(self._EXTRACT_MAIN_TEXT_JS)
+            if raw:
+                cleaned = strip_linkedin_noise(raw)
+                if cleaned:
+                    all_text_parts.append(cleaned)
+
+            page_ids = await self._page.evaluate(self._EXTRACT_JOB_IDS_JS)
+            new_ids = [jid for jid in page_ids if jid not in prev_ids]
+            logger.info("Page %d: found %d new job IDs", page_num, len(new_ids))
+            if not new_ids:
+                break
+            all_job_ids.extend(new_ids)
+
+            total_pages = max(
+                total_pages,
+                page_num,
+                min(
+                    max(await self._page.evaluate(self._EXTRACT_MAX_PAGE_JS), 1),
+                    max_pages,
+                ),
+            )
+
+            if on_progress:
+                await on_progress(
+                    page_num, total_pages, f"Fetched saved jobs page {page_num}"
+                )
+
+        # Append a summary of job IDs so they are always visible in the text.
+        id_summary = "\n".join(
+            f"- Job ID: {jid} (https://www.linkedin.com/jobs/view/{jid}/)"
+            for jid in all_job_ids
+        )
+        if id_summary:
+            all_text_parts.append(f"--- Saved Job IDs ---\n{id_summary}")
+
+        sections: dict[str, str] = {}
+        if all_text_parts:
+            sections["saved_jobs"] = "\n\n".join(all_text_parts)
+
+        logger.info("Total saved jobs found: %d across all pages", len(all_job_ids))
+
+        return {
+            "url": url,
+            "sections": sections,
+            "job_ids": all_job_ids,
+        }
 
     async def search_people(
         self,
