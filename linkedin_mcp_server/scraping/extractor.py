@@ -649,15 +649,7 @@ class LinkedInExtractor:
         self,
         num_posts: int = 10,
     ) -> ExtractedSection:
-        """Navigate to the LinkedIn home feed and scroll until *num_posts* are loaded.
-
-        LinkedIn's feed lives in its own scroll container — ``window.scrollY``
-        and ``document.body.scrollHeight`` never change while scrolling. Posts
-        are triggered by an IntersectionObserver on a sentinel element at the
-        bottom of the loaded list, firing in batches of ~5 every few seconds.
-        This method uses ``mouse.wheel`` to fire native scroll events on the
-        correct container and polls for new posts after each event.
-        """
+        """Scrape the LinkedIn home feed, scrolling until *num_posts* are loaded."""
         try:
             return await self._extract_feed_once(num_posts)
         except LinkedInScraperException:
@@ -686,7 +678,6 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
 
-        # Wait for initial feed content to render
         try:
             await self._page.wait_for_function(
                 """() => {
@@ -699,25 +690,16 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("Feed content did not appear on %s", url)
 
-        # LinkedIn's feed lives in its own scroll container — window.scrollY
-        # and document.body.scrollHeight never change while scrolling.
-        # Posts are loaded by an IntersectionObserver watching a sentinel at
-        # the bottom of the loaded list: batches of ~5 arrive every ~5-10s
-        # while the user is actively scrolling near the bottom.
-        #
-        # Strategy: move the mouse to the center of the viewport (over the
-        # feed), send repeated mouse.wheel events to keep the sentinel
-        # in view, and wait up to _BATCH_WAIT seconds after each wheel burst
-        # for a new batch to arrive before declaring it stale.
+        # The feed has its own scroll container — window.scrollTo is a no-op.
+        # mouse.wheel over the viewport center triggers the real scroll.
         _POST_MARKER = "Feed post"
         _MAX_SCROLLS = 20
         _MAX_STALE = 3
-        _BATCH_WAIT = 10.0  # seconds to wait for a new batch after scrolling
-        _WHEEL_DELTA = 2000  # px per wheel event
+        _BATCH_WAIT = 10.0
+        _WHEEL_DELTA = 2000
         stale_count = 0
         prev_count = 0
 
-        # Position mouse in the center of the viewport over the feed content.
         viewport = self._page.viewport_size or {"width": 1280, "height": 720}
         cx, cy = viewport["width"] // 2, viewport["height"] // 2
         await self._page.mouse.move(cx, cy)
@@ -735,10 +717,8 @@ class LinkedInExtractor:
             if count >= num_posts:
                 break
 
-            # Scroll down to trigger the IntersectionObserver sentinel.
             await self._page.mouse.wheel(0, _WHEEL_DELTA)
 
-            # Wait up to _BATCH_WAIT seconds for a new batch, polling every second.
             new_count = count
             for _ in range(int(_BATCH_WAIT)):
                 await asyncio.sleep(1.0)
@@ -751,7 +731,7 @@ class LinkedInExtractor:
                     _POST_MARKER,
                 )
                 if new_count > count:
-                    break  # batch arrived, move on
+                    break
 
             if new_count > prev_count:
                 stale_count = 0
@@ -768,10 +748,7 @@ class LinkedInExtractor:
                     break
             prev_count = new_count
 
-        # The home feed truncates posts with "… more" buttons.  Expand them
-        # so we capture the full text of every post.  We use a JS click
-        # because the buttons can be obscured by overlays (video players,
-        # modals) that cause Playwright's actionability checks to time out.
+        # Expand "… more" buttons via JS click (Playwright clicks time out on obscured buttons).
         expanded = await self._page.evaluate(
             """() => {
                 const main = document.querySelector('main');
@@ -786,7 +763,6 @@ class LinkedInExtractor:
         if expanded:
             await asyncio.sleep(0.5)
 
-        # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
 
