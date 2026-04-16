@@ -1073,48 +1073,81 @@ class LinkedInExtractor:
         # ---- Handle dialog (structural selectors only) ----
         # Only wait for a dialog when sending a Connect request (Accept
         # typically completes immediately without a dialog).
+        #
+        # LinkedIn's invitation modal uses role="dialog" on the inner
+        # container, so _DIALOG_SELECTOR matches it.  The modal typically
+        # has three buttons: [0] dismiss/X, [1] secondary, [2] primary.
+        # All interaction uses structural/positional selectors only.
+        note_sent = False
+
         if state == "connectable":
             try:
-                await self._page.wait_for_selector(_DIALOG_SELECTOR)
+                await self._page.wait_for_selector(
+                    _DIALOG_SELECTOR, state="visible", timeout=5000
+                )
             except PlaywrightTimeoutError:
                 logger.debug("No dialog appeared after clicking '%s'", button_text)
 
-        note_sent = False
-        if note and await self._dialog_is_open():
-            # Try to find textarea directly; if not visible, click the first
-            # button in the dialog (typically "Add a note") to reveal it
-            textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
-            if textarea_count == 0:
-                buttons = self._page.locator(
+            if await self._dialog_is_open(timeout=3000):
+                # Locate all buttons inside the dialog.  We address
+                # action buttons from the end so the dismiss button
+                # position doesn't matter.
+                dialog_buttons = self._page.locator(
                     f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
                 )
-                if await buttons.count() > 1:
-                    await buttons.first.click()
+                btn_count = await dialog_buttons.count()
 
-            filled = await self._fill_dialog_textarea(note)
-            if filled:
-                note_sent = True
-            else:
-                await self._dismiss_dialog()
-                return _connection_result(
-                    url,
-                    "note_not_supported",
-                    "LinkedIn did not offer note entry for this connection flow.",
-                )
+                if note and btn_count > 2:
+                    # Click the second-to-last button (secondary action) to
+                    # reveal the note textarea, then fill and send.
+                    await dialog_buttons.nth(btn_count - 2).click()
+                    # Wait for the textarea to render
+                    try:
+                        await self._page.wait_for_selector(
+                            _DIALOG_TEXTAREA_SELECTOR,
+                            state="visible",
+                            timeout=3000,
+                        )
+                    except PlaywrightTimeoutError:
+                        logger.debug("Textarea did not appear after note button")
 
-        # Click the primary (Send) button if a dialog is still open
-        if await self._dialog_is_open():
-            sent = await self._click_dialog_primary_button()
-            if not sent:
-                await self._dismiss_dialog()
-                return _connection_result(
-                    url, "send_failed", "Could not find the send button in the dialog."
-                )
-            # Wait for dialog to close
-            try:
-                await self._page.wait_for_selector(_DIALOG_SELECTOR, state="hidden")
-            except PlaywrightTimeoutError:
-                logger.debug("Dialog did not close after clicking send")
+                    filled = await self._fill_dialog_textarea(note)
+                    if filled:
+                        note_sent = True
+                    else:
+                        await self._dismiss_dialog()
+                        return _connection_result(
+                            url,
+                            "note_not_supported",
+                            "LinkedIn did not offer note entry for this connection flow.",
+                        )
+                elif note:
+                    # Modal present but no secondary button — note not
+                    # supported in this connection flow.
+                    await self._dismiss_dialog()
+                    return _connection_result(
+                        url,
+                        "note_not_supported",
+                        "LinkedIn did not offer note entry for this connection flow.",
+                    )
+
+                # Click the primary (last) button to send.
+                # Re-query buttons as the modal content may have changed.
+                sent = await self._click_dialog_primary_button()
+                if not sent:
+                    await self._dismiss_dialog()
+                    return _connection_result(
+                        url,
+                        "send_failed",
+                        "Could not find the send button in the dialog.",
+                    )
+                # Wait for dialog to close
+                try:
+                    await self._page.wait_for_selector(
+                        _DIALOG_SELECTOR, state="hidden", timeout=5000
+                    )
+                except PlaywrightTimeoutError:
+                    logger.debug("Dialog did not close after clicking send")
 
         # Read the current page text (already on the profile after the action)
         updated_text = await self.get_page_text()
@@ -1488,6 +1521,21 @@ class LinkedInExtractor:
                 candidate_count if candidate_count is not None else "unknown",
             )
 
+            # patchright quirk: locator.wait_for(state="visible") times out on
+            # the contenteditable compose div even though count() > 0 and the
+            # element is fully visible by every CSS/DOM criterion (display:block,
+            # visibility:visible, opacity:1, non-zero bbox, no inert ancestor).
+            # This appears to be a patchright bug with React-hydrated contenteditable
+            # elements in isolated worlds. Skip the actionability wait when count()
+            # already confirmed the element is present — downstream interactions
+            # use page.evaluate() which bypasses the same check.
+            if candidate_count and candidate_count > 0:
+                return locator.last
+
+            # Fallback: when count() raised an exception above (candidate_count
+            # is None), attempt the original wait_for path.  This is unlikely to
+            # succeed given the same patchright quirk, but preserves the prior
+            # behaviour for non-patchright drivers where wait_for works normally.
             candidate = locator.last
             try:
                 await candidate.wait_for(state="visible")
@@ -2512,8 +2560,18 @@ class LinkedInExtractor:
         await handle_modal_close(self._page)
         display_name = await self._read_profile_display_name()
         if profile_urn:
+            # Build the full compose URL that LinkedIn's own Message button
+            # generates. The minimal ?recipient=<URN> form works for established
+            # connections but shows a "Say hello" widget (no compose box) for new
+            # connections. Adding profileUrn + screenContext + interop=msgOverlay
+            # consistently opens the real composer regardless of connection age.
+            _encoded = quote_plus(f"urn:li:fsd_profile:{profile_urn}")
             compose_url: str | None = (
-                f"https://www.linkedin.com/messaging/compose/?recipient={profile_urn}"
+                f"https://www.linkedin.com/messaging/compose/"
+                f"?profileUrn={_encoded}"
+                f"&recipient={profile_urn}"
+                f"&screenContext=NON_SELF_PROFILE_VIEW"
+                f"&interop=msgOverlay"
             )
         else:
             compose_url = await self._resolve_message_compose_href()
@@ -2606,47 +2664,60 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
 
-        await compose_box.click()
-        await compose_box.press_sequentially(message, delay=30)
+        # patchright quirk: compose_box.click() and press_sequentially() use
+        # actionability checks internally and hit the same wait_for timeout.
+        # Instead: focus via page.evaluate() (no actionability check) and type
+        # via page.keyboard.type() which operates on the active element directly
+        # and fires the real keydown/input/keyup events React needs to enable Send.
+        #
+        # DOM dependency: innerText extraction is not applicable here — we need
+        # to call .focus() on the element reference, which requires querySelector.
+        # Selectors use only role + contenteditable + aria-label (ARIA attributes,
+        # not layout class names) so they are stable across LinkedIn UI changes.
+        focused = await self._page.evaluate(
+            """() => {
+                const el = document.querySelector(
+                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
+                    + 'div[role="textbox"][contenteditable="true"]'
+                );
+                if (!el) return false;
+                el.focus();
+                return true;
+            }"""
+        )
+        if not focused:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "compose_interact_failed",
+                "Could not focus compose box via JavaScript.",
+                recipient_selected=recipient_selected,
+            )
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(message, delay=15)
         await asyncio.sleep(0.3)
 
-        try:
-            await self._page.wait_for_function(
-                """() => {
-                    const isVisible = element =>
-                        !!(
-                            element &&
-                            (element.offsetWidth ||
-                                element.offsetHeight ||
-                                element.getClientRects().length)
-                        );
-                    return Array.from(
-                        document.querySelectorAll(
-                            'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]'
-                        )
-                    ).some(button => isVisible(button) && !button.disabled);
-                }""",
-            )
-        except PlaywrightTimeoutError:
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "send_unavailable",
-                "LinkedIn did not expose an enabled Send action for this draft.",
-                recipient_selected=recipient_selected,
-            )
-
-        send_button = self._page.locator(_MESSAGING_ENABLED_SEND_SELECTOR).last
-        try:
-            await send_button.click()
-        except PlaywrightTimeoutError:
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "send_unavailable",
-                "LinkedIn did not confirm that the message was sent.",
-                recipient_selected=recipient_selected,
-            )
+        # patchright actionability also blocks send_button.click(). Use JS click
+        # on any visible, enabled send button; fall back to Enter key which
+        # LinkedIn's composer also accepts for submission.
+        #
+        # DOM dependency: we need btn.click() on the element reference — not
+        # achievable via innerText or URL navigation. Selectors use only type,
+        # aria-label, and data attributes (no layout class names).
+        await asyncio.sleep(1.0)  # allow React to process keyboard input
+        sent_via_js = await self._page.evaluate(
+            """() => {
+                const btn = Array.from(document.querySelectorAll(
+                    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
+                    + 'button[data-control-name="send"]'
+                )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not sent_via_js:
+            await self._page.keyboard.press("Enter")
 
         if not await self._message_text_visible(message):
             await self._dismiss_message_ui()
