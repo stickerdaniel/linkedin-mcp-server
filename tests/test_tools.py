@@ -739,6 +739,79 @@ class TestMessagingTools:
             )
 
 
+class TestFeedTools:
+    async def test_get_feed_success(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_feed = AsyncMock(
+            return_value=ExtractedSection(text="Post 1\nPost 2", references=[])
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_feed")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result["url"] == "https://www.linkedin.com/feed/"
+        assert "feed" in result["sections"]
+        assert result["sections"]["feed"] == "Post 1\nPost 2"
+
+    async def test_get_feed_omits_rate_limited_sentinel(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_feed = AsyncMock(
+            return_value=ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_feed")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result["sections"] == {}
+
+    async def test_get_feed_returns_section_errors(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_feed = AsyncMock(
+            return_value=ExtractedSection(
+                text="",
+                references=[],
+                error={"issue_template_path": "/tmp/feed-issue.md"},
+            )
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_feed")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result["sections"] == {}
+        assert "feed" in result["section_errors"]
+
+    async def test_get_feed_clamps_num_posts(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_feed = AsyncMock(
+            return_value=ExtractedSection(text="Feed content", references=[])
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_feed")
+        await tool_fn(mock_context, num_posts=100, extractor=mock_extractor)
+        mock_extractor.extract_feed.assert_called_once_with(num_posts=50)
+
+        mock_extractor.extract_feed.reset_mock()
+        await tool_fn(mock_context, num_posts=0, extractor=mock_extractor)
+        mock_extractor.extract_feed.assert_called_once_with(num_posts=1)
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
@@ -759,6 +832,7 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "get_feed",
             "close_session",
         )
 
