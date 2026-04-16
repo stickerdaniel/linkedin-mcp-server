@@ -667,7 +667,7 @@ class LinkedInExtractor:
             return ExtractedSection(
                 text="",
                 references=[],
-                error=build_issue_diagnostics(e, "extract_feed"),
+                error=build_issue_diagnostics(e, context="extract_feed"),
             )
 
     async def _extract_feed_once(
