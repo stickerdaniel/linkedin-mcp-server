@@ -36,9 +36,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
-    mock.extract_feed = AsyncMock(
-        return_value=ExtractedSection(text="", references=[])
-    )
+    mock.extract_feed = AsyncMock(return_value=ExtractedSection(text="", references=[]))
     return mock
 
 
