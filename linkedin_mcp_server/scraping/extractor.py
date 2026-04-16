@@ -87,6 +87,8 @@ _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
+_NETWORK_MAP = {"first": "F", "second": "S", "third": "O"}
+
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
@@ -141,6 +143,16 @@ def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
     """Normalize a comma-separated filter value using the provided mapping."""
     parts = [v.strip() for v in value.split(",")]
     return ",".join(mapping.get(p, p) for p in parts)
+
+
+def _format_bracket_list(value: str) -> str:
+    """Format comma-separated IDs into LinkedIn bracket-list URL syntax.
+
+    Example: "103334640,162479" -> '["103334640","162479"]'
+    """
+    parts = [v.strip() for v in value.split(",")]
+    inner = ",".join('"' + p + '"' for p in parts)
+    return "[" + inner + "]"
 
 
 # Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
@@ -1962,6 +1974,48 @@ class LinkedInExtractor:
         return int(match.group(1)) if match else None
 
     @staticmethod
+    def _build_people_search_url(
+        keywords: str,
+        location: str | None = None,
+        current_company: str | None = None,
+        past_company: str | None = None,
+        school: str | None = None,
+        title: str | None = None,
+        network: str | None = None,
+        industry: str | None = None,
+    ) -> str:
+        """Build a LinkedIn people search URL with optional filters.
+
+        Structured filters use LinkedIn URL parameter format.
+        Company, school, and industry IDs are numeric strings.
+        Network accepts human-readable values: first, second, third.
+        """
+        params = f"keywords={quote_plus(keywords)}"
+
+        if location:
+            params += f"&location={quote_plus(location)}"
+        if current_company:
+            ids = _format_bracket_list(current_company)
+            params += f"&currentCompany={quote_plus(ids)}"
+        if past_company:
+            ids = _format_bracket_list(past_company)
+            params += f"&pastCompany={quote_plus(ids)}"
+        if school:
+            ids = _format_bracket_list(school)
+            params += f"&schoolFilter={quote_plus(ids)}"
+        if title:
+            params += f"&titleFreeText={quote_plus(title.strip())}"
+        if network:
+            codes = _normalize_csv(network, _NETWORK_MAP)
+            formatted = _format_bracket_list(codes)
+            params += f"&network={quote_plus(formatted)}"
+        if industry:
+            ids = _format_bracket_list(industry)
+            params += f"&industry={quote_plus(ids)}"
+
+        return f"https://www.linkedin.com/search/results/people/?{params}"
+
+    @staticmethod
     def _build_job_search_url(
         keywords: str,
         location: str | None = None,
@@ -2148,17 +2202,28 @@ class LinkedInExtractor:
         self,
         keywords: str,
         location: str | None = None,
+        current_company: str | None = None,
+        past_company: str | None = None,
+        school: str | None = None,
+        title: str | None = None,
+        network: str | None = None,
+        industry: str | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results page.
 
         Returns:
             {url, sections: {name: text}}
         """
-        params = f"keywords={quote_plus(keywords)}"
-        if location:
-            params += f"&location={quote_plus(location)}"
-
-        url = f"https://www.linkedin.com/search/results/people/?{params}"
+        url = self._build_people_search_url(
+            keywords=keywords,
+            location=location,
+            current_company=current_company,
+            past_company=past_company,
+            school=school,
+            title=title,
+            network=network,
+            industry=industry,
+        )
         extracted = await self.extract_page(url, section_name="search_results")
 
         sections: dict[str, str] = {}
