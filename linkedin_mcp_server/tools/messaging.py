@@ -246,3 +246,53 @@ def register_messaging_tools(mcp: FastMCP) -> None:
                 raise_tool_error(relogin_exc, "send_message")
         except Exception as e:
             raise_tool_error(e, "send_message")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Saved Posts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"feed", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_saved_posts(
+        ctx: Context,
+        limit: Annotated[int, Field(ge=1, le=50)] = 20,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get saved posts (bookmarks) from the LinkedIn saved items page.
+
+        Navigates to https://www.linkedin.com/my-items/saved-posts/ and extracts
+        all bookmarked posts, including author, text content, and post URL.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            limit: Maximum number of saved posts to return (1-50, default 20)
+
+        Returns:
+            Dict with url, sections (saved_posts -> raw text), and optional references
+            pointing to individual post URLs.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_saved_posts"
+            )
+            logger.info("Fetching saved posts (limit=%d)", limit)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading saved posts"
+            )
+
+            result = await extractor.get_saved_posts(limit=limit)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_saved_posts")
+        except Exception as e:
+            raise_tool_error(e, "get_saved_posts")  # NoReturn
