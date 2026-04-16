@@ -902,7 +902,9 @@ class TestConnectWithPerson:
     async def test_connectable_clicks_connect(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         initial_text = "Jane\n\n\u00b7 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
-        verified_text = "Jane\n\n\u00b7 3rd\n\nEngineer\n\nMessage\nPending\nMore\nAbout\n"
+        verified_text = (
+            "Jane\n\n\u00b7 3rd\n\nEngineer\n\nMessage\nPending\nMore\nAbout\n"
+        )
 
         with (
             patch.object(
@@ -987,7 +989,9 @@ class TestConnectWithPerson:
     async def test_returns_follow_only(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         text = "Public Figure\n\n\u00b7 3rd+\n\nCEO\n\nFollow\nMore\nAbout\n"
-        verified_text = "Public Figure\n\n\u00b7 3rd+\n\nCEO\n\nMessage\nPending\nMore\nAbout\n"
+        verified_text = (
+            "Public Figure\n\n\u00b7 3rd+\n\nCEO\n\nMessage\nPending\nMore\nAbout\n"
+        )
 
         with (
             patch.object(

@@ -510,11 +510,9 @@ class LinkedInExtractor:
 
     async def _click_send_without_note_button(self, *, timeout: int = 5000) -> bool:
         """Click LinkedIn's send-without-note action when it is present."""
-        matches = (
-            self._page.locator(
-                f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-            ).filter(has_text=re.compile(r"^Send without(?: a)? note$", re.IGNORECASE))
-        )
+        matches = self._page.locator(
+            f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+        ).filter(has_text=re.compile(r"^Send without(?: a)? note$", re.IGNORECASE))
         count = await matches.count()
         if count == 0:
             return False
@@ -1106,13 +1104,7 @@ class LinkedInExtractor:
             )
 
         if state == "incoming_request":
-            button_text = STATE_BUTTON_MAP.get(state)
-            if not button_text:
-                return _connection_result(
-                    url,
-                    "connect_unavailable",
-                    f"No button mapping for state '{state}'.",
-                )
+            button_text = STATE_BUTTON_MAP["incoming_request"]
             clicked = await self.click_button_by_text(button_text, scope="main")
             if not clicked:
                 return _connection_result(
@@ -1121,9 +1113,11 @@ class LinkedInExtractor:
                     f"Could not find or click button '{button_text}'.",
                 )
 
-            verified_state, verified_text, _verified_profile = (
-                await self._get_profile_connection_state(username)
-            )
+            (
+                verified_state,
+                verified_text,
+                _verified_profile,
+            ) = await self._get_profile_connection_state(username)
             if verified_state != "already_connected":
                 return _connection_result(
                     url,
@@ -1172,9 +1166,11 @@ class LinkedInExtractor:
                 note_sent=note_sent,
             )
 
-        verified_state, verified_text, _verified_profile = (
-            await self._get_profile_connection_state(username)
-        )
+        (
+            verified_state,
+            verified_text,
+            _verified_profile,
+        ) = await self._get_profile_connection_state(username)
         if verified_state != "pending":
             return _connection_result(
                 url,
