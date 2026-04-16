@@ -55,7 +55,17 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 
 ### Installation
 
-**Client Configuration**
+Install to any supported AI host ([18 hosts](https://github.com/pea3nut/agent-add) including Claude Code, Cursor, Windsurf, Claude Desktop, and more) with one command:
+
+```bash
+npx -y agent-add --mcp '{"linkedin":{"command":"uvx","args":["linkedin-scraper-mcp@latest"],"env":{"UV_HTTP_TIMEOUT":"300"}}}'
+```
+
+> Requires [Node.js](https://nodejs.org/) 18+. `agent-add` auto-detects your AI host and writes the config to the correct file.
+
+**Manual Configuration**
+
+Alternatively, add the following JSON to your MCP client's config file:
 
 ```json
 {
