@@ -1,0 +1,44 @@
+name: Check Attribution
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-bot-coauthors:
+    if: ${{ !endsWith(github.actor, '[bot]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Check for bot Co-Authored-By lines
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          COMMITS=$(git log --format='%H' "origin/${BASE_REF}..${HEAD_SHA}" 2>/dev/null || true)
+
+          if [ -z "$COMMITS" ]; then
+            echo "No commits to check"
+            exit 0
+          fi
+
+          FOUND=0
+          for sha in $COMMITS; do
+            MSG=$(git log --format='%B' -1 "$sha")
+            if echo "$MSG" | grep -qi 'co-authored-by.*\(anthropic\.com\|Copilot@users\.noreply\.github\.com\|greptile-apps\[bot\]\)'; then
+              echo "::error::Commit $sha contains a bot Co-Authored-By line. Remove it with: git rebase -i and edit the commit message."
+              echo "$MSG" | grep -i 'co-authored-by.*\(anthropic\|copilot\|greptile\)'
+              FOUND=1
+            fi
+          done
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo ""
+            echo "To fix: run 'git rebase -i origin/main', change 'pick' to 'reword' for flagged commits, then remove the Co-Authored-By lines."
+            exit 1
+          fi
+
+          echo "All commits clean."
