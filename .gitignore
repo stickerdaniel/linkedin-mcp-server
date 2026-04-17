@@ -194,8 +194,9 @@ cython_debug/
 # DXT extension packages (too large for git)
 *.dxt
 
-# claude code settings
-.claude
+# claude code settings (keep .claude/settings.json checked in)
+.claude/*
+!.claude/settings.json
 
 # opencode
 .opencode/plans
