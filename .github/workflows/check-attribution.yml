@@ -9,7 +9,7 @@ jobs:
     if: ${{ !endsWith(github.actor, '[bot]') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
 
@@ -28,9 +28,9 @@ jobs:
           FOUND=0
           for sha in $COMMITS; do
             MSG=$(git log --format='%B' -1 "$sha")
-            if echo "$MSG" | grep -qi 'co-authored-by.*\(anthropic\.com\|Copilot@users\.noreply\.github\.com\|greptile-apps\[bot\]\)'; then
+            if echo "$MSG" | grep -qi 'co-authored-by.*\(noreply@anthropic\.com\|Copilot@users\.noreply\.github\.com\|greptile-apps\[bot\]\)'; then
               echo "::error::Commit $sha contains a bot Co-Authored-By line. Remove it with: git rebase -i and edit the commit message."
-              echo "$MSG" | grep -i 'co-authored-by.*\(anthropic\|copilot\|greptile\)'
+              echo "$MSG" | grep -i 'co-authored-by.*\(noreply@anthropic\|copilot\|greptile\)'
               FOUND=1
             fi
           done
