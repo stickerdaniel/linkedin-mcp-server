@@ -766,7 +766,10 @@ class TestFeedTools:
                 text="Feed post\n\nhello\n\nFeed post\n\nworld",
                 references=[],
                 posts=[
-                    {"text": "hello", "url": "https://www.linkedin.com/posts/a_hello-ugcPost-1-xx"},
+                    {
+                        "text": "hello",
+                        "url": "https://www.linkedin.com/posts/a_hello-ugcPost-1-xx",
+                    },
                     {"text": "world"},
                 ],
             )
@@ -780,7 +783,10 @@ class TestFeedTools:
         tool_fn = await get_tool_fn(mcp, "get_feed")
         result = await tool_fn(mock_context, extractor=mock_extractor)
         assert result["posts"] == [
-            {"text": "hello", "url": "https://www.linkedin.com/posts/a_hello-ugcPost-1-xx"},
+            {
+                "text": "hello",
+                "url": "https://www.linkedin.com/posts/a_hello-ugcPost-1-xx",
+            },
             {"text": "world"},
         ]
 

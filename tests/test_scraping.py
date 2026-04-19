@@ -3412,7 +3412,10 @@ class TestBuildFeedPosts:
         url_b = "https://www.linkedin.com/posts/building-a-company-is-almost-inhuman-and-ugcPost-2-yy"
         posts = _build_feed_posts(text, [url_b, url_a])
         assert posts == [
-            {"text": "Alice\n\nMe and Charles, 7 years ago on graduation day", "url": url_a},
+            {
+                "text": "Alice\n\nMe and Charles, 7 years ago on graduation day",
+                "url": url_a,
+            },
             {
                 "text": "Bob\n\nBuilding a company is almost inhuman and hard",
                 "url": url_b,
@@ -3437,17 +3440,13 @@ class TestBuildFeedPosts:
         url = "https://www.linkedin.com/posts/alice_hello-world-from-the-only-post-ugcPost-1-xx"
         extra = "https://www.linkedin.com/posts/unrelated-slug-that-matches-nothing-ugcPost-2-yy"
         posts = _build_feed_posts(text, [extra, url])
-        assert posts == [
-            {"text": "Hello world from the only post", "url": url}
-        ]
+        assert posts == [{"text": "Hello world from the only post", "url": url}]
 
     def test_punctuation_differences_dont_block_match(self):
         text = "Feed post\n\nLet's go, Paul! 15M from Benchmark."
         url = "https://www.linkedin.com/posts/guillaumerx21_lets-go-paul-15m-from-benchmark-share-1-xx"
         posts = _build_feed_posts(text, [url])
-        assert posts == [
-            {"text": "Let's go, Paul! 15M from Benchmark.", "url": url}
-        ]
+        assert posts == [{"text": "Let's go, Paul! 15M from Benchmark.", "url": url}]
 
     def test_malformed_slug_url_is_ignored(self):
         text = "Feed post\n\nSome post"
