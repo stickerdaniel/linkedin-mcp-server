@@ -108,6 +108,8 @@ def register_person_tools(mcp: FastMCP) -> None:
         keywords: str,
         ctx: Context,
         location: str | None = None,
+        network: list[str] | None = None,
+        current_company: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -117,6 +119,12 @@ def register_person_tools(mcp: FastMCP) -> None:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
             ctx: FastMCP context for progress reporting
             location: Optional location filter (e.g., "New York", "Remote")
+            network: Optional connection-degree filter. Each element is one of
+                "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
+                Example: ["F"] to only return 1st-degree connections.
+            current_company: Optional current-employer filter. Accepts a company
+                name (e.g. "Weber Inc"). Numeric company URN IDs also work and
+                give the strictest match.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -127,16 +135,23 @@ def register_person_tools(mcp: FastMCP) -> None:
                 ctx, tool_name="search_people"
             )
             logger.info(
-                "Searching people: keywords='%s', location='%s'",
+                "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
                 keywords,
                 location,
+                network,
+                current_company,
             )
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting people search"
             )
 
-            result = await extractor.search_people(keywords, location)
+            result = await extractor.search_people(
+                keywords,
+                location,
+                network=network,
+                current_company=current_company,
+            )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

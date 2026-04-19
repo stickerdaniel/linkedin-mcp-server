@@ -87,6 +87,10 @@ _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
+# Valid tokens for the people-search ``network`` facet.
+# LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
+_NETWORK_TOKENS = ("F", "S", "O")
+
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
@@ -141,6 +145,17 @@ def _normalize_csv(value: str, mapping: dict[str, str]) -> str:
     """Normalize a comma-separated filter value using the provided mapping."""
     parts = [v.strip() for v in value.split(",")]
     return ",".join(mapping.get(p, p) for p in parts)
+
+
+def _encode_list_facet(values: list[str]) -> str:
+    """Encode a list of string values for a LinkedIn people-search list facet.
+
+    LinkedIn's people-search URL uses JSON-list encoded facets of the form
+    ``["A","B"]``. This helper URL-encodes the rendered JSON so the final URL
+    contains e.g. ``%5B%22F%22%5D`` for ``["F"]``.
+    """
+    rendered = "[" + ",".join(f'"{v}"' for v in values) + "]"
+    return quote_plus(rendered)
 
 
 # Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
@@ -2181,15 +2196,41 @@ class LinkedInExtractor:
         self,
         keywords: str,
         location: str | None = None,
+        network: list[str] | None = None,
+        current_company: str | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results page.
+
+        Args:
+            keywords: Free-text query ("software engineer", "recruiter at Google").
+            location: Optional location filter ("New York", "Remote").
+            network: Optional connection-degree filter. Each element is one of
+                ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
+                and beyond). Example: ``["F"]`` to only return 1st-degree
+                connections. Invalid tokens raise ``ValueError``.
+            current_company: Optional current-employer filter. Accepts a company
+                name (e.g. ``"Weber Inc"``) and is passed through to LinkedIn's
+                ``currentCompany`` URL facet. Numeric company URN IDs work too
+                and give the strictest match.
 
         Returns:
             {url, sections: {name: text}}
         """
+        if network is not None:
+            invalid = [t for t in network if t not in _NETWORK_TOKENS]
+            if invalid:
+                raise ValueError(
+                    "Invalid network token(s) "
+                    f"{invalid!r}; expected any of {list(_NETWORK_TOKENS)!r}"
+                )
+
         params = f"keywords={quote_plus(keywords)}"
         if location:
             params += f"&location={quote_plus(location)}"
+        if network:
+            params += f"&network={_encode_list_facet(network)}"
+        if current_company:
+            params += f"&currentCompany={_encode_list_facet([current_company])}"
 
         url = f"https://www.linkedin.com/search/results/people/?{params}"
         extracted = await self.extract_page(url, section_name="search_results")
