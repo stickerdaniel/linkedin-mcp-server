@@ -70,6 +70,11 @@ def register_feed_tools(mcp: FastMCP) -> None:
                 sections["feed"] = extracted.text
                 if extracted.references:
                     references["feed"] = extracted.references
+            elif extracted.text == _RATE_LIMITED_MSG:
+                section_errors["feed"] = {
+                    "error_type": "rate_limit",
+                    "error_message": extracted.text,
+                }
             elif extracted.error:
                 section_errors["feed"] = extracted.error
 
