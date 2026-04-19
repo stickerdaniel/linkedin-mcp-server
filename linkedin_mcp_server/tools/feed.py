@@ -46,8 +46,10 @@ def register_feed_tools(mcp: FastMCP) -> None:
                        so the actual count may slightly exceed the target.
 
         Returns:
-            Dict with url, sections (name -> raw text), and optional references.
-            The LLM should parse the raw text to extract individual posts.
+            Dict with url, sections (name -> raw text), and optional keys:
+            - posts: list of {url, text} per post in feed order. Some posts
+              (promoted/suggested) have no url.
+            - references, section_errors.
         """
         try:
             extractor = extractor or await get_ready_extractor(
@@ -81,6 +83,8 @@ def register_feed_tools(mcp: FastMCP) -> None:
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
             result: dict[str, Any] = {"url": url, "sections": sections}
+            if extracted.posts:
+                result["posts"] = extracted.posts
             if references:
                 result["references"] = references
             if section_errors:

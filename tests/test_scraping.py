@@ -17,6 +17,7 @@ from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
     _RATE_LIMITED_MSG,
+    _build_feed_posts,
     _truncate_linkedin_noise,
     strip_linkedin_noise,
 )
@@ -3397,3 +3398,66 @@ class TestSendMessageComposerInteraction:
         assert result["status"] == "sent"
         # Enter was pressed as fallback
         mock_keyboard.press.assert_awaited_once_with("Enter")
+
+
+class TestBuildFeedPosts:
+    def test_matches_urls_to_posts_by_content_fingerprint(self):
+        # URL order reversed vs DOM order — slug fingerprint matching should
+        # still pair each URL with the correct post.
+        text = (
+            "Feed post\n\nAlice\n\nMe and Charles, 7 years ago on graduation day\n\n"
+            "Feed post\n\nBob\n\nBuilding a company is almost inhuman and hard"
+        )
+        url_a = "https://www.linkedin.com/posts/alice_me-and-charles-7-years-ago-on-graduation-share-1-xx"
+        url_b = "https://www.linkedin.com/posts/building-a-company-is-almost-inhuman-and-ugcPost-2-yy"
+        posts = _build_feed_posts(text, [url_b, url_a])
+        assert posts == [
+            {"text": "Alice\n\nMe and Charles, 7 years ago on graduation day", "url": url_a},
+            {
+                "text": "Bob\n\nBuilding a company is almost inhuman and hard",
+                "url": url_b,
+            },
+        ]
+
+    def test_unmatched_post_gets_no_url(self):
+        text = "Feed post\n\nSuggested promo with no permalink"
+        posts = _build_feed_posts(text, [])
+        assert posts == [{"text": "Suggested promo with no permalink"}]
+
+    def test_drops_preamble_before_first_marker(self):
+        text = "site chrome\nmore chrome\nFeed post\n\nreal post body here"
+        posts = _build_feed_posts(text, [])
+        assert posts == [{"text": "real post body here"}]
+
+    def test_empty_text_yields_no_posts(self):
+        assert _build_feed_posts("", ["u1"]) == []
+
+    def test_urls_without_matching_post_are_dropped(self):
+        text = "Feed post\n\nHello world from the only post"
+        url = "https://www.linkedin.com/posts/alice_hello-world-from-the-only-post-ugcPost-1-xx"
+        extra = "https://www.linkedin.com/posts/unrelated-slug-that-matches-nothing-ugcPost-2-yy"
+        posts = _build_feed_posts(text, [extra, url])
+        assert posts == [
+            {"text": "Hello world from the only post", "url": url}
+        ]
+
+    def test_punctuation_differences_dont_block_match(self):
+        text = "Feed post\n\nLet's go, Paul! 15M from Benchmark."
+        url = "https://www.linkedin.com/posts/guillaumerx21_lets-go-paul-15m-from-benchmark-share-1-xx"
+        posts = _build_feed_posts(text, [url])
+        assert posts == [
+            {"text": "Let's go, Paul! 15M from Benchmark.", "url": url}
+        ]
+
+    def test_malformed_slug_url_is_ignored(self):
+        text = "Feed post\n\nSome post"
+        posts = _build_feed_posts(text, ["https://example.com/not-a-slug-url"])
+        assert posts == [{"text": "Some post"}]
+
+    def test_unicode_bold_post_body_matches_plain_slug(self):
+        # LinkedIn posts styled with mathematical-bold Unicode (U+1D400 block)
+        # should still match their plain-text slug after NFKC normalization.
+        text = "Feed post\n\n𝐈 𝐠𝐨𝐭 𝐟𝐢𝐫𝐞𝐝 𝐟𝐫𝐨𝐦 𝐦𝐲 𝐣𝐨𝐛 because I was bad"
+        url = "https://www.linkedin.com/posts/louis_i-got-fired-from-my-job-because-i-was-bad-share-1-xx"
+        posts = _build_feed_posts(text, [url])
+        assert posts == [{"text": text.split("\n\n", 1)[1], "url": url}]

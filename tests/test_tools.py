@@ -757,6 +757,32 @@ class TestFeedTools:
         assert result["url"] == "https://www.linkedin.com/feed/"
         assert "feed" in result["sections"]
         assert result["sections"]["feed"] == "Post 1\nPost 2"
+        assert "posts" not in result
+
+    async def test_get_feed_includes_posts(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_feed = AsyncMock(
+            return_value=ExtractedSection(
+                text="Feed post\n\nhello\n\nFeed post\n\nworld",
+                references=[],
+                posts=[
+                    {"text": "hello", "url": "https://www.linkedin.com/posts/a_hello-ugcPost-1-xx"},
+                    {"text": "world"},
+                ],
+            )
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_feed")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result["posts"] == [
+            {"text": "hello", "url": "https://www.linkedin.com/posts/a_hello-ugcPost-1-xx"},
+            {"text": "world"},
+        ]
 
     async def test_get_feed_omits_rate_limited_sentinel(self, mock_context):
         mock_extractor = MagicMock()

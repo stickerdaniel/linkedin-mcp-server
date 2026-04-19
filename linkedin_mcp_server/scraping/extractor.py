@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 import re
+import unicodedata
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
@@ -177,6 +178,105 @@ class ExtractedSection:
     text: str
     references: list[Reference]
     error: dict[str, Any] | None = None
+    posts: list[dict[str, Any]] | None = None
+
+
+_FEED_RSC_MARKER = "sduiid=com.linkedin.sdui.pagers.feed.mainFeed"
+# Matches a LinkedIn post permalink in either plain or JSON-escaped form
+# (the initial /feed/ HTML embeds the RSC flight data with \u002f for slashes,
+# while paginated responses use plain slashes). Captures the slug portion so
+# we can rebuild a canonical URL regardless of the source encoding.
+_POST_SLUG_URL_RE = re.compile(
+    r"linkedin\.com(?:\\u002[fF]|/)posts(?:\\u002[fF]|/)"
+    r"(?P<slug>[A-Za-z0-9_-]+?-(?:ugcPost|activity|share)-\d+-[A-Za-z0-9_-]+)"
+)
+_FEED_POST_SPLIT_RE = re.compile(r"(?:^|\n)Feed post\s*\n+")
+_FEED_DOCUMENT_URLS = {
+    "https://www.linkedin.com/feed",
+    "https://www.linkedin.com/feed/",
+}
+_POST_SLUG_PATH_RE = re.compile(
+    r"/posts/(?P<prefix>.+?)-(?:ugcPost|activity|share)-\d+-[A-Za-z0-9_-]+/?$"
+)
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]")
+# Minimum normalized length of a slug fingerprint before we'll try to match it
+# against a post block — guards against false positives from very short slugs.
+_MIN_FINGERPRINT_LEN = 12
+
+
+def _normalize_for_match(text: str) -> str:
+    # NFKC folds mathematical-bold / full-width / superscript characters to
+    # their ASCII equivalents, so posts styled with Unicode typography still
+    # substring-match their plain-text slugs.
+    return _NON_ALNUM_RE.sub("", unicodedata.normalize("NFKC", text).lower())
+
+
+def _is_feed_payload_response(url: str) -> bool:
+    """True if the response URL is one that carries `postSlugUrl` fields."""
+    if _FEED_RSC_MARKER in url:
+        return True
+    return url.split("?", 1)[0] in _FEED_DOCUMENT_URLS
+
+
+def _fingerprint_from_slug_url(slug_url: str) -> str | None:
+    """Derive a normalized content fingerprint from a post slug URL.
+
+    LinkedIn encodes the first several words of the post body into the slug:
+    ``/posts/<author>_<title-words>-<type>-<id>-<trk>`` (or just
+    ``/posts/<title-words>-<type>-<id>-<trk>`` for org posts). We extract the
+    title portion and strip non-alphanumerics so it substring-matches the
+    post's innerText regardless of punctuation/whitespace differences.
+    """
+    path = slug_url.split("?", 1)[0].split("#", 1)[0]
+    match = _POST_SLUG_PATH_RE.search(path)
+    if not match:
+        return None
+    prefix = match.group("prefix")
+    _, sep, title = prefix.partition("_")
+    if not sep:
+        title = prefix
+    normalized = _normalize_for_match(title)
+    return normalized if len(normalized) >= _MIN_FINGERPRINT_LEN else None
+
+
+def _build_feed_posts(
+    cleaned_text: str,
+    captured_urls: list[str],
+) -> list[dict[str, Any]]:
+    """Split feed innerText into per-post blocks and attach captured permalinks.
+
+    Matches each URL to a post by content fingerprint (first words of the
+    post body, encoded into the slug URL). Ordering between the captured-URL
+    list and the rendered DOM is not stable — posts from the initial HTML
+    document and subsequent pagination fetches interleave — so we key on
+    content instead. Promoted/suggested posts have no ``postSlugUrl`` and
+    simply receive no ``url`` field.
+    """
+    blocks = [
+        block.strip()
+        for block in _FEED_POST_SPLIT_RE.split(cleaned_text)
+        if block.strip()
+    ]
+    if blocks and not cleaned_text.lstrip().startswith("Feed post"):
+        blocks = blocks[1:]
+
+    url_pool: list[tuple[str, str]] = []
+    for url in captured_urls:
+        fingerprint = _fingerprint_from_slug_url(url)
+        if fingerprint:
+            url_pool.append((fingerprint, url))
+
+    posts: list[dict[str, Any]] = []
+    for block in blocks:
+        entry: dict[str, Any] = {"text": block}
+        normalized_block = _normalize_for_match(block)
+        for i, (fingerprint, url) in enumerate(url_pool):
+            if fingerprint in normalized_block:
+                entry["url"] = url
+                url_pool.pop(i)
+                break
+        posts.append(entry)
+    return posts
 
 
 def strip_linkedin_noise(text: str) -> str:
@@ -668,6 +768,48 @@ class LinkedInExtractor:
     ) -> ExtractedSection:
         """Single attempt: navigate, scroll until post count, extract."""
         url = "https://www.linkedin.com/feed/"
+
+        # Post permalinks aren't rendered in the feed DOM anymore — they only
+        # live in the SDUI pagination response (field: "postSlugUrl"). Listen
+        # for those responses during the whole scroll loop.
+        captured_urls: list[str] = []
+        seen_urls: set[str] = set()
+
+        def _handle_response(resp: Any) -> None:
+            if not _is_feed_payload_response(resp.url):
+                return
+
+            async def _read() -> None:
+                try:
+                    body = await resp.body()
+                except Exception:
+                    return
+                if not body:
+                    return
+                text = body.decode("utf-8", errors="replace")
+                for match in _POST_SLUG_URL_RE.finditer(text):
+                    post_url = f"https://www.linkedin.com/posts/{match.group('slug')}"
+                    if post_url not in seen_urls:
+                        seen_urls.add(post_url)
+                        captured_urls.append(post_url)
+
+            asyncio.create_task(_read())
+
+        self._page.on("response", _handle_response)
+        try:
+            return await self._extract_feed_body(url, num_posts, captured_urls)
+        finally:
+            try:
+                self._page.remove_listener("response", _handle_response)
+            except Exception:
+                pass
+
+    async def _extract_feed_body(
+        self,
+        url: str,
+        num_posts: int,
+        captured_urls: list[str],
+    ) -> ExtractedSection:
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
@@ -761,6 +903,9 @@ class LinkedInExtractor:
         if expanded:
             await asyncio.sleep(0.5)
 
+        # Give any in-flight response reads a beat to finish recording URLs.
+        await asyncio.sleep(0.2)
+
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
 
@@ -773,9 +918,11 @@ class LinkedInExtractor:
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
+        posts = _build_feed_posts(cleaned, captured_urls)
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], "feed"),
+            posts=posts,
         )
 
     async def extract_page(

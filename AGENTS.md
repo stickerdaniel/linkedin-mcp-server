@@ -30,6 +30,7 @@ Optional additional keys:
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
 - `job_ids: [id, ...]` (search_jobs only)
+- `posts: [{text, url?}, ...]` (get_feed only) — per-post text blocks in feed order; `url` omitted for promoted/suggested items
 
 ## Verifying Bug Reports
 
