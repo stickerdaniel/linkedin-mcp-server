@@ -265,3 +265,63 @@ def register_person_tools(mcp: FastMCP) -> None:
                 raise_tool_error(relogin_exc, "get_sidebar_profiles")
         except Exception as e:
             raise_tool_error(e, "get_sidebar_profiles")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get My Profile",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_my_profile(
+        ctx: Context,
+        sections: str | None = None,
+        max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get the authenticated user's own LinkedIn profile.
+
+        Navigates to /in/me/ which LinkedIn redirects to the actual profile.
+        The resolved URL in the result reveals the real username.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            sections: Comma-separated list of extra sections to scrape.
+                The main profile page is always included.
+                Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts
+                Examples: "experience,education", "contact_info", "skills,projects"
+                Default (None) scrapes only the main profile page.
+            max_scrolls: Maximum pagination attempts per section (same as get_person_profile).
+
+        Returns:
+            Dict with url, sections (name -> raw text), and optional references.
+            The url field reflects the resolved profile URL, revealing the real username.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_my_profile"
+            )
+            requested, unknown = parse_person_sections(sections)
+
+            logger.info("Scraping own profile (sections=%s)", sections)
+
+            cb = MCPContextProgressCallback(ctx)
+            result = await extractor.get_my_profile(
+                sections=requested,
+                callbacks=cb,
+                max_scrolls=max_scrolls,
+            )
+
+            if unknown:
+                result["unknown_sections"] = unknown
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_my_profile")
+        except Exception as e:
+            raise_tool_error(e, "get_my_profile")  # NoReturn

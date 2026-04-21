@@ -983,6 +983,27 @@ class LinkedInExtractor:
 
         return result
 
+    async def get_my_profile(
+        self,
+        sections: set[str] | None = None,
+        callbacks: ProgressCallback | None = None,
+        max_scrolls: int | None = None,
+    ) -> dict[str, Any]:
+        """Scrape the authenticated user's own LinkedIn profile.
+
+        Navigates to /in/me/ which LinkedIn redirects to the actual profile.
+        The resolved URL in the result reveals the real username.
+
+        Returns:
+            {url, sections: {name: text}}
+        """
+        return await self.scrape_person(
+            "me",
+            sections if sections is not None else {"main_profile"},
+            callbacks=callbacks,
+            max_scrolls=max_scrolls,
+        )
+
     async def connect_with_person(
         self,
         username: str,
@@ -1832,6 +1853,41 @@ class LinkedInExtractor:
 
         return result
 
+    async def get_company_employees(
+        self,
+        company_name: str,
+        keywords: str | None = None,
+    ) -> dict[str, Any]:
+        """List employees at a company from the /people/ page.
+
+        Returns:
+            {url, sections: {employees: text}, references: {employees: [...]}}
+        """
+        url = f"https://www.linkedin.com/company/{company_name}/people/"
+        if keywords:
+            url += f"?keywords={quote_plus(keywords)}"
+        extracted = await self.extract_page(url, section_name="employees")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["employees"] = extracted.text
+            if extracted.references:
+                references["employees"] = extracted.references
+        elif extracted.error:
+            section_errors["employees"] = extracted.error
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
     async def scrape_job(self, job_id: str) -> dict[str, Any]:
         """Scrape a single job posting.
 
@@ -2192,6 +2248,38 @@ class LinkedInExtractor:
             params += f"&location={quote_plus(location)}"
 
         url = f"https://www.linkedin.com/search/results/people/?{params}"
+        extracted = await self.extract_page(url, section_name="search_results")
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["search_results"] = extracted.text
+            if extracted.references:
+                references["search_results"] = extracted.references
+        elif extracted.error:
+            section_errors["search_results"] = extracted.error
+
+        result: dict[str, Any] = {
+            "url": url,
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def search_companies(
+        self,
+        keywords: str,
+    ) -> dict[str, Any]:
+        """Search for companies and extract the results page.
+
+        Returns:
+            {url, sections: {search_results: text}}
+        """
+        url = f"https://www.linkedin.com/search/results/companies/?keywords={quote_plus(keywords)}"
         extracted = await self.extract_page(url, section_name="search_results")
 
         sections: dict[str, str] = {}

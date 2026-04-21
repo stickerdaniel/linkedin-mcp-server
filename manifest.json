@@ -50,6 +50,10 @@
       "description": "Get detailed information from a LinkedIn profile including work history, education, certifications, skills, projects, connections, and recent posts"
     },
     {
+      "name": "get_my_profile",
+      "description": "Get the authenticated user's own LinkedIn profile with optional section selection (experience, education, skills, etc.)"
+    },
+    {
       "name": "connect_with_person",
       "description": "Send a connection request or accept an incoming one, with optional note"
     },
@@ -64,6 +68,14 @@
     {
       "name": "get_company_posts",
       "description": "Get recent posts from a company's LinkedIn feed"
+    },
+    {
+      "name": "search_companies",
+      "description": "Search for companies on LinkedIn by keywords"
+    },
+    {
+      "name": "get_company_employees",
+      "description": "List employees at a company from the LinkedIn /people/ page, with optional keyword filter by name, title, or skill"
     },
     {
       "name": "get_job_details",
