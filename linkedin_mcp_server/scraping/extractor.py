@@ -2233,6 +2233,7 @@ class LinkedInExtractor:
         await self._wait_for_main_text(log_context="Messaging inbox")
         await handle_modal_close(self._page)
 
+        filter_failed = False
         filter_label = self._INBOX_FILTER_LABELS.get(filter)
         if filter_label:
             try:
@@ -2241,6 +2242,7 @@ class LinkedInExtractor:
                 await self._page.wait_for_timeout(1000)
             except Exception:
                 logger.warning("Could not activate %s filter", filter_label)
+                filter_failed = True
 
         scrolls = max(1, limit // 10)
         await self._scroll_main_scrollable_region(
@@ -2261,12 +2263,25 @@ class LinkedInExtractor:
         if conversation_refs:
             references = dedupe_references(conversation_refs + references)
 
-        return self._single_section_result(
+        result = self._single_section_result(
             url,
             "inbox",
             cleaned,
             references=references,
         )
+
+        if filter_failed:
+            result["section_errors"] = {
+                "inbox": {
+                    "error_type": "filter_failed",
+                    "error_message": (
+                        f"Could not activate '{filter}' filter; "
+                        "results may be unfiltered"
+                    ),
+                }
+            }
+
+        return result
 
     async def _extract_conversation_thread_refs(self, limit: int) -> list[Reference]:
         """Click each inbox conversation item and capture the thread URL.
