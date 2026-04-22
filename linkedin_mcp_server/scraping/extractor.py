@@ -991,14 +991,21 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Scrape the authenticated user's own LinkedIn profile.
 
-        Navigates to /in/me/ which LinkedIn redirects to the actual profile.
-        The resolved URL in the result reveals the real username.
+        Navigates to /in/me/ and resolves the redirect to obtain the real
+        username before scraping, so result["url"] reflects the actual profile
+        URL rather than /in/me/.
 
         Returns:
             {url, sections: {name: text}}
         """
+        await self._navigate_to_page("https://www.linkedin.com/in/me/")
+        real_url = self._page.url  # post-redirect, e.g. /in/johndoe/
+        match = re.search(r"/in/([^/?#]+)", real_url)
+        username = match.group(1) if match else "me"
+        logger.debug("get_my_profile resolved username=%r from %s", username, real_url)
+
         return await self.scrape_person(
-            "me",
+            username,
             sections if sections is not None else {"main_profile"},
             callbacks=callbacks,
             max_scrolls=max_scrolls,

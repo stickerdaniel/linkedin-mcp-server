@@ -282,8 +282,9 @@ def register_person_tools(mcp: FastMCP) -> None:
         """
         Get the authenticated user's own LinkedIn profile.
 
-        Navigates to /in/me/ which LinkedIn redirects to the actual profile.
-        The resolved URL in the result reveals the real username.
+        Navigates to /in/me/ and resolves the redirect to obtain the real
+        username before scraping, so the url field in the result is the actual
+        profile URL (e.g. linkedin.com/in/johndoe/) rather than /in/me/.
 
         Args:
             ctx: FastMCP context for progress reporting
