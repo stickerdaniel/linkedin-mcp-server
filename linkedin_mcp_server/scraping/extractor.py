@@ -2214,13 +2214,35 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
-    async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
+    # Maps filter param values to the button text shown in LinkedIn's inbox UI.
+    _INBOX_FILTER_LABELS: dict[str, str] = {
+        "unread": "Unread",
+        "jobs": "Jobs",
+        "connections": "Connections",
+        "inmail": "InMail",
+        "starred": "Starred",
+    }
+
+    async def get_inbox(
+        self, limit: int = 20, *, filter: str = "none"
+    ) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
         url = "https://www.linkedin.com/messaging/"
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
         await self._wait_for_main_text(log_context="Messaging inbox")
         await handle_modal_close(self._page)
+
+        filter_failed = False
+        filter_label = self._INBOX_FILTER_LABELS.get(filter)
+        if filter_label:
+            try:
+                btn = self._page.get_by_role("button", name=filter_label, exact=True)
+                await btn.click(timeout=5000)
+                await self._page.wait_for_timeout(1000)
+            except Exception:
+                logger.warning("Could not activate %s filter", filter_label)
+                filter_failed = True
 
         scrolls = max(1, limit // 10)
         await self._scroll_main_scrollable_region(
@@ -2241,12 +2263,25 @@ class LinkedInExtractor:
         if conversation_refs:
             references = dedupe_references(conversation_refs + references)
 
-        return self._single_section_result(
+        result = self._single_section_result(
             url,
             "inbox",
             cleaned,
             references=references,
         )
+
+        if filter_failed:
+            result["section_errors"] = {
+                "inbox": {
+                    "error_type": "filter_failed",
+                    "error_message": (
+                        f"Could not activate '{filter}' filter; "
+                        "results may be unfiltered"
+                    ),
+                }
+            }
+
+        return result
 
     async def _extract_conversation_thread_refs(self, limit: int) -> list[Reference]:
         """Click each inbox conversation item and capture the thread URL.
