@@ -214,6 +214,30 @@ class LinkedInExtractor:
 
     def __init__(self, page: Page):
         self._page = page
+        self._open_to_work_data: dict[str, Any] | None = None
+
+    async def _capture_open_to_work(self, response) -> None:
+        """Passively capture OpenToWork status from LinkedIn's Voyager API."""
+        url = response.url
+        if "OpenToCards" not in url or response.status != 200:
+            return
+        try:
+            content_type = response.headers.get("content-type", "")
+            if "json" not in content_type:
+                return
+            body = await response.json()
+            cards = (
+                body.get("data", {})
+                .get("data", {})
+                .get("identityDashOpenToCardsByTopCard", {})
+            )
+            elements = cards.get("elements", cards.get("*elements", []))
+            if elements:
+                self._open_to_work_data = {"open_to_work": True, "cards": elements}
+            else:
+                self._open_to_work_data = {"open_to_work": False}
+        except Exception:
+            pass
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -917,55 +941,67 @@ class LinkedInExtractor:
         if callbacks:
             await callbacks.on_start("person profile", base_url)
 
+        self._open_to_work_data = None
+        self._page.on("response", self._capture_open_to_work)
         try:
-            for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
-                if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+            try:
+                for i, (section_name, suffix, is_overlay) in enumerate(
+                    requested_ordered
+                ):
+                    if i > 0:
+                        await asyncio.sleep(_NAV_DELAY)
 
-                url = base_url + suffix
-                try:
-                    if is_overlay:
-                        extracted = await self._extract_overlay(
-                            url, section_name=section_name
+                    url = base_url + suffix
+                    try:
+                        if is_overlay:
+                            extracted = await self._extract_overlay(
+                                url, section_name=section_name
+                            )
+                        else:
+                            extracted = await self.extract_page(
+                                url,
+                                section_name=section_name,
+                                max_scrolls=max_scrolls,
+                            )
+
+                        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                            sections[section_name] = extracted.text
+                            if extracted.references:
+                                references[section_name] = extracted.references
+                        elif extracted.error:
+                            section_errors[section_name] = extracted.error
+
+                        if section_name == "main_profile" and profile_urn is None:
+                            profile_urn = await self._extract_profile_urn()
+                    except LinkedInScraperException:
+                        raise
+                    except Exception as e:
+                        logger.warning(
+                            "Error scraping section %s: %s", section_name, e
                         )
-                    else:
-                        extracted = await self.extract_page(
-                            url,
+                        section_errors[section_name] = build_issue_diagnostics(
+                            e,
+                            context="scrape_person",
+                            target_url=url,
                             section_name=section_name,
-                            max_scrolls=max_scrolls,
                         )
 
-                    if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-                        sections[section_name] = extracted.text
-                        if extracted.references:
-                            references[section_name] = extracted.references
-                    elif extracted.error:
-                        section_errors[section_name] = extracted.error
-
-                    if section_name == "main_profile" and profile_urn is None:
-                        profile_urn = await self._extract_profile_urn()
-                except LinkedInScraperException:
-                    raise
-                except Exception as e:
-                    logger.warning("Error scraping section %s: %s", section_name, e)
-                    section_errors[section_name] = build_issue_diagnostics(
-                        e,
-                        context="scrape_person",
-                        target_url=url,
-                        section_name=section_name,
-                    )
-
-                # "Scraped" = processed/attempted, not necessarily successful.
-                # Per-section failures are captured in section_errors.
+                    # "Scraped" = processed/attempted, not necessarily successful.
+                    # Per-section failures are captured in section_errors.
+                    if callbacks:
+                        percent = round((i + 1) / total * 95)
+                        await callbacks.on_progress(
+                            f"Scraped {section_name} ({i + 1}/{total})", percent
+                        )
+            except LinkedInScraperException as e:
                 if callbacks:
-                    percent = round((i + 1) / total * 95)
-                    await callbacks.on_progress(
-                        f"Scraped {section_name} ({i + 1}/{total})", percent
-                    )
-        except LinkedInScraperException as e:
-            if callbacks:
-                await callbacks.on_error(e)
-            raise
+                    await callbacks.on_error(e)
+                raise
+        finally:
+            try:
+                self._page.remove_listener("response", self._capture_open_to_work)
+            except Exception:
+                pass
 
         result: dict[str, Any] = {
             "url": f"{base_url}/",
@@ -977,6 +1013,8 @@ class LinkedInExtractor:
             result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
+        if self._open_to_work_data is not None:
+            result["open_to_work"] = self._open_to_work_data.get("open_to_work", False)
 
         if callbacks:
             await callbacks.on_complete("person profile", result)
