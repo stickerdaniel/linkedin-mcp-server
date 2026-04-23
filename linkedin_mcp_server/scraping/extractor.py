@@ -237,7 +237,7 @@ class LinkedInExtractor:
             else:
                 self._open_to_work_data = {"open_to_work": False}
         except Exception:
-            pass
+            logger.debug("OpenToWork API capture failed for %s", url)
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -976,9 +976,7 @@ class LinkedInExtractor:
                     except LinkedInScraperException:
                         raise
                     except Exception as e:
-                        logger.warning(
-                            "Error scraping section %s: %s", section_name, e
-                        )
+                        logger.warning("Error scraping section %s: %s", section_name, e)
                         section_errors[section_name] = build_issue_diagnostics(
                             e,
                             context="scrape_person",
@@ -1013,8 +1011,11 @@ class LinkedInExtractor:
             result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
-        if self._open_to_work_data is not None:
-            result["open_to_work"] = self._open_to_work_data.get("open_to_work", False)
+        result["open_to_work"] = (
+            self._open_to_work_data.get("open_to_work", False)
+            if self._open_to_work_data is not None
+            else None
+        )
 
         if callbacks:
             await callbacks.on_complete("person profile", result)
