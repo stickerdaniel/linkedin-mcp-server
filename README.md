@@ -44,6 +44,8 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 | `search_jobs` | Search for jobs with keywords and location filters | working |
 | `search_people` | Search for people by keywords and location | working |
 | `get_job_details` | Get detailed information about a specific job posting | working |
+| `get_sent_invitations` | List outgoing connection requests still awaiting acceptance | working |
+| `get_received_invitations` | List incoming connection requests awaiting your action | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 <br/>

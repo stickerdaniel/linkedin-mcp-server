@@ -25,6 +25,7 @@ from linkedin_mcp_server.sequential_tool_middleware import (
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.messaging import register_messaging_tools
+from linkedin_mcp_server.tools.network import register_network_tools
 from linkedin_mcp_server.tools.person import register_person_tools
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ def create_mcp_server() -> FastMCP:
     register_company_tools(mcp)
     register_job_tools(mcp)
     register_messaging_tools(mcp)
+    register_network_tools(mcp)
 
     # Register session management tool
     @mcp.tool(
