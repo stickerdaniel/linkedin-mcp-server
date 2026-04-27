@@ -33,6 +33,8 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
+    mock.get_sent_invitations = AsyncMock(return_value=scrape_result)
+    mock.get_received_invitations = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -739,6 +741,63 @@ class TestMessagingTools:
             )
 
 
+class TestNetworkTools:
+    async def test_get_sent_invitations_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/mynetwork/invitation-manager/sent/",
+            "sections": {"sent_invitations": "Pending invite to John Doe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.network import register_network_tools
+
+        mcp = FastMCP("test")
+        register_network_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_sent_invitations")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        assert result["sections"]["sent_invitations"] == "Pending invite to John Doe"
+        mock_extractor.get_sent_invitations.assert_awaited_once_with(limit=50)
+
+    async def test_get_sent_invitations_with_custom_limit(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/mynetwork/invitation-manager/sent/",
+            "sections": {"sent_invitations": "..."},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.network import register_network_tools
+
+        mcp = FastMCP("test")
+        register_network_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_sent_invitations")
+        await tool_fn(mock_context, limit=20, extractor=mock_extractor)
+
+        mock_extractor.get_sent_invitations.assert_awaited_once_with(limit=20)
+
+    async def test_get_received_invitations_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/mynetwork/invitation-manager/",
+            "sections": {"received_invitations": "Jane Smith wants to connect"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.network import register_network_tools
+
+        mcp = FastMCP("test")
+        register_network_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_received_invitations")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        assert (
+            result["sections"]["received_invitations"] == "Jane Smith wants to connect"
+        )
+        mock_extractor.get_received_invitations.assert_awaited_once_with(limit=50)
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
@@ -759,6 +818,8 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "get_sent_invitations",
+            "get_received_invitations",
             "close_session",
         )
 
