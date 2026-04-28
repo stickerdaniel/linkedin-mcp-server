@@ -37,6 +37,13 @@
       "matchPackageNames": ["python"],
       "matchUpdateTypes": ["major", "minor"],
       "enabled": false
+    },
+    {
+      "description": "requires-python: bump upper bound to next major.minor only",
+      "matchManagers": ["pep621"],
+      "matchDepTypes": ["requires-python"],
+      "rangeStrategy": "bump",
+      "extractVersion": "^(?<version>\\d+\\.\\d+)"
     }
   ]
 }

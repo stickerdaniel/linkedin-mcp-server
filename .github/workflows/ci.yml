@@ -39,8 +39,6 @@ jobs:
         with:
           enable-cache: true
 
-      - run: uv python install 3.14
-
       - run: uv sync --group dev
 
       - name: Run tests
