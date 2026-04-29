@@ -12,7 +12,7 @@ cd linkedin-mcp-server
 uv sync                                    # Install dependencies
 uv sync --group dev                        # Install dev dependencies
 uv run pre-commit install                  # Set up pre-commit hooks
-uv run patchright install chromium         # Install browser
+uv run python -m patchright install chromium  # Install browser
 uv run pytest --cov                        # Run tests with coverage
 ```
 

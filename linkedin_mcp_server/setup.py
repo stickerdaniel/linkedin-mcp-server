@@ -9,6 +9,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core import (
     BrowserManager,
@@ -17,7 +18,12 @@ from linkedin_mcp_server.core import (
     warm_up_browser,
 )
 from linkedin_mcp_server.drivers.browser import get_profile_dir
-from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
+from linkedin_mcp_server.session_state import (
+    portable_cookie_path,
+    profile_exists,
+    source_state_path,
+    write_source_state,
+)
 
 
 async def _perform_login(
@@ -58,6 +64,27 @@ async def _perform_login(
     return True
 
 
+def _should_retry_with_fresh_auth_state(user_data_dir: Path, error: Exception) -> bool:
+    """Retry once when a stale LinkedIn profile causes a redirect loop."""
+    if "ERR_TOO_MANY_REDIRECTS" not in str(error):
+        return False
+
+    return (
+        profile_exists(user_data_dir)
+        or portable_cookie_path(user_data_dir).exists()
+        or source_state_path(user_data_dir).exists()
+    )
+
+
+def _login_launch_options() -> dict[str, Any]:
+    """Launch options shared by interactive login flows."""
+    launch_options: dict[str, Any] = {}
+    config = get_config()
+    if config.browser.chrome_path:
+        launch_options["executable_path"] = config.browser.chrome_path
+    return launch_options
+
+
 async def interactive_login(user_data_dir: Path | None = None, warm_up: bool = True) -> bool:
     """Open browser for manual LinkedIn login, then close it.
 
@@ -70,15 +97,21 @@ async def interactive_login(user_data_dir: Path | None = None, warm_up: bool = T
     print("   Please log in manually. You have 5 minutes to complete authentication.")
     print("   (This handles 2FA, captcha, and any security challenges)")
 
-    launch_options: dict[str, Any] = {}
-    config = get_config()
-    if config.browser.chrome_path:
-        launch_options["executable_path"] = config.browser.chrome_path
+    launch_options = _login_launch_options()
 
-    async with BrowserManager(
-        user_data_dir=user_data_dir, headless=False, **launch_options
-    ) as browser:
-        return await _perform_login(browser, user_data_dir, warm_up)
+    for attempt in range(2):
+        try:
+            async with BrowserManager(
+                user_data_dir=user_data_dir, headless=False, **launch_options
+            ) as browser:
+                return await _perform_login(browser, user_data_dir, warm_up)
+        except Exception as error:
+            if attempt == 0 and _should_retry_with_fresh_auth_state(user_data_dir, error):
+                print("   Existing LinkedIn auth state appears stale. Clearing it and retrying...")
+                clear_auth_state(user_data_dir)
+                continue
+            raise
+    raise RuntimeError("Interactive login retry loop exhausted")
 
 
 async def interactive_login_keep_alive(
@@ -99,22 +132,25 @@ async def interactive_login_keep_alive(
     print("   Please log in manually. You have 5 minutes to complete authentication.")
     print("   (This handles 2FA, captcha, and any security challenges)")
 
-    launch_options: dict[str, Any] = {}
-    config = get_config()
-    if config.browser.chrome_path:
-        launch_options["executable_path"] = config.browser.chrome_path
+    launch_options = _login_launch_options()
 
-    browser = BrowserManager(user_data_dir=user_data_dir, headless=False, **launch_options)
-    await browser.start()
-    try:
-        ok = await _perform_login(browser, user_data_dir, warm_up)
-        if not ok:
-            raise RuntimeError("Login failed — cookie export unsuccessful")
-        browser.is_authenticated = True
-        return browser
-    except Exception:
-        await browser.close()
-        raise
+    for attempt in range(2):
+        browser = BrowserManager(user_data_dir=user_data_dir, headless=False, **launch_options)
+        await browser.start()
+        try:
+            ok = await _perform_login(browser, user_data_dir, warm_up)
+            if not ok:
+                raise RuntimeError("Login failed — cookie export unsuccessful")
+            browser.is_authenticated = True
+            return browser
+        except Exception as error:
+            await browser.close()
+            if attempt == 0 and _should_retry_with_fresh_auth_state(user_data_dir, error):
+                print("   Existing LinkedIn auth state appears stale. Clearing it and retrying...")
+                clear_auth_state(user_data_dir)
+                continue
+            raise
+    raise RuntimeError("Interactive login retry loop exhausted")
 
 
 def run_profile_creation(user_data_dir: str | None = None) -> bool:
@@ -127,17 +163,13 @@ def run_profile_creation(user_data_dir: str | None = None) -> bool:
     Returns:
         True if profile was created successfully
     """
-    if user_data_dir:
-        profile_dir = Path(user_data_dir).expanduser()
-    else:
-        profile_dir = get_profile_dir()
+    profile_dir = Path(user_data_dir).expanduser() if user_data_dir else get_profile_dir()
 
     print("LinkedIn MCP Server - Profile Creation")
     print(f"   Profile will be saved to: {profile_dir}")
 
     try:
-        success = asyncio.run(interactive_login(profile_dir))
-        return success
+        return asyncio.run(interactive_login(profile_dir))
     except Exception as e:
         print(f"Profile creation failed: {e}")
         return False

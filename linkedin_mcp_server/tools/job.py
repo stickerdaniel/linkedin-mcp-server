@@ -8,13 +8,19 @@ import logging
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.dependencies import Depends
 from pydantic import Field
 
 from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.dependencies import get_ready_extractor
+from linkedin_mcp_server.dependencies import (
+    get_job_details_extractor,
+    get_search_jobs_extractor,
+)
 from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
+_JOB_DETAILS_EXTRACTOR = Depends(get_job_details_extractor)
+_SEARCH_JOBS_EXTRACTOR = Depends(get_search_jobs_extractor)
 
 
 def register_job_tools(mcp: FastMCP) -> None:
@@ -25,12 +31,11 @@ def register_job_tools(mcp: FastMCP) -> None:
         title="Get Job Details",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_job_details(
         job_id: str,
         ctx: Context,
-        extractor: Any | None = None,
+        extractor: Any = _JOB_DETAILS_EXTRACTOR,
     ) -> dict[str, Any]:
         """
         Get job details for a specific job posting on LinkedIn.
@@ -44,7 +49,6 @@ def register_job_tools(mcp: FastMCP) -> None:
             The LLM should parse the raw text to extract job details.
         """
         try:
-            extractor = extractor or await get_ready_extractor(ctx, tool_name="get_job_details")
             logger.info("Scraping job: %s", job_id)
 
             await ctx.report_progress(progress=0, total=100, message="Starting job scrape")
@@ -63,7 +67,6 @@ def register_job_tools(mcp: FastMCP) -> None:
         title="Search Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},
-        exclude_args=["extractor"],
     )
     async def search_jobs(
         keywords: str,
@@ -76,7 +79,7 @@ def register_job_tools(mcp: FastMCP) -> None:
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
-        extractor: Any | None = None,
+        extractor: Any = _SEARCH_JOBS_EXTRACTOR,
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
@@ -89,8 +92,12 @@ def register_job_tools(mcp: FastMCP) -> None:
             location: Optional location filter (e.g., "San Francisco", "Remote")
             max_pages: Maximum number of result pages to load (1-10, default 3)
             date_posted: Filter by posting date (past_hour, past_24_hours, past_week, past_month)
-            job_type: Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other)
-            experience_level: Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive)
+            job_type:
+                Filter by job type, comma-separated
+                (full_time, part_time, contract, temporary, volunteer, internship, other)
+            experience_level:
+                Filter by experience level, comma-separated
+                (internship, entry, associate, mid_senior, director, executive)
             work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
             easy_apply: Only show Easy Apply jobs (default false)
             sort_by: Sort results (date, relevance)
@@ -100,7 +107,6 @@ def register_job_tools(mcp: FastMCP) -> None:
             numeric job ID strings usable with get_job_details), and optional references.
         """
         try:
-            extractor = extractor or await get_ready_extractor(ctx, tool_name="search_jobs")
             logger.info(
                 "Searching jobs: keywords='%s', location='%s', max_pages=%d",
                 keywords,

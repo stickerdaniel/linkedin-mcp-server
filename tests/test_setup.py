@@ -38,7 +38,7 @@ async def test_interactive_login_writes_source_state_when_cookie_export_succeeds
     monkeypatch.setattr("linkedin_mcp_server.setup.get_config", lambda: AppConfig())
     monkeypatch.setattr(
         "linkedin_mcp_server.setup.BrowserManager",
-        lambda **kwargs: _BrowserContextManager(browser),
+        lambda **_kwargs: _BrowserContextManager(browser),
     )
     monkeypatch.setattr("linkedin_mcp_server.setup.warm_up_browser", AsyncMock())
     monkeypatch.setattr(
@@ -70,7 +70,7 @@ async def test_interactive_login_returns_false_when_cookie_export_fails(
     monkeypatch.setattr("linkedin_mcp_server.setup.get_config", lambda: AppConfig())
     monkeypatch.setattr(
         "linkedin_mcp_server.setup.BrowserManager",
-        lambda **kwargs: _BrowserContextManager(browser),
+        lambda **_kwargs: _BrowserContextManager(browser),
     )
     monkeypatch.setattr("linkedin_mcp_server.setup.warm_up_browser", AsyncMock())
     monkeypatch.setattr(
@@ -123,3 +123,42 @@ async def test_interactive_login_passes_chrome_path_to_browser_manager(monkeypat
     await interactive_login(tmp_path / "profile")
 
     assert captured_kwargs.get("executable_path") == "/custom/chrome"
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_clears_stale_auth_state_after_redirect_loop(
+    monkeypatch, tmp_path, capsys
+):
+    first_browser = _make_browser(export_cookies=True)
+    first_browser.page.goto = AsyncMock(
+        side_effect=Exception("Page.goto: net::ERR_TOO_MANY_REDIRECTS")
+    )
+    second_browser = _make_browser(export_cookies=True)
+    browsers = iter([first_browser, second_browser])
+    clear_auth_state = MagicMock(return_value=True)
+
+    monkeypatch.setattr("linkedin_mcp_server.setup.get_config", lambda: AppConfig())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.setup.BrowserManager",
+        lambda **_kwargs: _BrowserContextManager(next(browsers)),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.clear_auth_state", clear_auth_state)
+    monkeypatch.setattr("linkedin_mcp_server.setup.warm_up_browser", AsyncMock())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.setup.resolve_remember_me_prompt",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.wait_for_manual_login", AsyncMock())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.setup.write_source_state",
+        MagicMock(return_value=SimpleNamespace(login_generation="gen-2")),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.asyncio.sleep", AsyncMock())
+    (tmp_path / "profile").mkdir(parents=True)
+    portable_cookie_path(tmp_path / "profile").write_text("[]")
+
+    assert await interactive_login(tmp_path / "profile") is True
+
+    clear_auth_state.assert_called_once_with(tmp_path / "profile")
+    captured = capsys.readouterr()
+    assert "appears stale" in captured.out.lower()

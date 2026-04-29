@@ -70,6 +70,10 @@
       "description": "Search for people on LinkedIn by keywords and location"
     },
     {
+      "name": "get_linkedin_page",
+      "description": "Fetch supported LinkedIn public pages such as schools, newsletters, articles, feed posts, events, groups, services, products, and showcase pages"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
     }

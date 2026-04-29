@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Run server locally: `uv run -m linkedin_mcp_server --no-headless`
 - Run via uvx (PyPI/package verification only): `uvx linkedin-scraper-mcp`
 - Docker build: `docker build -t linkedin-mcp-server .`
-- Install browser: `uv run patchright install chromium`
+- Install browser: `uv run python -m patchright install chromium`
 
 ## Scraping Rules
 

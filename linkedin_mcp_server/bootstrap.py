@@ -34,7 +34,7 @@ def configure_browser_environment() -> Path:
     return browser_dir
 
 
-def initialize_bootstrap(runtime_policy: str | None = None) -> None:
+def initialize_bootstrap(_runtime_policy: str | None = None) -> None:
     """Configure the shared browser cache on startup."""
     global _initialized
     if _initialized:
@@ -44,18 +44,19 @@ def initialize_bootstrap(runtime_policy: str | None = None) -> None:
 
 
 async def start_background_browser_setup_if_needed() -> None:
-    """No-op -- browser install is handled by `uv run patchright install chromium`."""
+    """No-op -- browser install is handled by `uv run python -m patchright install chromium`."""
     initialize_bootstrap()
 
 
-async def ensure_tool_ready_or_raise(tool_name: str, ctx: object | None = None) -> None:
+async def ensure_tool_ready_or_raise(_tool_name: str, _ctx: object | None = None) -> None:
     """Gate tools on browser installed + valid auth profile."""
     initialize_bootstrap()
 
     browser_dir = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", str(browsers_path())))
     if not browser_dir.exists() or not any(browser_dir.iterdir()):
         raise AuthenticationError(
-            "Patchright Chromium browser is not installed. Run: uv run patchright install chromium"
+            "Patchright Chromium browser is not installed. "
+            "Run: uv run python -m patchright install chromium"
         )
 
     profile_dir = get_profile_dir()
