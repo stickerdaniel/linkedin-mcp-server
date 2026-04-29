@@ -97,8 +97,12 @@ _MESSAGING_COMPOSE_SELECTOR = (
 )
 _MESSAGING_COMPOSE_FALLBACK_SELECTORS = (
     _MESSAGING_COMPOSE_SELECTOR,
+    'div[role="textbox"][contenteditable="true"]',  # overlay outside main, any language
     'main div[role="textbox"][contenteditable="true"]',
     'main [contenteditable="true"][aria-label*="message"]',
+    '[contenteditable="true"][aria-label*="message"]',
+    '[contenteditable="true"][aria-label*="messaggio"]',
+    '[contenteditable="true"][aria-label*="scrivi"]',
 )
 _MESSAGING_ENABLED_SEND_SELECTOR = (
     'button[type="submit"]:not([disabled]), '
@@ -1429,9 +1433,15 @@ class LinkedInExtractor:
         }
 
     async def _resolve_message_compose_href(self) -> str | None:
-        """Return the direct recipient-specific compose URL from a profile page."""
-        href = await self._page.evaluate(
-            """(selector) => {
+        """Return the direct recipient-specific compose URL from a profile page.
+
+        First tries to find an anchor tag with a /messaging/compose/ href.
+        Falls back to locating the Message button (which LinkedIn may render as
+        a <button> with no href in newer UI versions) and extracting the profile
+        URN from data attributes, ancestor elements, or embedded page scripts.
+        """
+        result = await self._page.evaluate(
+            """(anchorSelector) => {
                 const isVisible = element =>
                     !!(
                         element &&
@@ -1440,17 +1450,82 @@ class LinkedInExtractor:
                             element.getClientRects().length)
                     );
 
+                // Original approach: anchor tag with /messaging/compose/ href
                 const anchor = Array.from(
-                    document.querySelectorAll(selector)
+                    document.querySelectorAll(anchorSelector)
                 ).find(isVisible);
-                if (!anchor) return null;
-                return anchor.getAttribute('href') || anchor.href || null;
+                if (anchor) {
+                    const href = anchor.getAttribute('href') || anchor.href || null;
+                    if (href) return { type: 'href', value: href };
+                }
+
+                // Fallback: find the Message button by text or aria-label.
+                // LinkedIn's newer UI renders it as a <button> (no href).
+                const msgEl = Array.from(
+                    document.querySelectorAll('main a, main button')
+                ).find(el => {
+                    if (!isVisible(el)) return false;
+                    const label = (el.getAttribute('aria-label') || '').toLowerCase();
+                    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    return (
+                        label.includes('message') ||
+                        text === 'message' ||
+                        text === 'messaggio' ||
+                        text === 'nachr' ||
+                        text === 'mensaje'
+                    );
+                });
+                if (!msgEl) return null;
+
+                // If the button is actually an anchor with a non-compose href, use it.
+                const btnHref = msgEl.getAttribute('href') || '';
+                if (btnHref && !btnHref.startsWith('#') && btnHref !== 'javascript:void(0)') {
+                    return { type: 'href', value: btnHref };
+                }
+
+                // Try to extract the profile URN (ACoAA... format) from
+                // data attributes on the button or its ancestors.
+                const URN_RE = /ACoAA[A-Za-z0-9_-]{5,}/;
+                let el = msgEl;
+                for (let depth = 0; depth < 6 && el; depth++, el = el.parentElement) {
+                    for (const attr of Array.from(el.attributes)) {
+                        const m = (attr.value || '').match(URN_RE);
+                        if (m) return { type: 'urn', value: m[0] };
+                    }
+                }
+
+                // Last resort: scan inline scripts for the fsd_profile URN pattern.
+                for (const script of Array.from(document.querySelectorAll('script:not([src])'))) {
+                    const m = (script.textContent || '').match(/"fsd_profile:([A-Za-z0-9_-]{20,})"/);
+                    if (m) return { type: 'urn', value: m[1] };
+                }
+
+                return null;
             }""",
             _MESSAGING_COMPOSE_LINK_SELECTOR,
         )
-        if not isinstance(href, str) or not href.strip():
+
+        if result is None:
             return None
-        return urljoin("https://www.linkedin.com", href.strip())
+
+        result_type = result.get("type") if isinstance(result, dict) else None
+        result_value = result.get("value", "") if isinstance(result, dict) else ""
+
+        if result_type == "href" and isinstance(result_value, str) and result_value.strip():
+            return urljoin("https://www.linkedin.com", result_value.strip())
+
+        if result_type == "urn" and isinstance(result_value, str) and result_value.strip():
+            urn = result_value.strip()
+            _encoded = quote_plus(f"urn:li:fsd_profile:{urn}")
+            return (
+                f"https://www.linkedin.com/messaging/compose/"
+                f"?profileUrn={_encoded}"
+                f"&recipient={urn}"
+                f"&screenContext=NON_SELF_PROFILE_VIEW"
+                f"&interop=msgOverlay"
+            )
+
+        return None
 
     async def _read_profile_display_name(self) -> str | None:
         """Read the visible profile name from the current person page."""
@@ -2442,6 +2517,43 @@ class LinkedInExtractor:
             references=references,
         )
 
+    async def _click_profile_message_button(self) -> bool:
+        """Find and click the Message button on the current LinkedIn profile page.
+
+        Used as a fallback when the button does not carry a /messaging/compose/
+        href (LinkedIn's newer UI opens a floating overlay instead of navigating).
+        Matches by aria-label or visible button/anchor text across several
+        localisations.
+        """
+        return bool(
+            await self._page.evaluate(
+                """() => {
+                    const isVisible = el =>
+                        !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                    const normalize = s =>
+                        (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                    const btn = Array.from(document.querySelectorAll('a, button')).find(el => {
+                        if (!isVisible(el)) return false;
+                        const label = normalize(el.getAttribute('aria-label') || '');
+                        const text  = normalize(el.innerText || el.textContent || '');
+                        return (
+                            label.includes('message') ||
+                            label.includes('messaggio') ||
+                            label.includes('messaggia') ||
+                            text === 'message' ||
+                            text === 'messaggio' ||
+                            text === 'messaggia' ||
+                            text.startsWith('messaggio') ||
+                            text.startsWith('message')
+                        );
+                    });
+                    if (!btn) return false;
+                    btn.click();
+                    return true;
+                }"""
+            )
+        )
+
     async def send_message(
         self,
         linkedin_username: str,
@@ -2486,22 +2598,38 @@ class LinkedInExtractor:
             )
         else:
             compose_url = await self._resolve_message_compose_href()
-        if not compose_url:
-            return self._message_action_result(
-                profile_url,
-                "message_unavailable",
-                "LinkedIn did not expose a usable Message action for this profile.",
-            )
 
-        await self._navigate_to_page(compose_url)
-        await detect_rate_limit(self._page)
+        if compose_url:
+            await self._navigate_to_page(compose_url)
+            await detect_rate_limit(self._page)
+            try:
+                await self._page.wait_for_selector("main")
+            except PlaywrightTimeoutError:
+                logger.debug("Compose page did not fully load for %s", linkedin_username)
+            await handle_modal_close(self._page)
+        else:
+            # LinkedIn's newer UI opens a floating overlay instead of navigating
+            # to /messaging/compose/. Try clicking the Message button directly.
+            clicked = await self._click_profile_message_button()
+            if not clicked:
+                return self._message_action_result(
+                    profile_url,
+                    "message_unavailable",
+                    "LinkedIn did not expose a usable Message action for this profile.",
+                )
+            # Wait for the compose textbox to appear in the floating overlay
+            # rather than using a fixed sleep — the overlay loads asynchronously.
+            try:
+                await self._page.wait_for_selector(
+                    'div[role="textbox"][contenteditable="true"]',
+                    timeout=8000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug(
+                    "Compose box did not appear after clicking message button for %s",
+                    linkedin_username,
+                )
 
-        try:
-            await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
-            logger.debug("Compose page did not fully load for %s", linkedin_username)
-
-        await handle_modal_close(self._page)
         message_surface = await self._wait_for_message_surface()
         logger.debug(
             "Message surface for %s before hydration was %s",
