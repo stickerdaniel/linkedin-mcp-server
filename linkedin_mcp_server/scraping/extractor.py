@@ -2647,6 +2647,62 @@ class LinkedInExtractor:
             sent=True,
         )
 
+    async def get_sent_invitations(self, limit: int = 50) -> dict[str, Any]:
+        """List outgoing connection requests still awaiting acceptance."""
+        url = "https://www.linkedin.com/mynetwork/invitation-manager/sent/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context="Sent invitations")
+        await handle_modal_close(self._page)
+
+        scrolls = max(1, limit // 10)
+        await self._scroll_main_scrollable_region(
+            position="bottom", attempts=scrolls, pause_time=0.5
+        )
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+        references: list[Reference] = (
+            build_references(raw_result["references"], "sent_invitations")
+            if cleaned
+            else []
+        )
+        return self._single_section_result(
+            url,
+            "sent_invitations",
+            cleaned,
+            references=references,
+        )
+
+    async def get_received_invitations(self, limit: int = 50) -> dict[str, Any]:
+        """List incoming connection requests awaiting your action."""
+        url = "https://www.linkedin.com/mynetwork/invitation-manager/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context="Received invitations")
+        await handle_modal_close(self._page)
+
+        scrolls = max(1, limit // 10)
+        await self._scroll_main_scrollable_region(
+            position="bottom", attempts=scrolls, pause_time=0.5
+        )
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+        references: list[Reference] = (
+            build_references(raw_result["references"], "received_invitations")
+            if cleaned
+            else []
+        )
+        return self._single_section_result(
+            url,
+            "received_invitations",
+            cleaned,
+            references=references,
+        )
+
     async def _extract_root_content(
         self,
         selectors: list[str],
