@@ -1167,10 +1167,12 @@ class LinkedInExtractor:
             )
 
         # Connectable / follow_only: drive the invite via the deeplink.
-        # The deeplink works regardless of whether the visible button is
-        # behind the More menu or hidden by an intermediate UI state.
+        # The URL pattern matches LinkedIn's own Connect anchor href, so it
+        # works regardless of locale or whether the visible button is behind
+        # the More menu.
         invite_url = (
-            f"https://www.linkedin.com/in/{quote_plus(username)}/preload/custom-invite/"
+            "https://www.linkedin.com/preload/custom-invite/"
+            f"?vanityName={quote_plus(username)}"
         )
         await self._navigate_to_page(invite_url)
 
