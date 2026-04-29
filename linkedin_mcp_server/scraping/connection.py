@@ -72,9 +72,9 @@ def detect_connection_state(
     if profile_text and "· 1st" in profile_text[:300]:
         return "already_connected"
 
-    if signals is not None:
-        return "follow_only"
-
+    # No structural or text marker matched. Fall back to text-only inspection
+    # so an unmatched profile can resolve to follow_only or unavailable based
+    # on the action area instead of being silently lumped into follow_only.
     return _detect_from_text_only(profile_text)
 
 

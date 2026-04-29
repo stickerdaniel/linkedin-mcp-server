@@ -1027,6 +1027,8 @@ class LinkedInExtractor:
 
         Returns (submitted, note_sent). All interaction uses structural
         selectors and positional indexing — no localized text matching.
+        Owns dialog cleanup: the dialog is dismissed on every failure path,
+        callers must not dismiss again.
         """
         if not await self._dialog_is_open(timeout=5000):
             return False, False
@@ -1035,12 +1037,15 @@ class LinkedInExtractor:
         if note:
             textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
             if textarea_count == 0:
-                # Reveal the note textarea via the secondary action.
+                # Reveal the note textarea via the secondary action. The note
+                # layout exposes three buttons (dismiss, secondary, primary);
+                # require all three before clicking the second-to-last so we
+                # never click dismiss on a no-note layout.
                 buttons = self._page.locator(
                     f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
                 )
                 btn_count = await buttons.count()
-                if btn_count >= 2:
+                if btn_count >= 3:
                     await buttons.nth(btn_count - 2).click()
                     try:
                         await self._page.wait_for_selector(
@@ -1058,20 +1063,32 @@ class LinkedInExtractor:
 
         sent = await self._click_dialog_primary_button()
         if not sent:
-            # Fallback: keyboard submit (Enter focuses primary in Send w/o
-            # note; Cmd+Enter submits form when note textarea is focused).
-            await self._page.keyboard.press("Enter")
-            sent = not await self._dialog_is_open(timeout=2000)
+            # Fallback: focus the primary button positionally so a subsequent
+            # Enter targets it instead of a focused textarea (where Enter
+            # would just insert a newline).
+            buttons = self._page.locator(
+                f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+            )
+            btn_count = await buttons.count()
+            if btn_count > 0:
+                try:
+                    await buttons.nth(btn_count - 1).focus()
+                    await self._page.keyboard.press("Enter")
+                    sent = not await self._dialog_is_open(timeout=2000)
+                except Exception:
+                    logger.debug("Keyboard submit fallback failed", exc_info=True)
+            if not sent:
+                await self._dismiss_dialog()
+                return False, note_sent
 
-        if sent:
-            try:
-                await self._page.wait_for_selector(
-                    _DIALOG_SELECTOR, state="hidden", timeout=5000
-                )
-            except PlaywrightTimeoutError:
-                logger.debug("Invite dialog did not close after submit")
+        try:
+            await self._page.wait_for_selector(
+                _DIALOG_SELECTOR, state="hidden", timeout=5000
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Invite dialog did not close after submit")
 
-        return sent, note_sent
+        return True, note_sent
 
     async def connect_with_person(
         self,
@@ -1178,7 +1195,6 @@ class LinkedInExtractor:
 
         submitted, note_sent = await self._submit_invite_dialog(note)
         if not submitted:
-            await self._dismiss_dialog()
             return _connection_result(
                 url,
                 "connect_unavailable",
