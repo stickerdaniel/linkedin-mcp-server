@@ -40,6 +40,7 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 | `search_jobs` | Search for jobs with keywords and location filters | working |
 | `search_people` | Search for people by keywords and location | working |
 | `get_job_details` | Get detailed information about a specific job posting | working |
+| `get_linkedin_page` | Get raw text from supported LinkedIn public pages like schools, newsletters, articles, feed posts, events, groups, services, products, and showcase pages | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 <br/>
@@ -422,7 +423,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 **Python/Patchright issues:**
 
 - Check Python version: `python --version` (should be 3.12+)
-- Reinstall Patchright: `uv run patchright install chromium`
+- Reinstall Patchright: `uv run python -m patchright install chromium`
 - Reinstall dependencies: `uv sync --reinstall`
 
 **Timeout issues:**
