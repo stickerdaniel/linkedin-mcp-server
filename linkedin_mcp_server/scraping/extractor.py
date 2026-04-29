@@ -499,6 +499,8 @@ class LinkedInExtractor:
         """Click the last (primary/Send) button in the open dialog.
 
         LinkedIn consistently places the primary action as the last button.
+        Returns False (rather than raising) when the click is intercepted or
+        times out, so callers can fall back to a keyboard submit.
         """
         buttons = self._page.locator(
             f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
@@ -506,8 +508,12 @@ class LinkedInExtractor:
         count = await buttons.count()
         if count == 0:
             return False
-        await buttons.nth(count - 1).click(timeout=timeout)
-        return True
+        try:
+            await buttons.nth(count - 1).click(timeout=timeout)
+            return True
+        except Exception:
+            logger.debug("Primary dialog button click failed", exc_info=True)
+            return False
 
     async def _fill_dialog_textarea(self, value: str, *, timeout: int = 5000) -> bool:
         """Fill the first textarea inside the open dialog (structural)."""
