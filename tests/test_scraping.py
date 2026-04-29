@@ -10,7 +10,8 @@ from linkedin_mcp_server.core.exceptions import (
     LinkedInScraperException,
 )
 from linkedin_mcp_server.scraping.connection import (
-    _extract_action_area,
+    ActionSignals,
+    _action_area,
     detect_connection_state,
 )
 from linkedin_mcp_server.scraping.extractor import (
@@ -878,28 +879,124 @@ class TestDetectConnectionState:
 
     def test_action_area_cuts_at_about(self):
         text = "Name\n\nConnect\nMore\nAbout\n\nFollow\nConnect"
-        area = _extract_action_area(text)
+        area = _action_area(text)
         assert "About" not in area
         assert "Follow" not in area
 
     def test_action_area_cuts_at_highlights(self):
         text = "Name\n\nMessage\nPending\nMore\nHighlights\n\nFollow"
-        area = _extract_action_area(text)
+        area = _action_area(text)
         assert "Follow" not in area
         assert "Pending" in area
 
 
 class TestConnectWithPerson:
-    def _mock_scrape(self, profile_text: str) -> AsyncMock:
-        """Return a mock for scrape_person that returns the given text."""
-        return AsyncMock(
-            return_value={
-                "url": "https://www.linkedin.com/in/testuser/",
-                "sections": {"main_profile": profile_text},
-            }
+    def _mock_scrape(
+        self, profile_text: str, *, follow_up_text: str | None = None
+    ) -> AsyncMock:
+        """Return a mock for scrape_person.
+
+        When ``follow_up_text`` is given, the second call returns that text
+        — used to simulate verification re-reads after an action.
+        """
+        first = {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "sections": {"main_profile": profile_text},
+        }
+        if follow_up_text is None:
+            return AsyncMock(return_value=first)
+        second = {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "sections": {"main_profile": follow_up_text},
+        }
+        return AsyncMock(side_effect=[first, second])
+
+    @staticmethod
+    def _signals(
+        invite: bool = False, compose: bool = False, edit: bool = False
+    ) -> ActionSignals:
+        return ActionSignals(
+            has_invite_anchor=invite,
+            has_compose_anchor=compose,
+            has_edit_intro_anchor=edit,
         )
 
-    async def test_connectable_clicks_connect(self, mock_page):
+    async def test_connectable_navigates_deeplink_and_verifies(self, mock_page):
+        """Connect via deeplink: dialog opens, submit succeeds, anchor disappears."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        post_text = "Jane\n\n· 3rd\n\nEngineer\n\nMessage\nPending\nMore\nAbout\n"
+
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                self._mock_scrape(text, follow_up_text=post_text),
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(invite=True), self._signals()],
+            ),
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+            ) as mock_nav,
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connected"
+        mock_nav.assert_awaited_once()
+        await_args = mock_nav.await_args
+        assert await_args is not None
+        assert "preload/custom-invite" in await_args.args[0]
+
+    async def test_connectable_send_failed_when_anchor_persists(self, mock_page):
+        """Dialog submitted but profile still exposes Connect → send_failed."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+
+        with (
+            patch.object(
+                extractor, "scrape_person", self._mock_scrape(text, follow_up_text=text)
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(invite=True), self._signals(invite=True)],
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "send_failed"
+
+    async def test_connectable_no_dialog_returns_connect_unavailable(self, mock_page):
+        """Deeplink opened but no dialog appeared → connect_unavailable."""
         extractor = LinkedInExtractor(mock_page)
         text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
 
@@ -907,99 +1004,154 @@ class TestConnectWithPerson:
             patch.object(extractor, "scrape_person", self._mock_scrape(text)),
             patch.object(
                 extractor,
-                "click_button_by_text",
+                "_read_action_signals",
                 new_callable=AsyncMock,
-                return_value=True,
-            ) as mock_click,
+                return_value=self._signals(invite=True),
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=False
+            ),
+            patch.object(extractor, "_dismiss_dialog", new_callable=AsyncMock),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connect_unavailable"
+
+    async def test_returns_already_connected_via_anchor(self, mock_page):
+        """1st-degree detected via /messaging/compose anchor."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Collin\n\n· 1st\n\nEngineer\n\nMessage\nMore\nAbout\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
             patch.object(
                 extractor,
-                "_dialog_is_open",
+                "_read_action_signals",
                 new_callable=AsyncMock,
-                return_value=False,
+                return_value=self._signals(compose=True),
             ),
         ):
             result = await extractor.connect_with_person("testuser")
 
-        assert result["status"] == "connected"
-        assert result["url"] == "https://www.linkedin.com/in/testuser/"
-        mock_click.assert_awaited_once_with("Connect", scope="main")
+        assert result["status"] == "already_connected"
 
-    async def test_returns_already_connected(self, mock_page):
+    async def test_returns_self_profile_via_edit_intro_anchor(self, mock_page):
+        """Editing-your-own-profile anchor blocks connect attempts."""
         extractor = LinkedInExtractor(mock_page)
-        text = "Collin\n\n· 1st\n\nEngineer\n\nMessage\nMore\nAbout\n"
+        text = "Daniel\n\nEdit profile\n"
 
-        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(edit=True),
+            ),
+        ):
             result = await extractor.connect_with_person("testuser")
 
-        assert result["status"] == "already_connected"
+        assert result["status"] == "connect_unavailable"
+        assert "own profile" in result["message"]
 
     async def test_returns_pending(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         text = "Marinus\n\n· 2nd\n\nStudent\n\nMessage\nPending\nMore\nAbout\n"
 
-        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(),
+            ),
+        ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "pending"
 
     async def test_returns_incoming_request_accepted(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        text = "Aklasur\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore\nAbout\n"
+        pre = "Aklasur\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore\nAbout\n"
+        post = "Aklasur\n\n· 1st\n\nDhaka\n\nMessage\nMore\nAbout\n"
 
         with (
-            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "scrape_person",
+                self._mock_scrape(pre, follow_up_text=post),
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(), self._signals(compose=True)],
+            ),
             patch.object(
                 extractor,
                 "click_button_by_text",
                 new_callable=AsyncMock,
                 return_value=True,
             ) as mock_click,
-            patch.object(
-                extractor,
-                "_dialog_is_open",
-                new_callable=AsyncMock,
-                return_value=False,
-            ),
         ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "accepted"
         mock_click.assert_awaited_once_with("Accept", scope="main")
 
-    async def test_returns_follow_only(self, mock_page):
+    async def test_incoming_request_send_failed_when_no_first_degree(self, mock_page):
+        """Accept clicked but profile never transitions to 1st-degree."""
         extractor = LinkedInExtractor(mock_page)
-        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMore\nAbout\n"
-
-        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
-            result = await extractor.connect_with_person("testuser")
-
-        assert result["status"] == "follow_only"
-
-    async def test_returns_unavailable(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
-        text = "Unknown\n\nSome text\nAbout\n"
-
-        with patch.object(extractor, "scrape_person", self._mock_scrape(text)):
-            result = await extractor.connect_with_person("testuser")
-
-        assert result["status"] == "connect_unavailable"
-
-    async def test_returns_send_failed_when_button_not_found(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
-        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        pre = "Aklasur\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore\nAbout\n"
 
         with (
-            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "scrape_person",
+                self._mock_scrape(pre, follow_up_text=pre),
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(), self._signals()],
+            ),
             patch.object(
                 extractor,
                 "click_button_by_text",
                 new_callable=AsyncMock,
-                return_value=False,
+                return_value=True,
             ),
         ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "send_failed"
+
+    async def test_returns_unavailable_when_no_signals_and_text(self, mock_page):
+        """No structural signals, no actionable text → connect_unavailable."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMore\nAbout\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(),
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=False
+            ),
+            patch.object(extractor, "_dismiss_dialog", new_callable=AsyncMock),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        # follow_only path goes through deeplink; no dialog opens → unavailable
+        assert result["status"] == "connect_unavailable"
 
     async def test_returns_unavailable_on_empty_page(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
