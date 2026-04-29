@@ -537,6 +537,64 @@ class TestJobTools:
         assert "pages_visited" not in result
 
 
+class TestPageTools:
+    async def test_get_linkedin_page(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(text="A LinkedIn article", references=[])
+        )
+
+        from linkedin_mcp_server.tools.page import register_page_tools
+
+        mcp = FastMCP("test")
+        register_page_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_linkedin_page")
+        result = await tool_fn("/pulse/test-post/", mock_context, extractor=mock_extractor)
+        assert result["url"] == "https://www.linkedin.com/pulse/test-post/"
+        assert result["sections"] == {"page": "A LinkedIn article"}
+        mock_extractor.extract_page.assert_awaited_once_with(
+            "https://www.linkedin.com/pulse/test-post/",
+            section_name="page",
+        )
+
+    async def test_get_linkedin_page_rejects_unsupported_routes(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.page import register_page_tools
+
+        mcp = FastMCP("test")
+        register_page_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_linkedin_page")
+        with pytest.raises(ToolError, match="Unsupported LinkedIn page URL"):
+            await tool_fn("https://www.linkedin.com/company/testcorp/", mock_context)
+
+    async def test_get_linkedin_page_returns_section_errors(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(
+                text="",
+                references=[],
+                error={"issue_template_path": "page-issue.md"},
+            )
+        )
+
+        from linkedin_mcp_server.tools.page import register_page_tools
+
+        mcp = FastMCP("test")
+        register_page_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_linkedin_page")
+        result = await tool_fn(
+            "/school/harvard-university/",
+            mock_context,
+            extractor=mock_extractor,
+        )
+        assert result["sections"] == {}
+        assert result["section_errors"]["page"]["issue_template_path"] == "page-issue.md"
+
+
 class TestGetSidebarProfilesTool:
     async def test_get_sidebar_profiles_success(self, mock_context):
         expected = {
@@ -755,6 +813,7 @@ class TestToolTimeouts:
             "get_company_posts",
             "get_job_details",
             "search_jobs",
+            "get_linkedin_page",
             "get_inbox",
             "get_conversation",
             "search_conversations",
