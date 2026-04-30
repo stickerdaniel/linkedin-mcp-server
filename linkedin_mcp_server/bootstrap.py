@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
+import importlib.metadata
 import json
 import logging
 import os
@@ -41,6 +42,17 @@ logger = logging.getLogger(__name__)
 _BROWSER_DIR = "patchright-browsers"
 _BROWSER_INSTALL_METADATA = "browser-install.json"
 _INVALID_STATE_PREFIX = "invalid-state-"
+_INSTALL_METADATA_SCHEMA = 2
+
+# Registry browser names mapped to on-disk dir prefixes for the binaries this
+# server actually launches. ffmpeg/firefox/webkit are excluded — ffmpeg is only
+# used for video recording (we don't), and chromium / chromium-headless-shell
+# entries have no revisionOverrides, so we avoid patchright's per-platform
+# special-prefix logic entirely.
+_REGISTRY_NAME_TO_DIR_PREFIX = {
+    "chromium": "chromium-",
+    "chromium-headless-shell": "chromium_headless_shell-",
+}
 
 
 class RuntimePolicy(str, Enum):
@@ -115,10 +127,55 @@ def install_metadata_path() -> Path:
 
 
 def configure_browser_environment() -> Path:
-    """Ensure the shared browser cache path is configured."""
-    browser_dir = browsers_path()
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browser_dir))
-    return browser_dir
+    """Ensure the shared browser cache path is configured and return the effective path.
+
+    Honors a pre-set ``PLAYWRIGHT_BROWSERS_PATH`` so install metadata and
+    readiness checks operate on the same path patchright actually uses.
+    """
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browsers_path()))
+    return Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
+
+
+def _patchright_pkg_version() -> str | None:
+    try:
+        return importlib.metadata.version("patchright")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _patchright_install_targets() -> dict[str, str] | None:
+    """Resolve {dir_prefix: revision} from patchright's bundled browsers.json.
+
+    Reads ``<patchright>/driver/package/browsers.json`` — the authoritative
+    file patchright itself consults to know which revision it expects.
+    Returns ``None`` if the registry can't be read; callers treat ``None``
+    as "not ready" so the next gate triggers reinstall.
+    """
+    try:
+        import patchright
+
+        registry = (
+            Path(patchright.__file__).parent / "driver" / "package" / "browsers.json"
+        )
+        payload = json.loads(registry.read_text())
+    except (ImportError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    targets: dict[str, str] = {}
+    for entry in payload.get("browsers", []):
+        if not isinstance(entry, dict) or not entry.get("installByDefault"):
+            continue
+        prefix = _REGISTRY_NAME_TO_DIR_PREFIX.get(entry.get("name"))
+        if prefix is None or entry.get("revision") is None:
+            continue
+        targets[prefix] = str(entry["revision"])
+    return targets or None
+
+
+def _has_install_for(configured: Path, prefix: str, revision: str) -> bool:
+    return (configured / f"{prefix}{revision}" / "INSTALLATION_COMPLETE").is_file()
 
 
 def initialize_bootstrap(runtime_policy: RuntimePolicy | str | None = None) -> None:
@@ -146,29 +203,55 @@ async def start_background_browser_setup_if_needed() -> None:
             _state.setup_state = SetupState.READY
             _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
             return
+        if _state.setup_state == SetupState.READY:
+            invalidate_browser_setup()
         if _state.setup_task is not None and not _state.setup_task.done():
             return
         _start_browser_setup_task_locked()
 
 
 def browser_setup_ready() -> bool:
+    """Return whether the patchright Chromium install on disk is current.
+
+    Pure: no mutation of metadata or in-memory state. Mutation happens
+    in :func:`invalidate_browser_setup`, called by the gate paths.
+    """
     metadata_path = install_metadata_path()
     configured_browsers_path = Path(
         os.environ.get("PLAYWRIGHT_BROWSERS_PATH", str(browsers_path()))
     )
     if not metadata_path.exists() or not configured_browsers_path.exists():
         return False
-    if not any(configured_browsers_path.iterdir()):
-        return False
     try:
         payload = json.loads(metadata_path.read_text())
     except (OSError, json.JSONDecodeError):
         return False
-    return (
+    if not (
         isinstance(payload, dict)
         and payload.get("browser_name") == "chromium"
         and payload.get("installer_name") == "patchright"
-    )
+        and payload.get("version") == _INSTALL_METADATA_SCHEMA
+    ):
+        return False
+    if payload.get("browsers_path") != str(configured_browsers_path):
+        return False
+    if payload.get("patchright_version") != _patchright_pkg_version():
+        return False
+    targets = _patchright_install_targets()
+    if not targets:
+        return False
+    for prefix, revision in targets.items():
+        if not _has_install_for(configured_browsers_path, prefix, revision):
+            return False
+    return True
+
+
+def invalidate_browser_setup() -> None:
+    """Mark browser setup as not-ready: drop install metadata and reset cached READY state."""
+    install_metadata_path().unlink(missing_ok=True)
+    if _state.setup_state == SetupState.READY:
+        _state.setup_state = SetupState.IDLE
+        _state.setup_completed_at = None
 
 
 def _browser_setup_ready() -> bool:
@@ -208,12 +291,13 @@ async def _run_browser_setup() -> None:
         )
 
     metadata = {
-        "version": 1,
+        "version": _INSTALL_METADATA_SCHEMA,
         "runtime_id": get_runtime_id(),
         "installed_at": utcnow_iso(),
         "browsers_path": str(browser_dir),
         "browser_name": "chromium",
         "installer_name": "patchright",
+        "patchright_version": _patchright_pkg_version(),
     }
     secure_write_text(
         metadata_path, json.dumps(metadata, indent=2, sort_keys=True) + "\n"
@@ -295,6 +379,8 @@ async def ensure_tool_ready_or_raise(
     if _browser_setup_ready():
         _state.setup_state = SetupState.READY
     else:
+        if _state.setup_state == SetupState.READY:
+            invalidate_browser_setup()
         if _state.setup_state in {SetupState.IDLE, SetupState.FAILED} and (
             _state.setup_task is None or _state.setup_task.done()
         ):
