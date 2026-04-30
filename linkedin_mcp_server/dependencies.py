@@ -10,6 +10,7 @@ from linkedin_mcp_server.bootstrap import (
     ensure_tool_ready_or_raise,
     get_runtime_policy,
     invalidate_auth_and_trigger_relogin,
+    invalidate_browser_setup,
 )
 from linkedin_mcp_server.core.exceptions import AuthenticationError, NetworkError
 from linkedin_mcp_server.drivers.browser import (
@@ -19,6 +20,7 @@ from linkedin_mcp_server.drivers.browser import (
 )
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
+    BrowserBinaryMissingError,
     DockerHostLoginRequiredError,
     LinuxBrowserDependencyError,
 )
@@ -35,6 +37,15 @@ def _is_linux_browser_dependency_error(error: Exception) -> bool:
         "shared libraries",
         "libnss3",
         "libatk",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _is_browser_binary_missing_error(error: Exception) -> bool:
+    message = str(error).lower()
+    markers = (
+        "executable doesn't exist at",
+        "looks like playwright was just installed or updated",
     )
     return any(marker in message for marker in markers)
 
@@ -77,6 +88,14 @@ async def get_ready_extractor(
     except AuthenticationError as e:
         await handle_auth_error(e, ctx)  # always raises
     except Exception as e:
+        if isinstance(e, NetworkError) and _is_browser_binary_missing_error(e):
+            invalidate_browser_setup()
+            raise_tool_error(
+                BrowserBinaryMissingError(
+                    "Patchright Chromium browser is missing. Run 'uv run patchright install chromium', or restart the server to auto-install."
+                ),
+                tool_name,
+            )
         if isinstance(e, NetworkError) and _is_linux_browser_dependency_error(e):
             raise_tool_error(
                 LinuxBrowserDependencyError(
