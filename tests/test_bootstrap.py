@@ -594,6 +594,28 @@ class TestConfigureBrowserEnvironment:
         assert result == browsers_path()
         assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers_path())
 
+    def test_expands_tilde_in_env_var(self, isolate_profile_dir, monkeypatch):
+        """A pre-set ``~``-prefixed path is expanded so readiness/metadata stay consistent."""
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "~/some-custom-browsers-cache")
+
+        result = configure_browser_environment()
+
+        assert "~" not in str(result)
+        assert result.is_absolute()
+        assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(result)
+
+    def test_absolutizes_relative_env_var(
+        self, isolate_profile_dir, monkeypatch, tmp_path
+    ):
+        """A relative path env var is made absolute so subsequent readiness checks don't depend on cwd."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "relative-cache")
+
+        result = configure_browser_environment()
+
+        assert result.is_absolute()
+        assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(result)
+
 
 class TestHasInstallFor:
     def test_true_when_marker_present(self, isolate_profile_dir):

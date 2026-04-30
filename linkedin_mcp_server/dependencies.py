@@ -46,7 +46,6 @@ def _is_browser_binary_missing_error(error: Exception) -> bool:
     markers = (
         "executable doesn't exist at",
         "looks like playwright was just installed or updated",
-        "patchright install",
     )
     return any(marker in message for marker in markers)
 

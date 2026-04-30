@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
+import functools
 import importlib.metadata
 import json
 import logging
@@ -103,6 +104,10 @@ def reset_bootstrap_for_testing() -> None:
     _state = BootstrapState()
     _lock = asyncio.Lock()
     os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+    # Tolerate monkeypatched stand-ins that lack `cache_clear`.
+    clear = getattr(_patchright_install_targets, "cache_clear", None)
+    if clear is not None:
+        clear()
 
 
 def get_runtime_policy() -> RuntimePolicy:
@@ -131,9 +136,14 @@ def configure_browser_environment() -> Path:
 
     Honors a pre-set ``PLAYWRIGHT_BROWSERS_PATH`` so install metadata and
     readiness checks operate on the same path patchright actually uses.
+    The path is normalized (``~`` expanded, made absolute) and written back
+    to the env var so metadata writes, readiness checks, and patchright
+    subprocesses all agree on the same string.
     """
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browsers_path()))
-    return Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
+    raw = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or str(browsers_path())
+    normalized = Path(raw).expanduser().absolute()
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(normalized)
+    return normalized
 
 
 def _patchright_pkg_version() -> str | None:
@@ -143,6 +153,7 @@ def _patchright_pkg_version() -> str | None:
         return None
 
 
+@functools.cache
 def _patchright_install_targets() -> dict[str, str] | None:
     """Resolve {dir_prefix: revision} from patchright's bundled browsers.json.
 
@@ -150,6 +161,10 @@ def _patchright_install_targets() -> dict[str, str] | None:
     file patchright itself consults to know which revision it expects.
     Returns ``None`` if the registry can't be read; callers treat ``None``
     as "not ready" so the next gate triggers reinstall.
+
+    Cached for the process lifetime: the patchright revision only changes on
+    package upgrade, which requires a process restart. Tests reset the cache
+    via ``reset_bootstrap_for_testing()``.
     """
     try:
         import patchright
