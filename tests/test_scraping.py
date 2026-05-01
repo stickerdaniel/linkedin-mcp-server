@@ -11,7 +11,6 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.scraping.connection import (
     ActionSignals,
-    _action_area,
     detect_connection_state,
 )
 from linkedin_mcp_server.scraping.extractor import (
@@ -842,52 +841,123 @@ class TestScrapePersonUrls:
 
 
 class TestDetectConnectionState:
-    """Tests for connection state detection from profile text."""
+    """Tests for locale-independent connection-state detection.
 
-    def test_already_connected(self):
-        text = "Collin Pfeifer\n\n· 1st\n\nAI Engineer\n\nMessage\nMore"
-        assert detect_connection_state(text) == "already_connected"
+    All states except incoming_request are decided purely from the
+    structural ActionSignals; profile_text is passed empty for those.
+    Incoming-request is the one AGENTS.md-sanctioned text fallback,
+    so its test passes both signals (all False) and a profile_text
+    containing Accept/Ignore labels. The two priority-ordering tests
+    intentionally pass non-empty text to verify that URL/attribute
+    signals win over text fallbacks regardless of what's in the text.
+    """
 
-    def test_pending(self):
-        text = "Marinus Prey\n\n· 2nd\n\nStudent\n\nMessage\nPending\nMore"
-        assert detect_connection_state(text) == "pending"
+    @staticmethod
+    def _signals(
+        invite: bool = False,
+        compose_in_root: bool = False,
+        edit: bool = False,
+        labeled_action: bool = False,
+        labeled_anchor: bool = False,
+    ) -> ActionSignals:
+        return ActionSignals(
+            has_invite_anchor=invite,
+            has_compose_anchor_in_action_root=compose_in_root,
+            has_edit_intro_anchor=edit,
+            has_labeled_action_button=labeled_action,
+            has_labeled_action_anchor=labeled_anchor,
+        )
 
-    def test_incoming_request(self):
-        text = "Aklasur Rahman\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore"
-        assert detect_connection_state(text) == "incoming_request"
+    def test_self_profile(self):
+        assert detect_connection_state("", self._signals(edit=True)) == "self_profile"
 
     def test_connectable(self):
-        text = "Jane Doe\n\n· 3rd\n\nEngineer\n\nConnect\nMore"
-        assert detect_connection_state(text) == "connectable"
+        assert detect_connection_state("", self._signals(invite=True)) == "connectable"
+
+    def test_already_connected(self):
+        # 1st-degree: Message anchor in action root, but no Follow/Connect/Pending
+        # button (no aria-label on any action-root button).
+        assert (
+            detect_connection_state(
+                "", self._signals(compose_in_root=True, labeled_action=False)
+            )
+            == "already_connected"
+        )
 
     def test_follow_only(self):
-        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMore"
-        assert detect_connection_state(text) == "follow_only"
-
-    def test_unavailable(self):
-        text = "Unknown Person\n\nSome text here"
-        assert detect_connection_state(text) == "unavailable"
-
-    def test_follow_in_interests_not_matched(self):
-        """Follow in the Interests section should not cause a false positive."""
-        text = (
-            "Jane Doe\n\n· 2nd\n\nEngineer\n\nConnect\nMore\n"
-            "About\n\nSome bio\n\nInterests\n\n"
-            "Elon Musk\n101,000 followers\nFollow"
+        # No invite anchor anywhere, but a primary action <button> (Follow
+        # / Save in Sales Navigator) is present alongside the Message
+        # anchor.
+        assert (
+            detect_connection_state(
+                "", self._signals(compose_in_root=True, labeled_action=True)
+            )
+            == "follow_only"
         )
-        assert detect_connection_state(text) == "connectable"
 
-    def test_action_area_cuts_at_about(self):
-        text = "Name\n\nConnect\nMore\nAbout\n\nFollow\nConnect"
-        area = _action_area(text)
-        assert "About" not in area
-        assert "Follow" not in area
+    def test_pending_via_labeled_anchor(self):
+        # Pending is rendered as <a aria-label="Pending, click to ..."> in
+        # the action root — distinct from Follow's <button aria-label=...>.
+        assert (
+            detect_connection_state(
+                "",
+                self._signals(compose_in_root=True, labeled_anchor=True),
+            )
+            == "pending"
+        )
 
-    def test_action_area_cuts_at_highlights(self):
-        text = "Name\n\nMessage\nPending\nMore\nHighlights\n\nFollow"
-        area = _action_area(text)
-        assert "Follow" not in area
-        assert "Pending" in area
+    def test_pending_takes_priority_over_already_connected(self):
+        # If the labeled anchor is present alongside compose-in-root with
+        # no labeled button, pending wins over the already_connected
+        # fallthrough that would otherwise apply.
+        assert (
+            detect_connection_state(
+                "",
+                self._signals(compose_in_root=True, labeled_anchor=True),
+            )
+            == "pending"
+        )
+
+    def test_incoming_request_via_text_fallback_en(self):
+        # Locale-table fallback per AGENTS.md — Accept+Ignore (en) appear
+        # within the top-card prefix.
+        text = "Aklasur Rahman\n\n--\n\nDhaka\n\nAccept\nIgnore\nMore"
+        assert detect_connection_state(text, self._signals()) == "incoming_request"
+
+    def test_incoming_request_text_outside_top_card_ignored(self):
+        # Accept/Ignore far past the 600-char top-card budget must not match.
+        prefix = "X" * 700
+        text = prefix + "\nAccept\nIgnore\n"
+        assert detect_connection_state(text, self._signals()) == "unavailable"
+
+    def test_incoming_request_takes_priority_over_already_connected(self):
+        # If the profile somehow has both compose anchor and Accept/Ignore
+        # labels (edge case), incoming_request wins per resolution order.
+        text = "Aklasur\n\nAccept\nIgnore\nMore"
+        assert (
+            detect_connection_state(text, self._signals(compose_in_root=True))
+            == "incoming_request"
+        )
+
+    def test_connectable_takes_priority_over_text_signals(self):
+        # vanityName invite anchor wins even if the page also has
+        # text that would otherwise match a fallback.
+        text = "Jane\n\nAccept\nIgnore\n"
+        assert (
+            detect_connection_state(text, self._signals(invite=True)) == "connectable"
+        )
+
+    def test_unavailable_when_no_signals_or_text(self):
+        assert detect_connection_state("", self._signals()) == "unavailable"
+
+    def test_unavailable_when_compose_missing_and_no_text(self):
+        # Restricted profile: no compose anchor, no labels, no invite.
+        assert (
+            detect_connection_state(
+                "Some name\n\nFollow\n", self._signals(labeled_action=True)
+            )
+            == "unavailable"
+        )
 
 
 class TestConnectWithPerson:
@@ -913,12 +983,18 @@ class TestConnectWithPerson:
 
     @staticmethod
     def _signals(
-        invite: bool = False, compose: bool = False, edit: bool = False
+        invite: bool = False,
+        compose: bool = False,
+        edit: bool = False,
+        labeled_action: bool = False,
+        labeled_anchor: bool = False,
     ) -> ActionSignals:
         return ActionSignals(
             has_invite_anchor=invite,
-            has_compose_anchor=compose,
+            has_compose_anchor_in_action_root=compose,
             has_edit_intro_anchor=edit,
+            has_labeled_action_button=labeled_action,
+            has_labeled_action_anchor=labeled_anchor,
         )
 
     async def test_connectable_navigates_deeplink_and_verifies(self, mock_page):
@@ -1055,9 +1131,72 @@ class TestConnectWithPerson:
         assert result["status"] == "connect_unavailable"
         assert "own profile" in result["message"]
 
-    async def test_returns_pending(self, mock_page):
+    async def test_connect_via_more_menu(self, mock_page):
+        """Follow-primary profile with Connect under More: detection sees
+        no invite anchor initially, _open_more_menu surfaces it, deeplink
+        fires."""
         extractor = LinkedInExtractor(mock_page)
-        text = "Marinus\n\n· 2nd\n\nStudent\n\nMessage\nPending\nMore\nAbout\n"
+        # Pre-More: Follow primary, Connect hidden under the More dropdown.
+        pre = "Christian\n\n· 2nd\n\nFounder\n\nFollow\nMessage\nMore\n"
+        post = "Christian\n\n· 2nd\n\nFounder\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                self._mock_scrape(pre, follow_up_text=post),
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                # 1st: follow_only (compose+labeled, no invite).
+                # 2nd: post-More reread reveals invite anchor.
+                # 3rd: post-deeplink verification — invite anchor gone.
+                side_effect=[
+                    self._signals(compose=True, labeled_action=True),
+                    self._signals(invite=True, compose=True, labeled_action=True),
+                    self._signals(),
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_open_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_open_more,
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connected"
+        mock_open_more.assert_awaited_once()
+        # Deeplink fired exactly once.
+        assert mock_nav.await_count == 1
+        await_args = mock_nav.await_args
+        assert await_args is not None
+        assert "preload/custom-invite" in await_args.args[0]
+
+    async def test_follow_only_after_more_does_not_send(self, mock_page):
+        """Pending or genuinely follow-only profile: invite anchor never
+        appears even after More-menu open. Critical write-gate guardrail —
+        no deeplink fires, no connection request goes out."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
 
         with (
             patch.object(extractor, "scrape_person", self._mock_scrape(text)),
@@ -1065,12 +1204,95 @@ class TestConnectWithPerson:
                 extractor,
                 "_read_action_signals",
                 new_callable=AsyncMock,
-                return_value=self._signals(),
+                # Both reads (initial + post-More) show no invite anchor.
+                side_effect=[
+                    self._signals(compose=True, labeled_action=True),
+                    self._signals(compose=True, labeled_action=True),
+                ],
             ),
+            patch.object(
+                extractor,
+                "_open_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_open_more,
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor, "_submit_invite_dialog", new_callable=AsyncMock
+            ) as mock_submit,
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connect_unavailable"
+        assert result.get("note_sent") is False or "note_sent" not in result
+        mock_open_more.assert_awaited_once()
+        # Critical: deeplink must NOT fire and dialog must NOT be submitted.
+        mock_nav.assert_not_awaited()
+        mock_submit.assert_not_awaited()
+
+    async def test_more_menu_unavailable_does_not_send(self, mock_page):
+        """Action root present but no More button (unusual but possible):
+        _open_more_menu returns False, no retry, no deeplink fires."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(compose=True, labeled_action=True),
+            ),
+            patch.object(
+                extractor,
+                "_open_more_menu",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor, "_submit_invite_dialog", new_callable=AsyncMock
+            ) as mock_submit,
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connect_unavailable"
+        mock_nav.assert_not_awaited()
+        mock_submit.assert_not_awaited()
+
+    async def test_returns_pending(self, mock_page):
+        """Profile with a pending invitation: detected via labeled <a> in
+        the action root. Returns status='pending' without firing the
+        deeplink (LinkedIn would only show 'already invited' anyway)."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Frank\n\n· 3rd\n\nFounder\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(compose=True, labeled_anchor=True),
+            ),
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor, "_submit_invite_dialog", new_callable=AsyncMock
+            ) as mock_submit,
         ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "pending"
+        # No write-path side effects.
+        mock_nav.assert_not_awaited()
+        mock_submit.assert_not_awaited()
 
     async def test_returns_incoming_request_accepted(self, mock_page):
         extractor = LinkedInExtractor(mock_page)

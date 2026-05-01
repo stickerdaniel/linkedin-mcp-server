@@ -117,6 +117,130 @@ _MESSAGING_CLOSE_SELECTOR = (
     'button[aria-label*="Close"]'
 )
 
+# Shared JS function that walks up from any /messaging/compose/ anchor
+# inside <main> to find the smallest ancestor that satisfies the
+# action-root predicate (>=2 interactive children, >=1 button). This is
+# the top-card action row regardless of LinkedIn's class names.
+#
+# Inlined into both _ACTION_SIGNALS_JS and _OPEN_MORE_BUTTON_JS so a
+# single change to the heuristic propagates to both call sites.
+_FIND_ACTION_ROOT_FN_JS = r"""
+function findActionRoot(main) {
+  const composeAnchors = main.querySelectorAll('a[href*="/messaging/compose/"]');
+  for (const a of composeAnchors) {
+    let el = a.parentElement;
+    while (el && el !== main) {
+      const interactive = el.querySelectorAll('button, a').length;
+      const buttons = el.querySelectorAll('button').length;
+      if (interactive >= 2 && buttons >= 1) {
+        return el;
+      }
+      el = el.parentElement;
+    }
+  }
+  return null;
+}
+"""
+
+# Locale-independent connection-state probe. Returns four booleans;
+# per AGENTS.md Scraping Rules, every signal is based on URL patterns
+# or ARIA-attribute *presence* — never on label text values.
+#
+# - hasInvite: vanityName-scoped invite anchor anywhere in document.
+#   Searches document (not main) so a post-More-menu reread sees
+#   portal-rendered menu items. The vanityName parameter is unique to
+#   the target user, so document-wide search has no false-positive risk.
+# - hasComposeInActionRoot: any /messaging/compose/ anchor exists inside
+#   the action root. Scoped to main (not document) to avoid the More
+#   menu's "Send profile in a message" anchor, which is a compose URL
+#   but lives outside the action area.
+# - hasEditIntro: edit-intro URL exists, only rendered on own profile.
+# - hasLabeledActionButton: at least one <button[aria-label]> inside the
+#   action root. Primary action buttons (Follow / Connect /
+#   Save in Sales Navigator) carry aria-label for screen readers; the
+#   profile More button uses aria-expanded instead and is not counted.
+# - hasLabeledActionAnchor: at least one <a[aria-label]> inside the
+#   action root. LinkedIn renders the Pending state as an anchor (linking
+#   back to the profile URL) carrying aria-label like "Pending, click to
+#   withdraw…". The Message anchor has only aria-disabled, so a labeled
+#   anchor is the locale-independent Pending signal.
+#
+# The username is CSS-escaped before interpolation into attribute
+# selectors to defend against malformed inputs containing characters
+# that would otherwise break the selector syntax (quotes, brackets).
+_ACTION_SIGNALS_JS = (
+    r"""
+((username) => {
+"""
+    + _FIND_ACTION_ROOT_FN_JS
+    + r"""
+  const main = document.querySelector('main');
+  if (!main) return null;
+
+  const safe = CSS.escape(username);
+  const inviteSel = `a[href*="/preload/custom-invite/?vanityName=${safe}"]`;
+  const editSel = `a[href*="/in/${safe}/edit/intro/"]`;
+
+  const hasInvite = !!document.querySelector(inviteSel);
+  const hasEditIntro = !!main.querySelector(editSel);
+
+  const actionRoot = findActionRoot(main);
+
+  let hasComposeInActionRoot = false;
+  let hasLabeledActionButton = false;
+  let hasLabeledActionAnchor = false;
+  if (actionRoot) {
+    hasComposeInActionRoot =
+      !!actionRoot.querySelector('a[href*="/messaging/compose/"]');
+    for (const b of actionRoot.querySelectorAll('button')) {
+      if (b.hasAttribute('aria-label')) {
+        hasLabeledActionButton = true;
+        break;
+      }
+    }
+    for (const a of actionRoot.querySelectorAll('a')) {
+      if (a.hasAttribute('aria-label')) {
+        hasLabeledActionAnchor = true;
+        break;
+      }
+    }
+  }
+
+  return {
+    hasInvite,
+    hasComposeInActionRoot,
+    hasEditIntro,
+    hasLabeledActionButton,
+    hasLabeledActionAnchor,
+  };
+})
+"""
+)
+
+# Open the profile's More button, located inside the action root via the
+# aria-expanded attribute. The aria-expanded attribute uniquely identifies
+# the menu opener without text labels (the More button has no aria-label,
+# while Follow/Connect/Pending buttons do — the inverse pattern). Returns
+# true iff the click landed; the caller waits for [role='menu'] visibility
+# before re-scanning signals.
+_OPEN_MORE_BUTTON_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_ACTION_ROOT_FN_JS
+    + r"""
+  const main = document.querySelector('main');
+  if (!main) return false;
+  const actionRoot = findActionRoot(main);
+  if (!actionRoot) return false;
+  const moreBtn = actionRoot.querySelector('button[aria-expanded]');
+  if (!moreBtn) return false;
+  moreBtn.click();
+  return true;
+})
+"""
+)
+
 
 def _connection_result(
     url: str,
@@ -537,36 +661,33 @@ class LinkedInExtractor:
             pass
 
     async def _open_more_menu(self) -> bool:
-        """Open the profile's More (three-dot) menu and check for Connect.
+        """Open the profile's More (three-dot) menu in a locale-independent way.
 
-        Uses ``aria-label`` to find the More button (language-independent)
-        and ``[role="menu"]`` to detect the opened menu (structural).
-        Returns True if the menu opened and contains a Connect option.
+        Locates the More button structurally as ``actionRoot
+        button[aria-expanded]`` — the action-root walk discriminates the
+        profile More button from any other More-labelled buttons elsewhere
+        on the page (notably the video-player More on profiles with
+        background videos), and ``aria-expanded`` distinguishes the menu
+        opener from primary action buttons (which carry ``aria-label``
+        instead). Returns True iff the click landed and a ``[role='menu']``
+        became visible. The caller is expected to follow up with
+        ``_read_action_signals`` to scan the now-rendered menu items for
+        the vanityName invite anchor; this helper does not classify menu
+        contents itself.
         """
-        more_btn = self._page.locator("main button[aria-label*='More']")
         try:
-            if await more_btn.count() == 0:
-                return False
-            await more_btn.first.click()
+            clicked = await self._page.evaluate(_OPEN_MORE_BUTTON_JS)
         except Exception:
-            logger.debug("Could not click More button", exc_info=True)
+            logger.debug("More button click via JS failed", exc_info=True)
             return False
-
+        if not clicked:
+            return False
         try:
             await self._page.wait_for_selector("[role='menu']", timeout=3000)
+            return True
         except PlaywrightTimeoutError:
-            logger.debug("More menu did not appear")
+            logger.debug("More menu did not appear after click")
             return False
-
-        # Check if Connect is in the menu
-        menu_connect = (
-            self._page.locator("[role='menu']")
-            .locator("button, a, li, [role='menuitem'], [role='button']")
-            .filter(has_text=re.compile(r"^Connect$"))
-        )
-        count = await menu_connect.count()
-        logger.debug("More menu Connect matches: %d", count)
-        return count > 0
 
     async def _locator_is_visible(self, selector: str, *, timeout: int = 2000) -> bool:
         """Return whether the first matching locator is visible."""
@@ -990,42 +1111,35 @@ class LinkedInExtractor:
 
         return result
 
-    async def _read_action_signals(self) -> ActionSignals:
-        """Read structural anchor signals from the top of the profile page.
+    async def _read_action_signals(self, username: str) -> ActionSignals:
+        """Read locale-independent structural signals for a profile's
+        relationship state.
 
-        LinkedIn translates labels but not URLs, so the action area's hrefs
-        are the only locale-independent signal of relationship state.
+        Detection uses URL patterns and ARIA attribute presence only — never
+        text values — per the AGENTS.md Scraping Rules. The vanityName invite
+        anchor is searched document-wide because LinkedIn renders the More
+        menu's contents in a portal-mounted ``[role='menu']`` outside ``<main>``;
+        the URL is uniquely scoped to the target user, so document-wide
+        search introduces no false positives. The compose anchor used for
+        action-root discovery is scoped to ``<main>`` to avoid the
+        portal-rendered "Send profile in a message" anchor that appears
+        inside the More menu after click.
         """
-        data = await self._page.evaluate(
-            """() => {
-                const main = document.querySelector('main');
-                if (!main) return null;
-                const links = Array.from(main.querySelectorAll('a[href]')).filter(
-                    (a) => {
-                        const r = a.getBoundingClientRect();
-                        return r.top < 600 && r.width > 20 && r.height > 12;
-                    }
-                );
-                const hrefs = links.map((a) => a.getAttribute('href') || '');
-                return {
-                    hasInvite: hrefs.some(
-                        (h) => h.includes('/preload/custom-invite/')
-                    ),
-                    hasCompose: hrefs.some(
-                        (h) => h.includes('/messaging/compose/')
-                    ),
-                    hasEditIntro: hrefs.some(
-                        (h) => h.includes('/edit/intro/')
-                    ),
-                };
-            }"""
-        )
+        data = await self._page.evaluate(_ACTION_SIGNALS_JS, username)
         if not isinstance(data, dict):
-            return ActionSignals(False, False, False)
+            return ActionSignals(
+                has_invite_anchor=False,
+                has_compose_anchor_in_action_root=False,
+                has_edit_intro_anchor=False,
+                has_labeled_action_button=False,
+                has_labeled_action_anchor=False,
+            )
         return ActionSignals(
             has_invite_anchor=bool(data.get("hasInvite")),
-            has_compose_anchor=bool(data.get("hasCompose")),
+            has_compose_anchor_in_action_root=bool(data.get("hasComposeInActionRoot")),
             has_edit_intro_anchor=bool(data.get("hasEditIntro")),
+            has_labeled_action_button=bool(data.get("hasLabeledActionButton")),
+            has_labeled_action_anchor=bool(data.get("hasLabeledActionAnchor")),
         )
 
     async def _submit_invite_dialog(self, note: str | None) -> tuple[bool, bool]:
@@ -1104,13 +1218,16 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Send a LinkedIn connection request or accept an incoming one.
 
-        Detection uses structural anchor hrefs read from the top-card area
-        (Connect, Message, Edit). Sending uses LinkedIn's
-        ``/preload/custom-invite/`` deeplink so no Connect button click is
-        required. The dialog is submitted via positional button indexing.
-        Success is only reported once a fresh re-read of the profile no
-        longer exposes a Connect anchor (or shows a 1st-degree marker for
-        accepted requests).
+        Detection is locale-independent: classification uses URL patterns
+        (vanityName invite anchor, edit-intro anchor) and ARIA-attribute
+        presence on top-card buttons (`aria-label` for primary actions,
+        `aria-expanded` for the More-menu opener). The deeplink-submit
+        path is gated strictly on `has_invite_anchor=True` *after* the
+        optional More-menu retry, so Pending and follow-only profiles
+        cannot trigger a write. Sending itself uses the
+        ``/preload/custom-invite/?vanityName=`` deeplink, which works
+        whether the user-visible Connect button is in the action bar
+        or buried under the More menu.
         """
         from linkedin_mcp_server.scraping.connection import detect_connection_state
 
@@ -1123,7 +1240,7 @@ class LinkedInExtractor:
                 url, "unavailable", "Could not read profile page."
             )
 
-        signals = await self._read_action_signals()
+        signals = await self._read_action_signals(username)
         state = detect_connection_state(page_text, signals)
         logger.info(
             "Connection signals for %s: state=%s signals=%s", username, state, signals
@@ -1152,9 +1269,10 @@ class LinkedInExtractor:
             )
 
         if state == "incoming_request":
-            # Accept is rendered inline on the profile (no modal). The
-            # button text is locale-dependent but no anchor exposes the
-            # accept action; we accept this English-only fallback.
+            # TODO(locale): replace text-based Accept click with a
+            # structural identifier — needs a live probe against a real
+            # incoming-request profile (we have none to test against).
+            # Tracked as a documented escape-hatch per AGENTS.md.
             clicked = await self.click_button_by_text("Accept", scope="main")
             if not clicked:
                 return _connection_result(
@@ -1165,7 +1283,7 @@ class LinkedInExtractor:
                 )
             verified = await self.scrape_person(username, {"main_profile"})
             verified_text = verified.get("sections", {}).get("main_profile", "")
-            verified_signals = await self._read_action_signals()
+            verified_signals = await self._read_action_signals(username)
             verified_state = detect_connection_state(verified_text, verified_signals)
             if verified_state != "already_connected":
                 return _connection_result(
@@ -1181,7 +1299,32 @@ class LinkedInExtractor:
                 profile=verified_text,
             )
 
-        if state not in {"connectable", "follow_only"}:
+        # Follow-only profiles may have Connect hidden under the More menu
+        # (high-follower / creator-mode profiles). Try opening it and
+        # re-reading signals; if the vanityName invite anchor surfaces in
+        # the menu, we can proceed with the deeplink. (The
+        # has_invite_anchor=False guard is implicit: detect_connection_state
+        # only returns "follow_only" after the has_invite_anchor branch
+        # has already failed, so reaching this branch already implies it.)
+        if state == "follow_only":
+            opened = await self._open_more_menu()
+            if opened:
+                signals = await self._read_action_signals(username)
+                # Close the menu before any subsequent navigation so it
+                # doesn't intercept the upcoming page transition.
+                try:
+                    await self._page.keyboard.press("Escape")
+                except Exception:
+                    logger.debug("Escape after More-menu reread failed", exc_info=True)
+                logger.info("Post-More signals for %s: signals=%s", username, signals)
+
+        # Write-gate: the deeplink fires only when we have a vanityName
+        # invite anchor at this point. A `follow_only` outcome with no
+        # invite anchor (Pending profile, restricted profile, or
+        # genuinely follow-only) returns connect_unavailable without
+        # navigating to the invite URL — protects against accidental
+        # re-invitation of Pending profiles.
+        if not signals.has_invite_anchor:
             return _connection_result(
                 url,
                 "connect_unavailable",
@@ -1189,10 +1332,6 @@ class LinkedInExtractor:
                 profile=page_text,
             )
 
-        # Connectable / follow_only: drive the invite via the deeplink.
-        # The URL pattern matches LinkedIn's own Connect anchor href, so it
-        # works regardless of locale or whether the visible button is behind
-        # the More menu.
         invite_url = (
             "https://www.linkedin.com/preload/custom-invite/"
             f"?vanityName={quote_plus(username)}"
@@ -1210,7 +1349,7 @@ class LinkedInExtractor:
 
         verified = await self.scrape_person(username, {"main_profile"})
         verified_text = verified.get("sections", {}).get("main_profile", "")
-        verified_signals = await self._read_action_signals()
+        verified_signals = await self._read_action_signals(username)
         verified_state = detect_connection_state(verified_text, verified_signals)
 
         if verified_signals.has_invite_anchor:
