@@ -653,7 +653,7 @@ class TestMessagingTools:
         result = await tool_fn("hello", mock_context, extractor=mock_extractor)
 
         assert result["sections"]["search_results"] == "Result 1\nResult 2"
-        mock_extractor.search_conversations.assert_awaited_once_with("hello")
+        mock_extractor.search_conversations.assert_awaited_once_with("hello", limit=20)
 
     async def test_send_message_success(self, mock_context):
         expected = {

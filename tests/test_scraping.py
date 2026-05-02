@@ -3470,6 +3470,38 @@ class TestGetConversation:
                 await extractor.get_conversation(linkedin_username="jacki-old")
 
 
+class TestStripSelectConversationPrefix:
+    def test_strips_en_us_prefix(self):
+        """Best-effort strip removes the en-US 'Select conversation with ' prefix."""
+        assert (
+            LinkedInExtractor._strip_select_conversation_prefix(
+                "Select conversation with Jacki McMahan"
+            )
+            == "Jacki McMahan"
+        )
+
+    def test_case_insensitive(self):
+        assert (
+            LinkedInExtractor._strip_select_conversation_prefix(
+                "select conversation with jacki mcmahan"
+            )
+            == "jacki mcmahan"
+        )
+
+    def test_returns_full_aria_when_prefix_absent(self):
+        """In a non-en-US locale the verb prefix won't match; return as-is so
+        downstream matching can endsWith / endswith on the participant name."""
+        assert (
+            LinkedInExtractor._strip_select_conversation_prefix(
+                "Konversation auswählen mit Jacki McMahan"
+            )
+            == "Konversation auswählen mit Jacki McMahan"
+        )
+
+    def test_empty_input(self):
+        assert LinkedInExtractor._strip_select_conversation_prefix("") == ""
+
+
 class TestResolveConversationThreadUrls:
     async def test_url_driven_search_and_exact_aria_match(self, mock_page):
         """_resolve_conversation_thread_urls drives search via URL parameter
@@ -3625,7 +3657,7 @@ class TestSearchConversations:
         ):
             result = await extractor.search_conversations("Jacki")
 
-        mock_refs.assert_awaited_once_with(limit=None, context="search_results")
+        mock_refs.assert_awaited_once_with(limit=20, context="search_results")
         refs = result["references"]["search_results"]
         assert len(refs) == 2
         assert {ref["url"] for ref in refs} == {

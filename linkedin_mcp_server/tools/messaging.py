@@ -152,6 +152,7 @@ def register_messaging_tools(mcp: FastMCP) -> None:
     async def search_conversations(
         keywords: str,
         ctx: Context,
+        limit: Annotated[int, Field(ge=1, le=50)] = 20,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -160,6 +161,10 @@ def register_messaging_tools(mcp: FastMCP) -> None:
         Args:
             keywords: Search keywords to filter conversations
             ctx: FastMCP context for progress reporting
+            limit: Maximum number of search-result rows to enumerate as
+                conversation references (1-50, default 20). Each enumeration
+                selects the row in LinkedIn's UI and may mark it as read, so
+                a low cap is preferable for noisy queries.
 
         Returns:
             Dict with url, sections (search_results -> raw text), and optional references.
@@ -168,13 +173,15 @@ def register_messaging_tools(mcp: FastMCP) -> None:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_conversations"
             )
-            logger.info("Searching conversations: keywords='%s'", keywords)
+            logger.info(
+                "Searching conversations: keywords='%s', limit=%d", keywords, limit
+            )
 
             await ctx.report_progress(
                 progress=0, total=100, message="Searching messages"
             )
 
-            result = await extractor.search_conversations(keywords)
+            result = await extractor.search_conversations(keywords, limit=limit)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

@@ -1832,16 +1832,19 @@ class LinkedInExtractor:
         return match.group(1) if match else None
 
     async def _resolve_conversation_thread_urls(self, display_name: str) -> list[str]:
-        """Return all thread URLs whose participant aria-label matches display_name.
+        """Return all thread URLs whose participant name matches display_name.
 
         Uses URL-driven search (`/messaging/?searchTerm=…`) plus click-to-capture
         because LinkedIn renders the messaging sidebar with no anchor hrefs, no
         data-thread attributes, and no embedded URNs — clicking each row and
         reading the resulting SPA URL is the only available extraction path.
 
-        Matching is by exact ``aria-label == "Select conversation with <name>"``,
-        which is locale-independent and tolerates duplicate threads with the
-        same participant.
+        Matches by case-insensitive equality on the cleaned participant name
+        derived from the row's aria-label, which tolerates duplicate threads
+        with the same participant. Browser locale is forced to en-US so the
+        verb prefix strips reliably; in any other locale the comparison fails
+        cleanly with "Could not find a conversation" rather than returning
+        a wrong-thread match.
         """
         search_url = (
             f"https://www.linkedin.com/messaging/?searchTerm={quote_plus(display_name)}"
@@ -1854,13 +1857,11 @@ class LinkedInExtractor:
         refs = await self._extract_conversation_thread_refs(
             limit=None, context="search"
         )
-        target_aria = f"Select conversation with {display_name}".strip().lower()
+        target_name = display_name.strip().lower()
         urls: list[str] = []
         for ref in refs:
             ref_text = (ref.get("text") or "").strip().lower()
-            if not ref_text:
-                continue
-            if f"select conversation with {ref_text}" != target_aria:
+            if not ref_text or ref_text != target_name:
                 continue
             urls.append(f"https://www.linkedin.com{ref['url']}")
         return urls
@@ -1906,7 +1907,9 @@ class LinkedInExtractor:
 
             await self._navigate_to_page(thread_urls[index])
         except PlaywrightTimeoutError as exc:
-            raise LinkedInScraperException("Messaging search input not found.") from exc
+            raise LinkedInScraperException(
+                "Messaging search results did not load in time."
+            ) from exc
 
     async def scrape_company(
         self,
@@ -2418,8 +2421,9 @@ class LinkedInExtractor:
         """Click each visible conversation item and capture the thread URL.
 
         Works for both the inbox sidebar and the URL-driven search-results
-        sidebar (`/messaging/?searchTerm=…`), since LinkedIn uses the same
-        ``label[aria-label^="Select conversation"]`` markup for both.
+        sidebar (`/messaging/?searchTerm=…`), which share the same DOM shape:
+        each conversation row is an ``<li>`` containing a ``<label>`` with an
+        ``aria-label`` attribute carrying the participant name.
 
         LinkedIn renders the sidebar with no ``<a href>`` tags, no
         ``data-thread-id`` attributes, and no embedded URNs — clicking each
@@ -2432,13 +2436,19 @@ class LinkedInExtractor:
         # routinely takes several seconds to hydrate the messaging sidebar
         # after a navigation; an empty sidebar (zero matches) returns on
         # timeout.
-        # The <label> for each conversation row sits inside an Ember-managed
-        # form and is reliably attached but not always considered "visible"
-        # by Playwright's default visibility heuristic — wait on attachment,
-        # which is the only state we actually need to query the DOM.
+        #
+        # Selector is structural (`main li label[aria-label]`) rather than
+        # text-prefix-based (`aria-label^="Select conversation"`) so it
+        # survives any LinkedIn locale — the verb in the aria-label is
+        # locale-dependent, the attribute's presence inside a list-item label
+        # is not.
+        #
+        # Wait on `state="attached"` instead of the default `visible`:
+        # Ember-managed labels are reliably attached but Playwright's
+        # visibility heuristic doesn't always consider them visible.
         try:
             await self._page.wait_for_selector(
-                'main label[aria-label^="Select conversation"]',
+                "main li label[aria-label]",
                 state="attached",
                 timeout=10000,
             )
@@ -2452,12 +2462,12 @@ class LinkedInExtractor:
         # The Ember click handler lives on an inner div; the <li> and <label>
         # don't trigger SPA navigation.  No role/aria attributes exist on the
         # clickable element, so class-name selectors are unavoidable here.
-        # Participant names come from the <label aria-label> instead of
-        # innerText to avoid layout-dependent parsing.
+        # The aria-label value flows through unmodified — Python strips any
+        # known locale prefix to derive a clean participant name for refs.
         conversations: list[dict[str, str]] = await self._page.evaluate(
             """async ({ limit }) => {
                 const labels = Array.from(document.querySelectorAll(
-                    'main label[aria-label^="Select conversation"]'
+                    'main li label[aria-label]'
                 ));
                 const cap = (limit == null)
                     ? labels.length
@@ -2466,8 +2476,6 @@ class LinkedInExtractor:
                 for (let i = 0; i < cap; i++) {
                     const label = labels[i];
                     const ariaLabel = label.getAttribute('aria-label') || '';
-                    const name = ariaLabel
-                        .replace(/^Select conversation with\\s*/i, '').trim();
                     const clickTarget = label.closest('li')
                         ?.querySelector('div[class*="listitem__link"]');
                     if (!clickTarget) continue;
@@ -2487,7 +2495,7 @@ class LinkedInExtractor:
                         /\\/messaging\\/thread\\/([^/?#]+)/
                     );
                     if (match) {
-                        results.push({ name, threadId: match[1] });
+                        results.push({ ariaLabel, threadId: match[1] });
                     }
                 }
                 return results;
@@ -2501,10 +2509,24 @@ class LinkedInExtractor:
                 "url": f"/messaging/thread/{conv['threadId']}/",
                 "context": context,
             }
-            if conv.get("name"):
-                ref["text"] = conv["name"]
+            name = self._strip_select_conversation_prefix(conv.get("ariaLabel", ""))
+            if name:
+                ref["text"] = name
             refs.append(ref)
         return refs
+
+    # Best-effort prefix strip for the en-US "Select conversation with " verb.
+    # Browser locale is forced to en-US (see BrowserManager) so this normally
+    # succeeds; the regex falls through silently for any other locale, in
+    # which case the full aria-label flows into the ref's text field rather
+    # than a stripped name.
+    _SELECT_CONVERSATION_PREFIX_RE = re.compile(
+        r"^Select conversation with\s+", re.IGNORECASE
+    )
+
+    @classmethod
+    def _strip_select_conversation_prefix(cls, aria_label: str) -> str:
+        return cls._SELECT_CONVERSATION_PREFIX_RE.sub("", aria_label).strip()
 
     async def get_conversation(
         self,
@@ -2556,7 +2578,9 @@ class LinkedInExtractor:
             references=references,
         )
 
-    async def search_conversations(self, keywords: str) -> dict[str, Any]:
+    async def search_conversations(
+        self, keywords: str, limit: int = 20
+    ) -> dict[str, Any]:
         """Search messages by keyword.
 
         Uses LinkedIn's ``?searchTerm=`` URL parameter to drive the search
@@ -2564,6 +2588,10 @@ class LinkedInExtractor:
         regardless of how soon the messaging SPA mounts its searchbox role,
         and (critically) preserves the search filter across click-to-capture
         navigations so per-thread refs can be enumerated.
+
+        ``limit`` caps how many search-result rows the click-to-capture loop
+        visits. Each visit selects the row in LinkedIn's UI (and may mark it
+        as read), so a low cap is preferable for noisy queries.
         """
         search_url = (
             f"https://www.linkedin.com/messaging/?searchTerm={quote_plus(keywords)}"
@@ -2587,7 +2615,7 @@ class LinkedInExtractor:
         # surface per-result thread IDs is to click each row and read the SPA
         # URL. URL-driven search keeps the filter active across clicks.
         conversation_refs = await self._extract_conversation_thread_refs(
-            limit=None, context="search_results"
+            limit=limit, context="search_results"
         )
         if conversation_refs:
             references = dedupe_references(conversation_refs + references)
