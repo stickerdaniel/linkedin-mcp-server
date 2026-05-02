@@ -89,6 +89,13 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
         Provide either linkedin_username or thread_id to identify the conversation.
 
+        When looked up by linkedin_username, resolution searches the messaging
+        inbox for the participant's display name and click-visits every
+        matching row to capture its thread ID — LinkedIn's sidebar has no
+        anchor hrefs or thread-id attributes, so this is the only available
+        path. Each visit selects the row in the LinkedIn UI and may mark it
+        as read. Pass thread_id directly to skip this enumeration.
+
         Args:
             ctx: FastMCP context for progress reporting
             linkedin_username: LinkedIn username of the conversation participant

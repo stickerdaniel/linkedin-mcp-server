@@ -2541,6 +2541,13 @@ class LinkedInExtractor:
         InMail. Ignored when ``thread_id`` is provided. Use
         ``search_conversations`` to enumerate thread IDs first if disambiguation
         by index is impractical.
+
+        Side effect when looked up by username: resolution searches LinkedIn's
+        messaging inbox for the participant's display name and click-visits
+        every matching row to capture its thread ID (no anchor hrefs or
+        thread-id attributes exist in the sidebar). Each visit selects the row
+        in the LinkedIn UI and may mark it as read. Pass ``thread_id`` directly
+        to skip this enumeration.
         """
         if not linkedin_username and not thread_id:
             raise LinkedInScraperException(
