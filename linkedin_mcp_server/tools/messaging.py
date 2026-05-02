@@ -81,6 +81,7 @@ def register_messaging_tools(mcp: FastMCP) -> None:
         ctx: Context,
         linkedin_username: str | None = None,
         thread_id: str | None = None,
+        index: Annotated[int, Field(ge=0)] = 0,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -92,6 +93,10 @@ def register_messaging_tools(mcp: FastMCP) -> None:
             ctx: FastMCP context for progress reporting
             linkedin_username: LinkedIn username of the conversation participant
             thread_id: LinkedIn messaging thread ID
+            index: 0-based selector for which thread to open when the
+                participant has multiple threads (e.g. an organic 1-on-1 plus
+                an InMail). Ignored when thread_id is provided. To enumerate
+                thread IDs first, call search_conversations.
 
         Returns:
             Dict with url, sections (conversation -> raw text), and optional references.
@@ -109,9 +114,10 @@ def register_messaging_tools(mcp: FastMCP) -> None:
                 ctx, tool_name="get_conversation"
             )
             logger.info(
-                "Fetching conversation: username=%s, thread_id=%s",
+                "Fetching conversation: username=%s, thread_id=%s, index=%d",
                 linkedin_username,
                 thread_id,
+                index,
             )
 
             await ctx.report_progress(
@@ -121,6 +127,7 @@ def register_messaging_tools(mcp: FastMCP) -> None:
             result = await extractor.get_conversation(
                 linkedin_username=linkedin_username,
                 thread_id=thread_id,
+                index=index,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")

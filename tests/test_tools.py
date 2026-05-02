@@ -634,7 +634,7 @@ class TestMessagingTools:
 
         assert result["sections"]["conversation"] == "Hello!\nHi there!"
         mock_extractor.get_conversation.assert_awaited_once_with(
-            linkedin_username="testuser", thread_id=None
+            linkedin_username="testuser", thread_id=None, index=0
         )
 
     async def test_search_conversations_success(self, mock_context):

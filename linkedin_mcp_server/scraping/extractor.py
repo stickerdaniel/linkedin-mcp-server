@@ -1831,102 +1831,51 @@ class LinkedInExtractor:
         match = re.search(r"/messaging/thread/([^/?#]+)/", url)
         return match.group(1) if match else None
 
-    async def _resolve_conversation_thread_url(self, search_query: str) -> str | None:
-        """Search the messaging inbox and return the matching thread URL."""
-        await self._navigate_to_page("https://www.linkedin.com/messaging/")
+    async def _resolve_conversation_thread_urls(self, display_name: str) -> list[str]:
+        """Return all thread URLs whose participant aria-label matches display_name.
+
+        Uses URL-driven search (`/messaging/?searchTerm=…`) plus click-to-capture
+        because LinkedIn renders the messaging sidebar with no anchor hrefs, no
+        data-thread attributes, and no embedded URNs — clicking each row and
+        reading the resulting SPA URL is the only available extraction path.
+
+        Matching is by exact ``aria-label == "Select conversation with <name>"``,
+        which is locale-independent and tolerates duplicate threads with the
+        same participant.
+        """
+        search_url = (
+            f"https://www.linkedin.com/messaging/?searchTerm={quote_plus(display_name)}"
+        )
+        await self._navigate_to_page(search_url)
         await detect_rate_limit(self._page)
         await handle_modal_close(self._page)
-        await self._wait_for_main_text(log_context="Messaging inbox")
-        # LinkedIn auto-redirects /messaging/ to the most recent thread;
-        # capture the baseline *after* the SPA settles so we can distinguish
-        # between the auto-opened thread and a search-selected one.
-        baseline_thread_id = self._extract_thread_id(self._page.url)
-
-        search_input = self._page.get_by_role("searchbox")
-        await search_input.wait_for()
-        await search_input.click()
-        await self._page.keyboard.type(search_query, delay=30)
-        await asyncio.sleep(1.0)
-        await self._page.keyboard.press("Enter")
-        await asyncio.sleep(1.5)
         await self._wait_for_main_text(log_context="Messaging search results")
 
-        match_result = await self._page.evaluate(
-            """({ searchQuery }) => {
-                const normalize = value =>
-                    (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                const target = normalize(searchQuery);
-                const isVisible = element =>
-                    !!(
-                        element &&
-                        (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
-                    );
-                const resolveThreadHref = element => {
-                    if (!element) return null;
-                    const threadSelector = 'a[href*="/messaging/thread/"]';
-                    const candidates = [
-                        element.matches?.(threadSelector) ? element : null,
-                        element.querySelector?.(threadSelector) || null,
-                        element.closest?.(threadSelector) || null,
-                    ].filter(Boolean);
-                    const threadLink = candidates.find(candidate => isVisible(candidate));
-                    return threadLink?.href || threadLink?.getAttribute('href') || null;
-                };
-
-                const matchingAnchor = Array.from(
-                    document.querySelectorAll('main a[href*="/messaging/thread/"]')
-                ).find(anchor => {
-                    if (!isVisible(anchor)) return false;
-                    const container =
-                        anchor.closest('[role="listitem"], li') ||
-                        anchor.parentElement ||
-                        anchor;
-                    const text = normalize(container.innerText || container.textContent);
-                    return text.includes(target);
-                });
-                if (matchingAnchor) {
-                    matchingAnchor.click();
-                    return {
-                        clicked: true,
-                        href: resolveThreadHref(matchingAnchor),
-                    };
-                }
-
-                const matchingRow = Array.from(
-                    document.querySelectorAll('main [role="listitem"], main li')
-                ).find(row => {
-                    if (!isVisible(row)) return false;
-                    const text = normalize(row.innerText || row.textContent);
-                    return text.includes(target);
-                });
-                if (matchingRow) {
-                    const interactionTarget =
-                        matchingRow.querySelector(
-                            '[tabindex="0"], button, [role="button"], a'
-                        ) || matchingRow;
-                    interactionTarget.click();
-                    return {
-                        clicked: true,
-                        href: resolveThreadHref(matchingRow),
-                    };
-                }
-
-                return { clicked: false, href: null };
-            }""",
-            {"searchQuery": search_query},
+        refs = await self._extract_conversation_thread_refs(
+            limit=None, context="search"
         )
-        if not isinstance(match_result, dict) or not match_result.get("clicked"):
-            return None
+        target_aria = f"Select conversation with {display_name}".strip().lower()
+        urls: list[str] = []
+        for ref in refs:
+            ref_text = (ref.get("text") or "").strip().lower()
+            if not ref_text:
+                continue
+            if f"select conversation with {ref_text}" != target_aria:
+                continue
+            urls.append(f"https://www.linkedin.com{ref['url']}")
+        return urls
 
-        await asyncio.sleep(1.0)
-        current_thread_id = self._extract_thread_id(self._page.url)
-        if current_thread_id and current_thread_id != baseline_thread_id:
-            return self._page.url
-        href = match_result.get("href")
-        return href if isinstance(href, str) and href else None
+    async def _open_conversation_by_username(
+        self, linkedin_username: str, index: int = 0
+    ) -> None:
+        """Open the ``index``-th conversation thread for the named participant.
 
-    async def _open_conversation_by_username(self, linkedin_username: str) -> None:
-        """Open a conversation by resolving the profile name, then searching inbox."""
+        ``index`` is 0-based and orders threads as the search-results sidebar
+        renders them (LinkedIn surfaces newest activity first).
+        """
+        if index < 0:
+            raise LinkedInScraperException(f"index must be non-negative (got {index}).")
+
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
@@ -1944,13 +1893,18 @@ class LinkedInExtractor:
             )
 
         try:
-            thread_url = await self._resolve_conversation_thread_url(display_name)
-            if not thread_url:
+            thread_urls = await self._resolve_conversation_thread_urls(display_name)
+            if not thread_urls:
                 raise LinkedInScraperException(
                     f"Could not find a conversation for {linkedin_username}."
                 )
+            if index >= len(thread_urls):
+                raise LinkedInScraperException(
+                    f"index {index} out of range: only {len(thread_urls)} "
+                    f"thread(s) exist for {linkedin_username}."
+                )
 
-            await self._navigate_to_page(thread_url)
+            await self._navigate_to_page(thread_urls[index])
         except PlaywrightTimeoutError as exc:
             raise LinkedInScraperException("Messaging search input not found.") from exc
 
@@ -2445,7 +2399,9 @@ class LinkedInExtractor:
         # LinkedIn's conversation sidebar uses JS click handlers instead of
         # <a> tags, so anchor extraction cannot capture thread IDs.  Click each
         # conversation item and read the resulting SPA URL to build references.
-        conversation_refs = await self._extract_conversation_thread_refs(limit)
+        conversation_refs = await self._extract_conversation_thread_refs(
+            limit=limit, context="inbox"
+        )
         if conversation_refs:
             references = dedupe_references(conversation_refs + references)
 
@@ -2456,25 +2412,58 @@ class LinkedInExtractor:
             references=references,
         )
 
-    async def _extract_conversation_thread_refs(self, limit: int) -> list[Reference]:
-        """Click each inbox conversation item and capture the thread URL.
+    async def _extract_conversation_thread_refs(
+        self, limit: int | None, context: str
+    ) -> list[Reference]:
+        """Click each visible conversation item and capture the thread URL.
 
-        LinkedIn's conversation sidebar renders ``<li>`` items with JS click
-        handlers — no ``<a href>`` tags — so the only reliable way to obtain
-        thread IDs is to click each item and read the SPA URL change.
+        Works for both the inbox sidebar and the URL-driven search-results
+        sidebar (`/messaging/?searchTerm=…`), since LinkedIn uses the same
+        ``label[aria-label^="Select conversation"]`` markup for both.
+
+        LinkedIn renders the sidebar with no ``<a href>`` tags, no
+        ``data-thread-id`` attributes, and no embedded URNs — clicking each
+        row and reading the SPA URL is the only reliable extraction path.
+        Pass ``limit=None`` to capture every visible row.
         """
+        # The conversation list mounts after main text settles, so wait
+        # explicitly for at least one label rather than relying on
+        # _wait_for_main_text alone (which only checks chrome text). LinkedIn
+        # routinely takes several seconds to hydrate the messaging sidebar
+        # after a navigation; an empty sidebar (zero matches) returns on
+        # timeout.
+        # The <label> for each conversation row sits inside an Ember-managed
+        # form and is reliably attached but not always considered "visible"
+        # by Playwright's default visibility heuristic — wait on attachment,
+        # which is the only state we actually need to query the DOM.
+        try:
+            await self._page.wait_for_selector(
+                'main label[aria-label^="Select conversation"]',
+                state="attached",
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug(
+                "conversation labels did not appear within 10s (context=%s)",
+                context,
+            )
+            return []
+
         # The Ember click handler lives on an inner div; the <li> and <label>
         # don't trigger SPA navigation.  No role/aria attributes exist on the
         # clickable element, so class-name selectors are unavoidable here.
-        # Participant names are extracted from the <label aria-label> instead
-        # of innerText to avoid layout-dependent parsing.
+        # Participant names come from the <label aria-label> instead of
+        # innerText to avoid layout-dependent parsing.
         conversations: list[dict[str, str]] = await self._page.evaluate(
             """async ({ limit }) => {
                 const labels = Array.from(document.querySelectorAll(
                     'main label[aria-label^="Select conversation"]'
                 ));
+                const cap = (limit == null)
+                    ? labels.length
+                    : Math.min(labels.length, limit);
                 const results = [];
-                for (let i = 0; i < Math.min(labels.length, limit); i++) {
+                for (let i = 0; i < cap; i++) {
                     const label = labels[i];
                     const ariaLabel = label.getAttribute('aria-label') || '';
                     const name = ariaLabel
@@ -2482,9 +2471,19 @@ class LinkedInExtractor:
                     const clickTarget = label.closest('li')
                         ?.querySelector('div[class*="listitem__link"]');
                     if (!clickTarget) continue;
+                    const before = location.href;
                     clickTarget.click();
-                    await new Promise(r => setTimeout(r, 300));
-                    const match = location.href.match(
+                    // Poll for the SPA URL to settle on the thread route. The
+                    // Ember click handler can take a moment to bind after the
+                    // label mounts, and a fixed sleep races the initial click.
+                    let after = before;
+                    for (let waits = 0; waits < 12; waits++) {
+                        await new Promise(r => setTimeout(r, 100));
+                        after = location.href;
+                        if (after !== before
+                            && /\\/messaging\\/thread\\//.test(after)) break;
+                    }
+                    const match = after.match(
                         /\\/messaging\\/thread\\/([^/?#]+)/
                     );
                     if (match) {
@@ -2500,7 +2499,7 @@ class LinkedInExtractor:
             ref: Reference = {
                 "kind": "conversation",
                 "url": f"/messaging/thread/{conv['threadId']}/",
-                "context": "inbox",
+                "context": context,
             }
             if conv.get("name"):
                 ref["text"] = conv["name"]
@@ -2511,8 +2510,16 @@ class LinkedInExtractor:
         self,
         linkedin_username: str | None = None,
         thread_id: str | None = None,
+        index: int = 0,
     ) -> dict[str, Any]:
-        """Read a specific messaging conversation by thread ID or username."""
+        """Read a specific messaging conversation by thread ID or username.
+
+        ``index`` (0-based) selects which thread to open when a participant has
+        multiple conversation threads — e.g. an organic 1-on-1 plus a separate
+        InMail. Ignored when ``thread_id`` is provided. Use
+        ``search_conversations`` to enumerate thread IDs first if disambiguation
+        by index is impractical.
+        """
         if not linkedin_username and not thread_id:
             raise LinkedInScraperException(
                 "Provide at least one of linkedin_username or thread_id"
@@ -2523,7 +2530,9 @@ class LinkedInExtractor:
                 f"https://www.linkedin.com/messaging/thread/{thread_id}/"
             )
         else:
-            await self._open_conversation_by_username(linkedin_username or "")
+            await self._open_conversation_by_username(
+                linkedin_username or "", index=index
+            )
 
         await detect_rate_limit(self._page)
         await self._wait_for_main_text(log_context="Conversation")
@@ -2548,32 +2557,41 @@ class LinkedInExtractor:
         )
 
     async def search_conversations(self, keywords: str) -> dict[str, Any]:
-        """Search messages by keyword."""
-        await self._navigate_to_page("https://www.linkedin.com/messaging/")
+        """Search messages by keyword.
+
+        Uses LinkedIn's ``?searchTerm=`` URL parameter to drive the search
+        rather than typing into the searchbox — the URL form is reliable
+        regardless of how soon the messaging SPA mounts its searchbox role,
+        and (critically) preserves the search filter across click-to-capture
+        navigations so per-thread refs can be enumerated.
+        """
+        search_url = (
+            f"https://www.linkedin.com/messaging/?searchTerm={quote_plus(keywords)}"
+        )
+        await self._navigate_to_page(search_url)
         await detect_rate_limit(self._page)
         await handle_modal_close(self._page)
-
-        try:
-            search_input = self._page.get_by_role("searchbox")
-            await search_input.wait_for()
-            await search_input.click()
-            await self._page.keyboard.type(keywords, delay=30)
-            await asyncio.sleep(1.0)
-            await self._page.keyboard.press("Enter")
-            await asyncio.sleep(1.5)
-        except PlaywrightTimeoutError:
-            logger.warning("Messaging search input not found")
-
         await self._wait_for_main_text(log_context="Messaging search")
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
         cleaned = strip_linkedin_noise(raw) if raw else ""
-        references = (
+        references: list[Reference] = (
             build_references(raw_result["references"], "search_results")
             if cleaned
             else []
         )
+
+        # Same click-to-capture path as get_inbox: LinkedIn's search sidebar
+        # has no anchor hrefs or thread-id attributes, so the only way to
+        # surface per-result thread IDs is to click each row and read the SPA
+        # URL. URL-driven search keeps the filter active across clicks.
+        conversation_refs = await self._extract_conversation_thread_refs(
+            limit=None, context="search_results"
+        )
+        if conversation_refs:
+            references = dedupe_references(conversation_refs + references)
+
         return self._single_section_result(
             self._page.url,
             "search_results",
