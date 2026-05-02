@@ -3289,20 +3289,126 @@ class TestGetConversation:
         with pytest.raises(LinkedInScraperException):
             await extractor.get_conversation()
 
-
-class TestSearchConversations:
-    async def test_returns_search_results(self, mock_page):
-        """search_conversations returns search_results section."""
+    async def test_by_username_default_index_picks_first_thread(self, mock_page):
+        """get_conversation by username opens the 0th matching thread by default."""
         extractor = LinkedInExtractor(mock_page)
-        mock_searchbox = AsyncMock()
-        mock_searchbox.wait_for = AsyncMock()
-        mock_searchbox.click = AsyncMock()
-        mock_page.get_by_role = MagicMock(return_value=mock_searchbox)
-        mock_keyboard = MagicMock()
-        mock_keyboard.type = AsyncMock()
-        mock_keyboard.press = AsyncMock()
-        mock_page.keyboard = mock_keyboard
+        nav_mock = AsyncMock()
+        mock_page.wait_for_selector = AsyncMock()
+        with (
+            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_read_profile_display_name",
+                new_callable=AsyncMock,
+                return_value="Jacki McMahan",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_conversation_thread_urls",
+                new_callable=AsyncMock,
+                return_value=[
+                    "https://www.linkedin.com/messaging/thread/2-newer/",
+                    "https://www.linkedin.com/messaging/thread/2-older/",
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "msg", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="msg",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+        ):
+            await extractor.get_conversation(linkedin_username="jacki-old")
 
+        target_calls = [
+            c.args[0]
+            for c in nav_mock.call_args_list
+            if c.args and "/messaging/thread/" in c.args[0]
+        ]
+        assert target_calls == ["https://www.linkedin.com/messaging/thread/2-newer/"]
+
+    async def test_by_username_index_picks_specified_thread(self, mock_page):
+        """get_conversation by username + index opens the i-th matching thread."""
+        extractor = LinkedInExtractor(mock_page)
+        nav_mock = AsyncMock()
+        mock_page.wait_for_selector = AsyncMock()
+        with (
+            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_read_profile_display_name",
+                new_callable=AsyncMock,
+                return_value="Jacki McMahan",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_conversation_thread_urls",
+                new_callable=AsyncMock,
+                return_value=[
+                    "https://www.linkedin.com/messaging/thread/2-newer/",
+                    "https://www.linkedin.com/messaging/thread/2-older/",
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "msg", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="msg",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+        ):
+            await extractor.get_conversation(linkedin_username="jacki-old", index=1)
+
+        target_calls = [
+            c.args[0]
+            for c in nav_mock.call_args_list
+            if c.args and "/messaging/thread/" in c.args[0]
+        ]
+        assert target_calls == ["https://www.linkedin.com/messaging/thread/2-older/"]
+
+    async def test_by_username_index_out_of_range_raises(self, mock_page):
+        """get_conversation raises when index exceeds the number of threads."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.wait_for_selector = AsyncMock()
         with (
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch(
@@ -3313,11 +3419,161 @@ class TestSearchConversations:
                 "linkedin_mcp_server.scraping.extractor.handle_modal_close",
                 new_callable=AsyncMock,
             ),
-            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_read_profile_display_name",
+                new_callable=AsyncMock,
+                return_value="Jacki McMahan",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_conversation_thread_urls",
+                new_callable=AsyncMock,
+                return_value=[
+                    "https://www.linkedin.com/messaging/thread/2-only/",
+                ],
+            ),
+        ):
+            with pytest.raises(LinkedInScraperException, match="out of range"):
+                await extractor.get_conversation(linkedin_username="jacki-old", index=5)
+
+    async def test_by_username_no_threads_raises_could_not_find(self, mock_page):
+        """get_conversation raises 'Could not find a conversation' when none exist."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.wait_for_selector = AsyncMock()
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch(
-                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
             ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_read_profile_display_name",
+                new_callable=AsyncMock,
+                return_value="Jacki McMahan",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_conversation_thread_urls",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            with pytest.raises(
+                LinkedInScraperException, match="Could not find a conversation"
+            ):
+                await extractor.get_conversation(linkedin_username="jacki-old")
+
+
+class TestStripSelectConversationPrefix:
+    def test_strips_en_us_prefix(self):
+        """Best-effort strip removes the en-US 'Select conversation with ' prefix."""
+        assert (
+            LinkedInExtractor._strip_select_conversation_prefix(
+                "Select conversation with Jacki McMahan"
+            )
+            == "Jacki McMahan"
+        )
+
+    def test_case_insensitive(self):
+        assert (
+            LinkedInExtractor._strip_select_conversation_prefix(
+                "select conversation with jacki mcmahan"
+            )
+            == "jacki mcmahan"
+        )
+
+    def test_returns_full_aria_when_prefix_absent(self):
+        """In a non-en-US locale the verb prefix won't match; return as-is so
+        downstream matching can endsWith / endswith on the participant name."""
+        assert (
+            LinkedInExtractor._strip_select_conversation_prefix(
+                "Konversation auswählen mit Jacki McMahan"
+            )
+            == "Konversation auswählen mit Jacki McMahan"
+        )
+
+    def test_empty_input(self):
+        assert LinkedInExtractor._strip_select_conversation_prefix("") == ""
+
+
+class TestResolveConversationThreadUrls:
+    async def test_url_driven_search_and_exact_aria_match(self, mock_page):
+        """_resolve_conversation_thread_urls drives search via URL parameter
+        and matches participant by exact aria-label rather than substring."""
+        extractor = LinkedInExtractor(mock_page)
+        nav_mock = AsyncMock()
+        thread_refs = [
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-aaa/",
+                "text": "Jacki McMahan",  # exact match
+                "context": "search",
+            },
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-bbb/",
+                "text": "Jacki McMahan-Group",  # extra suffix → not exact
+                "context": "search",
+            },
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-ccc/",
+                "text": "Jacki McMahan",  # second exact match (multi-thread case)
+                "context": "search",
+            },
+        ]
+        with (
+            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=thread_refs,
+            ),
+        ):
+            urls = await extractor._resolve_conversation_thread_urls("Jacki McMahan")
+
+        nav_mock.assert_awaited_once_with(
+            "https://www.linkedin.com/messaging/?searchTerm=Jacki+McMahan"
+        )
+        assert urls == [
+            "https://www.linkedin.com/messaging/thread/2-aaa/",
+            "https://www.linkedin.com/messaging/thread/2-ccc/",
+        ]
+
+
+class TestSearchConversations:
+    async def test_returns_search_results(self, mock_page):
+        """search_conversations returns search_results section."""
+        extractor = LinkedInExtractor(mock_page)
+        nav_mock = AsyncMock()
+
+        with (
+            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
             patch.object(
                 extractor,
                 "_extract_root_content",
@@ -3332,11 +3588,82 @@ class TestSearchConversations:
                 "linkedin_mcp_server.scraping.extractor.build_references",
                 return_value=[],
             ),
+            patch.object(
+                extractor,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
-            result = await extractor.search_conversations("hello")
+            result = await extractor.search_conversations("hello world")
 
         assert "search_results" in result["sections"]
         assert "Result 1" in result["sections"]["search_results"]
+        # Search must be driven by the searchTerm URL parameter, not by typing
+        # into the searchbox -- the URL form is reliable across SPA mounts and
+        # preserves the search filter across click-to-capture navigations.
+        nav_mock.assert_awaited_once_with(
+            "https://www.linkedin.com/messaging/?searchTerm=hello+world"
+        )
+
+    async def test_includes_conversation_thread_refs(self, mock_page):
+        """search_conversations exposes per-result thread URLs as references."""
+        extractor = LinkedInExtractor(mock_page)
+        thread_refs = [
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-abc/",
+                "text": "Jacki McMahan",
+                "context": "search_results",
+            },
+            {
+                "kind": "conversation",
+                "url": "/messaging/thread/2-def/",
+                "text": "Jacki McMahan",
+                "context": "search_results",
+            },
+        ]
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "Jacki McMahan\nJacki McMahan", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="Jacki McMahan\nJacki McMahan",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=thread_refs,
+            ) as mock_refs,
+        ):
+            result = await extractor.search_conversations("Jacki")
+
+        mock_refs.assert_awaited_once_with(limit=20, context="search_results")
+        refs = result["references"]["search_results"]
+        assert len(refs) == 2
+        assert {ref["url"] for ref in refs} == {
+            "/messaging/thread/2-abc/",
+            "/messaging/thread/2-def/",
+        }
 
 
 class TestSendMessage:

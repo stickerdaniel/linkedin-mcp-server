@@ -81,6 +81,7 @@ def register_messaging_tools(mcp: FastMCP) -> None:
         ctx: Context,
         linkedin_username: str | None = None,
         thread_id: str | None = None,
+        index: Annotated[int, Field(ge=0)] = 0,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -88,10 +89,21 @@ def register_messaging_tools(mcp: FastMCP) -> None:
 
         Provide either linkedin_username or thread_id to identify the conversation.
 
+        When looked up by linkedin_username, resolution searches the messaging
+        inbox for the participant's display name and click-visits every
+        matching row to capture its thread ID — LinkedIn's sidebar has no
+        anchor hrefs or thread-id attributes, so this is the only available
+        path. Each visit selects the row in the LinkedIn UI and may mark it
+        as read. Pass thread_id directly to skip this enumeration.
+
         Args:
             ctx: FastMCP context for progress reporting
             linkedin_username: LinkedIn username of the conversation participant
             thread_id: LinkedIn messaging thread ID
+            index: 0-based selector for which thread to open when the
+                participant has multiple threads (e.g. an organic 1-on-1 plus
+                an InMail). Ignored when thread_id is provided. To enumerate
+                thread IDs first, call search_conversations.
 
         Returns:
             Dict with url, sections (conversation -> raw text), and optional references.
@@ -109,9 +121,10 @@ def register_messaging_tools(mcp: FastMCP) -> None:
                 ctx, tool_name="get_conversation"
             )
             logger.info(
-                "Fetching conversation: username=%s, thread_id=%s",
+                "Fetching conversation: username=%s, thread_id=%s, index=%d",
                 linkedin_username,
                 thread_id,
+                index,
             )
 
             await ctx.report_progress(
@@ -121,6 +134,7 @@ def register_messaging_tools(mcp: FastMCP) -> None:
             result = await extractor.get_conversation(
                 linkedin_username=linkedin_username,
                 thread_id=thread_id,
+                index=index,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
@@ -145,6 +159,7 @@ def register_messaging_tools(mcp: FastMCP) -> None:
     async def search_conversations(
         keywords: str,
         ctx: Context,
+        limit: Annotated[int, Field(ge=1, le=50)] = 20,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -153,6 +168,10 @@ def register_messaging_tools(mcp: FastMCP) -> None:
         Args:
             keywords: Search keywords to filter conversations
             ctx: FastMCP context for progress reporting
+            limit: Maximum number of search-result rows to enumerate as
+                conversation references (1-50, default 20). Each enumeration
+                selects the row in LinkedIn's UI and may mark it as read, so
+                a low cap is preferable for noisy queries.
 
         Returns:
             Dict with url, sections (search_results -> raw text), and optional references.
@@ -161,13 +180,15 @@ def register_messaging_tools(mcp: FastMCP) -> None:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_conversations"
             )
-            logger.info("Searching conversations: keywords='%s'", keywords)
+            logger.info(
+                "Searching conversations: keywords='%s', limit=%d", keywords, limit
+            )
 
             await ctx.report_progress(
                 progress=0, total=100, message="Searching messages"
             )
 
-            result = await extractor.search_conversations(keywords)
+            result = await extractor.search_conversations(keywords, limit=limit)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
