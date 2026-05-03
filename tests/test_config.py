@@ -32,7 +32,7 @@ class TestServerConfig:
         config = ServerConfig()
         assert config.transport == "stdio"
         assert config.port == 8000
-        assert config.tool_timeout_seconds == 90.0
+        assert config.tool_timeout_seconds == 180.0
 
     def test_validate_passes(self):
         ServerConfig().validate()  # No error

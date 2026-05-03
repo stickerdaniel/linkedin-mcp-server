@@ -267,7 +267,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
         type=positive_float,
         default=None,
         metavar="SECONDS",
-        help="Per-tool MCP execution timeout in seconds (default: 90.0)",
+        help="Per-tool MCP execution timeout in seconds (default: 180.0)",
     )
 
     parser.add_argument(

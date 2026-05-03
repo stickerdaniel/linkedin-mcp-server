@@ -13,7 +13,7 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TOOL_TIMEOUT_SECONDS: float = 90.0
+DEFAULT_TOOL_TIMEOUT_SECONDS: float = 180.0
 
 
 class ConfigurationError(Exception):

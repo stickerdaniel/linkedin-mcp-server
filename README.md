@@ -93,7 +93,7 @@ The `@latest` tag ensures you always run the newest version — `uvx` checks PyP
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--logout` - Clear stored LinkedIn browser profile
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
-- `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 90.0). Increase for heavy scrapes / cold-start Chromium / slow networks.
+- `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
 
@@ -150,7 +150,7 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 **Timeout issues:**
 
 - *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out at ~90s* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 90).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - Users on slow connections may need higher values for either.
 
 **Custom Chrome path:**
@@ -195,7 +195,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 **Timeout issues:**
 
 - *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out at ~90s* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 90).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - Users on slow connections may need higher values for either.
 
 </details>
@@ -263,7 +263,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--logout` - Clear all stored LinkedIn auth state, including source and derived runtime profiles
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
-- `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 90.0). Increase for heavy scrapes / cold-start Chromium / slow networks.
+- `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (rarely needed in Docker)
 
@@ -311,7 +311,7 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 **Timeout issues:**
 
 - *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out at ~90s* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 90).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - Users on slow connections may need higher values for either.
 
 **Custom Chrome path:**
@@ -369,7 +369,7 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 - `--path PATH` - HTTP server path (default: /mcp)
 - `--logout` - Clear stored LinkedIn browser profile
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
-- `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 90.0). Increase for heavy scrapes / cold-start Chromium / slow networks.
+- `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--status` - Check if current session is valid and exit
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--slow-mo MS` - Delay between browser actions in milliseconds (default: 0, useful for debugging)
@@ -431,7 +431,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 **Timeout issues:**
 
 - *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out at ~90s* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 90).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - Users on slow connections may need higher values for either.
 
 **Custom Chrome path:**
