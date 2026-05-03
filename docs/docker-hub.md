@@ -58,6 +58,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `USER_DATA_DIR` | `~/.linkedin-mcp/profile` | Path to persistent browser profile directory |
 | `LOG_LEVEL` | `WARNING` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
+| `TOOL_TIMEOUT` | `180` | Per-tool MCP execution timeout in seconds. Increase further for heavy scrapes (multi-section profiles, cold-start Chromium, slow networks/containers). |
 | `USER_AGENT` | - | Custom browser user agent |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
@@ -69,7 +70,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: reuse checkpointed derived Linux runtime profiles across Docker restarts instead of fresh-bridging each startup |
 | `LINKEDIN_TRACE_MODE` | `on_error` | Trace/log retention mode: `on_error` keeps ephemeral artifacts only when a failure occurs, `always` keeps every run, `off` disables trace persistence |
 
-**Example with custom timeout:**
+**Example with custom timeouts:**
 
 ```json
 {
@@ -80,6 +81,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
         "run", "-i", "--rm",
         "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "-e", "TIMEOUT=10000",
+        "-e", "TOOL_TIMEOUT=300",
         "stickerdaniel/linkedin-mcp-server"
       ]
     }

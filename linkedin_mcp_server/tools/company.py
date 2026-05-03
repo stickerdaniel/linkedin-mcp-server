@@ -11,7 +11,7 @@ from typing import Any
 from fastmcp import Context, FastMCP
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
-from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -22,11 +22,13 @@ from linkedin_mcp_server.scraping.link_metadata import Reference
 logger = logging.getLogger(__name__)
 
 
-def register_company_tools(mcp: FastMCP) -> None:
+def register_company_tools(
+    mcp: FastMCP, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+) -> None:
     """Register all company-related tools with the MCP server."""
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Get Company Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
@@ -86,7 +88,7 @@ def register_company_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_company_profile")  # NoReturn
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Get Company Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
