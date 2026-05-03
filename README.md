@@ -32,7 +32,7 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#407](https://github.com/stickerdaniel/linkedin-mcp-server/issues/407) |
 | `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
 | `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
-| `get_conversation` | Read a specific messaging conversation by username or thread ID | [#307](https://github.com/stickerdaniel/linkedin-mcp-server/issues/307) |
+| `get_conversation` | Read a specific messaging conversation by username or thread ID | working |
 | `search_conversations` | Search messages by keyword | working |
 | `send_message` | Send a message to a LinkedIn user (requires confirmation) | working |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | working |
