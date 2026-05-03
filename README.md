@@ -38,7 +38,7 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
 | `search_jobs` | Search for jobs with keywords and location filters | working |
-| `search_people` | Search for people by keywords and location | working |
+| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | working |
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `close_session` | Close browser session and clean up resources | working |
 

@@ -254,7 +254,46 @@ class TestPersonTool:
         )
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
-        mock_extractor.search_people.assert_awaited_once_with("AI engineer", "New York")
+        mock_extractor.search_people.assert_awaited_once_with(
+            "AI engineer",
+            "New York",
+            network=None,
+            current_company=None,
+        )
+
+    async def test_search_people_with_network_and_company_filters(self, mock_context):
+        expected = {
+            "url": (
+                "https://www.linkedin.com/search/results/people/"
+                "?keywords=engineer&network=%5B%22F%22%5D"
+                "&currentCompany=%5B%22Weber+Inc%22%5D"
+            ),
+            "sections": {
+                "search_results": "Jennifer Bonuso\nPresident Americas at Weber Inc"
+            },
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_people")
+        result = await tool_fn(
+            "engineer",
+            mock_context,
+            network=["F"],
+            current_company="Weber Inc",
+            extractor=mock_extractor,
+        )
+        assert "search_results" in result["sections"]
+        mock_extractor.search_people.assert_awaited_once_with(
+            "engineer",
+            None,
+            network=["F"],
+            current_company="Weber Inc",
+        )
 
     async def test_connect_with_person(self, mock_context):
         expected = {
