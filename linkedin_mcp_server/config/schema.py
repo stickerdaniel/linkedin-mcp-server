@@ -6,11 +6,14 @@ structure with type-safe configuration objects and default values.
 """
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_TOOL_TIMEOUT_SECONDS: float = 90.0
 
 
 class ConfigurationError(Exception):
@@ -70,6 +73,16 @@ class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8000
     path: str = "/mcp"
+    tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+
+    def validate(self) -> None:
+        """Validate server configuration values."""
+        if not (
+            math.isfinite(self.tool_timeout_seconds) and self.tool_timeout_seconds > 0
+        ):
+            raise ConfigurationError(
+                f"tool_timeout_seconds must be a positive finite number, got {self.tool_timeout_seconds}"
+            )
 
 
 @dataclass
@@ -83,6 +96,7 @@ class AppConfig:
     def validate(self) -> None:
         """Validate all configuration values. Call after modifying config."""
         self.browser.validate()
+        self.server.validate()
         if self.server.transport == "streamable-http":
             self._validate_transport_config()
             self._validate_path_format()

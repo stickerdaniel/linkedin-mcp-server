@@ -741,10 +741,10 @@ class TestMessagingTools:
 
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
-        from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
         from linkedin_mcp_server.server import create_mcp_server
 
-        mcp = create_mcp_server()
+        custom_timeout = 7.5
+        mcp = create_mcp_server(tool_timeout=custom_timeout)
 
         tool_names = (
             "get_person_profile",
@@ -765,4 +765,4 @@ class TestToolTimeouts:
         for name in tool_names:
             tool = await mcp.get_tool(name)
             assert tool is not None
-            assert tool.timeout == TOOL_TIMEOUT_SECONDS
+            assert tool.timeout == custom_timeout

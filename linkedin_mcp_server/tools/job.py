@@ -10,7 +10,7 @@ from typing import Annotated, Any
 from fastmcp import Context, FastMCP
 from pydantic import Field
 
-from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -18,11 +18,13 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 logger = logging.getLogger(__name__)
 
 
-def register_job_tools(mcp: FastMCP) -> None:
+def register_job_tools(
+    mcp: FastMCP, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+) -> None:
     """Register all job-related tools with the MCP server."""
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Get Job Details",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},
@@ -69,7 +71,7 @@ def register_job_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_job_details")  # NoReturn
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Search Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},

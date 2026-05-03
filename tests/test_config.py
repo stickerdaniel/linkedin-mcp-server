@@ -32,6 +32,17 @@ class TestServerConfig:
         config = ServerConfig()
         assert config.transport == "stdio"
         assert config.port == 8000
+        assert config.tool_timeout_seconds == 90.0
+
+    def test_validate_passes(self):
+        ServerConfig().validate()  # No error
+
+    @pytest.mark.parametrize(
+        "bad_value", [-1.0, 0.0, float("nan"), float("inf"), float("-inf")]
+    )
+    def test_validate_invalid_tool_timeout(self, bad_value):
+        with pytest.raises(ConfigurationError):
+            ServerConfig(tool_timeout_seconds=bad_value).validate()
 
 
 class TestAppConfig:
@@ -171,6 +182,49 @@ class TestLoaders:
 
         with pytest.raises(ConfigurationError, match="Invalid TIMEOUT"):
             load_from_env(AppConfig())
+
+    def test_load_from_env_tool_timeout(self, monkeypatch):
+        monkeypatch.setenv("TOOL_TIMEOUT", "120.5")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.server.tool_timeout_seconds == 120.5
+
+    def test_load_from_env_invalid_tool_timeout_non_numeric(self, monkeypatch):
+        monkeypatch.setenv("TOOL_TIMEOUT", "abc")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match="Invalid TOOL_TIMEOUT"):
+            load_from_env(AppConfig())
+
+    @pytest.mark.parametrize("bad_value", ["0", "-5", "nan", "inf", "-inf"])
+    def test_load_from_env_invalid_tool_timeout_non_finite_or_non_positive(
+        self, monkeypatch, bad_value
+    ):
+        monkeypatch.setenv("TOOL_TIMEOUT", bad_value)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match="Invalid TOOL_TIMEOUT"):
+            load_from_env(AppConfig())
+
+    def test_load_from_args_tool_timeout(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv", ["linkedin-mcp-server", "--tool-timeout", "7.5"]
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.server.tool_timeout_seconds == 7.5
+
+    @pytest.mark.parametrize("bad_value", ["0", "-1", "abc", "nan", "inf"])
+    def test_load_from_args_invalid_tool_timeout(self, monkeypatch, bad_value):
+        monkeypatch.setattr(
+            "sys.argv", ["linkedin-mcp-server", "--tool-timeout", bad_value]
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(SystemExit):
+            load_from_args(AppConfig())
 
     def test_load_from_env_port(self, monkeypatch):
         monkeypatch.setenv("PORT", "9000")

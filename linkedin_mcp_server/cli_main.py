@@ -312,7 +312,7 @@ def main() -> None:
                 transport = choose_transport_interactive()
 
             # Create and run the MCP server
-            mcp = create_mcp_server()
+            mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
 
             if transport == "streamable-http":
                 mcp.run(

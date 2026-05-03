@@ -12,7 +12,7 @@ from fastmcp import Context, FastMCP
 from pydantic import Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
-from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -21,11 +21,13 @@ from linkedin_mcp_server.scraping import parse_person_sections
 logger = logging.getLogger(__name__)
 
 
-def register_person_tools(mcp: FastMCP) -> None:
+def register_person_tools(
+    mcp: FastMCP, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+) -> None:
     """Register all person-related tools with the MCP server."""
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Get Person Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},
@@ -98,7 +100,7 @@ def register_person_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_person_profile")  # NoReturn
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Search People",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "search"},
@@ -151,7 +153,7 @@ def register_person_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "search_people")  # NoReturn
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Connect With Person",
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"person", "actions"},
@@ -214,7 +216,7 @@ def register_person_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "connect_with_person")  # NoReturn
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Get Sidebar Profiles",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},
