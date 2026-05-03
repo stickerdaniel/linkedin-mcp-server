@@ -2097,6 +2097,19 @@ class LinkedInExtractor:
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
         await self._navigate_to_page(url)
+        return await self._extract_search_page_static(url, section_name)
+
+    async def _extract_search_page_static(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
+        """Extract from the currently loaded search-style page without navigating.
+
+        Used by click-based pagination flows (e.g. /jobs-tracker/) where the
+        URL stays the same and content updates in place. ``url`` is only used
+        for logging context.
+        """
         await detect_rate_limit(self._page)
 
         main_found = True
@@ -2337,6 +2350,149 @@ class LinkedInExtractor:
         if page_references:
             result["references"] = {
                 "search_results": dedupe_references(page_references, cap=15)
+            }
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def _advance_saved_jobs_page(self, target_index: int) -> bool:
+        """Click the saved-jobs "next" pagination button, then wait for the
+        target page indicator to become active.
+
+        ``/jobs-tracker/`` paginates client-side: the URL stays the same and
+        content updates in place, so URL-based pagination is impossible.
+
+        Detection is locale-independent — we use the ``data-testid`` suffix
+        (``-visible``/``-hidden``) on the next button and ``aria-current="true"``
+        on the target indicator. Returns ``False`` if no next button is
+        visible (we're on the last page) or if the indicator never updates.
+        """
+        next_visible = self._page.locator(
+            '[data-testid="pagination-controls-next-button-visible"]'
+        )
+        if await next_visible.count() == 0:
+            return False
+
+        try:
+            await next_visible.first.click()
+        except Exception as e:
+            logger.debug("Could not click saved-jobs next button: %s", e)
+            return False
+
+        target = self._page.locator(
+            f'[data-testid="pagination-indicator-{target_index}"][aria-current="true"]'
+        )
+        try:
+            await target.wait_for(state="attached", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug(
+                "Saved-jobs indicator %d never became aria-current",
+                target_index,
+            )
+            return False
+        return True
+
+    async def scrape_saved_jobs(self, max_pages: int = 3) -> dict[str, Any]:
+        """Scrape the user's saved jobs from /jobs-tracker/ with pagination.
+
+        Extracts job IDs from ``a[href*="/jobs/view/"]`` links and paginates
+        by clicking the next button (``data-testid=pagination-controls-next-
+        button-visible``). The page has no ``Page X of Y`` text element, so
+        we stop when the next button disappears, when a page yields no new
+        IDs, or when ``max_pages`` is hit.
+
+        Args:
+            max_pages: Maximum pages to load (1-10, default 3)
+
+        Returns:
+            {url, sections: {saved_jobs: text}, job_ids: [str]}
+        """
+        base_url = "https://www.linkedin.com/jobs-tracker/"
+        all_job_ids: list[str] = []
+        seen_ids: set[str] = set()
+        page_texts: list[str] = []
+        page_references: list[Reference] = []
+        section_errors: dict[str, dict[str, Any]] = {}
+
+        for page_num in range(max_pages):
+            try:
+                if page_num == 0:
+                    extracted = await self._extract_search_page(
+                        base_url, section_name="saved_jobs"
+                    )
+                else:
+                    await asyncio.sleep(_NAV_DELAY)
+                    advanced = await self._advance_saved_jobs_page(page_num)
+                    if not advanced:
+                        logger.debug(
+                            "No more saved-jobs pages after page %d, stopping",
+                            page_num,
+                        )
+                        break
+                    extracted = await self._extract_search_page_static(
+                        self._page.url, section_name="saved_jobs"
+                    )
+
+                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                    if extracted.error:
+                        section_errors["saved_jobs"] = extracted.error
+                    break
+
+                if not self._page.url.startswith(
+                    "https://www.linkedin.com/jobs-tracker/"
+                ):
+                    logger.debug(
+                        "Unexpected page URL after extraction: %s — "
+                        "skipping job ID extraction",
+                        self._page.url,
+                    )
+                    page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
+                    break
+
+                page_ids = await self._extract_job_ids()
+                new_ids = [jid for jid in page_ids if jid not in seen_ids]
+
+                if not new_ids:
+                    page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
+                    logger.debug(
+                        "No new saved-job IDs on page %d, stopping", page_num + 1
+                    )
+                    break
+
+                for jid in new_ids:
+                    seen_ids.add(jid)
+                    all_job_ids.append(jid)
+
+                page_texts.append(extracted.text)
+                if extracted.references:
+                    page_references.extend(extracted.references)
+
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Error on saved-jobs page %d: %s", page_num + 1, e)
+                section_errors["saved_jobs"] = build_issue_diagnostics(
+                    e,
+                    context="scrape_saved_jobs",
+                    target_url=self._page.url,
+                    section_name="saved_jobs",
+                )
+                break
+
+        result: dict[str, Any] = {
+            "url": base_url,
+            "sections": {"saved_jobs": "\n---\n".join(page_texts)}
+            if page_texts
+            else {},
+            "job_ids": all_job_ids,
+        }
+        if page_references:
+            result["references"] = {
+                "saved_jobs": dedupe_references(page_references, cap=15)
             }
         if section_errors:
             result["section_errors"] = section_errors

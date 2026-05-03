@@ -2164,6 +2164,283 @@ class TestSearchJobs:
         assert "references" not in result
 
 
+class TestScrapeSavedJobs:
+    """Tests for scrape_saved_jobs (jobs-tracker page)."""
+
+    @pytest.fixture(autouse=True)
+    def _set_tracker_url(self, mock_page):
+        mock_page.url = "https://www.linkedin.com/jobs-tracker/"
+
+    async def test_returns_job_ids(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Saved 1\nSaved 2"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111", "222"],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_saved_jobs(max_pages=1)
+
+        assert result["url"] == "https://www.linkedin.com/jobs-tracker/"
+        assert result["job_ids"] == ["111", "222"]
+        assert "saved_jobs" in result["sections"]
+
+    async def test_returns_references(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted(
+                    "Saved 1",
+                    [{"kind": "job", "url": "/jobs/view/111/", "text": "Job 111"}],
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_saved_jobs(max_pages=1)
+
+        assert result["references"] == {
+            "saved_jobs": [{"kind": "job", "url": "/jobs/view/111/", "text": "Job 111"}]
+        }
+
+    async def test_pagination_clicks_next_button(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        id_pages = iter([["100", "200"], ["300", "400"]])
+
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Page 1 text"),
+            ) as mock_extract_initial,
+            patch.object(
+                extractor,
+                "_extract_search_page_static",
+                new_callable=AsyncMock,
+                return_value=extracted("Page 2 text"),
+            ) as mock_extract_static,
+            patch.object(
+                extractor,
+                "_advance_saved_jobs_page",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_advance,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_saved_jobs(max_pages=2)
+
+        assert result["job_ids"] == ["100", "200", "300", "400"]
+        mock_extract_initial.assert_awaited_once()
+        mock_advance.assert_awaited_once_with(1)
+        mock_extract_static.assert_awaited_once()
+
+    async def test_pagination_stops_when_next_button_hidden(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Page 1 text"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_search_page_static",
+                new_callable=AsyncMock,
+                return_value=extracted("never reached"),
+            ) as mock_extract_static,
+            patch.object(
+                extractor,
+                "_advance_saved_jobs_page",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_advance,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["100", "200"],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_saved_jobs(max_pages=5)
+
+        assert result["job_ids"] == ["100", "200"]
+        mock_advance.assert_awaited_once_with(1)
+        mock_extract_static.assert_not_awaited()
+
+    async def test_early_stop_no_new_ids(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        id_pages = iter([["100", "200"], ["100", "200"]])
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ) as mock_extract_initial,
+            patch.object(
+                extractor,
+                "_extract_search_page_static",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ) as mock_extract_static,
+            patch.object(
+                extractor,
+                "_advance_saved_jobs_page",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_saved_jobs(max_pages=5)
+
+        assert result["job_ids"] == ["100", "200"]
+        assert mock_extract_initial.await_count == 1
+        assert mock_extract_static.await_count == 1
+
+    async def test_rate_limited_skips_ids_and_text(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted(_RATE_LIMITED_MSG),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["100"],
+            ) as mock_ids,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_saved_jobs(max_pages=1)
+
+        assert result["job_ids"] == []
+        assert result["sections"] == {}
+        mock_ids.assert_not_awaited()
+
+    async def test_url_redirect_skips_id_extraction(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/uas/login"
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Login page content"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_ids,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_saved_jobs(max_pages=2)
+
+        mock_ids.assert_not_awaited()
+        assert result["job_ids"] == []
+        assert result["sections"]["saved_jobs"] == "Login page content"
+
+
+class TestAdvanceSavedJobsPage:
+    """Tests for _advance_saved_jobs_page click-based pagination helper."""
+
+    async def test_returns_false_when_next_button_hidden(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        next_locator = MagicMock()
+        next_locator.count = AsyncMock(return_value=0)
+        mock_page.locator = MagicMock(return_value=next_locator)
+
+        result = await extractor._advance_saved_jobs_page(1)
+
+        assert result is False
+        mock_page.locator.assert_called_once_with(
+            '[data-testid="pagination-controls-next-button-visible"]'
+        )
+
+    async def test_clicks_and_waits_for_indicator(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        next_locator = MagicMock()
+        next_locator.count = AsyncMock(return_value=1)
+        next_first = MagicMock()
+        next_first.click = AsyncMock()
+        next_locator.first = next_first
+
+        indicator_locator = MagicMock()
+        indicator_locator.wait_for = AsyncMock()
+
+        def locator_side_effect(selector):
+            if "next-button-visible" in selector:
+                return next_locator
+            if "pagination-indicator-1" in selector and "aria-current" in selector:
+                return indicator_locator
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        mock_page.locator = MagicMock(side_effect=locator_side_effect)
+
+        result = await extractor._advance_saved_jobs_page(1)
+
+        assert result is True
+        next_first.click.assert_awaited_once()
+        indicator_locator.wait_for.assert_awaited_once()
+
+
 class TestStripLinkedInNoise:
     def test_strips_footer(self):
         text = "Bill Gates\nChair, Gates Foundation\n\nAbout\nAccessibility\nTalent Solutions\nCareers"

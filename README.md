@@ -40,6 +40,7 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 | `search_jobs` | Search for jobs with keywords and location filters | working |
 | `search_people` | Search for people by keywords and location | working |
 | `get_job_details` | Get detailed information about a specific job posting | working |
+| `get_saved_jobs` | List the user's saved jobs from the LinkedIn job tracker (returns job IDs usable with `get_job_details`) | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 <br/>

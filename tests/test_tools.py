@@ -27,6 +27,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_company = AsyncMock(return_value=scrape_result)
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
+    mock.scrape_saved_jobs = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
     mock.get_inbox = AsyncMock(return_value=scrape_result)
@@ -535,6 +536,25 @@ class TestJobTools:
         )
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
+
+    async def test_get_saved_jobs(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/jobs-tracker/",
+            "sections": {"saved_jobs": "Saved 1\nSaved 2"},
+            "job_ids": ["111", "222"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_saved_jobs")
+        result = await tool_fn(mock_context, max_pages=2, extractor=mock_extractor)
+        assert "saved_jobs" in result["sections"]
+        assert result["job_ids"] == ["111", "222"]
+        mock_extractor.scrape_saved_jobs.assert_awaited_once_with(max_pages=2)
 
 
 class TestGetSidebarProfilesTool:
