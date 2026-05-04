@@ -94,6 +94,10 @@
       "description": "Send a message to a LinkedIn user with explicit confirmation and optional profile URN support"
     },
     {
+      "name": "comment_on_post",
+      "description": "Post a top-level comment on a LinkedIn feed post with explicit confirmation"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
     }

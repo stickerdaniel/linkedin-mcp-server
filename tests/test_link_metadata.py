@@ -578,3 +578,75 @@ class TestClassifyLink:
         assert len(references) == 1
         assert references[0]["kind"] == "conversation"
         assert references[0]["url"] == "/messaging/thread/2-xyz/"
+
+
+class TestClassifyShareActivityPermalink:
+    """Share-style /posts/<slug>-activity-<id>-<sig>/ canonicalize to feed_post."""
+
+    _CANONICAL = "/feed/update/urn:li:activity:7000000000000000000/"
+
+    def test_share_permalink_classifies_as_feed_post(self):
+        result = classify_link(
+            "https://www.linkedin.com/posts/"
+            "someone-12345_topic-thoughts-activity-7000000000000000000-AbCd/"
+        )
+        assert result == ("feed_post", self._CANONICAL)
+
+    def test_share_permalink_with_query_string(self):
+        result = classify_link(
+            "https://www.linkedin.com/posts/"
+            "alice-bob_topic-activity-7000000000000000000-XYZ/"
+            "?utm_source=share"
+        )
+        assert result == ("feed_post", self._CANONICAL)
+
+    def test_share_permalink_minimal_slug(self):
+        """A bare slug (no underscores or hashtags) still matches."""
+        result = classify_link(
+            "https://www.linkedin.com/posts/foo-activity-7000000000000000000-XYZ/"
+        )
+        assert result == ("feed_post", self._CANONICAL)
+
+    def test_short_id_rejected(self):
+        """IDs below the 15-digit floor are not treated as activity ids."""
+        result = classify_link("https://www.linkedin.com/posts/foo-activity-12345-XYZ/")
+        assert result is None
+
+    def test_signature_required(self):
+        """The trailing -<sig> segment is required to match."""
+        # The URL ends after the digits (no trailing -<sig>) — should not
+        # match the share-permalink shape.
+        result = classify_link(
+            "https://www.linkedin.com/posts/foo-activity-7000000000000000000/"
+        )
+        assert result is None
+
+    def test_unrelated_posts_url_rejected(self):
+        """A /posts/<slug>/ without -activity-<id>- doesn't match."""
+        result = classify_link("https://www.linkedin.com/posts/some-article-headline/")
+        assert result is None
+
+    def test_share_and_canonical_dedupe(self):
+        """Anchor with share permalink + anchor with /feed/update/ collapse to one."""
+        references = build_references(
+            [
+                {
+                    "href": (
+                        "https://www.linkedin.com/posts/"
+                        "alice_topic-activity-7000000000000000000-XYZ/"
+                    ),
+                    "text": "Alice's post",
+                },
+                {
+                    "href": (
+                        "https://www.linkedin.com/feed/update/"
+                        "urn:li:activity:7000000000000000000/"
+                    ),
+                    "text": "",
+                },
+            ],
+            "posts",
+        )
+        assert len(references) == 1
+        assert references[0]["kind"] == "feed_post"
+        assert references[0]["url"] == self._CANONICAL

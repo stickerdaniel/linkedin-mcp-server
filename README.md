@@ -28,13 +28,14 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 
 | Tool | Description | Status |
 |------|-------------|--------|
-| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) | working |
+| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts). The `posts` section surfaces each post's permalink in `references.posts` (kind `feed_post`) so callers can chain to `comment_on_post`. | working |
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#407](https://github.com/stickerdaniel/linkedin-mcp-server/issues/407) |
 | `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
 | `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID | working |
 | `search_conversations` | Search messages by keyword | working |
 | `send_message` | Send a message to a LinkedIn user (requires confirmation) | working |
+| `comment_on_post` | Post a top-level comment on a feed post (requires confirmation) | working |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs) | working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
 | `search_jobs` | Search for jobs with keywords and location filters | working |
