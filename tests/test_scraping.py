@@ -2235,6 +2235,89 @@ class TestStripLinkedInNoise:
         assert strip_linkedin_noise(text) == "Feed post number 1\nActual post content"
 
 
+class TestNormalizeActivityUrl:
+    """Pure-function tests for LinkedInExtractor._normalize_activity_url."""
+
+    _CANONICAL = (
+        "https://www.linkedin.com/feed/update/urn:li:activity:7000000000000000000/"
+    )
+
+    def test_full_feed_update_url(self):
+        url = (
+            "https://www.linkedin.com/feed/update/urn:li:activity:7000000000000000000/"
+        )
+        assert LinkedInExtractor._normalize_activity_url(url) == self._CANONICAL
+
+    def test_feed_update_url_with_trailing_query(self):
+        url = (
+            "https://www.linkedin.com/feed/update/urn:li:activity:7000000000000000000/"
+            "?utm_source=share"
+        )
+        assert LinkedInExtractor._normalize_activity_url(url) == self._CANONICAL
+
+    def test_share_permalink(self):
+        url = (
+            "https://www.linkedin.com/posts/"
+            "someone-12345_topic-thoughts-activity-7000000000000000000-AbCd/"
+        )
+        assert LinkedInExtractor._normalize_activity_url(url) == self._CANONICAL
+
+    def test_bare_urn(self):
+        assert (
+            LinkedInExtractor._normalize_activity_url(
+                "urn:li:activity:7000000000000000000"
+            )
+            == self._CANONICAL
+        )
+
+    def test_bare_numeric_id(self):
+        assert (
+            LinkedInExtractor._normalize_activity_url("7000000000000000000")
+            == self._CANONICAL
+        )
+
+    def test_bare_numeric_id_with_whitespace(self):
+        assert (
+            LinkedInExtractor._normalize_activity_url("  7000000000000000000  ")
+            == self._CANONICAL
+        )
+
+    def test_short_numeric_rejected(self):
+        # 14 digits — below the 15-digit floor, ambiguous and not an
+        # activity id.
+        assert LinkedInExtractor._normalize_activity_url("12345678901234") is None
+
+    def test_short_id_in_share_permalink_rejected(self):
+        # Share permalink shape with a sub-15-digit numeric segment —
+        # gated by the >=15-digit floor so the helper does not silently
+        # canonicalize a bogus URL into a real-looking feed-update URL.
+        assert (
+            LinkedInExtractor._normalize_activity_url(
+                "https://www.linkedin.com/posts/user-news-activity-123-sig/"
+            )
+            is None
+        )
+
+    def test_short_id_in_urn_rejected(self):
+        # Same floor applied to the urn:li:activity:NN shape so a
+        # malformed URN cannot squeeze through.
+        assert LinkedInExtractor._normalize_activity_url("urn:li:activity:123") is None
+
+    def test_unrelated_url_rejected(self):
+        assert (
+            LinkedInExtractor._normalize_activity_url(
+                "https://www.linkedin.com/in/williamhgates/"
+            )
+            is None
+        )
+
+    def test_empty_string_rejected(self):
+        assert LinkedInExtractor._normalize_activity_url("") is None
+
+    def test_garbage_rejected(self):
+        assert LinkedInExtractor._normalize_activity_url("not a url") is None
+
+
 class TestActivityFeedExtraction:
     """Tests for activity page detection and wait behavior in _extract_page_once."""
 
@@ -2598,6 +2681,229 @@ class TestActivityFeedExtraction:
 
         # Should return whatever text is available, not crash
         assert result.text == tab_headers
+
+
+class TestActivityUrnExtraction:
+    """Tests for activity-feed URN harvesting from data-urn / data-id wrappers."""
+
+    _CANONICAL_URL = "/feed/update/urn:li:activity:7000000000000000000/"
+
+    async def test_urn_harvest_runs_on_activity_pages(self, mock_page):
+        """An activity URL triggers _harvest_activity_urns and emits feed_post refs."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Post content " * 50,
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+
+        synthesized_ref = {
+            "href": (
+                "https://www.linkedin.com/feed/update/"
+                "urn:li:activity:7000000000000000000/"
+            ),
+            "text": "Hendrik's post about Claude Code search",
+            "aria_label": "",
+            "title": "",
+            "heading": "",
+            "in_article": True,
+            "in_nav": False,
+            "in_footer": False,
+        }
+
+        with (
+            patch.object(
+                extractor,
+                "_harvest_activity_urns",
+                new_callable=AsyncMock,
+            ) as mock_harvest,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            mock_harvest.return_value = [synthesized_ref]
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/recent-activity/all/",
+                section_name="posts",
+            )
+            mock_harvest.assert_awaited_once()
+
+        feed_post_refs = [r for r in result.references if r["kind"] == "feed_post"]
+        assert len(feed_post_refs) == 1
+        assert feed_post_refs[0]["url"] == self._CANONICAL_URL
+        assert feed_post_refs[0]["text"] == "Hendrik's post about Claude Code search"
+
+    async def test_urn_harvest_skipped_on_non_activity_pages(self, mock_page):
+        """Non-activity sections (main_profile, experience, …) skip the harvest."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "Profile text", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch.object(
+                extractor,
+                "_harvest_activity_urns",
+                new_callable=AsyncMock,
+            ) as mock_harvest,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            mock_harvest.return_value = []
+            await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/",
+                section_name="main_profile",
+            )
+            mock_harvest.assert_not_awaited()
+
+    async def test_urn_harvest_dedupes_against_share_permalink_anchors(self, mock_page):
+        """A share-permalink anchor and a data-urn wrapper for the same post collapse."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Post content " * 50,
+                # Anchor-derived: a share permalink that classify_link rewrites
+                # to /feed/update/urn:li:activity:NNN/ via _SHARE_POST_PATH_RE.
+                "references": [
+                    {
+                        "href": (
+                            "https://www.linkedin.com/posts/"
+                            "alice_topic-activity-7000000000000000000-XYZ/"
+                        ),
+                        "text": "Alice's post",
+                        "aria_label": "",
+                        "title": "",
+                        "heading": "",
+                        "in_article": True,
+                        "in_nav": False,
+                        "in_footer": False,
+                    }
+                ],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+
+        wrapper_ref = {
+            "href": (
+                "https://www.linkedin.com/feed/update/"
+                "urn:li:activity:7000000000000000000/"
+            ),
+            "text": "Alice's post (from wrapper)",
+            "aria_label": "",
+            "title": "",
+            "heading": "",
+            "in_article": True,
+            "in_nav": False,
+            "in_footer": False,
+        }
+
+        with (
+            patch.object(
+                extractor,
+                "_harvest_activity_urns",
+                new_callable=AsyncMock,
+            ) as mock_harvest,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            mock_harvest.return_value = [wrapper_ref]
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/in/alice/recent-activity/all/",
+                section_name="posts",
+            )
+
+        feed_post_refs = [r for r in result.references if r["kind"] == "feed_post"]
+        # dedupe_references collapses by canonical URL — exactly one survives.
+        assert len(feed_post_refs) == 1
+        assert feed_post_refs[0]["url"] == self._CANONICAL_URL
+
+    async def test_harvest_helper_filters_invalid_urns(self, mock_page):
+        """_harvest_activity_urns drops non-activity / empty / missing URNs.
+
+        Note: the helper itself does *not* dedupe duplicate URNs. The
+        JS-side seen-set in the live evaluate prevents duplicates at the
+        DOM level, but if the JS were to return repeats the Python
+        helper passes them through. Cross-source dedup (e.g. URN entries
+        from this helper vs. share-permalink anchors in the same page)
+        happens downstream in `dedupe_references` via the canonical
+        URL — not here.
+        """
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                # Valid activity URN.
+                {
+                    "urn": "urn:li:activity:7000000000000000000",
+                    "text": "Alice's post",
+                },
+                # Duplicate URN — passed through unchanged by the helper
+                # (the JS seen-set normally prevents this; if it didn't,
+                # `dedupe_references` collapses by canonical URL later).
+                {
+                    "urn": "urn:li:activity:7000000000000000000",
+                    "text": "duplicate",
+                },
+                # Wrong URN type — must be filtered out.
+                {
+                    "urn": "urn:li:share:1234567890",
+                    "text": "share-not-activity",
+                },
+                # Empty URN — filtered.
+                {"urn": "", "text": "empty"},
+                # Missing urn key entirely — filtered.
+                {"text": "no urn key"},
+            ]
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        result = await extractor._harvest_activity_urns()
+
+        # Two activity URNs survive; the duplicate is intentionally
+        # *not* collapsed at this layer — see docstring.
+        assert len(result) == 2
+        for entry in result:
+            assert entry["href"] == (
+                "https://www.linkedin.com/feed/update/"
+                "urn:li:activity:7000000000000000000/"
+            )
+            assert entry["in_nav"] is False
+            assert entry["in_footer"] is False
 
 
 class TestSearchResultsExtraction:

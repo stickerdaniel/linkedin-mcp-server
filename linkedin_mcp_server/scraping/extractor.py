@@ -88,6 +88,28 @@ _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
+
+# Per AGENTS.md Scraping Rules, text-only signals must live behind an
+# explicit per-locale table. The submit button on the post-detail
+# comment composer is rendered in current LinkedIn UIs as
+# `<button componentkey="…commentButtonSection…">` with no aria-label
+# and no data-control-name — that componentkey selector is the primary,
+# locale-independent path and what `post_comment` matches first.
+# This table is the second-line fallback for older renderings (or
+# layouts where the componentkey hasn't rolled out for a locale yet).
+# Extend by appending entries verified against a real account; locales
+# not listed here fall through to the documented Ctrl+Enter
+# composer-submit shortcut, which works regardless of UI language.
+#
+# Known unsupported (would benefit from entries here): Spanish
+# ("Comentar"), Portuguese ("Comentar"), Dutch ("Reageren"),
+# Italian ("Commenta"), Polish ("Skomentuj").
+_COMMENT_SUBMIT_LABELS_BY_LOCALE: dict[str, str] = {
+    "en": "Comment",
+    "de": "Kommentieren",
+    "fr": "Commenter",
+}
+
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
@@ -379,6 +401,59 @@ class LinkedInExtractor:
             "recipient_selected": recipient_selected,
             "sent": sent,
         }
+
+    @staticmethod
+    def _post_action_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        posted: bool = False,
+        comment_visible: bool = False,
+    ) -> dict[str, Any]:
+        """Build a structured response for the comment_on_post tool."""
+        return {
+            "url": url,
+            "status": status,
+            "message": message,
+            "posted": posted,
+            "comment_visible": comment_visible,
+        }
+
+    @staticmethod
+    def _normalize_activity_url(post_url: str) -> str | None:
+        """Normalize a post reference to a canonical feed-update URL.
+
+        LinkedIn exposes a feed post under several shapes: the canonical
+        ``/feed/update/urn:li:activity:{id}/`` URL, the share-style
+        ``/posts/<slug>-activity-{id}-<sig>/`` permalink, the bare URN, or
+        the bare numeric activity id. All carry the same activity id; this
+        helper extracts it and returns the canonical detail URL so
+        ``post_comment`` always navigates to a single shape regardless of
+        what the caller passed in.
+
+        Returns ``None`` when no activity id can be extracted.
+        """
+        # All branches use the same >=15-digit floor as
+        # _SHARE_POST_PATH_RE in scraping/link_metadata.py — LinkedIn
+        # activity ids are 19 digits today; the floor tolerates future
+        # width while rejecting ambiguous short numerics in URLs that
+        # happen to contain unrelated -activity-NN- segments.
+
+        # urn:li:activity:NUMBERS pattern (handles both bare URNs and the
+        # full /feed/update/ shape that embeds the URN).
+        m = re.search(r"urn:li:activity:(\d{15,})", post_url)
+        if m:
+            return f"https://www.linkedin.com/feed/update/urn:li:activity:{m.group(1)}/"
+        # /posts/<slug>-activity-{id}-<sig>/ share permalinks.
+        m = re.search(r"-activity-(\d{15,})-", post_url)
+        if m:
+            return f"https://www.linkedin.com/feed/update/urn:li:activity:{m.group(1)}/"
+        # Bare numeric id.
+        stripped = post_url.strip()
+        if re.fullmatch(r"\d{15,}", stripped):
+            return f"https://www.linkedin.com/feed/update/urn:li:activity:{stripped}/"
+        return None
 
     async def _log_navigation_failure(
         self,
@@ -931,9 +1006,30 @@ class LinkedInExtractor:
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
+
+        # Activity feed pages render the post timestamp/permalink as a
+        # <button>, not an <a>, so _extract_root_content (which only collects
+        # anchor hrefs) misses the URN that identifies each post. Harvest
+        # data-urn / data-id attributes from post wrappers and synthesize
+        # references with the canonical /feed/update/urn:li:activity:{id}/
+        # URL — these flow through the same build_references pipeline and
+        # dedupe against any share-permalink anchors that classify_link picks
+        # up via _SHARE_POST_PATH_RE.
+        #
+        # Order matters: prepend the wrapper-derived URN refs so they win the
+        # per-section reference cap over generic anchors (post attachments,
+        # author mentions, lnkd.in shortlinks). The post permalink is the
+        # canonical identifier callers need to chain into comment_on_post —
+        # losing it to a cap that fills with post-attachment anchors would
+        # defeat the purpose of harvesting.
+        references_raw: list[Any] = []
+        if is_activity:
+            references_raw.extend(await self._harvest_activity_urns())
+        references_raw.extend(raw_result["references"])
+
         return ExtractedSection(
             text=cleaned,
-            references=build_references(raw_result["references"], section_name),
+            references=build_references(references_raw, section_name),
         )
 
     async def _extract_overlay(
@@ -2838,6 +2934,327 @@ class LinkedInExtractor:
             recipient_selected=recipient_selected,
             sent=True,
         )
+
+    async def post_comment(
+        self,
+        post_url: str,
+        comment_text: str,
+        *,
+        confirm_post: bool,
+    ) -> dict[str, Any]:
+        """Post a top-level comment on a LinkedIn feed post.
+
+        Mirrors the confirmation-gated, JS-driven write pattern of
+        :meth:`send_message`. patchright's actionability checks block
+        normal ``.click()`` and ``.type()`` calls on the React-driven
+        comment composer, so focusing and submitting both go through
+        ``page.evaluate()``.
+
+        Locale-independence: the composer and submit button selectors
+        layer an ``aria-label`` hint on top of a plain
+        ``[role=textbox][contenteditable=true]`` / ``button[type=submit]``
+        fallback, so detection works regardless of the LinkedIn UI
+        language. Activity URL navigation is purely structural — no
+        text labels are read.
+
+        Args:
+            post_url: A feed post URL or activity reference. Accepts the
+                ``/feed/update/urn:li:activity:{id}/`` URL, the share-style
+                ``/posts/<slug>-activity-{id}-<sig>/`` permalink, a bare
+                ``urn:li:activity:{id}`` URN, or the bare numeric id.
+            comment_text: The comment body to post.
+            confirm_post: Must be True to actually submit (False does a
+                dry run that locates the composer and returns
+                ``confirmation_required`` without typing).
+        """
+        canonical_url = self._normalize_activity_url(post_url)
+        if not canonical_url:
+            return self._post_action_result(
+                post_url,
+                "post_unavailable",
+                "Could not extract a LinkedIn activity id from the provided URL.",
+            )
+
+        await self._navigate_to_page(canonical_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Post detail page did not load for %s", canonical_url)
+
+        await handle_modal_close(self._page)
+
+        # The post detail page hydrates the comment composer asynchronously
+        # — `wait_for_selector("main")` returns long before the Tiptap
+        # editor (`<div role="textbox" contenteditable="true">`) appears in
+        # the DOM. Wait explicitly for any contenteditable textbox to mount
+        # so the focus/type evaluate below has something to act on.
+        # Selector kept structural (role + contenteditable presence) so it
+        # works regardless of UI locale.
+        try:
+            await self._page.wait_for_selector(
+                'div[role="textbox"][contenteditable="true"]',
+                timeout=10000,
+                state="visible",
+            )
+        except PlaywrightTimeoutError:
+            logger.debug(
+                "Comment composer did not hydrate within timeout on %s",
+                canonical_url,
+            )
+
+        # Locate and focus the comment composer. Locale-independent
+        # strategy mirroring send_message (extractor.py:2780-2790):
+        # aria-label hint first, generic [role=textbox][contenteditable]
+        # fallback so the German "Kommentar verfassen" / French
+        # "Ajouter un commentaire" cases still resolve. We pick the first
+        # *visible* match (offsetWidth/offsetHeight/getClientRects) to
+        # skip hidden composer skeletons LinkedIn renders for related
+        # posts in side rails.
+        composer_focused = await self._page.evaluate(
+            """() => {
+                const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                    + 'div[role="textbox"][contenteditable="true"]';
+                const el = Array.from(document.querySelectorAll(sel))
+                    .find(node => node.offsetWidth || node.offsetHeight || node.getClientRects().length);
+                if (!el) return false;
+                el.focus();
+                return true;
+            }"""
+        )
+        if not composer_focused:
+            return self._post_action_result(
+                self._page.url,
+                "composer_unavailable",
+                "LinkedIn did not expose a usable comment composer on this post.",
+            )
+
+        if not confirm_post:
+            return self._post_action_result(
+                self._page.url,
+                "confirmation_required",
+                "Set confirm_post=true to submit the comment.",
+            )
+
+        # patchright quirk: same as send_message — type via the keyboard
+        # against the focused element. delay=15 lets React fire the
+        # input/keyup events that enable the submit button.
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(comment_text, delay=15)
+        await asyncio.sleep(0.5)
+
+        # Submit. LinkedIn's current React UI renders the submit control
+        # as `<button type="button" componentkey="…commentButtonSection…">`
+        # with the visible label inside nested <span>s and *no*
+        # aria-label and *no* data-control-name. The componentkey
+        # attribute is part of LinkedIn's React component identity and
+        # is locale-independent, so we anchor on its substring match.
+        # The aria-label fallbacks come from the explicit per-locale
+        # table _COMMENT_SUBMIT_LABELS_BY_LOCALE (per AGENTS.md scraping
+        # rules — text-only signals must live behind an explicit table).
+        #
+        # React handlers need a full mousedown → mouseup → click event
+        # sequence to fire reliably; a bare `btn.click()` sometimes
+        # registers as a synthetic event but skips the parent handlers
+        # that gate the actual submit. Dispatching the three events
+        # explicitly via MouseEvent matches what a real cursor produces.
+        # Final fallback is the documented Ctrl+Enter LinkedIn
+        # comment-submit shortcut, which works irrespective of locale.
+        click_diag = await self._page.evaluate(
+            """({ labels }) => {
+                // querySelectorAll returns in document order, so a
+                // broad-but-low-priority match (overflow menus with the
+                // word 'post' in their aria-label) can outrank the
+                // submit button if we naively .find() the first match.
+                // Collect all candidates, then sort so the most
+                // specific signal (componentkey containing
+                // 'commentButtonSection') wins. The aria-label clauses
+                // stay as fallbacks for older LinkedIn renderings,
+                // sourced from the per-locale table on the Python side
+                // — broader aria-label substring matches were dropped
+                // because LinkedIn renders the post overflow as
+                // 'Open control menu for post by NAME', which would
+                // substring-match 'post' and click the wrong target.
+                const labelSelectors = labels
+                    .map(label => `button[aria-label="${label}"]`)
+                    .join(',');
+                const sel = 'button[componentkey*="commentButtonSection"],'
+                    + 'button[type="submit"][data-control-name*="comment" i]'
+                    + (labelSelectors ? ',' + labelSelectors : '');
+                const candidates = Array.from(document.querySelectorAll(sel))
+                    .filter(b =>
+                        !b.disabled
+                        && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
+                    );
+                candidates.sort((a, b) => {
+                    const ak = (a.getAttribute('componentkey') || '')
+                        .includes('commentButtonSection') ? 0 : 1;
+                    const bk = (b.getAttribute('componentkey') || '')
+                        .includes('commentButtonSection') ? 0 : 1;
+                    return ak - bk;
+                });
+                const btn = candidates[0];
+                if (!btn) return { clicked: false, reason: 'no_candidate', count: candidates.length };
+                const rect = btn.getBoundingClientRect();
+                const opts = {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    button: 0,
+                    clientX: rect.left + rect.width / 2,
+                    clientY: rect.top + rect.height / 2,
+                };
+                ['mousedown', 'mouseup', 'click'].forEach((type) => {
+                    btn.dispatchEvent(new MouseEvent(type, opts));
+                });
+                return {
+                    clicked: true,
+                    component_key: btn.getAttribute('componentkey'),
+                    aria_label: btn.getAttribute('aria-label'),
+                    type: btn.getAttribute('type'),
+                };
+            }""",
+            arg={"labels": list(_COMMENT_SUBMIT_LABELS_BY_LOCALE.values())},
+        )
+        logger.info("comment_on_post submit click diag: %s", click_diag)
+        if not click_diag.get("clicked"):
+            # Fallback: documented LinkedIn comment-submit shortcut.
+            await self._page.keyboard.down("Control")
+            await self._page.keyboard.press("Enter")
+            await self._page.keyboard.up("Control")
+
+        # Verify-after-action. Two-stage check, because
+        # `body.innerText.includes(comment_text)` alone is a false
+        # positive: the typed text already sits in the contenteditable
+        # composer's DOM and contributes to body.innerText whether or
+        # not the submit actually landed. The reliable structural signal
+        # is the composer *emptying* — LinkedIn clears the Tiptap editor
+        # only after the comment is accepted server-side. We poll for
+        # that, then assert the comment text is still visible elsewhere
+        # on the page (i.e. in the comments thread).
+        composer_cleared = await self._wait_for_composer_clear()
+        body_visible = await self._message_text_visible(comment_text)
+        if not composer_cleared:
+            return self._post_action_result(
+                self._page.url,
+                "post_unverified",
+                "Comment submitted but the composer did not clear — LinkedIn may have rejected the post.",
+                posted=False,
+                comment_visible=False,
+            )
+        if not body_visible:
+            return self._post_action_result(
+                self._page.url,
+                "post_unverified",
+                "Composer cleared but the comment text was not visible in the comments thread.",
+                posted=True,
+                comment_visible=False,
+            )
+
+        return self._post_action_result(
+            self._page.url,
+            "posted",
+            "Comment posted.",
+            posted=True,
+            comment_visible=True,
+        )
+
+    async def _wait_for_composer_clear(self) -> bool:
+        """Wait until the comment composer's contenteditable becomes empty.
+
+        Used as the structural success signal after submitting a comment:
+        LinkedIn clears the Tiptap composer only when the comment has been
+        accepted server-side. Returns True if the composer is empty (or
+        has gone away entirely) within the page's default timeout, False
+        on timeout — which means submit silently failed.
+        """
+        try:
+            await self._page.wait_for_function(
+                """() => {
+                    const el = document.querySelector(
+                        'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                        + 'div[role="textbox"][contenteditable="true"]'
+                    );
+                    if (!el) return true;
+                    const text = (el.innerText || '').trim();
+                    // Tiptap renders an empty editor with a placeholder
+                    // <p data-placeholder="..." class="is-empty"><br></p>,
+                    // so .innerText is an empty string when cleared.
+                    return text === '';
+                }"""
+            )
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
+    async def _harvest_activity_urns(self) -> list[dict[str, Any]]:
+        """Collect post URNs from activity-feed post wrappers.
+
+        On `/recent-activity/all/` pages, LinkedIn renders each post's
+        timestamp/permalink as a ``<button>`` rather than an ``<a>``, so
+        :meth:`_extract_root_content` (which only collects anchor hrefs)
+        cannot see the URN that identifies the post. Each post wrapper,
+        however, carries a ``data-urn="urn:li:activity:NNN"`` (or
+        ``data-id`` on older variants) attribute that survives across
+        locales and layout tweaks.
+
+        This helper walks those wrappers and returns synthesized raw
+        references with the canonical ``/feed/update/urn:li:activity:NNN/``
+        permalink as ``href`` so they flow through the standard
+        :func:`build_references` pipeline. Anchor-derived references that
+        ``classify_link`` rewrites from ``/posts/<slug>-activity-NNN-XXX/``
+        share permalinks share the same canonical URL, so
+        :func:`dedupe_references` collapses any overlap.
+
+        Per ``AGENTS.md`` Scraping Rules: detection here uses attribute
+        *presence* and a stable URN prefix — never locale-dependent text.
+        """
+        raw_urns = await self._page.evaluate(
+            """() => {
+                const seen = new Set();
+                const out = [];
+                const els = document.querySelectorAll(
+                    '[data-urn^="urn:li:activity:"],'
+                    + '[data-id^="urn:li:activity:"]'
+                );
+                for (const el of els) {
+                    const urn = el.getAttribute('data-urn')
+                        || el.getAttribute('data-id');
+                    if (!urn || seen.has(urn)) continue;
+                    seen.add(urn);
+                    const text = (el.innerText || '')
+                        .replace(/\\s+/g, ' ')
+                        .trim()
+                        .slice(0, 120);
+                    out.push({ urn, text });
+                }
+                return out;
+            }"""
+        )
+
+        synthetic: list[dict[str, Any]] = []
+        if not isinstance(raw_urns, list):
+            return synthetic
+        for entry in raw_urns:
+            if not isinstance(entry, dict):
+                continue
+            urn = entry.get("urn", "") or ""
+            if not isinstance(urn, str) or not urn.startswith("urn:li:activity:"):
+                continue
+            synthetic.append(
+                {
+                    "href": f"https://www.linkedin.com/feed/update/{urn}/",
+                    "text": entry.get("text", ""),
+                    "aria_label": "",
+                    "title": "",
+                    "heading": "",
+                    "in_article": True,
+                    "in_nav": False,
+                    "in_footer": False,
+                }
+            )
+        return synthetic
 
     async def _extract_root_content(
         self,

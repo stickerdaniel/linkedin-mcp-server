@@ -112,6 +112,14 @@ _JOB_PATH_RE = re.compile(r"^/jobs/view/(\d+)")
 _NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
 _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
+# Share-style post permalinks LinkedIn renders on /recent-activity/all/ pages
+# alongside the /feed/update/ form. Shape:
+#   /posts/<slug>-activity-<19-digit-id>-<short-sig>/
+# The 15+ digit floor avoids matching unrelated /posts/<slug>-... URLs that
+# happen to contain shorter numeric segments. Both LinkedIn shapes carry the
+# same activity id, so we canonicalize to /feed/update/urn:li:activity:{id}/
+# and emit kind="feed_post" to fold into the existing reference pipeline.
+_SHARE_POST_PATH_RE = re.compile(r"^/posts/[^/?#]*-activity-(\d{15,})-[^/?#]+/?$")
 _MESSAGING_THREAD_PATH_RE = re.compile(r"^/messaging/thread/([^/?#]+)")
 _MAX_REDIRECT_UNWRAP_DEPTH = 5
 
@@ -234,6 +242,12 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
 
     if match := _FEED_PATH_RE.match(path):
         return "feed_post", f"/feed/update/{match.group(1)}/"
+
+    if match := _SHARE_POST_PATH_RE.match(path):
+        return (
+            "feed_post",
+            f"/feed/update/urn:li:activity:{match.group(1)}/",
+        )
 
     if match := _MESSAGING_THREAD_PATH_RE.match(path):
         return "conversation", f"/messaging/thread/{match.group(1)}/"

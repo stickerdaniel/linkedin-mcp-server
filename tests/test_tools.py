@@ -33,6 +33,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
+    mock.post_comment = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -739,6 +740,123 @@ class TestMessagingTools:
             )
 
 
+class TestPostTool:
+    async def test_comment_on_post_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:7000000000000000000/",
+            "status": "posted",
+            "message": "Comment posted.",
+            "posted": True,
+            "comment_visible": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "comment_on_post")
+        result = await tool_fn(
+            "urn:li:activity:7000000000000000000",
+            "Great point!",
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "posted"
+        assert result["posted"] is True
+        assert result["comment_visible"] is True
+        mock_extractor.post_comment.assert_awaited_once_with(
+            "urn:li:activity:7000000000000000000",
+            "Great point!",
+            confirm_post=True,
+        )
+
+    async def test_comment_on_post_dry_run(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:7000000000000000000/",
+            "status": "confirmation_required",
+            "message": "Set confirm_post=true to submit the comment.",
+            "posted": False,
+            "comment_visible": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "comment_on_post")
+        result = await tool_fn(
+            "https://www.linkedin.com/feed/update/urn:li:activity:7000000000000000000/",
+            "Great point!",
+            False,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "confirmation_required"
+        assert result["posted"] is False
+        mock_extractor.post_comment.assert_awaited_once_with(
+            "https://www.linkedin.com/feed/update/urn:li:activity:7000000000000000000/",
+            "Great point!",
+            confirm_post=False,
+        )
+
+    async def test_comment_on_post_composer_unavailable(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:7000000000000000000/",
+            "status": "composer_unavailable",
+            "message": "LinkedIn did not expose a usable comment composer on this post.",
+            "posted": False,
+            "comment_visible": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "comment_on_post")
+        result = await tool_fn(
+            "urn:li:activity:7000000000000000000",
+            "Great point!",
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "composer_unavailable"
+        assert result["posted"] is False
+
+    async def test_comment_on_post_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.post_comment = AsyncMock(side_effect=SessionExpiredError())
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "comment_on_post")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn(
+                "urn:li:activity:7000000000000000000",
+                "Great point!",
+                True,
+                mock_context,
+                extractor=mock_extractor,
+            )
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.server import create_mcp_server
@@ -759,6 +877,7 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "comment_on_post",
             "close_session",
         )
 
