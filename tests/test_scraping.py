@@ -2287,6 +2287,22 @@ class TestNormalizeActivityUrl:
         # activity id.
         assert LinkedInExtractor._normalize_activity_url("12345678901234") is None
 
+    def test_short_id_in_share_permalink_rejected(self):
+        # Share permalink shape with a sub-15-digit numeric segment —
+        # gated by the >=15-digit floor so the helper does not silently
+        # canonicalize a bogus URL into a real-looking feed-update URL.
+        assert (
+            LinkedInExtractor._normalize_activity_url(
+                "https://www.linkedin.com/posts/user-news-activity-123-sig/"
+            )
+            is None
+        )
+
+    def test_short_id_in_urn_rejected(self):
+        # Same floor applied to the urn:li:activity:NN shape so a
+        # malformed URN cannot squeeze through.
+        assert LinkedInExtractor._normalize_activity_url("urn:li:activity:123") is None
+
     def test_unrelated_url_rejected(self):
         assert (
             LinkedInExtractor._normalize_activity_url(
@@ -2838,8 +2854,17 @@ class TestActivityUrnExtraction:
         assert len(feed_post_refs) == 1
         assert feed_post_refs[0]["url"] == self._CANONICAL_URL
 
-    async def test_harvest_helper_filters_invalid_urns_and_dedupes(self, mock_page):
-        """_harvest_activity_urns drops non-activity URNs and dedupes within itself."""
+    async def test_harvest_helper_filters_invalid_urns(self, mock_page):
+        """_harvest_activity_urns drops non-activity / empty / missing URNs.
+
+        Note: the helper itself does *not* dedupe duplicate URNs. The
+        JS-side seen-set in the live evaluate prevents duplicates at the
+        DOM level, but if the JS were to return repeats the Python
+        helper passes them through. Cross-source dedup (e.g. URN entries
+        from this helper vs. share-permalink anchors in the same page)
+        happens downstream in `dedupe_references` via the canonical
+        URL — not here.
+        """
         mock_page.evaluate = AsyncMock(
             return_value=[
                 # Valid activity URN.
@@ -2847,9 +2872,9 @@ class TestActivityUrnExtraction:
                     "urn": "urn:li:activity:7000000000000000000",
                     "text": "Alice's post",
                 },
-                # Duplicate of the first — JS-side seen-set should prevent
-                # this in practice, but the Python side defensively dedupes
-                # too via dict-key on the synthesized href in build_references.
+                # Duplicate URN — passed through unchanged by the helper
+                # (the JS seen-set normally prevents this; if it didn't,
+                # `dedupe_references` collapses by canonical URL later).
                 {
                     "urn": "urn:li:activity:7000000000000000000",
                     "text": "duplicate",
@@ -2869,7 +2894,9 @@ class TestActivityUrnExtraction:
 
         result = await extractor._harvest_activity_urns()
 
-        assert len(result) == 2  # Two activity URNs survive (one is a dup).
+        # Two activity URNs survive; the duplicate is intentionally
+        # *not* collapsed at this layer — see docstring.
+        assert len(result) == 2
         for entry in result:
             assert entry["href"] == (
                 "https://www.linkedin.com/feed/update/"

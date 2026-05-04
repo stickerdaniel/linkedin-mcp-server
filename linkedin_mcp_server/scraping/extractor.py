@@ -88,6 +88,28 @@ _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
+
+# Per AGENTS.md Scraping Rules, text-only signals must live behind an
+# explicit per-locale table. The submit button on the post-detail
+# comment composer is rendered in current LinkedIn UIs as
+# `<button componentkey="…commentButtonSection…">` with no aria-label
+# and no data-control-name — that componentkey selector is the primary,
+# locale-independent path and what `post_comment` matches first.
+# This table is the second-line fallback for older renderings (or
+# layouts where the componentkey hasn't rolled out for a locale yet).
+# Extend by appending entries verified against a real account; locales
+# not listed here fall through to the documented Ctrl+Enter
+# composer-submit shortcut, which works regardless of UI language.
+#
+# Known unsupported (would benefit from entries here): Spanish
+# ("Comentar"), Portuguese ("Comentar"), Dutch ("Reageren"),
+# Italian ("Commenta"), Polish ("Skomentuj").
+_COMMENT_SUBMIT_LABELS_BY_LOCALE: dict[str, str] = {
+    "en": "Comment",
+    "de": "Kommentieren",
+    "fr": "Commenter",
+}
+
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
@@ -412,18 +434,22 @@ class LinkedInExtractor:
 
         Returns ``None`` when no activity id can be extracted.
         """
+        # All branches use the same >=15-digit floor as
+        # _SHARE_POST_PATH_RE in scraping/link_metadata.py — LinkedIn
+        # activity ids are 19 digits today; the floor tolerates future
+        # width while rejecting ambiguous short numerics in URLs that
+        # happen to contain unrelated -activity-NN- segments.
+
         # urn:li:activity:NUMBERS pattern (handles both bare URNs and the
         # full /feed/update/ shape that embeds the URN).
-        m = re.search(r"urn:li:activity:(\d+)", post_url)
+        m = re.search(r"urn:li:activity:(\d{15,})", post_url)
         if m:
             return f"https://www.linkedin.com/feed/update/urn:li:activity:{m.group(1)}/"
         # /posts/<slug>-activity-{id}-<sig>/ share permalinks.
-        m = re.search(r"-activity-(\d+)-", post_url)
+        m = re.search(r"-activity-(\d{15,})-", post_url)
         if m:
             return f"https://www.linkedin.com/feed/update/urn:li:activity:{m.group(1)}/"
-        # Bare numeric id. LinkedIn activity ids are 19 digits today; gate
-        # on >=15 to tolerate future width while rejecting ambiguous short
-        # numerics that are clearly not activity ids.
+        # Bare numeric id.
         stripped = post_url.strip()
         if re.fullmatch(r"\d{15,}", stripped):
             return f"https://www.linkedin.com/feed/update/urn:li:activity:{stripped}/"
@@ -3024,8 +3050,9 @@ class LinkedInExtractor:
         # aria-label and *no* data-control-name. The componentkey
         # attribute is part of LinkedIn's React component identity and
         # is locale-independent, so we anchor on its substring match.
-        # The legacy aria-label / type="submit" / data-control-name
-        # selectors stay as fallbacks for older renderings.
+        # The aria-label fallbacks come from the explicit per-locale
+        # table _COMMENT_SUBMIT_LABELS_BY_LOCALE (per AGENTS.md scraping
+        # rules — text-only signals must live behind an explicit table).
         #
         # React handlers need a full mousedown → mouseup → click event
         # sequence to fire reliably; a bare `btn.click()` sometimes
@@ -3035,30 +3062,31 @@ class LinkedInExtractor:
         # Final fallback is the documented Ctrl+Enter LinkedIn
         # comment-submit shortcut, which works irrespective of locale.
         click_diag = await self._page.evaluate(
-            """() => {
+            """({ labels }) => {
                 // querySelectorAll returns in document order, so a
                 // broad-but-low-priority match (overflow menus with the
                 // word 'post' in their aria-label) can outrank the
                 // submit button if we naively .find() the first match.
                 // Collect all candidates, then sort so the most
                 // specific signal (componentkey containing
-                // 'commentButtonSection') wins. The aria-label
-                // 'Comment' clause stays as a fallback for older
-                // LinkedIn renderings; the broader aria-label='Post'
-                // clause is dropped because LinkedIn renders the
-                // overall post overflow as 'Open control menu for post
-                // by NAME', which substring-matches 'post' and is the
-                // wrong target.
-                const candidates = Array.from(document.querySelectorAll(
-                    'button[componentkey*="commentButtonSection"],'
-                    + 'button[type="submit"][data-control-name*="comment" i],'
-                    + 'button[aria-label="Comment"],'
-                    + 'button[aria-label="Kommentieren"],'
-                    + 'button[aria-label="Commenter"]'
-                )).filter(b =>
-                    !b.disabled
-                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
-                );
+                // 'commentButtonSection') wins. The aria-label clauses
+                // stay as fallbacks for older LinkedIn renderings,
+                // sourced from the per-locale table on the Python side
+                // — broader aria-label substring matches were dropped
+                // because LinkedIn renders the post overflow as
+                // 'Open control menu for post by NAME', which would
+                // substring-match 'post' and click the wrong target.
+                const labelSelectors = labels
+                    .map(label => `button[aria-label="${label}"]`)
+                    .join(',');
+                const sel = 'button[componentkey*="commentButtonSection"],'
+                    + 'button[type="submit"][data-control-name*="comment" i]'
+                    + (labelSelectors ? ',' + labelSelectors : '');
+                const candidates = Array.from(document.querySelectorAll(sel))
+                    .filter(b =>
+                        !b.disabled
+                        && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
+                    );
                 candidates.sort((a, b) => {
                     const ak = (a.getAttribute('componentkey') || '')
                         .includes('commentButtonSection') ? 0 : 1;
@@ -3086,7 +3114,8 @@ class LinkedInExtractor:
                     aria_label: btn.getAttribute('aria-label'),
                     type: btn.getAttribute('type'),
                 };
-            }"""
+            }""",
+            arg={"labels": list(_COMMENT_SUBMIT_LABELS_BY_LOCALE.values())},
         )
         logger.info("comment_on_post submit click diag: %s", click_diag)
         if not click_diag.get("clicked"):
