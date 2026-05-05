@@ -42,7 +42,7 @@ def register_application_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Save Job",
-        annotations={"destructiveHint": False, "openWorldHint": True},
+        annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"job", "actions"},
         exclude_args=["extractor"],
     )
@@ -73,17 +73,13 @@ def register_application_tools(
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="save_job"
             )
-            logger.info(
-                "Saving job: %s (confirm_send=%s)", job_id, confirm_send
-            )
+            logger.info("Saving job: %s (confirm_send=%s)", job_id, confirm_send)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Loading job posting"
             )
 
-            result = await extractor.save_job(
-                job_id, confirm_send=confirm_send
-            )
+            result = await extractor.save_job(job_id, confirm_send=confirm_send)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

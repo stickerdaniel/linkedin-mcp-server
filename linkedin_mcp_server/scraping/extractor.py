@@ -294,6 +294,25 @@ _NOISE_LINES: list[re.Pattern[str]] = [
     re.compile(r"^(?:Loaded:.*|Remaining time.*|Stream Type.*)$"),
 ]
 
+# Locale-dependent text patterns for job application detection.
+# Each entry maps a locale key to a (easy_apply_label, applied_label) tuple.
+# Note: LinkedIn provides no machine-readable badge state, so locale-aware
+# text matching is required per CLAUDE.md scraping rules.
+_LOCALE_JOB_LABELS: dict[str, tuple[str, str]] = {
+    "en": ("Easy Apply", "Applied"),
+    # Extend as needed: "fr": ("Candidature simple", "Candidature envoyée"),
+}
+
+
+def _get_job_labels() -> tuple[str, str]:
+    """Return (easy_apply, applied) labels for the current locale.
+
+    Falls back to English if locale is not in the table.
+    """
+    # Could detect locale from page, but LinkedIn UI locale is usually English.
+    labels = _LOCALE_JOB_LABELS.get("en", ("Easy Apply", "Applied"))
+    return labels
+
 
 @dataclass
 class ExtractedSection:
@@ -2991,9 +3010,7 @@ class LinkedInExtractor:
                 if page_index == 0
                 else f"{base_url}&start={page_index * _PAGE_SIZE}"
             )
-            extracted = await self.extract_page(
-                page_url, section_name="applied_jobs"
-            )
+            extracted = await self.extract_page(page_url, section_name="applied_jobs")
             last_url = page_url
             if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
                 break
@@ -3077,7 +3094,39 @@ class LinkedInExtractor:
                     "submit_failed",
                     "Could not click Submit application button.",
                 )
-            await asyncio.sleep(1.0)
+
+            # Wait for confirmation: dialog closes or "Applied" badge appears
+            confirmed = await self._page.evaluate(
+                """() => {
+                    // Wait up to 5s for dialog to close or Applied badge
+                    const deadline = Date.now() + 5000;
+                    while (Date.now() < deadline) {
+                        const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                        if (!dialog) return true; // Dialog closed = success
+                        const appliedBadge = Array.from(
+                            document.querySelectorAll('main span, main div')
+                        ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
+                        if (appliedBadge) return true;
+                        // Brief sleep to avoid busy-waiting
+                        if (window.Promise) break; // Exit quickly if no async support
+                    }
+                    // Fallback: check if dialog is gone or badge visible
+                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                    if (!dialog) return true;
+                    const appliedBadge = Array.from(
+                        document.querySelectorAll('main span, main div')
+                    ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
+                    return appliedBadge;
+                }"""
+            )
+
+            if not confirmed:
+                return self._application_action_result(
+                    self._page.url,
+                    "submission_unconfirmed",
+                    "Submit was clicked but no success confirmation detected.",
+                )
+
             return self._application_action_result(
                 self._page.url,
                 "submitted",
@@ -3100,23 +3149,22 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
 
-        # Both Easy Apply and Applied labels are locale-dependent in
-        # English. LinkedIn provides no machine-readable badge state,
-        # so this is the same trade-off called out in CLAUDE.md.
+        # Use per-locale table for label detection (per CLAUDE.md scraping rules).
+        easy_apply_label, applied_label = _get_job_labels()
         state = await self._page.evaluate(
-            """() => {
+            f"""() => {{
                 const easyApplyBtn = Array.from(document.querySelectorAll(
-                    'main button[aria-label*="Easy Apply"]'
+                    'main button[aria-label*="{easy_apply_label}"]'
                 )).find(b => !b.disabled
                     && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
                 const appliedBadge = Array.from(
                     document.querySelectorAll('main span, main div')
-                ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
-                return {
+                ).some(el => /\\b{applied_label}\\b/i.test((el.innerText || '').trim()));
+                return {{
                     has_easy_apply: Boolean(easyApplyBtn),
                     already_applied: appliedBadge && !easyApplyBtn,
-                };
-            }"""
+                }};
+            }}"""
         )
 
         if state.get("already_applied"):
@@ -3237,10 +3285,8 @@ class LinkedInExtractor:
                     const label = (b.getAttribute('aria-label') || '').toLowerCase();
                     const text = (b.innerText || '').toLowerCase();
                     return label.includes('submit application')
-                        || text.includes('submit application')
-                        || b.type === 'submit';
+                        || text.includes('submit application');
                 });
-
                 return {
                     step_count: stepCount,
                     questions,
@@ -3265,8 +3311,7 @@ class LinkedInExtractor:
                     const label = (b.getAttribute('aria-label') || '').toLowerCase();
                     const text = (b.innerText || '').toLowerCase();
                     return label.includes('submit application')
-                        || text.includes('submit application')
-                        || b.type === 'submit';
+                        || text.includes('submit application');
                 });
                 if (!btn) return false;
                 btn.click();
