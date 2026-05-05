@@ -117,6 +117,15 @@ _MESSAGING_CLOSE_SELECTOR = (
     'button[aria-label*="Close"]'
 )
 
+# InMail-specific selectors
+_INMAIL_COMPOSE_LINK_SELECTOR = (
+    'a[href*="/messaging/compose/"], '
+    'button[aria-label*="InMail"], '
+    'button[aria-label*="inMail"], '
+    'button[data-control-name*="inmail"], '
+    'button[data-control-name*="InMail"]'
+)
+
 # Shared JS function that walks up from any /messaging/compose/ anchor
 # inside <main> to find the smallest ancestor that satisfies the
 # action-root predicate (>=2 interactive children, >=1 button). This is
@@ -2350,7 +2359,7 @@ class LinkedInExtractor:
         """Search for people and extract the results page.
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {name: text}, urns: [{urn, name, headline, profileUrl}]}
         """
         params = f"keywords={quote_plus(keywords)}"
         if location:
@@ -2362,12 +2371,24 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
+        urns: list[dict[str, Any]] = []
         if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references
         elif extracted.error:
             section_errors["search_results"] = extracted.error
+
+        # Also fetch URNs via Voyager API for InMail compatibility
+        urns = []
+        try:
+            urns = await self._search_people_urns(keywords, location)
+            logger.info(f"URN search returned {len(urns)} results for '{keywords}'")
+        except Exception as e:
+            logger.exception(
+                f"URN search FAILED for '{keywords}': {type(e).__name__}: {e}"
+            )
+            urns = []
 
         result: dict[str, Any] = {
             "url": url,
@@ -2377,7 +2398,103 @@ class LinkedInExtractor:
             result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
+        if urns:
+            result["urns"] = urns
         return result
+
+    async def _search_people_urns(
+        self, keywords: str, location: str | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Extract profile URNs from search results DOM.
+
+        Returns list of {urn, name, headline, profileUrl} for use with InMail.
+        """
+        # Navigate directly to search URL with keywords
+        search_params = f"keywords={quote_plus(keywords)}"
+        if location:
+            search_params += f"&location={quote_plus(location)}"
+        search_url = f"https://www.linkedin.com/search/results/people/?{search_params}"
+
+        await self._navigate_to_page(search_url)
+        await detect_rate_limit(self._page)
+        await asyncio.sleep(2)  # Wait for JS to hydrate
+
+        # Extract URNs from DOM - LinkedIn stores profile data in JSON
+        urns = await self._page.evaluate(
+            """({ limit }) => {
+                const results = [];
+                const seen = new Set();
+
+                // Look for profile data in various LinkedIn DOM patterns
+                // Pattern 1: data-urn attributes on search result elements
+                const dataElements = document.querySelectorAll('[data-urn]');
+                for (const el of dataElements) {
+                    const urn = el.getAttribute('data-urn');
+                    if (urn && urn.includes('fsd_profile') && !seen.has(urn)) {
+                        seen.add(urn);
+                        const urnPart = urn.match(/urn:li:fsd_profile:([A-Za-z0-9_-]+)/);
+                        if (urnPart) {
+                            const nameEl = el.querySelector('.actor-name, .search-result__title a, span[aria-label]');
+                            const headlineEl = el.querySelector('.subline-level-1, .search-result__snippet, .entity-result__primary-subtitle');
+                            results.push({
+                                urn: urnPart[1],
+                                name: nameEl?.textContent?.trim() || '',
+                                headline: headlineEl?.textContent?.trim() || '',
+                                profileUrl: nameEl?.href || ''
+                            });
+                        }
+                    }
+                }
+
+                // Pattern 2: Look in script tags with JSON data
+                const scripts = document.querySelectorAll('script');
+                for (const script of scripts) {
+                    if (script.textContent && script.textContent.includes('fsd_profile')) {
+                        const matches = script.textContent.matchAll(/urn:li:fsd_profile:([A-Za-z0-9_-]+)/g);
+                        for (const match of matches) {
+                            const urn = match[1];
+                            if (!seen.has(urn)) {
+                                seen.add(urn);
+                                results.push({
+                                    urn: urn,
+                                    name: '',
+                                    headline: '',
+                                    profileUrl: `https://www.linkedin.com/in/${urn}`
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Pattern 3: Look in search result links with tracking params
+                const links = document.querySelectorAll('a[href*="/in/"][data-test-app-aware-link]');
+                for (const link of links) {
+                    const href = link.href;
+                    // Extract public ID from URL pattern like /in/username-123456/
+                    const usernameMatch = href.match(/\/in\/([^\/\?]+)/);
+                    if (usernameMatch) {
+                        const username = usernameMatch[1];
+                        // Generate URN from username - this is a best effort
+                        if (!seen.has(username)) {
+                            seen.add(username);
+                            const parent = link.closest('.search-result, .entity-result');
+                            const name = link.textContent?.trim() || username;
+                            results.push({
+                                urn: username,  // Use username as identifier
+                                name: name,
+                                headline: parent?.querySelector('.entity-result__primary-subtitle')?.textContent?.trim() || '',
+                                profileUrl: href.split('?')[0]
+                            });
+                        }
+                    }
+                }
+
+                return results.slice(0, limit);
+            }""",
+            {"limit": limit},
+        )
+
+        return urns if isinstance(urns, list) else []
 
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
@@ -2838,6 +2955,416 @@ class LinkedInExtractor:
             recipient_selected=recipient_selected,
             sent=True,
         )
+
+    async def send_inmail(
+        self,
+        linkedin_username: str,
+        message: str,
+        subject: str,
+        *,
+        confirm_send: bool,
+        profile_urn: str | None = None,
+    ) -> dict[str, Any]:
+        """Send an InMail message to a LinkedIn user with Premium.
+
+        InMail allows messaging users you are not connected to. Requires
+        Premium with available InMail credits.
+
+        Args:
+            linkedin_username: LinkedIn username of the recipient.
+            message: The message text to send.
+            subject: Subject line for the InMail.
+            confirm_send: Must be True to actually send (False does a dry run).
+            profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
+                compose URL directly.
+        """
+        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        await self._navigate_to_page(profile_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Profile page did not load for %s", linkedin_username)
+
+        await handle_modal_close(self._page)
+        display_name = await self._read_profile_display_name()
+
+        # For InMail, we need to navigate to a profile and look for the InMail button
+        # or use the profile URN to construct the compose URL with InMail parameters
+        if profile_urn:
+            # Encode URN for URL
+            _encoded = quote_plus(f"urn:li:fsd_profile:{profile_urn}")
+            # InMail compose URL - uses same pattern but LinkedIn recognizes InMail context
+            compose_url = (
+                f"https://www.linkedin.com/messaging/compose/"
+                f"?profileUrn={_encoded}"
+                f"&recipient={profile_urn}"
+                f"&screenContext=NON_SELF_PROFILE_VIEW"
+                f"&interop=msgOverlay"
+                f"&messagingKind=INMAIL"
+            )
+        else:
+            # Fall back to finding InMail button on profile
+            compose_url = await self._resolve_inmail_compose_href()
+
+        if not compose_url:
+            return self._message_action_result(
+                profile_url,
+                "inmail_unavailable",
+                "LinkedIn did not expose a usable InMail action for this profile.",
+            )
+
+        await self._navigate_to_page(compose_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Compose page did not fully load for %s", linkedin_username)
+
+        await handle_modal_close(self._page)
+
+        # Check if this is an InMail composer (may have subject field)
+        has_subject_field = await self._locator_is_visible(
+            'input[aria-label*="Subject"], input[placeholder*="subject"]',
+            timeout=2000,
+        )
+
+        if has_subject_field:
+            # Fill subject field
+            subject_filled = await self._page.evaluate(
+                """({ subj }) => {
+                    const input = document.querySelector(
+                        'input[aria-label*="Subject"], input[placeholder*="subject"]'
+                    );
+                    if (!input) return false;
+                    // Focus and type using keyboard to trigger React state
+                    input.focus();
+                    document.execCommand('selectAll', false, null);
+                    document.execCommand('insertText', false, subj);
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }""",
+                {"subj": subject},
+            )
+            if not subject_filled:
+                await self._dismiss_message_ui()
+                return self._message_action_result(
+                    self._page.url,
+                    "subject_fill_failed",
+                    "Could not fill InMail subject field.",
+                )
+
+        message_surface = await self._wait_for_message_surface()
+        logger.debug(
+            "InMail surface for %s was %s",
+            linkedin_username,
+            message_surface,
+        )
+
+        recipient_selected = False
+        if message_surface == "recipient_picker":
+            recipient_selected = await self._select_message_recipient(
+                display_name or "",
+                linkedin_username,
+            )
+            if not recipient_selected:
+                await self._dismiss_message_ui()
+                return self._message_action_result(
+                    self._page.url,
+                    "recipient_resolution_failed",
+                    "LinkedIn opened a compose page, but the visible recipient did not match.",
+                )
+            message_surface = await self._wait_for_message_surface()
+
+        compose_box = await self._resolve_message_compose_box()
+        if compose_box is None:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "composer_unavailable",
+                "LinkedIn did not expose a usable message composer.",
+                recipient_selected=recipient_selected,
+            )
+
+        if not await self._compose_page_matches_recipient(
+            display_name or "",
+            linkedin_username,
+        ):
+            logger.debug(
+                "Recipient match failed for InMail %s after compose hydration",
+                linkedin_username,
+            )
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "recipient_resolution_failed",
+                "LinkedIn opened a compose page, but the visible recipient did not match.",
+                recipient_selected=recipient_selected,
+            )
+        recipient_selected = True
+
+        if not confirm_send:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "confirmation_required",
+                "Set confirm_send=true to send the InMail.",
+                recipient_selected=recipient_selected,
+            )
+
+        # Focus compose box and type message
+        focused = await self._page.evaluate(
+            """() => {
+                const el = document.querySelector(
+                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
+                    + 'div[role="textbox"][contenteditable="true"]'
+                );
+                if (!el) return false;
+                el.focus();
+                return true;
+            }"""
+        )
+        if not focused:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "compose_interact_failed",
+                "Could not focus compose box via JavaScript.",
+                recipient_selected=recipient_selected,
+            )
+
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(message, delay=15)
+        await asyncio.sleep(1.0)  # allow React to process input
+
+        # Send via JS click or Enter key
+        sent_via_js = await self._page.evaluate(
+            """() => {
+                const btn = Array.from(document.querySelectorAll(
+                    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
+                    + 'button[data-control-name="send"]'
+                )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not sent_via_js:
+            await self._page.keyboard.press("Enter")
+
+        if not await self._message_text_visible(message):
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "send_unavailable",
+                "LinkedIn did not confirm that the InMail was sent.",
+                recipient_selected=recipient_selected,
+            )
+
+        return self._message_action_result(
+            self._page.url,
+            "sent",
+            "InMail sent.",
+            recipient_selected=recipient_selected,
+            sent=True,
+        )
+
+    async def send_connection_request(
+        self,
+        linkedin_username: str,
+        message: str | None = None,
+        *,
+        confirm_send: bool,
+        profile_urn: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a connection request to a LinkedIn user.
+
+        Args:
+            linkedin_username: LinkedIn username of the recipient.
+            message: Optional personalized message to include (300 char limit).
+            confirm_send: Must be True to actually send (False does a dry run).
+            profile_urn: Optional profile URN (e.g. ACoAAB...) for the recipient.
+        """
+        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        await self._navigate_to_page(profile_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Profile page did not load for %s", linkedin_username)
+
+        await handle_modal_close(self._page)
+
+        # Get CSRF token from cookies
+        csrf_token = await self._page.evaluate(
+            """() => {
+                const match = document.cookie.match(/JSESSIONID["=]?([^;]+)/);
+                return match ? match[1].replace(/"/g, '') : null;
+            }"""
+        )
+        if not csrf_token:
+            return self._message_action_result(
+                profile_url,
+                "auth_failed",
+                "Could not extract CSRF token from cookies.",
+            )
+
+        # Get profile URN or public identifier
+        profile_id = profile_urn
+        if not profile_id:
+            profile_id = await self._extract_profile_urn_from_page()
+            # Fall back to username if no URN found
+            if not profile_id:
+                profile_id = linkedin_username
+
+        if not confirm_send:
+            return self._message_action_result(
+                self._page.url,
+                "confirmation_required",
+                "Set confirm_send=true to send the connection request.",
+                recipient_selected=True,
+            )
+
+        # Send connection request via Voyager API
+        # Use the URN if available, otherwise use the public identifier
+        is_urn = profile_id and profile_id.startswith("ACoAA")
+        result = await self._page.evaluate(
+            """async ({ csrfToken, profileId, customMessage, isUrn }) => {
+                const params = new URLSearchParams({
+                    action: "verifyQuotaAndCreate",
+                    decorationId: "com.linkedin.voyager.dash.deco.relationships.InvitationCreationResult-2"
+                });
+
+                // Build the body - URN format or plain ID format
+                const body = isUrn
+                    ? { inviteeProfileUrn: `urn:li:fsd_profile:${profileId}`, customMessage: customMessage || "" }
+                    : { trackingId: profileId, customMessage: customMessage || "" };
+
+                const response = await fetch(
+                    `/voyager/api/voyagerRelationshipsDashMemberRelationships?${params}`,
+                    {
+                        method: "POST",
+                        headers: {
+                            "csrf-token": csrfToken,
+                            "Content-Type": "application/json",
+                        },
+                        body: JSON.stringify(body)
+                    }
+                );
+
+                if (response.status === 429) {
+                    return { success: false, code: 429, message: "Daily connection limit reached" };
+                }
+                if (response.status === 406) {
+                    return { success: false, code: 406, message: "Recently sent connection request" };
+                }
+                if (response.status === 201) {
+                    return { success: true, code: 201, message: "Connection request sent" };
+                }
+
+                const data = await response.json();
+                return { success: response.ok, code: response.status, data };
+            }""",
+            {
+                "csrfToken": csrf_token,
+                "profileId": profile_id,
+                "customMessage": message or "",
+                "isUrn": is_urn,
+            },
+        )
+
+        if result and result.get("success"):
+            return self._message_action_result(
+                self._page.url,
+                "sent",
+                "Connection request sent.",
+                recipient_selected=True,
+                sent=True,
+            )
+
+        return self._message_action_result(
+            self._page.url,
+            str(result.get("code")) if result else "failed",
+            result.get("message") if result else "Connection request failed.",
+            recipient_selected=True,
+            sent=False,
+        )
+
+    async def _extract_profile_urn_from_page(self) -> str | None:
+        """Extract profile URN from current profile page."""
+        urn = await self._page.evaluate(
+            """() => {
+                // Try data attributes on the page
+                const dataEl = document.querySelector('[data-urn*="fsd_profile"]');
+                if (dataEl) {
+                    const match = dataEl.getAttribute('data-urn').match(/urn:li:fsd_profile:([A-Za-z0-9_-]+)/);
+                    if (match) return match[1];
+                }
+
+                // Try JSON-LD scripts
+                const scripts = document.querySelectorAll('script');
+                for (const script of scripts) {
+                    if (script.textContent && script.textContent.includes('fsd_profile')) {
+                        const match = script.textContent.match(/urn:li:fsd_profile:([A-Za-z0-9_-]+)/);
+                        if (match) return match[1];
+                    }
+                }
+
+                // Try og:image URL which sometimes contains the URN
+                const ogImage = document.querySelector('meta[property="og:image"]');
+                if (ogImage && ogImage.content) {
+                    const match = ogImage.content.match(/urn:li:fsd_profile:([A-Za-z0-9_-]+)/);
+                    if (match) return match[1];
+                }
+
+                return null;
+            }"""
+        )
+        return urn
+
+    async def _resolve_inmail_compose_href(self) -> str | None:
+        """Return the direct InMail compose URL from a profile page.
+
+        Looks for InMail-specific buttons or links on the profile page.
+        """
+        href = await self._page.evaluate(
+            """() => {
+                const isVisible = element =>
+                    !!(
+                        element &&
+                        (element.offsetWidth ||
+                            element.offsetHeight ||
+                            element.getClientRects().length)
+                    );
+
+                // Look for InMail button specifically
+                const inmailButton = Array.from(
+                    document.querySelectorAll(
+                        'button[aria-label*="InMail"], button[aria-label*="inMail"],'
+                        + 'button[data-control-name*="inmail"], button[data-control-name*="InMail"]'
+                    )
+                ).find(isVisible);
+
+                if (inmailButton) {
+                    const href = inmailButton.getAttribute('href') || inmailButton.dataset.href;
+                    if (href) return href;
+                }
+
+                // Fall back to any compose link
+                const composeAnchor = Array.from(
+                    document.querySelectorAll('a[href*="/messaging/compose/"]')
+                ).find(isVisible);
+
+                return composeAnchor ? (composeAnchor.getAttribute('href') || composeAnchor.href) : null;
+            }"""
+        )
+        if not isinstance(href, str) or not href.strip():
+            return None
+        return urljoin("https://www.linkedin.com", href.strip())
 
     async def _extract_root_content(
         self,
