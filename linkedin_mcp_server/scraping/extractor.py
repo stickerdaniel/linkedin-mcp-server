@@ -2371,7 +2371,6 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
-        urns: list[dict[str, Any]] = []
         if extracted.text and extracted.text != _RATE_LIMITED_MSG:
             sections["search_results"] = extracted.text
             if extracted.references:
@@ -2405,48 +2404,20 @@ class LinkedInExtractor:
     async def _search_people_urns(
         self, keywords: str, location: str | None = None, limit: int = 10
     ) -> list[dict[str, Any]]:
-        """Extract profile URNs from search results DOM.
+        """Extract profile URNs from the current search results page.
 
+        Must be called AFTER navigate_to_page loads the search results.
+        Avoids re-navigating to prevent rate-limit exposure.
         Returns list of {urn, name, headline, profileUrl} for use with InMail.
         """
-        # Navigate directly to search URL with keywords
-        search_params = f"keywords={quote_plus(keywords)}"
-        if location:
-            search_params += f"&location={quote_plus(location)}"
-        search_url = f"https://www.linkedin.com/search/results/people/?{search_params}"
-
-        await self._navigate_to_page(search_url)
-        await detect_rate_limit(self._page)
         await asyncio.sleep(2)  # Wait for JS to hydrate
-
-        # Extract URNs from DOM - LinkedIn stores profile data in JSON
         urns = await self._page.evaluate(
             """({ limit }) => {
                 const results = [];
                 const seen = new Set();
 
-                // Look for profile data in various LinkedIn DOM patterns
-                // Pattern 1: data-urn attributes on search result elements
-                const dataElements = document.querySelectorAll('[data-urn]');
-                for (const el of dataElements) {
-                    const urn = el.getAttribute('data-urn');
-                    if (urn && urn.includes('fsd_profile') && !seen.has(urn)) {
-                        seen.add(urn);
-                        const urnPart = urn.match(/urn:li:fsd_profile:([A-Za-z0-9_-]+)/);
-                        if (urnPart) {
-                            const nameEl = el.querySelector('.actor-name, .search-result__title a, span[aria-label]');
-                            const headlineEl = el.querySelector('.subline-level-1, .search-result__snippet, .entity-result__primary-subtitle');
-                            results.push({
-                                urn: urnPart[1],
-                                name: nameEl?.textContent?.trim() || '',
-                                headline: headlineEl?.textContent?.trim() || '',
-                                profileUrl: nameEl?.href || ''
-                            });
-                        }
-                    }
-                }
-
-                // Pattern 2: Look in script tags with JSON data
+                // Pattern 1: Look in script tags with JSON data
+                // Extracts real profile URNs without layout-class DOM selectors
                 const scripts = document.querySelectorAll('script');
                 for (const script of scripts) {
                     if (script.textContent && script.textContent.includes('fsd_profile')) {
@@ -2462,29 +2433,6 @@ class LinkedInExtractor:
                                     profileUrl: `https://www.linkedin.com/in/${urn}`
                                 });
                             }
-                        }
-                    }
-                }
-
-                // Pattern 3: Look in search result links with tracking params
-                const links = document.querySelectorAll('a[href*="/in/"][data-test-app-aware-link]');
-                for (const link of links) {
-                    const href = link.href;
-                    // Extract public ID from URL pattern like /in/username-123456/
-                    const usernameMatch = href.match(/\/in\/([^\/\?]+)/);
-                    if (usernameMatch) {
-                        const username = usernameMatch[1];
-                        // Generate URN from username - this is a best effort
-                        if (!seen.has(username)) {
-                            seen.add(username);
-                            const parent = link.closest('.search-result, .entity-result');
-                            const name = link.textContent?.trim() || username;
-                            results.push({
-                                urn: username,  // Use username as identifier
-                                name: name,
-                                headline: parent?.querySelector('.entity-result__primary-subtitle')?.textContent?.trim() || '',
-                                profileUrl: href.split('?')[0]
-                            });
                         }
                     }
                 }
@@ -3221,6 +3169,14 @@ class LinkedInExtractor:
             if not profile_id:
                 profile_id = linkedin_username
 
+        if message and len(message) > 300:
+            return self._message_action_result(
+                self._page.url,
+                "message_too_long",
+                f"Connection request message exceeds 300 characters ({len(message)}).",
+                recipient_selected=True,
+            )
+
         if not confirm_send:
             return self._message_action_result(
                 self._page.url,
@@ -3231,7 +3187,16 @@ class LinkedInExtractor:
 
         # Send connection request via Voyager API
         # Use the URN if available, otherwise use the public identifier
-        is_urn = profile_id and profile_id.startswith("ACoAA")
+        # Profile URNs are base64url-encoded (no hyphens, 10+ chars, starts uppercase)
+        # Vanity slugs (usernames) contain hyphens and start with lowercase
+        import re as _re
+
+        is_urn = bool(
+            profile_id
+            and _re.match(r"^[A-Za-z0-9_-]{10,}$", profile_id)
+            and "-" not in profile_id
+            and profile_id[0].isupper()
+        )
         result = await self._page.evaluate(
             """async ({ csrfToken, profileId, customMessage, isUrn }) => {
                 const params = new URLSearchParams({
