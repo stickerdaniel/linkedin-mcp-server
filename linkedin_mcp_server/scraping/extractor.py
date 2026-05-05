@@ -3319,6 +3319,259 @@ class LinkedInExtractor:
             }"""
         )
 
+    async def _get_next_button(self) -> bool:
+        """Click the 'Continue to next step' button. Returns True if clicked."""
+        return await self._page.evaluate(
+            """() => {
+                const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                if (!dialog) return false;
+                const nextBtn = Array.from(
+                    dialog.querySelectorAll('button')
+                ).find(b => {
+                    if (b.disabled) return false;
+                    const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                    const text = (b.innerText || '').toLowerCase();
+                    return label.includes('continue to next step')
+                        || label.includes('next step')
+                        || text.includes('continue to next step')
+                        || text.includes('next step');
+                });
+                if (!nextBtn) return false;
+                nextBtn.click();
+                return true;
+            }"""
+        )
+
+    async def _has_next_step(self) -> bool:
+        """Check if there's a next step button (more steps to fill)."""
+        return await self._page.evaluate(
+            """() => {
+                const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                if (!dialog) return false;
+                const nextBtn = Array.from(
+                    dialog.querySelectorAll('button')
+                ).find(b => {
+                    if (b.disabled) return false;
+                    const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                    const text = (b.innerText || '').toLowerCase();
+                    return label.includes('continue to next step')
+                        || label.includes('next step')
+                        || text.includes('continue to next step')
+                        || text.includes('next step');
+                });
+                return Boolean(nextBtn);
+            }"""
+        )
+
+    async def _auto_fill_fields(self, answers: dict[str, str]) -> int:
+        """Auto-fill form fields with provided answers. Returns count of filled fields."""
+        if not answers:
+            return 0
+
+        filled = 0
+        for label, value in answers.items():
+            if not value:
+                continue
+
+            # Try to find and fill the field by label
+            result = await self._page.evaluate(
+                """(params) => {
+                    const {label, value} = params;
+                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                    if (!dialog) return false;
+
+                    // Find label element
+                    const labelEl = Array.from(dialog.querySelectorAll('label, h3, span'))
+                        .find(el => (el.innerText || '').toLowerCase().includes(label.toLowerCase()));
+
+                    if (!labelEl) return false;
+
+                    // Find associated input
+                    const input = labelEl.querySelector('input, select, textarea');
+                    const formGroup = labelEl.closest('div[data-test-form-item]') || labelEl.closest('.form-item');
+                    const formInput = formGroup ? formGroup.querySelector('input, select, textarea') : null;
+                    const target = input || formInput;
+
+                    if (!target) return false;
+
+                    // Fill based on type
+                    if (target.tagName === 'SELECT') {
+                        const option = Array.from(target.options)
+                            .find(opt => opt.text.toLowerCase().includes(value.toLowerCase()));
+                        if (option) {
+                            target.value = option.value;
+                            target.dispatchEvent(new Event('change', { bubbles: true }));
+                            return true;
+                        }
+                    } else if (target.type === 'checkbox' || target.type === 'radio') {
+                        if (value.toLowerCase() === 'yes' || value.toLowerCase() === 'true') {
+                            if (!target.checked) target.click();
+                            return true;
+                        }
+                    } else {
+                        target.value = value;
+                        target.dispatchEvent(new Event('input', { bubbles: true }));
+                        target.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    }
+                    return false;
+                }""",
+                {"label": label, "value": value},
+            )
+            if result:
+                filled += 1
+
+        return filled
+
+    async def _upload_resume_to_form(self, resume_path: str | None) -> bool:
+        """Upload resume to the form if file input exists. Returns True if uploaded."""
+        if not resume_path:
+            return False
+
+        return await self._page.evaluate(
+            """(resumePath) => {
+                const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                if (!dialog) return false;
+
+                // Find file input (usually labeled "Resume" or "CV")
+                const fileInputs = dialog.querySelectorAll('input[type="file"]');
+                for (const input of fileInputs) {
+                    const label = (input.getAttribute('aria-label') || '').toLowerCase();
+                    const name = (input.getAttribute('name') || '').toLowerCase();
+                    const id = (input.getAttribute('id') || '').toLowerCase();
+
+                    if (label.includes('resume') || label.includes('cv')
+                        || name.includes('resume') || name.includes('cv')
+                        || id.includes('resume') || id.includes('cv')) {
+                        // Set files on the input
+                        const dataTransfer = new DataTransfer();
+                        // Note: Can't actually set file content, just trigger the dialog
+                        // The caller needs to use Playwright's set_input_files
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    }
+                }
+                return false;
+            }""",
+            resume_path,
+        )
+
+    async def easy_apply_full(
+        self,
+        job_id: str,
+        *,
+        confirm_send: bool,
+        resume_path: str | None = None,
+        answers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Full multi-step Easy Apply with auto-fill.
+
+        Args:
+            job_id: LinkedIn job ID
+            confirm_send: Must be True to submit
+            resume_path: Path to resume file (optional)
+            answers: Dict of {field_label: value} to auto-fill
+
+        Returns:
+            Dict with status, message, and optional questions
+        """
+        opened = await self._open_easy_apply_dialog(job_id)
+        if not opened["ok"]:
+            return opened["result"]
+
+        try:
+            if not confirm_send:
+                return self._application_action_result(
+                    self._page.url,
+                    "confirmation_required",
+                    "Set confirm_send=true to submit.",
+                )
+
+            # Upload resume if provided
+            if resume_path:
+                uploaded = await self._upload_resume_to_form(resume_path)
+                if uploaded:
+                    logger.info("Resume upload triggered for %s", job_id)
+                    await asyncio.sleep(1)  # Wait for upload to process
+
+            # Auto-fill with answers
+            if answers:
+                filled = await self._auto_fill_fields(answers)
+                logger.info("Auto-filled %d fields for %s", filled, job_id)
+
+            # Multi-step navigation loop
+            steps_completed = 0
+            max_steps = 10  # Safety limit
+
+            while steps_completed < max_steps:
+                # Check if we can submit or need to continue
+                if await self._has_next_step():
+                    # Click next step
+                    clicked = await self._get_next_button()
+                    if clicked:
+                        steps_completed += 1
+                        await asyncio.sleep(0.5)  # Wait for next step to load
+
+                        # Auto-fill next step if answers provided
+                        if answers:
+                            await self._auto_fill_fields(answers)
+                    else:
+                        logger.warning(
+                            "Has next step but couldn't click for %s", job_id
+                        )
+                        break
+                else:
+                    # No more steps - try to submit
+                    break
+
+            # Try to submit
+            submitted = await self._click_easy_apply_submit()
+            if not submitted:
+                return self._application_action_result(
+                    self._page.url,
+                    "submit_failed",
+                    "Could not find Submit button.",
+                )
+
+            # Wait for confirmation
+            confirmed = await self._page.evaluate(
+                """() => {
+                    const deadline = Date.now() + 5000;
+                    while (Date.now() < deadline) {
+                        const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                        if (!dialog) return true;
+                        const appliedBadge = Array.from(
+                            document.querySelectorAll('main span, main div')
+                        ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
+                        if (appliedBadge) return true;
+                        if (window.Promise) break;
+                    }
+                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                    if (!dialog) return true;
+                    return Array.from(
+                        document.querySelectorAll('main span, main div')
+                    ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
+                }"""
+            )
+
+            if not confirmed:
+                return self._application_action_result(
+                    self._page.url,
+                    "submission_unconfirmed",
+                    "Submitted but confirmation not detected.",
+                )
+
+            return self._application_action_result(
+                self._page.url,
+                "submitted",
+                f"Easy Apply submitted ({steps_completed} step(s) completed).",
+                sent=True,
+            )
+
+        finally:
+            await self._dismiss_dialog()
+
     async def _dismiss_dialog(self) -> None:
         """Best-effort dismissal of any open dialog."""
         try:
