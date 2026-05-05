@@ -33,6 +33,10 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
+    mock.save_job = AsyncMock(return_value=scrape_result)
+    mock.list_applied_jobs = AsyncMock(return_value=scrape_result)
+    mock.easy_apply_inspect = AsyncMock(return_value=scrape_result)
+    mock.easy_apply_submit = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -739,6 +743,165 @@ class TestMessagingTools:
             )
 
 
+class TestApplicationTools:
+    async def test_save_job_preview(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/4252026496/",
+            "status": "confirmation_required",
+            "message": "Set confirm_send=true to bookmark the job.",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.applications import register_application_tools
+
+        mcp = FastMCP("test")
+        register_application_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "save_job")
+        result = await tool_fn(
+            "4252026496", False, mock_context, extractor=mock_extractor
+        )
+
+        assert result["status"] == "confirmation_required"
+        mock_extractor.save_job.assert_awaited_once_with(
+            "4252026496", confirm_send=False
+        )
+
+    async def test_save_job_confirm(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/4252026496/",
+            "status": "saved",
+            "message": "Job saved.",
+            "saved": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.applications import register_application_tools
+
+        mcp = FastMCP("test")
+        register_application_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "save_job")
+        result = await tool_fn(
+            "4252026496", True, mock_context, extractor=mock_extractor
+        )
+
+        assert result["status"] == "saved"
+        assert result["saved"] is True
+        mock_extractor.save_job.assert_awaited_once_with(
+            "4252026496", confirm_send=True
+        )
+
+    async def test_list_applied_default(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/my-items/saved-jobs/?cardType=APPLIED",
+            "sections": {"applied_jobs": "Job 1\nJob 2"},
+            "job_ids": ["4252026496", "4252026500"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.applications import register_application_tools
+
+        mcp = FastMCP("test")
+        register_application_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "list_applied")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        assert result["sections"]["applied_jobs"] == "Job 1\nJob 2"
+        assert result["job_ids"] == ["4252026496", "4252026500"]
+        mock_extractor.list_applied_jobs.assert_awaited_once_with(max_pages=3)
+
+    async def test_easy_apply_inspect(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/4252026496/",
+            "status": "ok",
+            "message": "Easy Apply dialog opened with 1 step(s) and 0 question(s).",
+            "questions": [],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.applications import register_application_tools
+
+        mcp = FastMCP("test")
+        register_application_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "easy_apply_inspect")
+        result = await tool_fn(
+            "4252026496", mock_context, extractor=mock_extractor
+        )
+
+        assert result["status"] == "ok"
+        assert result["questions"] == []
+        mock_extractor.easy_apply_inspect.assert_awaited_once_with("4252026496")
+
+    async def test_easy_apply_submit_preview(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/4252026496/",
+            "status": "confirmation_required",
+            "message": "Set confirm_send=true to submit the Easy Apply application.",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.applications import register_application_tools
+
+        mcp = FastMCP("test")
+        register_application_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "easy_apply_submit")
+        result = await tool_fn(
+            "4252026496", False, mock_context, extractor=mock_extractor
+        )
+
+        assert result["status"] == "confirmation_required"
+        mock_extractor.easy_apply_submit.assert_awaited_once_with(
+            "4252026496", confirm_send=False
+        )
+
+    async def test_easy_apply_submit_manual_review(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/4252026496/",
+            "status": "manual_review",
+            "message": "Easy Apply contains questions.",
+            "questions": [{"label": "Cover letter", "field_type": "textarea"}],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.applications import register_application_tools
+
+        mcp = FastMCP("test")
+        register_application_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "easy_apply_submit")
+        result = await tool_fn(
+            "4252026496", True, mock_context, extractor=mock_extractor
+        )
+
+        assert result["status"] == "manual_review"
+        assert result["questions"][0]["field_type"] == "textarea"
+
+
+_TOOL_NAMES_FULL = (
+    "get_person_profile",
+    "connect_with_person",
+    "get_sidebar_profiles",
+    "search_people",
+    "get_company_profile",
+    "get_company_posts",
+    "get_job_details",
+    "search_jobs",
+    "get_inbox",
+    "get_conversation",
+    "search_conversations",
+    "send_message",
+    "save_job",
+    "list_applied",
+    "easy_apply_inspect",
+    "easy_apply_submit",
+    "close_session",
+)
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.server import create_mcp_server
@@ -746,23 +909,7 @@ class TestToolTimeouts:
         custom_timeout = 7.5
         mcp = create_mcp_server(tool_timeout=custom_timeout)
 
-        tool_names = (
-            "get_person_profile",
-            "connect_with_person",
-            "get_sidebar_profiles",
-            "search_people",
-            "get_company_profile",
-            "get_company_posts",
-            "get_job_details",
-            "search_jobs",
-            "get_inbox",
-            "get_conversation",
-            "search_conversations",
-            "send_message",
-            "close_session",
-        )
-
-        for name in tool_names:
+        for name in _TOOL_NAMES_FULL:
             tool = await mcp.get_tool(name)
             assert tool is not None
             assert tool.timeout == custom_timeout
@@ -773,23 +920,7 @@ class TestToolTimeouts:
 
         mcp = create_mcp_server()
 
-        tool_names = (
-            "get_person_profile",
-            "connect_with_person",
-            "get_sidebar_profiles",
-            "search_people",
-            "get_company_profile",
-            "get_company_posts",
-            "get_job_details",
-            "search_jobs",
-            "get_inbox",
-            "get_conversation",
-            "search_conversations",
-            "send_message",
-            "close_session",
-        )
-
-        for name in tool_names:
+        for name in _TOOL_NAMES_FULL:
             tool = await mcp.get_tool(name)
             assert tool is not None
             assert tool.timeout == DEFAULT_TOOL_TIMEOUT_SECONDS
