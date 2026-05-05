@@ -1,0 +1,21 @@
+---
+description: Keep linkedin-mcp development in the personal fork only.
+alwaysApply: true
+---
+
+# Fork-Only Development
+
+This checkout is a personal fork of the upstream LinkedIn MCP server.
+
+## Hard Rules
+
+- NEVER create pull requests targeting the upstream source repository.
+- Keep local feature work in the personal fork and merge there.
+- Treat upstream as a read-only source for periodic sync and review only.
+- Do not depend on upstream accepting local job-hunt or application-flow changes.
+
+## Sync Discipline
+
+- Use `runx git fetch --repo linkedin-mcp` to refresh fork state.
+- Use fork-local branches and PRs for all changes.
+- Before deleting a branch, verify it is merged in the fork.

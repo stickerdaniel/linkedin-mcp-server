@@ -744,6 +744,17 @@ class TestMessagingTools:
 
 
 class TestApplicationTools:
+    async def test_save_job_is_marked_destructive(self):
+        from linkedin_mcp_server.tools.applications import register_application_tools
+
+        mcp = FastMCP("test")
+        register_application_tools(mcp)
+
+        tool = await mcp.get_tool("save_job")
+        assert tool is not None
+        annotations = getattr(tool, "annotations", None)
+        assert getattr(annotations, "destructiveHint") is True
+
     async def test_save_job_preview(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/jobs/view/4252026496/",

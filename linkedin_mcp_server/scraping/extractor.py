@@ -91,6 +91,108 @@ _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
+_LINKEDIN_JOB_ACTION_LABELS = {
+    # LinkedIn does not expose a locale-independent machine state for these
+    # job actions. Keep text matching explicit and table-driven so adding a
+    # tested locale is a data change, not another selector rewrite.
+    "en": {
+        "applied": ["Applied"],
+        "easy_apply": ["Easy Apply"],
+        "save": ["Save"],
+        "saved": ["Saved"],
+        "submit_application": ["Submit application"],
+        "submit_success": ["Application sent", "Your application was sent"],
+    },
+}
+_DEFAULT_JOB_ACTION_LABELS = _LINKEDIN_JOB_ACTION_LABELS["en"]
+
+_INSPECT_EASY_APPLY_DIALOG_JS = """() => {
+    const dialog = document.querySelector(
+        'dialog[open], [role="dialog"]'
+    );
+    if (!dialog) return {
+        step_count: 0,
+        questions: [],
+        submit_button: false,
+        text: '',
+    };
+
+    let stepCount = 1;
+    const progress = dialog.querySelector('[role="progressbar"]');
+    if (progress) {
+        const max = parseInt(
+            progress.getAttribute('aria-valuemax') || '1', 10
+        );
+        if (Number.isFinite(max) && max > 0) stepCount = max;
+    }
+
+    const questions = [];
+    const inputs = dialog.querySelectorAll(
+        'input[type="text"], input[type="email"], input[type="tel"],'
+        + 'input[type="number"], input[type="file"], select, textarea'
+    );
+    for (const el of inputs) {
+        if (!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)) {
+            continue;
+        }
+        const id = el.getAttribute('id');
+        let labelText = '';
+        if (id) {
+            const lbl = dialog.querySelector(
+                `label[for="${CSS.escape(id)}"]`
+            );
+            if (lbl) labelText = (lbl.innerText || '').trim();
+        }
+        if (!labelText) {
+            labelText = (el.getAttribute('aria-label') || '').trim();
+        }
+        if (!labelText) {
+            const wrap = el.closest('label, fieldset, div');
+            labelText = wrap ? (wrap.innerText || '').trim() : '';
+        }
+        questions.push({
+            label: labelText.slice(0, 200),
+            field_type: el.type || el.tagName.toLowerCase(),
+        });
+    }
+
+    const submitBtn = Array.from(
+        dialog.querySelectorAll('button')
+    ).find(b => {
+        if (b.disabled) return false;
+        const label = (b.getAttribute('aria-label') || '').toLowerCase();
+        const text = (b.innerText || '').toLowerCase();
+        return label.includes('submit application')
+            || text.includes('submit application');
+    });
+
+    return {
+        step_count: stepCount,
+        questions,
+        submit_button: Boolean(submitBtn),
+        text: (dialog.innerText || '').slice(0, 4000),
+    };
+}"""
+
+_CLICK_EASY_APPLY_SUBMIT_JS = """() => {
+    const dialog = document.querySelector(
+        'dialog[open], [role="dialog"]'
+    );
+    if (!dialog) return false;
+    const btn = Array.from(
+        dialog.querySelectorAll('button')
+    ).find(b => {
+        if (b.disabled) return false;
+        const label = (b.getAttribute('aria-label') || '').toLowerCase();
+        const text = (b.innerText || '').toLowerCase();
+        return label.includes('submit application')
+            || text.includes('submit application');
+    });
+    if (!btn) return false;
+    btn.click();
+    return true;
+}"""
+
 _MESSAGING_COMPOSE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]'
 _MESSAGING_COMPOSE_SELECTOR = (
     'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"]'
@@ -2860,14 +2962,15 @@ class LinkedInExtractor:
             "status": status,
             "message": message,
         }
-        if questions is not None:
-            result["questions"] = questions
-        if already_applied:
-            result["already_applied"] = True
-        if saved:
-            result["saved"] = True
-        if sent:
-            result["sent"] = True
+        optional_fields: tuple[tuple[str, Any], ...] = (
+            ("questions", questions),
+            ("already_applied", True if already_applied else None),
+            ("saved", True if saved else None),
+            ("sent", True if sent else None),
+        )
+        result.update(
+            {key: value for key, value in optional_fields if value is not None}
+        )
         return result
 
     async def save_job(
@@ -2880,42 +2983,33 @@ class LinkedInExtractor:
         url = f"https://www.linkedin.com/jobs/view/{job_id}/"
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
+        await self._wait_for_job_main(job_id)
+        await handle_modal_close(self._page)
 
+        button_state = await self._read_save_job_button_state()
+        state_result = self._save_job_state_result(button_state, confirm_send)
+        if state_result is not None:
+            return state_result
+
+        return await self._click_and_confirm_save_job()
+
+    async def _wait_for_job_main(self, job_id: str) -> None:
+        """Best-effort wait for job main content to mount."""
         try:
             await self._page.wait_for_selector("main")
         except PlaywrightTimeoutError:
             logger.debug("Job page did not load for %s", job_id)
 
-        await handle_modal_close(self._page)
-
-        # Detect Save button. The verb prefix in aria-label is locale-
-        # dependent (Save / Saved in English). aria-pressed is a stable
-        # structural signal: present and "true" means already saved.
-        button_state = await self._page.evaluate(
-            """() => {
-                const candidates = Array.from(document.querySelectorAll(
-                    'main button[aria-label*="Save"], main button[aria-label*="Saved"]'
-                ));
-                const btn = candidates.find(b =>
-                    !b.disabled
-                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
-                );
-                if (!btn) return { found: false };
-                return {
-                    found: true,
-                    pressed: btn.getAttribute('aria-pressed') === 'true',
-                    label: btn.getAttribute('aria-label') || '',
-                };
-            }"""
-        )
-
+    def _save_job_state_result(
+        self, button_state: dict[str, Any], confirm_send: bool
+    ) -> dict[str, Any] | None:
+        """Return the terminal result implied by the current Save state."""
         if not button_state.get("found"):
             return self._application_action_result(
                 self._page.url,
                 "save_unavailable",
                 "LinkedIn did not expose a Save button on this job posting.",
             )
-
         if button_state.get("pressed"):
             return self._application_action_result(
                 self._page.url,
@@ -2923,30 +3017,17 @@ class LinkedInExtractor:
                 "Job is already saved.",
                 saved=True,
             )
-
         if not confirm_send:
             return self._application_action_result(
                 self._page.url,
                 "confirmation_required",
                 "Set confirm_send=true to bookmark the job.",
             )
+        return None
 
-        clicked = await self._page.evaluate(
-            """() => {
-                const candidates = Array.from(document.querySelectorAll(
-                    'main button[aria-label*="Save"]'
-                ));
-                const btn = candidates.find(b =>
-                    !b.disabled
-                    && b.getAttribute('aria-pressed') !== 'true'
-                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
-                );
-                if (!btn) return false;
-                btn.click();
-                return true;
-            }"""
-        )
-        if not clicked:
+    async def _click_and_confirm_save_job(self) -> dict[str, Any]:
+        """Click Save and confirm LinkedIn flipped the saved state."""
+        if not await self._click_save_job_button():
             return self._application_action_result(
                 self._page.url,
                 "save_click_failed",
@@ -2954,16 +3035,7 @@ class LinkedInExtractor:
             )
 
         await asyncio.sleep(0.5)
-        post_state = await self._page.evaluate(
-            """() => {
-                const btn = Array.from(document.querySelectorAll(
-                    'main button[aria-label*="Save"], main button[aria-label*="Saved"]'
-                )).find(b => !b.disabled
-                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
-                return btn ? btn.getAttribute('aria-pressed') === 'true' : false;
-            }"""
-        )
-        if not post_state:
+        if not await self._read_saved_job_state():
             return self._application_action_result(
                 self._page.url,
                 "save_not_confirmed",
@@ -2975,6 +3047,90 @@ class LinkedInExtractor:
             "saved",
             "Job saved.",
             saved=True,
+        )
+
+    async def _read_save_job_button_state(self) -> dict[str, Any]:
+        """Read the visible save button state from the current job page."""
+        # The action words are locale-dependent, so visible terms come from
+        # _LINKEDIN_JOB_ACTION_LABELS. aria-pressed is the stable structural
+        # signal once the action button is found.
+        return await self._page.evaluate(
+            """({ labels }) => {
+                const includesAny = (value, terms) => {
+                    const normalized = (value || '').toLowerCase();
+                    return terms.some(term =>
+                        normalized.includes(term.toLowerCase())
+                    );
+                };
+                const candidates = Array.from(document.querySelectorAll(
+                    'main button[aria-label]'
+                ));
+                const btn = candidates.find(b => {
+                    const label = b.getAttribute('aria-label') || '';
+                    return !b.disabled
+                        && (includesAny(label, labels.save)
+                            || includesAny(label, labels.saved))
+                        && (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                });
+                if (!btn) return { found: false };
+                return {
+                    found: true,
+                    pressed: btn.getAttribute('aria-pressed') === 'true',
+                    label: btn.getAttribute('aria-label') || '',
+                };
+            }""",
+            {"labels": _DEFAULT_JOB_ACTION_LABELS},
+        )
+
+    async def _click_save_job_button(self) -> bool:
+        """Click the visible unsaved Save button."""
+        return await self._page.evaluate(
+            """({ labels }) => {
+                const includesAny = (value, terms) => {
+                    const normalized = (value || '').toLowerCase();
+                    return terms.some(term =>
+                        normalized.includes(term.toLowerCase())
+                    );
+                };
+                const candidates = Array.from(document.querySelectorAll(
+                    'main button[aria-label]'
+                ));
+                const btn = candidates.find(b => {
+                    const label = b.getAttribute('aria-label') || '';
+                    return !b.disabled
+                        && includesAny(label, labels.save)
+                        && b.getAttribute('aria-pressed') !== 'true'
+                        && (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                });
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }""",
+            {"labels": _DEFAULT_JOB_ACTION_LABELS},
+        )
+
+    async def _read_saved_job_state(self) -> bool:
+        """Return true when the current job page reports saved state."""
+        return await self._page.evaluate(
+            """({ labels }) => {
+                const includesAny = (value, terms) => {
+                    const normalized = (value || '').toLowerCase();
+                    return terms.some(term =>
+                        normalized.includes(term.toLowerCase())
+                    );
+                };
+                const btn = Array.from(document.querySelectorAll(
+                    'main button[aria-label]'
+                )).find(b => {
+                    const label = b.getAttribute('aria-label') || '';
+                    return !b.disabled
+                        && (includesAny(label, labels.save)
+                            || includesAny(label, labels.saved))
+                        && (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                });
+                return btn ? btn.getAttribute('aria-pressed') === 'true' : false;
+            }""",
+            {"labels": _DEFAULT_JOB_ACTION_LABELS},
         )
 
     async def list_applied_jobs(self, max_pages: int = 3) -> dict[str, Any]:
@@ -3045,23 +3201,9 @@ class LinkedInExtractor:
 
         try:
             inspection = await self._inspect_easy_apply_dialog()
-            if inspection["questions"]:
-                return self._application_action_result(
-                    self._page.url,
-                    "manual_review",
-                    (
-                        "Easy Apply contains questions. Resolve them in a human "
-                        "session; do not auto-submit."
-                    ),
-                    questions=inspection["questions"],
-                )
-            if inspection["step_count"] != 1 or not inspection["submit_button"]:
-                return self._application_action_result(
-                    self._page.url,
-                    "manual_review",
-                    "Easy Apply is multi-step or missing a single Submit button.",
-                    questions=inspection["questions"],
-                )
+            manual_review = self._easy_apply_manual_review_result(inspection)
+            if manual_review is not None:
+                return manual_review
 
             if not confirm_send:
                 return self._application_action_result(
@@ -3070,88 +3212,72 @@ class LinkedInExtractor:
                     "Set confirm_send=true to submit the Easy Apply application.",
                 )
 
-            submitted = await self._click_easy_apply_submit()
-            if not submitted:
-                return self._application_action_result(
-                    self._page.url,
-                    "submit_failed",
-                    "Could not click Submit application button.",
-                )
-            await asyncio.sleep(1.0)
-            return self._application_action_result(
-                self._page.url,
-                "submitted",
-                "Easy Apply submitted.",
-                sent=True,
-            )
+            return await self._submit_confirmed_easy_apply()
         finally:
             await self._dismiss_dialog()
+
+    def _easy_apply_manual_review_result(
+        self, inspection: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return a manual-review response when automation must stop."""
+        questions = inspection["questions"]
+        if questions:
+            return self._application_action_result(
+                self._page.url,
+                "manual_review",
+                (
+                    "Easy Apply contains questions. Resolve them in a human "
+                    "session; do not auto-submit."
+                ),
+                questions=questions,
+            )
+        if inspection["step_count"] != 1 or not inspection["submit_button"]:
+            return self._application_action_result(
+                self._page.url,
+                "manual_review",
+                "Easy Apply is multi-step or missing a single Submit button.",
+                questions=questions,
+            )
+        return None
+
+    async def _submit_confirmed_easy_apply(self) -> dict[str, Any]:
+        """Click Submit and only report success after LinkedIn confirms it."""
+        if not await self._click_easy_apply_submit():
+            return self._application_action_result(
+                self._page.url,
+                "submit_failed",
+                "Could not click Submit application button.",
+            )
+        if not await self._confirm_easy_apply_submission():
+            return self._application_action_result(
+                self._page.url,
+                "submit_unconfirmed",
+                (
+                    "Clicked Submit application, but LinkedIn did not show "
+                    "a success signal or close the dialog."
+                ),
+            )
+        return self._application_action_result(
+            self._page.url,
+            "submitted",
+            "Easy Apply submitted.",
+            sent=True,
+        )
 
     async def _open_easy_apply_dialog(self, job_id: str) -> dict[str, Any]:
         """Navigate to a job and open the Easy Apply dialog."""
         url = f"https://www.linkedin.com/jobs/view/{job_id}/"
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
-
-        try:
-            await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
-            logger.debug("Job page did not load for %s", job_id)
-
+        await self._wait_for_job_main(job_id)
         await handle_modal_close(self._page)
 
-        # Both Easy Apply and Applied labels are locale-dependent in
-        # English. LinkedIn provides no machine-readable badge state,
-        # so this is the same trade-off called out in CLAUDE.md.
-        state = await self._page.evaluate(
-            """() => {
-                const easyApplyBtn = Array.from(document.querySelectorAll(
-                    'main button[aria-label*="Easy Apply"]'
-                )).find(b => !b.disabled
-                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
-                const appliedBadge = Array.from(
-                    document.querySelectorAll('main span, main div')
-                ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
-                return {
-                    has_easy_apply: Boolean(easyApplyBtn),
-                    already_applied: appliedBadge && !easyApplyBtn,
-                };
-            }"""
-        )
+        state = await self._read_easy_apply_job_state()
+        state_result = self._easy_apply_open_state_result(state)
+        if state_result is not None:
+            return state_result
 
-        if state.get("already_applied"):
-            return {
-                "ok": False,
-                "result": self._application_action_result(
-                    self._page.url,
-                    "already_applied",
-                    "LinkedIn shows this job as already applied.",
-                    already_applied=True,
-                ),
-            }
-
-        if not state.get("has_easy_apply"):
-            return {
-                "ok": False,
-                "result": self._application_action_result(
-                    self._page.url,
-                    "no_easy_apply",
-                    "Job posting does not offer Easy Apply.",
-                ),
-            }
-
-        clicked = await self._page.evaluate(
-            """() => {
-                const btn = Array.from(document.querySelectorAll(
-                    'main button[aria-label*="Easy Apply"]'
-                )).find(b => !b.disabled
-                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
-                if (!btn) return false;
-                btn.click();
-                return true;
-            }"""
-        )
-        if not clicked:
+        if not await self._click_easy_apply_button():
             return {
                 "ok": False,
                 "result": self._application_action_result(
@@ -3177,102 +3303,133 @@ class LinkedInExtractor:
 
         return {"ok": True, "result": None}
 
-    async def _inspect_easy_apply_dialog(self) -> dict[str, Any]:
-        """Read the open Easy Apply dialog and report structure."""
+    def _easy_apply_open_state_result(
+        self, state: dict[str, bool]
+    ) -> dict[str, Any] | None:
+        """Return a terminal open-dialog result implied by page state."""
+        if state.get("already_applied"):
+            return {
+                "ok": False,
+                "result": self._application_action_result(
+                    self._page.url,
+                    "already_applied",
+                    "LinkedIn shows this job as already applied.",
+                    already_applied=True,
+                ),
+            }
+        if not state.get("has_easy_apply"):
+            return {
+                "ok": False,
+                "result": self._application_action_result(
+                    self._page.url,
+                    "no_easy_apply",
+                    "Job posting does not offer Easy Apply.",
+                ),
+            }
+        return None
+
+    async def _read_easy_apply_job_state(self) -> dict[str, bool]:
+        """Read Easy Apply and already-applied state from the current job page."""
+        # Easy Apply and Applied labels are locale-dependent. LinkedIn provides
+        # no machine-readable badge state here, so use the explicit per-locale
+        # table required by CLAUDE.md and fail closed for unlisted locales.
         return await self._page.evaluate(
-            """() => {
-                const dialog = document.querySelector(
-                    'dialog[open], [role="dialog"]'
-                );
-                if (!dialog) return {
-                    step_count: 0,
-                    questions: [],
-                    submit_button: false,
-                    text: '',
-                };
-
-                let stepCount = 1;
-                const progress = dialog.querySelector('[role="progressbar"]');
-                if (progress) {
-                    const max = parseInt(
-                        progress.getAttribute('aria-valuemax') || '1', 10
+            r"""({ labels }) => {
+                const includesAny = (value, terms) => {
+                    const normalized = (value || '').toLowerCase();
+                    return terms.some(term =>
+                        normalized.includes(term.toLowerCase())
                     );
-                    if (Number.isFinite(max) && max > 0) stepCount = max;
-                }
-
-                const questions = [];
-                const inputs = dialog.querySelectorAll(
-                    'input[type="text"], input[type="email"], input[type="tel"],'
-                    + 'input[type="number"], input[type="file"], select, textarea'
-                );
-                for (const el of inputs) {
-                    if (!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)) {
-                        continue;
-                    }
-                    const id = el.getAttribute('id');
-                    let labelText = '';
-                    if (id) {
-                        const lbl = dialog.querySelector(
-                            `label[for="${CSS.escape(id)}"]`
-                        );
-                        if (lbl) labelText = (lbl.innerText || '').trim();
-                    }
-                    if (!labelText) {
-                        labelText = (el.getAttribute('aria-label') || '').trim();
-                    }
-                    if (!labelText) {
-                        const wrap = el.closest('label, fieldset, div');
-                        labelText = wrap ? (wrap.innerText || '').trim() : '';
-                    }
-                    questions.push({
-                        label: labelText.slice(0, 200),
-                        field_type: el.type || el.tagName.toLowerCase(),
-                    });
-                }
-
-                const submitBtn = Array.from(
-                    dialog.querySelectorAll('button')
-                ).find(b => {
-                    if (b.disabled) return false;
-                    const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                    const text = (b.innerText || '').toLowerCase();
-                    return label.includes('submit application')
-                        || text.includes('submit application')
-                        || b.type === 'submit';
-                });
-
-                return {
-                    step_count: stepCount,
-                    questions,
-                    submit_button: Boolean(submitBtn),
-                    text: (dialog.innerText || '').slice(0, 4000),
                 };
-            }"""
+                const escapeRegExp = value =>
+                    value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const textHasAny = (value, terms) =>
+                    terms.some(term =>
+                        new RegExp(`\\b${escapeRegExp(term)}\\b`, 'i').test(value || '')
+                    );
+                const easyApplyBtn = Array.from(document.querySelectorAll(
+                    'main button[aria-label]'
+                )).find(b => {
+                    const label = b.getAttribute('aria-label') || '';
+                    return !b.disabled
+                        && includesAny(label, labels.easy_apply)
+                        && (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                });
+                const appliedBadge = Array.from(
+                    document.querySelectorAll('main span, main div')
+                ).some(el => textHasAny((el.innerText || '').trim(), labels.applied));
+                return {
+                    has_easy_apply: Boolean(easyApplyBtn),
+                    already_applied: appliedBadge && !easyApplyBtn,
+                };
+            }""",
+            {"labels": _DEFAULT_JOB_ACTION_LABELS},
         )
 
-    async def _click_easy_apply_submit(self) -> bool:
-        """Click the Submit application button in the Easy Apply dialog."""
+    async def _click_easy_apply_button(self) -> bool:
+        """Click the visible Easy Apply button."""
         return await self._page.evaluate(
-            """() => {
-                const dialog = document.querySelector(
-                    'dialog[open], [role="dialog"]'
-                );
-                if (!dialog) return false;
-                const btn = Array.from(
-                    dialog.querySelectorAll('button')
-                ).find(b => {
-                    if (b.disabled) return false;
-                    const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                    const text = (b.innerText || '').toLowerCase();
-                    return label.includes('submit application')
-                        || text.includes('submit application')
-                        || b.type === 'submit';
+            """({ labels }) => {
+                const includesAny = (value, terms) => {
+                    const normalized = (value || '').toLowerCase();
+                    return terms.some(term =>
+                        normalized.includes(term.toLowerCase())
+                    );
+                };
+                const btn = Array.from(document.querySelectorAll(
+                    'main button[aria-label]'
+                )).find(b => {
+                    const label = b.getAttribute('aria-label') || '';
+                    return !b.disabled
+                        && includesAny(label, labels.easy_apply)
+                        && (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
                 });
                 if (!btn) return false;
                 btn.click();
                 return true;
-            }"""
+            }""",
+            {"labels": _DEFAULT_JOB_ACTION_LABELS},
         )
+
+    async def _inspect_easy_apply_dialog(self) -> dict[str, Any]:
+        """Read the open Easy Apply dialog and report structure."""
+        return await self._page.evaluate(_INSPECT_EASY_APPLY_DIALOG_JS)
+
+    async def _click_easy_apply_submit(self) -> bool:
+        """Click the Submit application button in the Easy Apply dialog."""
+        return await self._page.evaluate(_CLICK_EASY_APPLY_SUBMIT_JS)
+
+    async def _confirm_easy_apply_submission(self) -> bool:
+        """Confirm LinkedIn accepted the Easy Apply submission."""
+        try:
+            await self._page.wait_for_function(
+                r"""({ labels }) => {
+                    const dialog = document.querySelector(
+                        'dialog[open], [role="dialog"]'
+                    );
+                    const dialogVisible = Boolean(dialog
+                        && (dialog.offsetWidth
+                            || dialog.offsetHeight
+                            || dialog.getClientRects().length));
+                    if (!dialogVisible) return true;
+
+                    const escapeRegExp = value =>
+                        value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const textHasAny = (value, terms) =>
+                        terms.some(term =>
+                            new RegExp(`\\b${escapeRegExp(term)}\\b`, 'i').test(value || '')
+                        );
+                    const mainText = document.querySelector('main')?.innerText || '';
+                    const dialogText = dialog?.innerText || '';
+                    return textHasAny(mainText, labels.applied)
+                        || textHasAny(dialogText, labels.submit_success);
+                }""",
+                {"labels": _DEFAULT_JOB_ACTION_LABELS},
+                timeout=5000,
+            )
+            return True
+        except PlaywrightTimeoutError:
+            return False
 
     async def _dismiss_dialog(self) -> None:
         """Best-effort dismissal of any open dialog."""
