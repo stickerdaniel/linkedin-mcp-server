@@ -294,6 +294,25 @@ _NOISE_LINES: list[re.Pattern[str]] = [
     re.compile(r"^(?:Loaded:.*|Remaining time.*|Stream Type.*)$"),
 ]
 
+# Locale-dependent text patterns for job application detection.
+# Each entry maps a locale key to a (easy_apply_label, applied_label) tuple.
+# Note: LinkedIn provides no machine-readable badge state, so locale-aware
+# text matching is required per CLAUDE.md scraping rules.
+_LOCALE_JOB_LABELS: dict[str, tuple[str, str]] = {
+    "en": ("Easy Apply", "Applied"),
+    # Extend as needed: "fr": ("Candidature simple", "Candidature envoyée"),
+}
+
+
+def _get_job_labels() -> tuple[str, str]:
+    """Return (easy_apply, applied) labels for the current locale.
+
+    Falls back to English if locale is not in the table.
+    """
+    # Could detect locale from page, but LinkedIn UI locale is usually English.
+    labels = _LOCALE_JOB_LABELS.get("en", ("Easy Apply", "Applied"))
+    return labels
+
 
 @dataclass
 class ExtractedSection:
@@ -2838,6 +2857,754 @@ class LinkedInExtractor:
             recipient_selected=recipient_selected,
             sent=True,
         )
+
+    # ------------------------------------------------------------------
+    # Job application helpers (save_job, list_applied, easy_apply_*)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _application_action_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        questions: list[dict[str, str]] | None = None,
+        already_applied: bool = False,
+        saved: bool = False,
+        sent: bool = False,
+    ) -> dict[str, Any]:
+        """Build a structured response for job-application tools."""
+        result: dict[str, Any] = {
+            "url": url,
+            "status": status,
+            "message": message,
+        }
+        if questions is not None:
+            result["questions"] = questions
+        if already_applied:
+            result["already_applied"] = True
+        if saved:
+            result["saved"] = True
+        if sent:
+            result["sent"] = True
+        return result
+
+    async def save_job(
+        self,
+        job_id: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Bookmark a job posting with explicit confirmation gating."""
+        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Job page did not load for %s", job_id)
+
+        await handle_modal_close(self._page)
+
+        # Detect Save button. The verb prefix in aria-label is locale-
+        # dependent (Save / Saved in English). aria-pressed is a stable
+        # structural signal: present and "true" means already saved.
+        button_state = await self._page.evaluate(
+            """() => {
+                const candidates = Array.from(document.querySelectorAll(
+                    'main button[aria-label*="Save"], main button[aria-label*="Saved"]'
+                ));
+                const btn = candidates.find(b =>
+                    !b.disabled
+                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
+                );
+                if (!btn) return { found: false };
+                return {
+                    found: true,
+                    pressed: btn.getAttribute('aria-pressed') === 'true',
+                    label: btn.getAttribute('aria-label') || '',
+                };
+            }"""
+        )
+
+        if not button_state.get("found"):
+            return self._application_action_result(
+                self._page.url,
+                "save_unavailable",
+                "LinkedIn did not expose a Save button on this job posting.",
+            )
+
+        if button_state.get("pressed"):
+            return self._application_action_result(
+                self._page.url,
+                "already_saved",
+                "Job is already saved.",
+                saved=True,
+            )
+
+        if not confirm_send:
+            return self._application_action_result(
+                self._page.url,
+                "confirmation_required",
+                "Set confirm_send=true to bookmark the job.",
+            )
+
+        clicked = await self._page.evaluate(
+            """() => {
+                const candidates = Array.from(document.querySelectorAll(
+                    'main button[aria-label*="Save"]'
+                ));
+                const btn = candidates.find(b =>
+                    !b.disabled
+                    && b.getAttribute('aria-pressed') !== 'true'
+                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
+                );
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not clicked:
+            return self._application_action_result(
+                self._page.url,
+                "save_click_failed",
+                "Could not click Save button.",
+            )
+
+        await asyncio.sleep(0.5)
+        post_state = await self._page.evaluate(
+            """() => {
+                const btn = Array.from(document.querySelectorAll(
+                    'main button[aria-label*="Save"], main button[aria-label*="Saved"]'
+                )).find(b => !b.disabled
+                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                return btn ? btn.getAttribute('aria-pressed') === 'true' : false;
+            }"""
+        )
+        if not post_state:
+            return self._application_action_result(
+                self._page.url,
+                "save_not_confirmed",
+                "Clicked Save but LinkedIn did not flip the saved state.",
+            )
+
+        return self._application_action_result(
+            self._page.url,
+            "saved",
+            "Job saved.",
+            saved=True,
+        )
+
+    async def list_applied_jobs(self, max_pages: int = 3) -> dict[str, Any]:
+        """List jobs the authenticated user has applied to."""
+        base_url = "https://www.linkedin.com/my-items/saved-jobs/?cardType=APPLIED"
+        all_text: list[str] = []
+        all_ids: list[str] = []
+        seen_ids: set[str] = set()
+        last_url = base_url
+
+        for page_index in range(max_pages):
+            page_url = (
+                base_url
+                if page_index == 0
+                else f"{base_url}&start={page_index * _PAGE_SIZE}"
+            )
+            extracted = await self.extract_page(page_url, section_name="applied_jobs")
+            last_url = page_url
+            if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                break
+            all_text.append(extracted.text)
+            ids = await self._extract_job_ids()
+            for jid in ids:
+                if jid not in seen_ids:
+                    seen_ids.add(jid)
+                    all_ids.append(jid)
+            await asyncio.sleep(_NAV_DELAY)
+
+        sections = {"applied_jobs": "\n\n---\n\n".join(all_text)} if all_text else {}
+        return {
+            "url": last_url,
+            "sections": sections,
+            "job_ids": all_ids,
+        }
+
+    async def easy_apply_inspect(self, job_id: str) -> dict[str, Any]:
+        """Inspect the Easy Apply flow without submitting an application."""
+        opened = await self._open_easy_apply_dialog(job_id)
+        if not opened["ok"]:
+            return opened["result"]
+
+        try:
+            inspection = await self._inspect_easy_apply_dialog()
+            return self._application_action_result(
+                self._page.url,
+                "ok",
+                (
+                    f"Easy Apply dialog opened with {inspection['step_count']} step(s) "
+                    f"and {len(inspection['questions'])} question(s)."
+                ),
+                questions=inspection["questions"],
+            )
+        finally:
+            await self._dismiss_dialog()
+
+    async def easy_apply_submit(
+        self,
+        job_id: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Submit a zero-question Easy Apply application."""
+        opened = await self._open_easy_apply_dialog(job_id)
+        if not opened["ok"]:
+            return opened["result"]
+
+        try:
+            inspection = await self._inspect_easy_apply_dialog()
+            if inspection["questions"]:
+                return self._application_action_result(
+                    self._page.url,
+                    "manual_review",
+                    (
+                        "Easy Apply contains questions. Resolve them in a human "
+                        "session; do not auto-submit."
+                    ),
+                    questions=inspection["questions"],
+                )
+            if inspection["step_count"] != 1 or not inspection["submit_button"]:
+                return self._application_action_result(
+                    self._page.url,
+                    "manual_review",
+                    "Easy Apply is multi-step or missing a single Submit button.",
+                    questions=inspection["questions"],
+                )
+
+            if not confirm_send:
+                return self._application_action_result(
+                    self._page.url,
+                    "confirmation_required",
+                    "Set confirm_send=true to submit the Easy Apply application.",
+                )
+
+            submitted = await self._click_easy_apply_submit()
+            if not submitted:
+                return self._application_action_result(
+                    self._page.url,
+                    "submit_failed",
+                    "Could not click Submit application button.",
+                )
+
+            # Wait for confirmation: dialog closes or "Applied" badge appears
+            confirmed = await self._page.evaluate(
+                """() => {
+                    // Wait up to 5s for dialog to close or Applied badge
+                    const deadline = Date.now() + 5000;
+                    while (Date.now() < deadline) {
+                        const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                        if (!dialog) return true; // Dialog closed = success
+                        const appliedBadge = Array.from(
+                            document.querySelectorAll('main span, main div')
+                        ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
+                        if (appliedBadge) return true;
+                        // Brief sleep to avoid busy-waiting
+                        if (window.Promise) break; // Exit quickly if no async support
+                    }
+                    // Fallback: check if dialog is gone or badge visible
+                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                    if (!dialog) return true;
+                    const appliedBadge = Array.from(
+                        document.querySelectorAll('main span, main div')
+                    ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
+                    return appliedBadge;
+                }"""
+            )
+
+            if not confirmed:
+                return self._application_action_result(
+                    self._page.url,
+                    "submission_unconfirmed",
+                    "Submit was clicked but no success confirmation detected.",
+                )
+
+            return self._application_action_result(
+                self._page.url,
+                "submitted",
+                "Easy Apply submitted.",
+                sent=True,
+            )
+        finally:
+            await self._dismiss_dialog()
+
+    async def _open_easy_apply_dialog(self, job_id: str) -> dict[str, Any]:
+        """Navigate to a job and open the Easy Apply dialog."""
+        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Job page did not load for %s", job_id)
+
+        await handle_modal_close(self._page)
+
+        # Use per-locale table for label detection (per CLAUDE.md scraping rules).
+        easy_apply_label, applied_label = _get_job_labels()
+        state = await self._page.evaluate(
+            f"""() => {{
+                const easyApplyBtn = Array.from(document.querySelectorAll(
+                    'main button[aria-label*="{easy_apply_label}"]'
+                )).find(b => !b.disabled
+                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                const appliedBadge = Array.from(
+                    document.querySelectorAll('main span, main div')
+                ).some(el => /\\b{applied_label}\\b/i.test((el.innerText || '').trim()));
+                return {{
+                    has_easy_apply: Boolean(easyApplyBtn),
+                    already_applied: appliedBadge && !easyApplyBtn,
+                }};
+            }}"""
+        )
+
+        if state.get("already_applied"):
+            return {
+                "ok": False,
+                "result": self._application_action_result(
+                    self._page.url,
+                    "already_applied",
+                    "LinkedIn shows this job as already applied.",
+                    already_applied=True,
+                ),
+            }
+
+        if not state.get("has_easy_apply"):
+            return {
+                "ok": False,
+                "result": self._application_action_result(
+                    self._page.url,
+                    "no_easy_apply",
+                    "Job posting does not offer Easy Apply.",
+                ),
+            }
+
+        clicked = await self._page.evaluate(
+            """() => {
+                const btn = Array.from(document.querySelectorAll(
+                    'main button[aria-label*="Easy Apply"]'
+                )).find(b => !b.disabled
+                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not clicked:
+            return {
+                "ok": False,
+                "result": self._application_action_result(
+                    self._page.url,
+                    "easy_apply_click_failed",
+                    "Could not click Easy Apply button.",
+                ),
+            }
+
+        try:
+            await self._page.wait_for_selector(
+                _DIALOG_SELECTOR, state="visible", timeout=5000
+            )
+        except PlaywrightTimeoutError:
+            return {
+                "ok": False,
+                "result": self._application_action_result(
+                    self._page.url,
+                    "dialog_not_opened",
+                    "Easy Apply dialog did not appear after clicking the button.",
+                ),
+            }
+
+        return {"ok": True, "result": None}
+
+    async def _inspect_easy_apply_dialog(self) -> dict[str, Any]:
+        """Read the open Easy Apply dialog and report structure."""
+        return await self._page.evaluate(
+            """() => {
+                const dialog = document.querySelector(
+                    'dialog[open], [role="dialog"]'
+                );
+                if (!dialog) return {
+                    step_count: 0,
+                    questions: [],
+                    submit_button: false,
+                    text: '',
+                };
+
+                let stepCount = 1;
+                const progress = dialog.querySelector('[role="progressbar"]');
+                if (progress) {
+                    const max = parseInt(
+                        progress.getAttribute('aria-valuemax') || '1', 10
+                    );
+                    if (Number.isFinite(max) && max > 0) stepCount = max;
+                }
+
+                const questions = [];
+                const inputs = dialog.querySelectorAll(
+                    'input[type="text"], input[type="email"], input[type="tel"],'
+                    + 'input[type="number"], input[type="file"], select, textarea'
+                );
+                for (const el of inputs) {
+                    if (!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)) {
+                        continue;
+                    }
+                    const id = el.getAttribute('id');
+                    let labelText = '';
+                    if (id) {
+                        const lbl = dialog.querySelector(
+                            `label[for="${CSS.escape(id)}"]`
+                        );
+                        if (lbl) labelText = (lbl.innerText || '').trim();
+                    }
+                    if (!labelText) {
+                        labelText = (el.getAttribute('aria-label') || '').trim();
+                    }
+                    if (!labelText) {
+                        const wrap = el.closest('label, fieldset, div');
+                        labelText = wrap ? (wrap.innerText || '').trim() : '';
+                    }
+                    questions.push({
+                        label: labelText.slice(0, 200),
+                        field_type: el.type || el.tagName.toLowerCase(),
+                    });
+                }
+
+                const submitBtn = Array.from(
+                    dialog.querySelectorAll('button')
+                ).find(b => {
+                    if (b.disabled) return false;
+                    const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                    const text = (b.innerText || '').toLowerCase();
+                    return label.includes('submit application')
+                        || text.includes('submit application');
+                });
+                return {
+                    step_count: stepCount,
+                    questions,
+                    submit_button: Boolean(submitBtn),
+                    text: (dialog.innerText || '').slice(0, 4000),
+                };
+            }"""
+        )
+
+    async def _click_easy_apply_submit(self) -> bool:
+        """Click the Submit application button in the Easy Apply dialog."""
+        return await self._page.evaluate(
+            """() => {
+                const dialog = document.querySelector(
+                    'dialog[open], [role="dialog"]'
+                );
+                if (!dialog) return false;
+                const btn = Array.from(
+                    dialog.querySelectorAll('button')
+                ).find(b => {
+                    if (b.disabled) return false;
+                    const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                    const text = (b.innerText || '').toLowerCase();
+                    return label.includes('submit application')
+                        || text.includes('submit application');
+                });
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+
+    async def _get_next_button(self) -> bool:
+        """Click the 'Continue to next step' button. Returns True if clicked."""
+        return await self._page.evaluate(
+            """() => {
+                const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                if (!dialog) return false;
+                const nextBtn = Array.from(
+                    dialog.querySelectorAll('button')
+                ).find(b => {
+                    if (b.disabled) return false;
+                    const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                    const text = (b.innerText || '').toLowerCase();
+                    return label.includes('continue to next step')
+                        || label.includes('next step')
+                        || text.includes('continue to next step')
+                        || text.includes('next step');
+                });
+                if (!nextBtn) return false;
+                nextBtn.click();
+                return true;
+            }"""
+        )
+
+    async def _has_next_step(self) -> bool:
+        """Check if there's a next step button (more steps to fill)."""
+        return await self._page.evaluate(
+            """() => {
+                const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                if (!dialog) return false;
+                const nextBtn = Array.from(
+                    dialog.querySelectorAll('button')
+                ).find(b => {
+                    if (b.disabled) return false;
+                    const label = (b.getAttribute('aria-label') || '').toLowerCase();
+                    const text = (b.innerText || '').toLowerCase();
+                    return label.includes('continue to next step')
+                        || label.includes('next step')
+                        || text.includes('continue to next step')
+                        || text.includes('next step');
+                });
+                return Boolean(nextBtn);
+            }"""
+        )
+
+    async def _auto_fill_fields(self, answers: dict[str, str]) -> int:
+        """Auto-fill form fields with provided answers. Returns count of filled fields."""
+        if not answers:
+            return 0
+
+        filled = 0
+        for label, value in answers.items():
+            if not value:
+                continue
+
+            # Try to find and fill the field by label
+            result = await self._page.evaluate(
+                """(params) => {
+                    const {label, value} = params;
+                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                    if (!dialog) return false;
+
+                    // Find label element
+                    const labelEl = Array.from(dialog.querySelectorAll('label, h3, span'))
+                        .find(el => (el.innerText || '').toLowerCase().includes(label.toLowerCase()));
+
+                    if (!labelEl) return false;
+
+                    // Find associated input
+                    const input = labelEl.querySelector('input, select, textarea');
+                    const formGroup = labelEl.closest('div[data-test-form-item]') || labelEl.closest('.form-item');
+                    const formInput = formGroup ? formGroup.querySelector('input, select, textarea') : null;
+                    const target = input || formInput;
+
+                    if (!target) return false;
+
+                    // Fill based on type
+                    if (target.tagName === 'SELECT') {
+                        const option = Array.from(target.options)
+                            .find(opt => opt.text.toLowerCase().includes(value.toLowerCase()));
+                        if (option) {
+                            target.value = option.value;
+                            target.dispatchEvent(new Event('change', { bubbles: true }));
+                            return true;
+                        }
+                    } else if (target.type === 'checkbox' || target.type === 'radio') {
+                        if (value.toLowerCase() === 'yes' || value.toLowerCase() === 'true') {
+                            if (!target.checked) target.click();
+                            return true;
+                        }
+                    } else {
+                        target.value = value;
+                        target.dispatchEvent(new Event('input', { bubbles: true }));
+                        target.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    }
+                    return false;
+                }""",
+                {"label": label, "value": value},
+            )
+            if result:
+                filled += 1
+
+        return filled
+
+    async def _upload_resume_to_form(self, resume_path: str | None) -> bool:
+        """Upload resume to the form if file input exists. Returns True if uploaded."""
+        if not resume_path:
+            return False
+
+        return await self._page.evaluate(
+            """(resumePath) => {
+                const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                if (!dialog) return false;
+
+                // Find file input (usually labeled "Resume" or "CV")
+                const fileInputs = dialog.querySelectorAll('input[type="file"]');
+                for (const input of fileInputs) {
+                    const label = (input.getAttribute('aria-label') || '').toLowerCase();
+                    const name = (input.getAttribute('name') || '').toLowerCase();
+                    const id = (input.getAttribute('id') || '').toLowerCase();
+
+                    if (label.includes('resume') || label.includes('cv')
+                        || name.includes('resume') || name.includes('cv')
+                        || id.includes('resume') || id.includes('cv')) {
+                        // Set files on the input
+                        const dataTransfer = new DataTransfer();
+                        // Note: Can't actually set file content, just trigger the dialog
+                        // The caller needs to use Playwright's set_input_files
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    }
+                }
+                return false;
+            }""",
+            resume_path,
+        )
+
+    async def easy_apply_full(
+        self,
+        job_id: str,
+        *,
+        confirm_send: bool,
+        resume_path: str | None = None,
+        answers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Full multi-step Easy Apply with auto-fill.
+
+        Args:
+            job_id: LinkedIn job ID
+            confirm_send: Must be True to submit
+            resume_path: Path to resume file (optional)
+            answers: Dict of {field_label: value} to auto-fill
+
+        Returns:
+            Dict with status, message, and optional questions
+        """
+        opened = await self._open_easy_apply_dialog(job_id)
+        if not opened["ok"]:
+            return opened["result"]
+
+        try:
+            if not confirm_send:
+                return self._application_action_result(
+                    self._page.url,
+                    "confirmation_required",
+                    "Set confirm_send=true to submit.",
+                )
+
+            # Upload resume if provided
+            if resume_path:
+                uploaded = await self._upload_resume_to_form(resume_path)
+                if uploaded:
+                    logger.info("Resume upload triggered for %s", job_id)
+                    await asyncio.sleep(1)  # Wait for upload to process
+
+            # Auto-fill with answers
+            if answers:
+                filled = await self._auto_fill_fields(answers)
+                logger.info("Auto-filled %d fields for %s", filled, job_id)
+
+            # Multi-step navigation loop
+            steps_completed = 0
+            max_steps = 10  # Safety limit
+
+            while steps_completed < max_steps:
+                # Check if we can submit or need to continue
+                if await self._has_next_step():
+                    # Click next step
+                    clicked = await self._get_next_button()
+                    if clicked:
+                        steps_completed += 1
+                        await asyncio.sleep(0.5)  # Wait for next step to load
+
+                        # Auto-fill next step if answers provided
+                        if answers:
+                            await self._auto_fill_fields(answers)
+                    else:
+                        logger.warning(
+                            "Has next step but couldn't click for %s", job_id
+                        )
+                        break
+                else:
+                    # No more steps - try to submit
+                    break
+
+            # Try to submit
+            submitted = await self._click_easy_apply_submit()
+            if not submitted:
+                return self._application_action_result(
+                    self._page.url,
+                    "submit_failed",
+                    "Could not find Submit button.",
+                )
+
+            # Wait for confirmation
+            confirmed = await self._page.evaluate(
+                """() => {
+                    const deadline = Date.now() + 5000;
+                    while (Date.now() < deadline) {
+                        const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                        if (!dialog) return true;
+                        const appliedBadge = Array.from(
+                            document.querySelectorAll('main span, main div')
+                        ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
+                        if (appliedBadge) return true;
+                        if (window.Promise) break;
+                    }
+                    const dialog = document.querySelector('dialog[open], [role="dialog"]');
+                    if (!dialog) return true;
+                    return Array.from(
+                        document.querySelectorAll('main span, main div')
+                    ).some(el => /\\bApplied\\b/i.test((el.innerText || '').trim()));
+                }"""
+            )
+
+            if not confirmed:
+                return self._application_action_result(
+                    self._page.url,
+                    "submission_unconfirmed",
+                    "Submitted but confirmation not detected.",
+                )
+
+            return self._application_action_result(
+                self._page.url,
+                "submitted",
+                f"Easy Apply submitted ({steps_completed} step(s) completed).",
+                sent=True,
+            )
+
+        finally:
+            await self._dismiss_dialog()
+
+    async def _dismiss_dialog(self) -> None:
+        """Best-effort dismissal of any open dialog."""
+        try:
+            close_clicked = await self._page.evaluate(
+                """() => {
+                    const dialog = document.querySelector(
+                        'dialog[open], [role="dialog"]'
+                    );
+                    if (!dialog) return true;
+                    const closeBtn = Array.from(
+                        dialog.querySelectorAll('button')
+                    ).find(b => {
+                        if (b.disabled) return false;
+                        const label = (
+                            b.getAttribute('aria-label') || ''
+                        ).toLowerCase();
+                        return label.includes('dismiss')
+                            || label.includes('close')
+                            || label === 'cancel'
+                            || (b.innerText || '').toLowerCase().trim() === 'cancel';
+                    });
+                    if (closeBtn) {
+                        closeBtn.click();
+                        return true;
+                    }
+                    return false;
+                }"""
+            )
+            if not close_clicked:
+                await self._page.keyboard.press("Escape")
+            await asyncio.sleep(0.5)
+        except Exception:
+            logger.debug("Could not dismiss Easy Apply dialog", exc_info=True)
 
     async def _extract_root_content(
         self,
