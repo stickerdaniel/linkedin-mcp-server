@@ -269,3 +269,131 @@ def register_messaging_tools(
                 raise_tool_error(relogin_exc, "send_message")
         except Exception as e:
             raise_tool_error(e, "send_message")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Send InMail",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"messaging", "actions", "inmail"},
+        exclude_args=["extractor"],
+    )
+    async def send_inmail(
+        linkedin_username: str,
+        message: str,
+        subject: str,
+        confirm_send: bool,
+        ctx: Context,
+        profile_urn: str | None = None,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Send an InMail message to a LinkedIn user.
+
+        InMail allows you to message LinkedIn users you are not connected to.
+        Requires a Premium subscription with available InMail credits.
+
+        Args:
+            linkedin_username: LinkedIn username of the recipient
+            message: The message text to send
+            subject: Subject line for the InMail
+            confirm_send: Must be True to send the InMail (False does a dry run)
+            ctx: FastMCP context for progress reporting
+            profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
+                compose URL directly, bypassing the InMail button lookup.
+                Obtain via get_person_profile.
+
+        Returns:
+            Dict with url, status, message, recipient_selected, and sent.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="send_inmail"
+            )
+            logger.info(
+                "Sending InMail to %s (confirm_send=%s)",
+                linkedin_username,
+                confirm_send,
+            )
+
+            await ctx.report_progress(progress=0, total=100, message="Sending InMail")
+
+            result = await extractor.send_inmail(
+                linkedin_username,
+                message,
+                subject,
+                confirm_send=confirm_send,
+                profile_urn=profile_urn,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "send_inmail")
+        except Exception as e:
+            raise_tool_error(e, "send_inmail")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Send Connection Request",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"messaging", "actions", "connection"},
+        exclude_args=["extractor"],
+    )
+    async def send_connection_request(
+        linkedin_username: str,
+        confirm_send: bool,
+        ctx: Context,
+        message: str | None = None,
+        profile_urn: str | None = None,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Send a connection request to a LinkedIn user.
+
+        Args:
+            linkedin_username: LinkedIn username of the recipient
+            confirm_send: Must be True to send (False does a dry run)
+            ctx: FastMCP context for progress reporting
+            message: Optional personalized message (300 char limit)
+            profile_urn: Optional profile URN for direct API call
+
+        Returns:
+            Dict with url, status, message, and sent.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="send_connection_request"
+            )
+            logger.info(
+                "Sending connection request to %s (confirm_send=%s)",
+                linkedin_username,
+                confirm_send,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Sending connection request"
+            )
+
+            result = await extractor.send_connection_request(
+                linkedin_username,
+                message,
+                confirm_send=confirm_send,
+                profile_urn=profile_urn,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "send_connection_request")
+        except Exception as e:
+            raise_tool_error(e, "send_connection_request")  # NoReturn
