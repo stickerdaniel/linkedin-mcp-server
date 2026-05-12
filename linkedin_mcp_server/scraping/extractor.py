@@ -2914,10 +2914,14 @@ class LinkedInExtractor:
         filter_failed = False
         filter_label = self._INBOX_FILTER_LABELS.get(inbox_filter)
         if filter_label:
+            btn = self._page.get_by_role("button", name=filter_label, exact=True)
             try:
-                btn = self._page.get_by_role("button", name=filter_label, exact=True)
                 await btn.click(timeout=5000)
-                await self._page.wait_for_timeout(1000)
+                # Tie extraction to actual filter state: wait for the pill's
+                # aria-pressed to flip to "true" instead of a wall-clock pause.
+                await btn.and_(self._page.locator('[aria-pressed="true"]')).wait_for(
+                    timeout=5000
+                )
             except Exception:
                 logger.warning("Could not activate %s filter", filter_label)
                 filter_failed = True
