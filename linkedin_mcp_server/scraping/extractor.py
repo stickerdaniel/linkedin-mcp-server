@@ -2885,7 +2885,14 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
-    # Maps filter param values to the button text shown in LinkedIn's inbox UI.
+    # Maps inbox_filter param values to the button text shown in LinkedIn's
+    # inbox UI. English-only by design: matched via Playwright's `name=`
+    # role lookup against rendered button text. On non-English sessions
+    # (e.g. German "Ungelesen" for "Unread") the lookup misses and the
+    # caller receives a `filter_failed` entry in `section_errors`. Widening
+    # this to a per-locale dict keyed off the page lang attribute would
+    # require a verified label table per locale; deferred until there's a
+    # concrete need.
     _INBOX_FILTER_LABELS: dict[str, str] = {
         "unread": "Unread",
         "jobs": "Jobs",
@@ -2895,7 +2902,7 @@ class LinkedInExtractor:
     }
 
     async def get_inbox(
-        self, limit: int = 20, *, filter: str = "none"
+        self, limit: int = 20, *, inbox_filter: str = "none"
     ) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
         url = "https://www.linkedin.com/messaging/"
@@ -2905,7 +2912,7 @@ class LinkedInExtractor:
         await handle_modal_close(self._page)
 
         filter_failed = False
-        filter_label = self._INBOX_FILTER_LABELS.get(filter)
+        filter_label = self._INBOX_FILTER_LABELS.get(inbox_filter)
         if filter_label:
             try:
                 btn = self._page.get_by_role("button", name=filter_label, exact=True)
@@ -2948,7 +2955,7 @@ class LinkedInExtractor:
                 "inbox": {
                     "error_type": "filter_failed",
                     "error_message": (
-                        f"Could not activate '{filter}' filter; "
+                        f"Could not activate '{inbox_filter}' filter; "
                         "results may be unfiltered"
                     ),
                 }

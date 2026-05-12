@@ -684,7 +684,9 @@ class TestMessagingTools:
         result = await tool_fn(mock_context, extractor=mock_extractor)
 
         assert result["sections"]["inbox"] == "Conversation 1\nConversation 2"
-        mock_extractor.get_inbox.assert_awaited_once_with(limit=20, filter="none")
+        mock_extractor.get_inbox.assert_awaited_once_with(
+            limit=20, inbox_filter="none"
+        )
 
     @pytest.mark.parametrize(
         "filter_value",
@@ -704,11 +706,13 @@ class TestMessagingTools:
 
         tool_fn = await get_tool_fn(mcp, "get_inbox")
         result = await tool_fn(
-            mock_context, filter=filter_value, extractor=mock_extractor
+            mock_context, inbox_filter=filter_value, extractor=mock_extractor
         )
 
         assert result["sections"]["inbox"] == "Filtered conversations"
-        mock_extractor.get_inbox.assert_awaited_once_with(limit=20, filter=filter_value)
+        mock_extractor.get_inbox.assert_awaited_once_with(
+            limit=20, inbox_filter=filter_value
+        )
 
     async def test_get_conversation_success(self, mock_context):
         expected = {
