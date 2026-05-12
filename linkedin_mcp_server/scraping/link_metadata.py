@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 ReferenceKind = Literal[
     "person",
     "company",
+    "company_urn",
     "job",
     "feed_post",
     "article",
@@ -26,6 +27,7 @@ class Reference(TypedDict):
     url: Required[str]
     text: NotRequired[str]
     context: NotRequired[str]
+    value: NotRequired[str]
 
 
 class RawReference(TypedDict, total=False):
@@ -99,6 +101,10 @@ _REFERENCE_CAPS = {
     "contact_info": 8,
     "inbox": 30,
     "conversation": 12,
+    # Headroom for get_feed's num_posts ceiling (Field(ge=1, le=50)).
+    # Kept in sync with the literal cap=50 in extractor._build_feed_references
+    # where SDUI-derived /posts/<slug> permalinks are appended.
+    "feed": 50,
 }
 
 _URL_LIKE_RE = re.compile(r"^(?:https?://|/)\S+$", re.IGNORECASE)
@@ -114,6 +120,27 @@ _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
 _MESSAGING_THREAD_PATH_RE = re.compile(r"^/messaging/thread/([^/?#]+)")
 _MAX_REDIRECT_UNWRAP_DEPTH = 5
+
+# Accept both quoted-string and bare-integer JSON list elements, e.g.
+# ``["1115","2573558"]`` (the form LinkedIn currently emits — verified live)
+# and ``[1115,2573558]`` (also valid JSON). Optional surrounding quote keeps
+# the matcher resilient if LinkedIn ever drops the string-typing.
+_FIRST_URN_RE = re.compile(r'\[\s*"?(\d+)"?')
+
+
+def _first_company_urn_from_query(query: str) -> str | None:
+    """Pull the first numeric id from a ``currentCompany`` people-search facet.
+
+    LinkedIn's people-search canned-search anchors carry the company URN
+    in the ``currentCompany`` query param as a JSON list, e.g.
+    ``currentCompany=["1115","2573558"]`` (percent-encoded in the href).
+    The first id is the parent company; subsequent ids are subsidiaries.
+    """
+    values = parse_qs(query).get("currentCompany")
+    if not values:
+        return None
+    match = _FIRST_URN_RE.match(values[0])
+    return match.group(1) if match else None
 
 
 def build_references(
@@ -150,8 +177,16 @@ def normalize_reference(
         return None
     kind, normalized_url = kind_url
 
-    text = choose_reference_text(raw, kind)
-    if text is None and kind not in {"feed_post", "external", "conversation"}:
+    if kind == "company_urn":
+        text = None
+    else:
+        text = choose_reference_text(raw, kind)
+    if text is None and kind not in {
+        "feed_post",
+        "external",
+        "conversation",
+        "company_urn",
+    }:
         return None
 
     context = derive_context(section_name, raw, kind)
@@ -160,6 +195,15 @@ def normalize_reference(
         "kind": kind,
         "url": normalized_url,
     }
+    if kind == "company_urn":
+        # ``classify_link`` already extracted the urn while building the
+        # canonical url. Re-parsing here keeps that classifier internal —
+        # callers of ``normalize_reference`` shouldn't have to know the
+        # url shape — and is cheap (the canonical url has a fixed
+        # single-id form, so ``parse_qs`` is O(1) here).
+        urn_id = _first_company_urn_from_query(urlparse(normalized_url).query)
+        if urn_id:
+            reference["value"] = urn_id
     if text:
         reference["text"] = text
     if context:
@@ -206,6 +250,18 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
         return "external", urlunparse(
             (parsed.scheme, parsed.netloc, parsed.path or "/", "", "", "")
         )
+
+    # The "See all employees on LinkedIn" canned-search anchor carries the
+    # company URN id, which is the only value LinkedIn's currentCompany
+    # people-search facet actually filters on. Match before the chrome
+    # check below, which would otherwise drop every /search/results path.
+    if path.rstrip("/") == "/search/results/people":
+        urn_id = _first_company_urn_from_query(parsed.query)
+        if urn_id:
+            return (
+                "company_urn",
+                f"/search/results/people/?currentCompany=%5B%22{urn_id}%22%5D",
+            )
 
     if _is_linkedin_chrome(path):
         return None

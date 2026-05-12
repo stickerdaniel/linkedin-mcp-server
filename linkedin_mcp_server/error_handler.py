@@ -25,6 +25,7 @@ from linkedin_mcp_server.exceptions import (
     AuthenticationBootstrapFailedError,
     AuthenticationInProgressError,
     AuthenticationStartedError,
+    BrowserBinaryMissingError,
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
     CredentialsNotFoundError,
@@ -111,6 +112,10 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     elif isinstance(exception, LinuxBrowserDependencyError):
         logger.warning("Linux browser dependency missing%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    elif isinstance(exception, BrowserBinaryMissingError):
+        logger.warning("Browser binary missing%s: %s", ctx, exception)
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, SessionExpiredError):

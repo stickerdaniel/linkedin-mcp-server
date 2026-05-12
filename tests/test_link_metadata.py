@@ -524,6 +524,123 @@ class TestBuildReferences:
             }
         ]
 
+    def test_company_urn_single_id_anchor(self):
+        """Anthropic-style: single id in the currentCompany list."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?currentCompany=%5B%2274126343%22%5D"
+                    "&origin=COMPANY_PAGE_CANNED_SEARCH",
+                    "text": "501-1K employees",
+                }
+            ],
+            "about",
+        )
+
+        assert references == [
+            {
+                "kind": "company_urn",
+                "url": "/search/results/people/?currentCompany=%5B%2274126343%22%5D",
+                "value": "74126343",
+                "context": "top card",
+            }
+        ]
+
+    def test_company_urn_multi_id_anchor_uses_first_id(self):
+        """SAP-style: parent + subsidiaries; the first id is the parent company."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?currentCompany=%5B%221115%22%2C%222573558%22%2C%222818%22%5D"
+                    "&origin=COMPANY_PAGE_CANNED_SEARCH",
+                    "text": "143,150 associated members",
+                }
+            ],
+            "about",
+        )
+
+        assert references == [
+            {
+                "kind": "company_urn",
+                "url": "/search/results/people/?currentCompany=%5B%221115%22%5D",
+                "value": "1115",
+                "context": "top card",
+            }
+        ]
+
+    def test_company_urn_suppresses_anchor_text(self):
+        """Anchor text like '10K+ employees' is not user-meaningful for a URN
+        reference; callers should key off ``value``."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?currentCompany=%5B%221115%22%5D",
+                    "text": "10K+ employees",
+                }
+            ],
+            "about",
+        )
+
+        assert len(references) == 1
+        assert references[0]["kind"] == "company_urn"
+        assert references[0]["value"] == "1115"
+        assert "text" not in references[0]
+
+    def test_company_urn_accepts_unquoted_json_integers(self):
+        """Defensive: LinkedIn currently serialises ids as quoted strings,
+        but plain JSON integers are also valid and should still classify."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?currentCompany=%5B1115%5D",
+                    "text": "10K+ employees",
+                }
+            ],
+            "about",
+        )
+
+        assert len(references) == 1
+        assert references[0]["kind"] == "company_urn"
+        assert references[0]["value"] == "1115"
+
+    def test_company_urn_lowercase_percent_escapes(self):
+        """``parse_qs`` decodes percent-escapes regardless of case, so
+        lowercase variants must still classify and extract the same id."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?currentCompany=%5b%221115%22%5d",
+                    "text": "10K+ employees",
+                }
+            ],
+            "about",
+        )
+
+        assert len(references) == 1
+        assert references[0]["kind"] == "company_urn"
+        assert references[0]["value"] == "1115"
+
+    def test_plain_people_search_still_dropped(self):
+        """A people-search href without ``currentCompany`` is page chrome
+        and stays excluded — preserves existing behaviour."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?keywords=engineer",
+                    "text": "engineer",
+                }
+            ],
+            "about",
+        )
+
+        assert references == []
+
 
 class TestClassifyLink:
     def test_messaging_thread_url(self):

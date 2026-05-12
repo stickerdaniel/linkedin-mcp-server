@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "linkedin-mcp-server",
   "display_name": "LinkedIn MCP Server",
-  "version": "4.9.3",
+  "version": "4.13.0",
   "description": "Connect Claude to LinkedIn for profiles, connection requests, companies, job details, and people search",
   "long_description": "# LinkedIn MCP Server\n\nConnect Claude to your LinkedIn account with an MCP Bundle (MCPB, formerly DXT). The bundle starts quickly, downloads the Patchright Chromium browser in the background when needed, and opens LinkedIn login on the first auth-requiring tool call.\n\n## First-time managed runtime flow\n\n1. Install the `.mcpb` bundle in Claude Desktop.\n2. Start Claude Desktop; the MCP server starts and begins preparing the Patchright Chromium browser cache under `~/.linkedin-mcp/patchright-browsers`.\n3. If you call a tool before setup finishes, the tool returns a setup-in-progress error.\n4. On the first tool call that needs authentication, a browser window opens so you can sign into LinkedIn.\n5. Retry the tool after login completes.\n\nDocker remains available as a separate runtime path, but it still requires host-side `--login`.",
   "author": {
@@ -50,6 +50,10 @@
       "description": "Get detailed information from a LinkedIn profile including work history, education, certifications, skills, projects, connections, and recent posts"
     },
     {
+      "name": "get_my_profile",
+      "description": "Get the authenticated user's own LinkedIn profile with optional section selection (experience, education, skills, etc.)"
+    },
+    {
       "name": "connect_with_person",
       "description": "Send a connection request or accept an incoming one, with optional note"
     },
@@ -59,11 +63,19 @@
     },
     {
       "name": "get_company_profile",
-      "description": "Extract comprehensive company information and details"
+      "description": "Extract comprehensive company information and details. About-section references may include a company_urn entry carrying the numeric id LinkedIn's people-search uses in its currentCompany URL facet."
     },
     {
       "name": "get_company_posts",
       "description": "Get recent posts from a company's LinkedIn feed"
+    },
+    {
+      "name": "search_companies",
+      "description": "Search for companies on LinkedIn by keywords"
+    },
+    {
+      "name": "get_company_employees",
+      "description": "List employees at a company from the LinkedIn /people/ page, with optional keyword filter by name, title, or skill"
     },
     {
       "name": "get_job_details",
@@ -75,7 +87,7 @@
     },
     {
       "name": "search_people",
-      "description": "Search for people on LinkedIn by keywords and location"
+      "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company"
     },
     {
       "name": "get_inbox",
@@ -92,6 +104,10 @@
     {
       "name": "send_message",
       "description": "Send a message to a LinkedIn user with explicit confirmation and optional profile URN support"
+    },
+    {
+      "name": "get_feed",
+      "description": "Get recent posts from the authenticated user's LinkedIn home feed"
     },
     {
       "name": "close_session",

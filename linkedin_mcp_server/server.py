@@ -16,13 +16,14 @@ from linkedin_mcp_server.bootstrap import (
     initialize_bootstrap,
     start_background_browser_setup_if_needed,
 )
-from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
 from linkedin_mcp_server.tools.company import register_company_tools
+from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.messaging import register_messaging_tools
 from linkedin_mcp_server.tools.person import register_person_tools
@@ -46,7 +47,7 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     await close_browser()
 
 
-def create_mcp_server() -> FastMCP:
+def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools."""
     mcp = FastMCP(
         "linkedin_scraper",
@@ -56,14 +57,15 @@ def create_mcp_server() -> FastMCP:
     mcp.add_middleware(SequentialToolExecutionMiddleware())
 
     # Register all tools
-    register_person_tools(mcp)
-    register_company_tools(mcp)
-    register_job_tools(mcp)
-    register_messaging_tools(mcp)
+    register_person_tools(mcp, tool_timeout=tool_timeout)
+    register_company_tools(mcp, tool_timeout=tool_timeout)
+    register_job_tools(mcp, tool_timeout=tool_timeout)
+    register_messaging_tools(mcp, tool_timeout=tool_timeout)
+    register_feed_tools(mcp, tool_timeout=tool_timeout)
 
     # Register session management tool
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Close Session",
         annotations={"destructiveHint": True},
         tags={"session"},

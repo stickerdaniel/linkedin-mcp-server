@@ -6,6 +6,7 @@ Loads settings from CLI arguments and environment variables.
 
 import argparse
 import logging
+import math
 import os
 import sys
 from typing import Literal, cast
@@ -37,6 +38,16 @@ def positive_int(value: str) -> int:
     return ivalue
 
 
+def positive_float(value: str) -> float:
+    """Argparse type for positive finite floats."""
+    fvalue = float(value)
+    if not (math.isfinite(fvalue) and fvalue > 0):
+        raise argparse.ArgumentTypeError(
+            f"must be a positive finite number, got {value}"
+        )
+    return fvalue
+
+
 class EnvironmentKeys:
     """Environment variable names used by the application."""
 
@@ -52,6 +63,7 @@ class EnvironmentKeys:
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
     USER_DATA_DIR = "USER_DATA_DIR"
+    TOOL_TIMEOUT = "TOOL_TIMEOUT"
 
 
 def is_interactive_environment() -> bool:
@@ -111,6 +123,20 @@ def load_from_env(config: AppConfig) -> AppConfig:
             raise ConfigurationError(
                 f"Invalid TIMEOUT: '{timeout_env}'. Must be an integer."
             )
+
+    # Per-tool MCP execution timeout in seconds (also validated in ServerConfig.validate())
+    if tool_timeout_env := os.environ.get(EnvironmentKeys.TOOL_TIMEOUT):
+        try:
+            tool_timeout_value = float(tool_timeout_env)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid TOOL_TIMEOUT: '{tool_timeout_env}'. Must be a number."
+            )
+        if not (math.isfinite(tool_timeout_value) and tool_timeout_value > 0):
+            raise ConfigurationError(
+                f"Invalid TOOL_TIMEOUT: '{tool_timeout_env}'. Must be a positive finite number."
+            )
+        config.server.tool_timeout_seconds = tool_timeout_value
 
     # Custom user agent
     if user_agent_env := os.environ.get(EnvironmentKeys.USER_AGENT):
@@ -237,6 +263,14 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
+        "--tool-timeout",
+        type=positive_float,
+        default=None,
+        metavar="SECONDS",
+        help="Per-tool MCP execution timeout in seconds (default: 180.0)",
+    )
+
+    parser.add_argument(
         "--chrome-path",
         type=str,
         default=None,
@@ -313,6 +347,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.timeout is not None:
         config.browser.default_timeout = args.timeout
+
+    if args.tool_timeout is not None:
+        config.server.tool_timeout_seconds = args.tool_timeout
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path

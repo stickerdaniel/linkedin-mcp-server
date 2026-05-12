@@ -345,7 +345,9 @@ class BrowserManager:
                 logger.warning("No li_at cookie found in %s", path)
                 return False
 
-            await self._context.add_cookies(cookies)  # type: ignore[arg-type]
+            await self._context.add_cookies(
+                cookies  # ty: ignore[invalid-argument-type]
+            )
             logger.info(
                 "Imported %d LinkedIn bridge cookies from %s (preset=%s, li_at=%s): %s",
                 len(cookies),

@@ -9,6 +9,7 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
+    BrowserBinaryMissingError,
     CredentialsNotFoundError,
     LinkedInMCPError,
     SessionExpiredError,
@@ -71,6 +72,17 @@ def test_profile_not_found_skips_issue_diagnostics(monkeypatch):
 def test_raises_tool_error_for_network_error():
     with pytest.raises(ToolError, match="Network error"):
         raise_tool_error(NetworkError("timeout"))
+
+
+def test_raises_tool_error_for_browser_binary_missing():
+    with pytest.raises(ToolError, match="Patchright Chromium browser is missing"):
+        raise_tool_error(
+            BrowserBinaryMissingError(
+                "Patchright Chromium browser is missing. "
+                "Run 'uv run patchright install chromium', "
+                "or restart the server to auto-install."
+            )
+        )
 
 
 def test_raises_tool_error_for_scraping_error():

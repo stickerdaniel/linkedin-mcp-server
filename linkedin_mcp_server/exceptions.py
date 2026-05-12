@@ -57,3 +57,7 @@ class DockerHostLoginRequiredError(LinkedInMCPError):
 
 class LinuxBrowserDependencyError(LinkedInMCPError):
     """Linux host dependencies required for Chromium are missing."""
+
+
+class BrowserBinaryMissingError(LinkedInMCPError):
+    """Patchright Chromium binary is absent or stale on disk."""

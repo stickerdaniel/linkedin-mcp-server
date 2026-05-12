@@ -11,7 +11,7 @@ from typing import Any
 from fastmcp import Context, FastMCP
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
-from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -22,11 +22,13 @@ from linkedin_mcp_server.scraping.link_metadata import Reference
 logger = logging.getLogger(__name__)
 
 
-def register_company_tools(mcp: FastMCP) -> None:
+def register_company_tools(
+    mcp: FastMCP, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+) -> None:
     """Register all company-related tools with the MCP server."""
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Get Company Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
@@ -54,6 +56,14 @@ def register_company_tools(mcp: FastMCP) -> None:
             Dict with url, sections (name -> raw text), and optional references.
             Includes unknown_sections list when unrecognised names are passed.
             The LLM should parse the raw text in each section.
+
+            When the about section is included, references["about"] may
+            include a {kind: "company_urn", value: "<numeric-id>"} entry —
+            present whenever the page exposes the "See all employees" link
+            (typically all but the smallest companies). The value is the
+            numeric id LinkedIn's people-search uses in its currentCompany
+            URL facet; plain-text company names are silently ignored by
+            that facet.
         """
         try:
             extractor = extractor or await get_ready_extractor(
@@ -86,7 +96,7 @@ def register_company_tools(mcp: FastMCP) -> None:
             raise_tool_error(e, "get_company_profile")  # NoReturn
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=tool_timeout,
         title="Get Company Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
@@ -150,3 +160,113 @@ def register_company_tools(mcp: FastMCP) -> None:
                 raise_tool_error(relogin_exc, "get_company_posts")
         except Exception as e:
             raise_tool_error(e, "get_company_posts")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Search Companies",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"company", "search"},
+        exclude_args=["extractor"],
+    )
+    async def search_companies(
+        keywords: str,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Search for companies on LinkedIn.
+
+        Args:
+            keywords: Search keywords (e.g., "fintech", "anthropic", "electric vehicles")
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, sections (search_results -> raw text), and optional references.
+            The LLM should parse the raw text to extract individual companies and their pages.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="search_companies"
+            )
+            logger.info("Searching companies: keywords='%s'", keywords)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting company search"
+            )
+
+            result = await extractor.search_companies(keywords)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "search_companies")
+        except Exception as e:
+            raise_tool_error(e, "search_companies")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Company Employees",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"company", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_company_employees(
+        company_name: str,
+        ctx: Context,
+        keywords: str | None = None,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List employees at a company from the LinkedIn /people/ page.
+
+        Useful for finding who works at a company and discovering mutual connections.
+        The optional keywords filter narrows results by name, title, or skill.
+
+        company_name must be the exact LinkedIn URL slug (the path segment after
+        /company/), not the display name. LinkedIn assigns unique slugs and the
+        display name often does not match — for example, the AI lab Anthropic
+        lives at /company/anthropicresearch/, not /company/anthropic/. If you
+        are unsure of the slug, call search_companies first and pick the slug
+        from the returned references.
+
+        Args:
+            company_name: LinkedIn company URL slug (e.g., "docker", "anthropicresearch", "microsoft")
+            ctx: FastMCP context for progress reporting
+            keywords: Optional filter by name, job title, or skill (e.g., "engineer", "sales")
+
+        Returns:
+            Dict with url, sections (employees -> raw text), and optional references.
+            References include /in/ profile paths for listed employees.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_company_employees"
+            )
+            logger.info(
+                "Scraping company employees: %s (keywords=%s)", company_name, keywords
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading company employees"
+            )
+
+            result = await extractor.get_company_employees(
+                company_name, keywords=keywords
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_company_employees")
+        except Exception as e:
+            raise_tool_error(e, "get_company_employees")  # NoReturn

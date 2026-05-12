@@ -55,7 +55,7 @@ for section_name, (suffix, is_overlay) in PERSON_SECTIONS.items():
 ```python
 {"url": str, "sections": {name: raw_text}}
 # Optional compact link metadata:
-{"url": str, "sections": {name: raw_text}, "references": {section: [{kind, url, text?, context?}, ...]}}
+{"url": str, "sections": {name: raw_text}, "references": {section: [{kind, url, text?, context?, value?}, ...]}}
 # When unknown section names are provided:
 {"url": str, "sections": {name: raw_text}, "unknown_sections": [name, ...]}
 # search_jobs also returns:

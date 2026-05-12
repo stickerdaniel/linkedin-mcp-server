@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastmcp.exceptions import ToolError
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError, RateLimitError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    NetworkError,
+    RateLimitError,
+)
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.exceptions import (
     AuthenticationStartedError,
@@ -100,6 +104,57 @@ class TestGetReadyExtractor:
                 await get_ready_extractor(ctx=None, tool_name="test_tool")
 
             mock_handle.assert_not_awaited()
+
+    async def test_browser_binary_missing_invalidates_and_raises_actionable(self):
+        """Patchright "Executable doesn't exist" surfaces as actionable BrowserBinaryMissingError, and metadata is dropped."""
+        err = NetworkError(
+            "Failed to start browser: BrowserType.launch_persistent_context: "
+            "Executable doesn't exist at /tmp/foo/chrome-headless-shell. "
+            "Looks like Playwright was just installed or updated. "
+            "Please run the following command to download new browsers: patchright install"
+        )
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.get_or_create_browser",
+                new_callable=AsyncMock,
+                side_effect=err,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_browser_setup"
+            ) as mock_invalidate,
+        ):
+            with pytest.raises(
+                ToolError, match="Patchright Chromium browser is missing"
+            ):
+                await get_ready_extractor(ctx=None, tool_name="test_tool")
+
+            mock_invalidate.assert_called_once()
+
+    async def test_unrelated_network_error_is_not_treated_as_binary_missing(self):
+        """A generic connection error must not call invalidate_browser_setup or surface the binary-missing copy."""
+        err = NetworkError("Failed to start browser: connection reset by peer")
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.get_or_create_browser",
+                new_callable=AsyncMock,
+                side_effect=err,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_browser_setup"
+            ) as mock_invalidate,
+        ):
+            with pytest.raises(ToolError, match="Network error"):
+                await get_ready_extractor(ctx=None, tool_name="test_tool")
+
+            mock_invalidate.assert_not_called()
 
     async def test_mid_scrape_auth_error_triggers_relogin(self):
         """AuthenticationError caught in tool wrapper invokes handle_auth_error."""
