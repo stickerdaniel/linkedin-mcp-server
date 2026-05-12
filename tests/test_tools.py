@@ -684,9 +684,7 @@ class TestMessagingTools:
         result = await tool_fn(mock_context, extractor=mock_extractor)
 
         assert result["sections"]["inbox"] == "Conversation 1\nConversation 2"
-        mock_extractor.get_inbox.assert_awaited_once_with(
-            limit=20, inbox_filter="none"
-        )
+        mock_extractor.get_inbox.assert_awaited_once_with(limit=20, inbox_filter="none")
 
     @pytest.mark.parametrize(
         "filter_value",
