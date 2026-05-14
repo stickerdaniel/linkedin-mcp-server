@@ -222,14 +222,20 @@ def register_company_tools(
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
-        List employees at a company from the LinkedIn /people/ page.
+        List employees at a company from the LinkedIn /people/ page, including
+        the demographics aggregate that this view exposes: where employees
+        live, where they studied, and a function breakdown (Engineering, Sales,
+        Operations, etc.). The demographics are unique to this tool.
 
-        Useful for finding who works at a company and discovering mutual connections.
+        For filtered search by network degree (1st/2nd/3rd) or location, prefer
+        search_people with current_company set to the company URN id. That path
+        also returns more result pages than the /people/ tab.
+
         The optional keywords filter narrows results by name, title, or skill.
 
         company_name must be the exact LinkedIn URL slug (the path segment after
         /company/), not the display name. LinkedIn assigns unique slugs and the
-        display name often does not match — for example, the AI lab Anthropic
+        display name often does not match. For example, the AI lab Anthropic
         lives at /company/anthropicresearch/, not /company/anthropic/. If you
         are unsure of the slug, call search_companies first and pick the slug
         from the returned references.

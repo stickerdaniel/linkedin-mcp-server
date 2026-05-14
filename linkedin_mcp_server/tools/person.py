@@ -131,7 +131,9 @@ def register_person_tools(
                 (e.g. "1115" for SAP); plain company names are accepted by the
                 URL but ignored by LinkedIn and return the unfiltered result
                 set. Look up a company's URN via get_company_profile -- it is
-                exposed under references["about"].
+                exposed under references["about"]. For company-wide employee
+                demographics (location/education/function breakdown) plus a
+                slug-based lookup, use get_company_employees instead.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
