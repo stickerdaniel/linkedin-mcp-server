@@ -3357,6 +3357,11 @@ class LinkedInExtractor:
         optional ``references["invitations"]``) so the consumer can read
         invite text and follow inviter/invitee profile links. Read-only:
         no accept/ignore/withdraw side effects.
+
+        Truncated invitation notes are auto-expanded before extraction by
+        clicking inline ``aria-expanded="false"`` toggles, so the returned
+        section text contains the full invite body rather than the
+        "... see more" preview LinkedIn renders by default.
         """
         url = f"https://www.linkedin.com/mynetwork/invitation-manager/{kind}/"
         await self._navigate_to_page(url)
@@ -3371,6 +3376,8 @@ class LinkedInExtractor:
             position="bottom", attempts=scrolls, pause_time=0.5
         )
 
+        await self._expand_invitation_note_toggles()
+
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
         cleaned = strip_linkedin_noise(raw) if raw else ""
@@ -3384,6 +3391,75 @@ class LinkedInExtractor:
             cleaned,
             references=references,
         )
+
+    async def _expand_invitation_note_toggles(self) -> None:
+        """Click inline expand toggles on invitation cards to reveal full notes.
+
+        LinkedIn truncates invitation notes longer than ~5 lines and renders
+        an inline ``<button data-testid="expandable-text-button">`` inside
+        a ``<span data-testid="expandable-text-box">``. The testid attribute
+        is the locale-independent signal — the visible verb ("see more" /
+        "pokaż więcej" / "voir plus") varies by locale and is unreliable.
+
+        The button ships with inline ``pointer-events: none`` and
+        ``aria-hidden="true"``, which blocks Playwright's standard
+        ``.click()`` from delivering the event to the React handler. We
+        therefore (a) inject a one-shot stylesheet re-enabling pointer
+        events on these specific testid'd nodes and (b) dispatch a
+        synthetic bubbling MouseEvent so the handler fires. The injected
+        style is scoped narrowly enough that it does not affect any other
+        element on the page.
+
+        Each dispatched click can cause LinkedIn to lazy-load further
+        invitation cards with their own collapsed notes, so we run a second
+        pass to pick up the newly-mounted toggles. Already-clicked buttons
+        are tagged with ``data-mcp-clicked="1"`` so the second pass never
+        re-clicks them — without the marker the post-click "collapse"
+        button (same testid, different visible verb) would be re-toggled
+        and silently re-truncate notes the first pass just expanded.
+        """
+        try:
+            for _ in range(2):
+                dispatched = await self._page.evaluate(
+                    """async () => {
+                        if (!document.getElementById('__linkedin_mcp_expand_style')) {
+                            const styleNode = document.createElement('style');
+                            styleNode.id = '__linkedin_mcp_expand_style';
+                            styleNode.textContent = `
+                                [data-testid="expandable-text-button"],
+                                [data-testid="expandable-text-box"] {
+                                    pointer-events: auto !important;
+                                }
+                            `;
+                            document.head.appendChild(styleNode);
+                        }
+                        const buttons = Array.from(document.querySelectorAll(
+                            'main [data-testid="expandable-text-button"]:not([data-mcp-clicked])'
+                        ));
+                        let count = 0;
+                        for (const btn of buttons) {
+                            try {
+                                btn.dataset.mcpClicked = '1';
+                                btn.dispatchEvent(new MouseEvent('click', {
+                                    bubbles: true,
+                                    cancelable: true,
+                                    view: window,
+                                }));
+                                count++;
+                            } catch (e) {
+                                /* ignore individual dispatch failures */
+                            }
+                        }
+                        // Let React render the expanded note bodies before
+                        // the caller extracts innerText.
+                        await new Promise(r => setTimeout(r, 400));
+                        return count;
+                    }"""
+                )
+                if not dispatched:
+                    break
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed to expand invitation note toggles: %s", exc)
 
     async def _extract_root_content(
         self,
