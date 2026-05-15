@@ -106,6 +106,10 @@
       "description": "Send a message to a LinkedIn user with explicit confirmation and optional profile URN support"
     },
     {
+      "name": "get_pending_invitations",
+      "description": "List pending LinkedIn network invitations (received or sent) from /mynetwork/invitation-manager/"
+    },
+    {
       "name": "get_feed",
       "description": "Get recent posts from the authenticated user's LinkedIn home feed"
     },

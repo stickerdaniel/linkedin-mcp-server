@@ -3345,6 +3345,46 @@ class LinkedInExtractor:
             sent=True,
         )
 
+    async def get_pending_invitations(
+        self,
+        limit: int = 20,
+        kind: Literal["received", "sent"] = "received",
+    ) -> dict[str, Any]:
+        """List pending LinkedIn network invitations (received or sent).
+
+        Mirrors ``/mynetwork/invitation-manager/{received|sent}/``. Returns
+        the standard single-section payload (``sections["invitations"]`` +
+        optional ``references["invitations"]``) so the consumer can read
+        invite text and follow inviter/invitee profile links. Read-only:
+        no accept/ignore/withdraw side effects.
+        """
+        url = f"https://www.linkedin.com/mynetwork/invitation-manager/{kind}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context=f"Invitations ({kind})")
+        await handle_modal_close(self._page)
+
+        # Invitations paginate as the list scrolls, ~10 cards per screenful,
+        # so reuse the same heuristic as get_inbox.
+        scrolls = max(1, limit // 10)
+        await self._scroll_main_scrollable_region(
+            position="bottom", attempts=scrolls, pause_time=0.5
+        )
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+        references: list[Reference] = (
+            build_references(raw_result["references"], "invitations") if cleaned else []
+        )
+
+        return self._single_section_result(
+            url,
+            "invitations",
+            cleaned,
+            references=references,
+        )
+
     async def _extract_root_content(
         self,
         selectors: list[str],
