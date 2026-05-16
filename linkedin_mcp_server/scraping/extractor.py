@@ -257,7 +257,6 @@ def _connection_result(
     *,
     note_sent: bool = False,
     profile: str = "",
-    can_send_without_note: bool | None = None,
 ) -> dict[str, Any]:
     """Build a structured response for a profile connection attempt."""
     result: dict[str, Any] = {
@@ -268,8 +267,6 @@ def _connection_result(
     }
     if profile:
         result["profile"] = profile
-    if can_send_without_note is not None:
-        result["can_send_without_note"] = can_send_without_note
     return result
 
 
@@ -790,32 +787,49 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             pass
 
-    async def _detect_premium_upsell_modal(self, *, timeout: int = 2500) -> bool:
-        """Return True when a Premium upsell dialog is visible.
+    async def _get_premium_upsell_message(self, *, timeout: int = 2500) -> str | None:
+        """Return the raw LinkedIn Premium upsell dialog text when visible.
 
-        LinkedIn intercepts the invite-with-note submit with an upsell modal
-        when the free personalized-note quota is exhausted. The modal is a
-        normal ``[role="dialog"]`` whose body links to ``/premium/...``,
-        which is the locale-independent signal we key off here: the URL
-        fragment is stable and language-independent, mirroring the
-        ``/preload/custom-invite/``-based gates elsewhere in this module.
-
-        The check waits briefly because LinkedIn swaps the invite dialog for
-        the upsell asynchronously after the primary submit click. A zero-wait
-        count can race that React transition and misclassify the quota block
-        as a generic send failure.
+        LinkedIn intercepts invite-with-note flows with an upsell modal when
+        the free personalized-note quota is exhausted. The detector itself is
+        locale-independent: the modal links to ``/premium/...``. The returned
+        message is the dialog text as rendered by LinkedIn, not a synthesized
+        explanation.
         """
         locator = self._page.locator(_DIALOG_PREMIUM_LINK_SELECTOR).first
         try:
             await locator.wait_for(state="visible", timeout=timeout)
-            return True
         except PlaywrightTimeoutError:
-            return False
+            return None
         except Exception:
             try:
-                return bool(await locator.is_visible())
+                if not await locator.is_visible():
+                    return None
             except Exception:
-                return False
+                return None
+
+        try:
+            message = await self._page.evaluate(
+                """() => {
+                    const link = document.querySelector(
+                        'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
+                    );
+                    const dialog = link?.closest('dialog,[role="dialog"]');
+                    return dialog?.innerText || dialog?.textContent || link?.innerText || '';
+                }"""
+            )
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        except Exception:
+            logger.debug("Could not read Premium upsell dialog text", exc_info=True)
+
+        try:
+            link_text = await locator.inner_text()
+            if link_text.strip():
+                return link_text.strip()
+        except Exception:
+            pass
+        return "LinkedIn Premium upsell modal detected."
 
     async def _open_more_menu(self) -> bool:
         """Open the profile's More (three-dot) menu in a locale-independent way.
@@ -1577,26 +1591,26 @@ class LinkedInExtractor:
             has_labeled_action_anchor=bool(data.get("hasLabeledActionAnchor")),
         )
 
-    async def _submit_invite_dialog(self, note: str | None) -> tuple[bool, bool, bool]:
+    async def _submit_invite_dialog(
+        self, note: str | None
+    ) -> tuple[bool, bool, str | None]:
         """Submit the invite dialog opened by the custom-invite deeplink.
 
-        Returns ``(submitted, note_sent, note_limit_blocked)``.
+        Returns ``(submitted, note_sent, note_limit_message)``.
 
         ``note_sent`` reports *delivery*, not textarea fill — it stays
         False on any failure path, including the Premium upsell that
         LinkedIn shows when the free personalized-note quota is exhausted.
-        ``note_limit_blocked`` is True only when the upsell was detected
-        after the primary-button submit; in that case ``submitted`` is
-        False, the dialog is dismissed, and callers should surface a
-        distinct status so the LLM can decide whether to retry without a
-        note.
+        ``note_limit_message`` is the raw LinkedIn Premium dialog text when
+        the upsell was detected; in that case ``submitted`` is False, the
+        dialog is dismissed, and callers should surface that text directly.
 
         All interaction uses structural selectors and positional indexing
         — no localized text matching. Owns dialog cleanup: the dialog is
         dismissed on every failure path, callers must not dismiss again.
         """
         if not await self._dialog_is_open(timeout=5000):
-            return False, False, False
+            return False, False, None
 
         note_filled = False
         if note:
@@ -1620,19 +1634,21 @@ class LinkedInExtractor:
                         )
                     except PlaywrightTimeoutError:
                         logger.debug("Note textarea did not appear")
-                    if await self._detect_premium_upsell_modal():
+                    note_limit_message = await self._get_premium_upsell_message()
+                    if note_limit_message is not None:
                         logger.info("Premium upsell blocked opening invite note editor")
                         await self._dismiss_dialog()
-                        return False, False, True
+                        return False, False, note_limit_message
 
             note_filled = await self._fill_dialog_textarea(note)
             if not note_filled:
-                if await self._detect_premium_upsell_modal():
+                note_limit_message = await self._get_premium_upsell_message()
+                if note_limit_message is not None:
                     logger.info("Premium upsell blocked filling invite note")
                     await self._dismiss_dialog()
-                    return False, False, True
+                    return False, False, note_limit_message
                 await self._dismiss_dialog()
-                return False, False, False
+                return False, False, None
 
         sent = await self._click_dialog_primary_button()
         if not sent:
@@ -1652,16 +1668,17 @@ class LinkedInExtractor:
                     logger.debug("Keyboard submit fallback failed", exc_info=True)
             if not sent:
                 await self._dismiss_dialog()
-                return False, False, False
+                return False, False, None
 
         # LinkedIn may swap the invite dialog for a Premium upsell when the
         # free note quota is exhausted. The textarea was filled but the
-        # invite was not delivered — surface a dedicated signal so callers
-        # don't conflate "submit-attempted" with "note actually sent".
-        if note and await self._detect_premium_upsell_modal():
-            logger.info("Premium upsell modal intercepted invite submit")
-            await self._dismiss_dialog()
-            return False, False, True
+        # invite was not delivered — surface LinkedIn's raw dialog text.
+        if note:
+            note_limit_message = await self._get_premium_upsell_message()
+            if note_limit_message is not None:
+                logger.info("Premium upsell modal intercepted invite submit")
+                await self._dismiss_dialog()
+                return False, False, note_limit_message
 
         try:
             await self._page.wait_for_selector(
@@ -1670,23 +1687,25 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("Invite dialog did not close after submit")
 
-        return True, note_filled, False
+        return True, note_filled, None
 
-    async def _probe_invite_note_limit(self) -> bool:
-        """Open the note editor only to detect a Premium note-quota block.
+    async def _probe_invite_note_limit(self) -> str | None:
+        """Open the note editor only to read a Premium note-quota message.
 
         This is used when the profile did not expose the normal invite anchor.
         Navigating to the custom-invite deeplink and opening the note editor is
         non-destructive, but submitting would weaken the write gate for
         follow-only/unavailable profiles. Therefore this helper never clicks
-        the primary Send button: it detects the Premium upsell if LinkedIn
-        shows it while opening the note editor, then dismisses the dialog.
+        the primary Send button: it returns the raw LinkedIn Premium dialog
+        text if LinkedIn shows it while opening the note editor, then
+        dismisses the dialog.
         """
         if not await self._dialog_is_open(timeout=5000):
-            return False
-        if await self._detect_premium_upsell_modal(timeout=500):
+            return None
+        note_limit_message = await self._get_premium_upsell_message(timeout=500)
+        if note_limit_message is not None:
             await self._dismiss_dialog()
-            return True
+            return note_limit_message
 
         try:
             textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
@@ -1694,7 +1713,7 @@ class LinkedInExtractor:
             textarea_count = 0
         if textarea_count > 0:
             await self._dismiss_dialog()
-            return False
+            return None
 
         buttons = self._page.locator(
             f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
@@ -1717,9 +1736,9 @@ class LinkedInExtractor:
             except PlaywrightTimeoutError:
                 logger.debug("Note textarea did not appear during quota probe")
 
-        note_limit_blocked = await self._detect_premium_upsell_modal()
+        note_limit_message = await self._get_premium_upsell_message()
         await self._dismiss_dialog()
-        return note_limit_blocked
+        return note_limit_message
 
     async def connect_with_person(
         self,
@@ -1849,15 +1868,14 @@ class LinkedInExtractor:
                     username,
                 )
                 await self._navigate_to_page(invite_url)
-                if await self._probe_invite_note_limit():
+                note_limit_message = await self._probe_invite_note_limit()
+                if note_limit_message is not None:
                     return _connection_result(
                         url,
                         "custom_note_limit_reached",
-                        "LinkedIn blocked personalized invite notes — the free "
-                        "personalized invitation note limit has been reached.",
+                        note_limit_message,
                         note_sent=False,
                         profile=page_text,
-                        can_send_without_note=False,
                     )
             return _connection_result(
                 url,
@@ -1868,18 +1886,16 @@ class LinkedInExtractor:
 
         await self._navigate_to_page(invite_url)
 
-        submitted, note_sent, note_limit_blocked = await self._submit_invite_dialog(
+        submitted, note_sent, note_limit_message = await self._submit_invite_dialog(
             note
         )
-        if note_limit_blocked:
+        if note_limit_message is not None:
             return _connection_result(
                 url,
                 "custom_note_limit_reached",
-                "LinkedIn blocked the invite — the free personalized "
-                "invitation note limit has been reached.",
+                note_limit_message,
                 note_sent=False,
                 profile=page_text,
-                can_send_without_note=True,
             )
         if not submitted:
             return _connection_result(

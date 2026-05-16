@@ -384,16 +384,12 @@ class TestPersonTool:
         )
 
     async def test_connect_with_person_custom_note_limit_reached(self, mock_context):
-        """The custom_note_limit_reached status carries can_send_without_note."""
+        """The custom_note_limit_reached status returns LinkedIn's message."""
         expected = {
             "url": "https://www.linkedin.com/in/test-user/",
             "status": "custom_note_limit_reached",
-            "message": (
-                "LinkedIn blocked the invite — the free personalized "
-                "invitation note limit has been reached."
-            ),
+            "message": "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
             "note_sent": False,
-            "can_send_without_note": True,
         }
         mock_extractor = _make_mock_extractor(expected)
 
@@ -411,8 +407,11 @@ class TestPersonTool:
         )
 
         assert result["status"] == "custom_note_limit_reached"
+        assert (
+            result["message"]
+            == "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
+        )
         assert result["note_sent"] is False
-        assert result["can_send_without_note"] is True
         mock_extractor.connect_with_person.assert_awaited_once_with(
             "test-user",
             note="Hello!",

@@ -1072,18 +1072,25 @@ class TestConnectWithPerson:
 
         assert result["status"] == "send_failed"
 
-    async def test_premium_upsell_detector_waits_for_visible_link(self, mock_page):
-        """Premium upsell detection waits for LinkedIn's async modal swap."""
+    async def test_premium_upsell_message_reads_linkedin_dialog_text(self, mock_page):
+        """Premium upsell detection returns LinkedIn's raw dialog text."""
         extractor = LinkedInExtractor(mock_page)
         premium_link = MagicMock()
         premium_link.wait_for = AsyncMock(return_value=None)
         premium_link.is_visible = AsyncMock(return_value=True)
+        premium_link.inner_text = AsyncMock(return_value="fallback")
         premium_link.first = premium_link
         mock_page.locator.return_value = premium_link
+        mock_page.evaluate = AsyncMock(
+            return_value="Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
+        )
 
-        result = await extractor._detect_premium_upsell_modal(timeout=1234)
+        result = await extractor._get_premium_upsell_message(timeout=1234)
 
-        assert result is True
+        assert (
+            result
+            == "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
+        )
         mock_page.locator.assert_called_once_with(
             'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
         )
@@ -1116,19 +1123,23 @@ class TestConnectWithPerson:
             ),
             patch.object(
                 extractor,
-                "_detect_premium_upsell_modal",
+                "_get_premium_upsell_message",
                 new_callable=AsyncMock,
-                return_value=True,
-            ) as mock_detect,
+                return_value="Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
+            ) as mock_message,
             patch.object(
                 extractor, "_dismiss_dialog", new_callable=AsyncMock
             ) as mock_dismiss,
         ):
             result = await extractor._submit_invite_dialog("Hello")
 
-        assert result == (False, False, True)
+        assert result == (
+            False,
+            False,
+            "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
+        )
         add_note_button.click.assert_awaited_once()
-        mock_detect.assert_awaited_once()
+        mock_message.assert_awaited_once()
         mock_dismiss.assert_awaited_once()
 
     async def test_connectable_no_dialog_returns_connect_unavailable(self, mock_page):
@@ -1323,7 +1334,7 @@ class TestConnectWithPerson:
                 extractor,
                 "_probe_invite_note_limit",
                 new_callable=AsyncMock,
-                return_value=True,
+                return_value="Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
             ) as mock_probe,
             patch.object(
                 extractor, "_submit_invite_dialog", new_callable=AsyncMock
@@ -1332,8 +1343,11 @@ class TestConnectWithPerson:
             result = await extractor.connect_with_person("testuser", note="Hello")
 
         assert result["status"] == "custom_note_limit_reached"
+        assert (
+            result["message"]
+            == "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
+        )
         assert result["note_sent"] is False
-        assert result["can_send_without_note"] is False
         mock_nav.assert_awaited_once()
         mock_probe.assert_awaited_once()
         mock_submit.assert_not_awaited()
