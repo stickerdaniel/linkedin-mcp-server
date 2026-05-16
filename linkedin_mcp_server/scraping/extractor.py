@@ -94,6 +94,9 @@ _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 _NETWORK_TOKENS = ("F", "S", "O")
 
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
+_DIALOG_PREMIUM_LINK_SELECTOR = (
+    'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
+)
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
 _MESSAGING_COMPOSE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]'
@@ -787,8 +790,8 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             pass
 
-    async def _detect_premium_upsell_modal(self) -> bool:
-        """Return True when a Premium upsell dialog is currently visible.
+    async def _detect_premium_upsell_modal(self, *, timeout: int = 2500) -> bool:
+        """Return True when a Premium upsell dialog is visible.
 
         LinkedIn intercepts the invite-with-note submit with an upsell modal
         when the free personalized-note quota is exhausted. The modal is a
@@ -796,14 +799,23 @@ class LinkedInExtractor:
         which is the locale-independent signal we key off here: the URL
         fragment is stable and language-independent, mirroring the
         ``/preload/custom-invite/``-based gates elsewhere in this module.
+
+        The check waits briefly because LinkedIn swaps the invite dialog for
+        the upsell asynchronously after the primary submit click. A zero-wait
+        count can race that React transition and misclassify the quota block
+        as a generic send failure.
         """
+        locator = self._page.locator(_DIALOG_PREMIUM_LINK_SELECTOR).first
         try:
-            count = await self._page.locator(
-                f'{_DIALOG_SELECTOR} a[href*="/premium/"]'
-            ).count()
-        except Exception:
+            await locator.wait_for(state="visible", timeout=timeout)
+            return True
+        except PlaywrightTimeoutError:
             return False
-        return count > 0
+        except Exception:
+            try:
+                return bool(await locator.is_visible())
+            except Exception:
+                return False
 
     async def _open_more_menu(self) -> bool:
         """Open the profile's More (three-dot) menu in a locale-independent way.

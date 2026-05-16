@@ -1072,6 +1072,23 @@ class TestConnectWithPerson:
 
         assert result["status"] == "send_failed"
 
+    async def test_premium_upsell_detector_waits_for_visible_link(self, mock_page):
+        """Premium upsell detection waits for LinkedIn's async modal swap."""
+        extractor = LinkedInExtractor(mock_page)
+        premium_link = MagicMock()
+        premium_link.wait_for = AsyncMock(return_value=None)
+        premium_link.is_visible = AsyncMock(return_value=True)
+        premium_link.first = premium_link
+        mock_page.locator.return_value = premium_link
+
+        result = await extractor._detect_premium_upsell_modal(timeout=1234)
+
+        assert result is True
+        mock_page.locator.assert_called_once_with(
+            'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
+        )
+        premium_link.wait_for.assert_awaited_once_with(state="visible", timeout=1234)
+
     async def test_connectable_no_dialog_returns_connect_unavailable(self, mock_page):
         """Deeplink opened but no dialog appeared → connect_unavailable."""
         extractor = LinkedInExtractor(mock_page)
