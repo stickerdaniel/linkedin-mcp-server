@@ -3359,9 +3359,16 @@ class LinkedInExtractor:
         no accept/ignore/withdraw side effects.
 
         Truncated invitation notes are auto-expanded before extraction by
-        clicking inline ``aria-expanded="false"`` toggles, so the returned
-        section text contains the full invite body rather than the
-        "... see more" preview LinkedIn renders by default.
+        clicking the inline ``data-testid="expandable-text-button"`` toggles
+        that are not already in the expanded state, so the returned section
+        text contains the full invite body rather than the "... see more"
+        preview LinkedIn renders by default.
+
+        ``limit`` controls how many inviter ``references`` are returned and
+        how many scroll passes pre-load the list. The ``sections`` text
+        always reflects whatever was rendered when extraction ran — typically
+        rounded up to LinkedIn's screenful (~10 cards), so the visible
+        section text may include slightly more invitations than ``limit``.
         """
         url = f"https://www.linkedin.com/mynetwork/invitation-manager/{kind}/"
         await self._navigate_to_page(url)
@@ -3382,7 +3389,9 @@ class LinkedInExtractor:
         raw = raw_result["text"]
         cleaned = strip_linkedin_noise(raw) if raw else ""
         references: list[Reference] = (
-            build_references(raw_result["references"], "invitations") if cleaned else []
+            build_references(raw_result["references"], "invitations")[:limit]
+            if cleaned
+            else []
         )
 
         return self._single_section_result(
@@ -3417,6 +3426,14 @@ class LinkedInExtractor:
         re-clicks them — without the marker the post-click "collapse"
         button (same testid, different visible verb) would be re-toggled
         and silently re-truncate notes the first pass just expanded.
+
+        The selector additionally excludes ``aria-expanded="true"`` so any
+        notes LinkedIn happens to render pre-expanded on initial load are
+        left alone instead of being toggled closed by the first pass.
+        Collapsed toggles ship without an ``aria-expanded`` attribute at
+        all on this surface, so the ``:not([aria-expanded="true"])`` filter
+        is the conservative shape: it matches both the unset and the
+        explicit ``"false"`` states while skipping the expanded ones.
         """
         try:
             for _ in range(2):
@@ -3434,7 +3451,9 @@ class LinkedInExtractor:
                             document.head.appendChild(styleNode);
                         }
                         const buttons = Array.from(document.querySelectorAll(
-                            'main [data-testid="expandable-text-button"]:not([data-mcp-clicked])'
+                            'main [data-testid="expandable-text-button"]'
+                            + ':not([aria-expanded="true"])'
+                            + ':not([data-mcp-clicked])'
                         ));
                         let count = 0;
                         for (const btn of buttons) {
