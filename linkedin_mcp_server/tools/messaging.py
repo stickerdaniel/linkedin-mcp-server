@@ -5,7 +5,7 @@ Provides inbox listing, conversation reading, message search, and sending.
 """
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
@@ -36,6 +36,9 @@ def register_messaging_tools(
     async def get_inbox(
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=50)] = 20,
+        inbox_filter: Literal[
+            "none", "unread", "jobs", "connections", "inmail", "starred"
+        ] = "none",
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -44,6 +47,13 @@ def register_messaging_tools(
         Args:
             ctx: FastMCP context for progress reporting
             limit: Maximum number of conversations to load (1-50, default 20)
+            inbox_filter: Filter conversations by category. Options: "none" (all
+                conversations), "unread", "jobs", "connections", "inmail",
+                "starred". Default "none". Filter buttons are matched against
+                LinkedIn's English UI text; non-English sessions (e.g. German,
+                where "Unread" is "Ungelesen") will not match, and the failure
+                is surfaced as a `filter_failed` entry in `section_errors`
+                rather than silently returning unfiltered results.
 
         Returns:
             Dict with url, sections (inbox -> raw text), and optional references.
@@ -52,13 +62,15 @@ def register_messaging_tools(
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_inbox"
             )
-            logger.info("Fetching inbox (limit=%d)", limit)
+            logger.info(
+                "Fetching inbox (limit=%d, inbox_filter=%s)", limit, inbox_filter
+            )
 
             await ctx.report_progress(
                 progress=0, total=100, message="Loading messaging inbox"
             )
 
-            result = await extractor.get_inbox(limit=limit)
+            result = await extractor.get_inbox(limit=limit, inbox_filter=inbox_filter)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

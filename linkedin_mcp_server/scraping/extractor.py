@@ -2885,13 +2885,46 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
-    async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
+    # Maps inbox_filter param values to the button text shown in LinkedIn's
+    # inbox UI. English-only by design: matched via Playwright's `name=`
+    # role lookup against rendered button text. On non-English sessions
+    # (e.g. German "Ungelesen" for "Unread") the lookup misses and the
+    # caller receives a `filter_failed` entry in `section_errors`. Widening
+    # this to a per-locale dict keyed off the page lang attribute would
+    # require a verified label table per locale; deferred until there's a
+    # concrete need.
+    _INBOX_FILTER_LABELS: dict[str, str] = {
+        "unread": "Unread",
+        "jobs": "Jobs",
+        "connections": "Connections",
+        "inmail": "InMail",
+        "starred": "Starred",
+    }
+
+    async def get_inbox(
+        self, limit: int = 20, *, inbox_filter: str = "none"
+    ) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
         url = "https://www.linkedin.com/messaging/"
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
         await self._wait_for_main_text(log_context="Messaging inbox")
         await handle_modal_close(self._page)
+
+        filter_failed = False
+        filter_label = self._INBOX_FILTER_LABELS.get(inbox_filter)
+        if filter_label:
+            btn = self._page.get_by_role("button", name=filter_label, exact=True)
+            try:
+                await btn.click(timeout=5000)
+                # Tie extraction to actual filter state: wait for the pill's
+                # aria-pressed to flip to "true" instead of a wall-clock pause.
+                await btn.and_(self._page.locator('[aria-pressed="true"]')).wait_for(
+                    timeout=5000
+                )
+            except Exception:
+                logger.warning("Could not activate %s filter", filter_label)
+                filter_failed = True
 
         scrolls = max(1, limit // 10)
         await self._scroll_main_scrollable_region(
@@ -2914,12 +2947,25 @@ class LinkedInExtractor:
         if conversation_refs:
             references = dedupe_references(conversation_refs + references)
 
-        return self._single_section_result(
+        result = self._single_section_result(
             url,
             "inbox",
             cleaned,
             references=references,
         )
+
+        if filter_failed:
+            result["section_errors"] = {
+                "inbox": {
+                    "error_type": "filter_failed",
+                    "error_message": (
+                        f"Could not activate '{inbox_filter}' filter; "
+                        "results may be unfiltered"
+                    ),
+                }
+            }
+
+        return result
 
     async def _extract_conversation_thread_refs(
         self, limit: int | None, context: str
