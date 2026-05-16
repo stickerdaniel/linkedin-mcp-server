@@ -216,10 +216,12 @@ def register_person_tools(
             connected, or accepted.
 
             When status is ``custom_note_limit_reached`` LinkedIn rejected
-            the invite because the free personalized-note quota for the
-            account is exhausted. The response includes
-            ``can_send_without_note: true`` to hint that a retry with
-            ``note=None`` should succeed.
+            personalized invite notes because the free note quota for the
+            account is exhausted. The response may include
+            ``can_send_without_note``: true when a retry with ``note=None``
+            should succeed through this tool, false when the limit was
+            detected by a non-submitting probe but LinkedIn did not expose a
+            safe Connect action to submit without a note.
         """
         try:
             extractor = extractor or await get_ready_extractor(

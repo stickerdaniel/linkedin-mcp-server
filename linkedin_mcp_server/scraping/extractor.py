@@ -1672,6 +1672,55 @@ class LinkedInExtractor:
 
         return True, note_filled, False
 
+    async def _probe_invite_note_limit(self) -> bool:
+        """Open the note editor only to detect a Premium note-quota block.
+
+        This is used when the profile did not expose the normal invite anchor.
+        Navigating to the custom-invite deeplink and opening the note editor is
+        non-destructive, but submitting would weaken the write gate for
+        follow-only/unavailable profiles. Therefore this helper never clicks
+        the primary Send button: it detects the Premium upsell if LinkedIn
+        shows it while opening the note editor, then dismisses the dialog.
+        """
+        if not await self._dialog_is_open(timeout=5000):
+            return False
+        if await self._detect_premium_upsell_modal(timeout=500):
+            await self._dismiss_dialog()
+            return True
+
+        try:
+            textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
+        except Exception:
+            textarea_count = 0
+        if textarea_count > 0:
+            await self._dismiss_dialog()
+            return False
+
+        buttons = self._page.locator(
+            f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+        )
+        try:
+            btn_count = await buttons.count()
+        except Exception:
+            btn_count = 0
+        if btn_count >= 3:
+            try:
+                await buttons.nth(btn_count - 2).click()
+            except Exception:
+                logger.debug("Could not open invite note editor", exc_info=True)
+            try:
+                await self._page.wait_for_selector(
+                    _DIALOG_TEXTAREA_SELECTOR,
+                    state="visible",
+                    timeout=3000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Note textarea did not appear during quota probe")
+
+        note_limit_blocked = await self._detect_premium_upsell_modal()
+        await self._dismiss_dialog()
+        return note_limit_blocked
+
     async def connect_with_person(
         self,
         username: str,
@@ -1686,7 +1735,9 @@ class LinkedInExtractor:
         `aria-expanded` for the More-menu opener). The deeplink-submit
         path is gated strictly on `has_invite_anchor=True` *after* the
         optional More-menu retry, so Pending and follow-only profiles
-        cannot trigger a write. Sending itself uses the
+        cannot trigger a write. If a note was requested but no invite
+        anchor is visible, the custom-invite deeplink may still be opened
+        only as a non-submitting note-quota probe. Sending itself uses the
         ``/preload/custom-invite/?vanityName=`` deeplink, which works
         whether the user-visible Connect button is in the action bar
         or buried under the More menu.
@@ -1785,24 +1836,34 @@ class LinkedInExtractor:
             f"?vanityName={quote_plus(username)}"
         )
 
-        # Write-gate: without a note we keep the conservative behaviour and
-        # only fire the deeplink when LinkedIn exposed the vanityName invite
-        # anchor. When a note is requested, probing the custom-invite deeplink
-        # is non-destructive until the dialog submit and lets us distinguish
-        # missed/hidden Connect affordances from the Premium note-quota block
-        # that appears only after opening the note editor.
+        # Write-gate: submit only when LinkedIn exposed the vanityName invite
+        # anchor. When a note is requested without that anchor, open the
+        # deeplink only as a non-submitting probe so we can report the Premium
+        # note-quota block without accidentally sending from a follow-only or
+        # otherwise unavailable profile.
         if not signals.has_invite_anchor:
-            if not note:
-                return _connection_result(
-                    url,
-                    "connect_unavailable",
-                    "LinkedIn did not expose a usable Connect action for this profile.",
-                    profile=page_text,
+            if note:
+                logger.info(
+                    "No visible invite anchor for %s; probing custom-invite deeplink "
+                    "because a personalized note was requested",
+                    username,
                 )
-            logger.info(
-                "No visible invite anchor for %s; probing custom-invite deeplink "
-                "because a personalized note was requested",
-                username,
+                await self._navigate_to_page(invite_url)
+                if await self._probe_invite_note_limit():
+                    return _connection_result(
+                        url,
+                        "custom_note_limit_reached",
+                        "LinkedIn blocked personalized invite notes — the free "
+                        "personalized invitation note limit has been reached.",
+                        note_sent=False,
+                        profile=page_text,
+                        can_send_without_note=False,
+                    )
+            return _connection_result(
+                url,
+                "connect_unavailable",
+                "LinkedIn did not expose a usable Connect action for this profile.",
+                profile=page_text,
             )
 
         await self._navigate_to_page(invite_url)

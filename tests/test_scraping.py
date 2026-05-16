@@ -1295,7 +1295,7 @@ class TestConnectWithPerson:
     async def test_follow_only_with_note_reports_note_limit_from_deeplink_probe(
         self, mock_page
     ):
-        """A requested note may reveal Premium quota even without invite anchor."""
+        """A requested note may reveal Premium quota without submitting."""
         extractor = LinkedInExtractor(mock_page)
         text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
 
@@ -1321,18 +1321,22 @@ class TestConnectWithPerson:
             ) as mock_nav,
             patch.object(
                 extractor,
-                "_submit_invite_dialog",
+                "_probe_invite_note_limit",
                 new_callable=AsyncMock,
-                return_value=(False, False, True),
+                return_value=True,
+            ) as mock_probe,
+            patch.object(
+                extractor, "_submit_invite_dialog", new_callable=AsyncMock
             ) as mock_submit,
         ):
             result = await extractor.connect_with_person("testuser", note="Hello")
 
         assert result["status"] == "custom_note_limit_reached"
         assert result["note_sent"] is False
-        assert result["can_send_without_note"] is True
+        assert result["can_send_without_note"] is False
         mock_nav.assert_awaited_once()
-        mock_submit.assert_awaited_once_with("Hello")
+        mock_probe.assert_awaited_once()
+        mock_submit.assert_not_awaited()
 
     async def test_more_menu_unavailable_does_not_send(self, mock_page):
         """Action root present but no More button (unusual but possible):
