@@ -1620,9 +1620,17 @@ class LinkedInExtractor:
                         )
                     except PlaywrightTimeoutError:
                         logger.debug("Note textarea did not appear")
+                    if await self._detect_premium_upsell_modal():
+                        logger.info("Premium upsell blocked opening invite note editor")
+                        await self._dismiss_dialog()
+                        return False, False, True
 
             note_filled = await self._fill_dialog_textarea(note)
             if not note_filled:
+                if await self._detect_premium_upsell_modal():
+                    logger.info("Premium upsell blocked filling invite note")
+                    await self._dismiss_dialog()
+                    return False, False, True
                 await self._dismiss_dialog()
                 return False, False, False
 
@@ -1772,24 +1780,31 @@ class LinkedInExtractor:
                     logger.debug("Escape after More-menu reread failed", exc_info=True)
                 logger.info("Post-More signals for %s: signals=%s", username, signals)
 
-        # Write-gate: the deeplink fires only when we have a vanityName
-        # invite anchor at this point. A `follow_only` outcome with no
-        # invite anchor (Pending profile, restricted profile, or
-        # genuinely follow-only) returns connect_unavailable without
-        # navigating to the invite URL — protects against accidental
-        # re-invitation of Pending profiles.
-        if not signals.has_invite_anchor:
-            return _connection_result(
-                url,
-                "connect_unavailable",
-                "LinkedIn did not expose a usable Connect action for this profile.",
-                profile=page_text,
-            )
-
         invite_url = (
             "https://www.linkedin.com/preload/custom-invite/"
             f"?vanityName={quote_plus(username)}"
         )
+
+        # Write-gate: without a note we keep the conservative behaviour and
+        # only fire the deeplink when LinkedIn exposed the vanityName invite
+        # anchor. When a note is requested, probing the custom-invite deeplink
+        # is non-destructive until the dialog submit and lets us distinguish
+        # missed/hidden Connect affordances from the Premium note-quota block
+        # that appears only after opening the note editor.
+        if not signals.has_invite_anchor:
+            if not note:
+                return _connection_result(
+                    url,
+                    "connect_unavailable",
+                    "LinkedIn did not expose a usable Connect action for this profile.",
+                    profile=page_text,
+                )
+            logger.info(
+                "No visible invite anchor for %s; probing custom-invite deeplink "
+                "because a personalized note was requested",
+                username,
+            )
+
         await self._navigate_to_page(invite_url)
 
         submitted, note_sent, note_limit_blocked = await self._submit_invite_dialog(
