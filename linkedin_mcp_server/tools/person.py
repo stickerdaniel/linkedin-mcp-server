@@ -212,7 +212,14 @@ def register_person_tools(
             Dict with url, status, message, and note_sent.
             Statuses: pending, already_connected, follow_only,
             connect_unavailable, unavailable, send_failed,
-            note_not_supported, connected, or accepted.
+            note_not_supported, custom_note_limit_reached,
+            connected, or accepted.
+
+            When status is ``custom_note_limit_reached`` LinkedIn rejected
+            the invite because the free personalized-note quota for the
+            account is exhausted. The response includes
+            ``can_send_without_note: true`` to hint that a retry with
+            ``note=None`` should succeed.
         """
         try:
             extractor = extractor or await get_ready_extractor(

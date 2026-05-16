@@ -383,6 +383,41 @@ class TestPersonTool:
             note=None,
         )
 
+    async def test_connect_with_person_custom_note_limit_reached(self, mock_context):
+        """The custom_note_limit_reached status carries can_send_without_note."""
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "status": "custom_note_limit_reached",
+            "message": (
+                "LinkedIn blocked the invite — the free personalized "
+                "invitation note limit has been reached."
+            ),
+            "note_sent": False,
+            "can_send_without_note": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "connect_with_person")
+        result = await tool_fn(
+            "test-user",
+            mock_context,
+            note="Hello!",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "custom_note_limit_reached"
+        assert result["note_sent"] is False
+        assert result["can_send_without_note"] is True
+        mock_extractor.connect_with_person.assert_awaited_once_with(
+            "test-user",
+            note="Hello!",
+        )
+
     async def test_connect_with_person_auth_error(self, monkeypatch):
         """Auth failures in the DI layer trigger auto-relogin and report the login browser."""
         from fastmcp.exceptions import ToolError

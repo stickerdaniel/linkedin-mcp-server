@@ -254,6 +254,7 @@ def _connection_result(
     *,
     note_sent: bool = False,
     profile: str = "",
+    can_send_without_note: bool | None = None,
 ) -> dict[str, Any]:
     """Build a structured response for a profile connection attempt."""
     result: dict[str, Any] = {
@@ -264,6 +265,8 @@ def _connection_result(
     }
     if profile:
         result["profile"] = profile
+    if can_send_without_note is not None:
+        result["can_send_without_note"] = can_send_without_note
     return result
 
 
@@ -783,6 +786,24 @@ class LinkedInExtractor:
             )
         except PlaywrightTimeoutError:
             pass
+
+    async def _detect_premium_upsell_modal(self) -> bool:
+        """Return True when a Premium upsell dialog is currently visible.
+
+        LinkedIn intercepts the invite-with-note submit with an upsell modal
+        when the free personalized-note quota is exhausted. The modal is a
+        normal ``[role="dialog"]`` whose body links to ``/premium/...``,
+        which is the locale-independent signal we key off here: the URL
+        fragment is stable and language-independent, mirroring the
+        ``/preload/custom-invite/``-based gates elsewhere in this module.
+        """
+        try:
+            count = await self._page.locator(
+                f'{_DIALOG_SELECTOR} a[href*="/premium/"]'
+            ).count()
+        except Exception:
+            return False
+        return count > 0
 
     async def _open_more_menu(self) -> bool:
         """Open the profile's More (three-dot) menu in a locale-independent way.
@@ -1544,18 +1565,28 @@ class LinkedInExtractor:
             has_labeled_action_anchor=bool(data.get("hasLabeledActionAnchor")),
         )
 
-    async def _submit_invite_dialog(self, note: str | None) -> tuple[bool, bool]:
+    async def _submit_invite_dialog(self, note: str | None) -> tuple[bool, bool, bool]:
         """Submit the invite dialog opened by the custom-invite deeplink.
 
-        Returns (submitted, note_sent). All interaction uses structural
-        selectors and positional indexing — no localized text matching.
-        Owns dialog cleanup: the dialog is dismissed on every failure path,
-        callers must not dismiss again.
+        Returns ``(submitted, note_sent, note_limit_blocked)``.
+
+        ``note_sent`` reports *delivery*, not textarea fill — it stays
+        False on any failure path, including the Premium upsell that
+        LinkedIn shows when the free personalized-note quota is exhausted.
+        ``note_limit_blocked`` is True only when the upsell was detected
+        after the primary-button submit; in that case ``submitted`` is
+        False, the dialog is dismissed, and callers should surface a
+        distinct status so the LLM can decide whether to retry without a
+        note.
+
+        All interaction uses structural selectors and positional indexing
+        — no localized text matching. Owns dialog cleanup: the dialog is
+        dismissed on every failure path, callers must not dismiss again.
         """
         if not await self._dialog_is_open(timeout=5000):
-            return False, False
+            return False, False, False
 
-        note_sent = False
+        note_filled = False
         if note:
             textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
             if textarea_count == 0:
@@ -1578,10 +1609,10 @@ class LinkedInExtractor:
                     except PlaywrightTimeoutError:
                         logger.debug("Note textarea did not appear")
 
-            note_sent = await self._fill_dialog_textarea(note)
-            if not note_sent:
+            note_filled = await self._fill_dialog_textarea(note)
+            if not note_filled:
                 await self._dismiss_dialog()
-                return False, False
+                return False, False, False
 
         sent = await self._click_dialog_primary_button()
         if not sent:
@@ -1601,7 +1632,16 @@ class LinkedInExtractor:
                     logger.debug("Keyboard submit fallback failed", exc_info=True)
             if not sent:
                 await self._dismiss_dialog()
-                return False, note_sent
+                return False, False, False
+
+        # LinkedIn may swap the invite dialog for a Premium upsell when the
+        # free note quota is exhausted. The textarea was filled but the
+        # invite was not delivered — surface a dedicated signal so callers
+        # don't conflate "submit-attempted" with "note actually sent".
+        if note and await self._detect_premium_upsell_modal():
+            logger.info("Premium upsell modal intercepted invite submit")
+            await self._dismiss_dialog()
+            return False, False, True
 
         try:
             await self._page.wait_for_selector(
@@ -1610,7 +1650,7 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("Invite dialog did not close after submit")
 
-        return True, note_sent
+        return True, note_filled, False
 
     async def connect_with_person(
         self,
@@ -1740,7 +1780,19 @@ class LinkedInExtractor:
         )
         await self._navigate_to_page(invite_url)
 
-        submitted, note_sent = await self._submit_invite_dialog(note)
+        submitted, note_sent, note_limit_blocked = await self._submit_invite_dialog(
+            note
+        )
+        if note_limit_blocked:
+            return _connection_result(
+                url,
+                "custom_note_limit_reached",
+                "LinkedIn blocked the invite — the free personalized "
+                "invitation note limit has been reached.",
+                note_sent=False,
+                profile=page_text,
+                can_send_without_note=True,
+            )
         if not submitted:
             return _connection_result(
                 url,
