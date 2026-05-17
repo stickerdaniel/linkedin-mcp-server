@@ -383,6 +383,40 @@ class TestPersonTool:
             note=None,
         )
 
+    async def test_connect_with_person_custom_note_limit_reached(self, mock_context):
+        """The custom_note_limit_reached status returns LinkedIn's message."""
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "status": "custom_note_limit_reached",
+            "message": "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
+            "note_sent": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "connect_with_person")
+        result = await tool_fn(
+            "test-user",
+            mock_context,
+            note="Hello!",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "custom_note_limit_reached"
+        assert (
+            result["message"]
+            == "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
+        )
+        assert result["note_sent"] is False
+        mock_extractor.connect_with_person.assert_awaited_once_with(
+            "test-user",
+            note="Hello!",
+        )
+
     async def test_connect_with_person_auth_error(self, monkeypatch):
         """Auth failures in the DI layer trigger auto-relogin and report the login browser."""
         from fastmcp.exceptions import ToolError
