@@ -459,4 +459,8 @@ Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/le
 
 This project is licensed under the Apache 2.0 license.
 
+## Used by
+
+- [till-hohmann/tinkering — linkedin-engagement-console](https://github.com/till-hohmann/tinkering/tree/main/linkedin-engagement-console). Daily engagement console with vault-grounded drafting. Built on this MCP server.
+
 <br>
