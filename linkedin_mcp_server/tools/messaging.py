@@ -217,24 +217,36 @@ def register_messaging_tools(
         confirm_send: bool,
         ctx: Context,
         profile_urn: str | None = None,
+        thread_id: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Send a message to a LinkedIn user.
 
-        The recipient must be directly messageable from the profile page. This is a
-        write operation when confirm_send is True.
+        Supports three paths for locating the recipient:
+
+        1. thread_id (best for replies): Navigates directly to an existing
+           conversation thread. Use this to reply to InMails from non-connections
+           or any existing conversation. Obtain via get_inbox or search_conversations.
+        2. profile_urn: Constructs the compose URL directly from a profile URN.
+        3. linkedin_username: Opens the user's profile page and looks for a
+           Message button (requires the user to be a 1st-degree connection).
+
+        This is a write operation when confirm_send is True.
 
         Args:
-            linkedin_username: LinkedIn username of the recipient
+            linkedin_username: LinkedIn username of the recipient (used for
+                display and fallback)
             message: The message text to send
             confirm_send: Must be True to send the message
             ctx: FastMCP context for progress reporting
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
-                compose URL directly. Providing this bypasses the Message-button
-                lookup and is more reliable when available. Obtain via
-                get_person_profile. Note: inbox may not always show all
-                messages; use search_conversations as a fallback.
+                compose URL directly. Obtain via get_person_profile.
+            thread_id: Optional LinkedIn messaging thread ID. When provided,
+                navigates directly to the conversation and sends the message
+                there, bypassing the Message-button lookup entirely. This is
+                the reliable way to reply to InMails from non-connections.
+                Obtain via get_inbox or search_conversations.
 
         Returns:
             Dict with url, status, message, recipient_selected, and sent.
@@ -244,8 +256,9 @@ def register_messaging_tools(
                 ctx, tool_name="send_message"
             )
             logger.info(
-                "Sending message to %s (confirm_send=%s)",
+                "Sending message to %s (thread_id=%s, confirm_send=%s)",
                 linkedin_username,
+                thread_id,
                 confirm_send,
             )
 
@@ -256,6 +269,7 @@ def register_messaging_tools(
                 message,
                 confirm_send=confirm_send,
                 profile_urn=profile_urn,
+                thread_id=thread_id,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")

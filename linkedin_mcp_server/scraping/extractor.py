@@ -3147,8 +3147,14 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
         """Send a message to a LinkedIn user with explicit confirmation gating.
+
+        Supports three paths (priority order):
+        1. thread_id — navigate directly to an existing conversation and reply.
+        2. profile_urn — build a compose URL directly from a profile URN.
+        3. fallback — open the profile page and look for a Message compose button.
 
         Args:
             linkedin_username: LinkedIn username of the recipient.
@@ -3156,7 +3162,110 @@ class LinkedInExtractor:
             confirm_send: Must be True to actually send (False does a dry run).
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
                 compose URL directly, bypassing the Message-button lookup.
+            thread_id: Optional LinkedIn messaging thread ID. When provided,
+                navigates directly to the conversation and sends the message
+                there, bypassing the Message-button lookup entirely.
         """
+        # Path 1: Direct thread — skip profile entirely
+        if thread_id:
+            thread_url = f"https://www.linkedin.com/messaging/thread/{thread_id}/"
+            logger.info(
+                "send_message: thread_id=%s — navigating directly to thread",
+                thread_id,
+            )
+            await self._navigate_to_page(thread_url)
+            await detect_rate_limit(self._page)
+
+            try:
+                await self._page.wait_for_selector("main")
+            except PlaywrightTimeoutError:
+                logger.debug("Thread page did not load for thread %s", thread_id)
+
+            await handle_modal_close(self._page)
+
+            # The compose box at the bottom of an open conversation is the same
+            # element as the standalone composer — reuse existing helpers.
+            message_surface = await self._wait_for_message_surface()
+            logger.debug(
+                "Message surface in thread %s: %s",
+                thread_id,
+                message_surface,
+            )
+
+            compose_box = await self._resolve_message_compose_box()
+            if compose_box is None:
+                return self._message_action_result(
+                    self._page.url,
+                    "composer_unavailable",
+                    "LinkedIn did not expose a usable message composer in this thread.",
+                )
+
+            # Recipient is already set by the conversation — skip resolution.
+            recipient_selected = True
+
+            # Dry-run gate
+            if not confirm_send:
+                return self._message_action_result(
+                    self._page.url,
+                    "confirmation_required",
+                    "Set confirm_send=true to send the message.",
+                    recipient_selected=recipient_selected,
+                )
+
+            # Send: focus compose box, type, submit.
+            focused = await self._page.evaluate(
+                """() => {
+                    const el = document.querySelector(
+                        'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
+                        + 'div[role="textbox"][contenteditable="true"]'
+                    );
+                    if (!el) return false;
+                    el.focus();
+                    return true;
+                }"""
+            )
+            if not focused:
+                return self._message_action_result(
+                    self._page.url,
+                    "compose_interact_failed",
+                    "Could not focus compose box via JavaScript.",
+                    recipient_selected=recipient_selected,
+                )
+            await asyncio.sleep(0.1)
+            await self._page.keyboard.type(message, delay=15)
+            await asyncio.sleep(0.3)
+            await asyncio.sleep(1.0)  # allow React to process keyboard input
+            sent_via_js = await self._page.evaluate(
+                """() => {
+                    const btn = Array.from(document.querySelectorAll(
+                        'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
+                        + 'button[data-control-name="send"]'
+                    )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                    if (!btn) return false;
+                    btn.click();
+                    return true;
+                }"""
+            )
+            if not sent_via_js:
+                await self._page.keyboard.press("Enter")
+
+            if not await self._message_text_visible(message):
+                return self._message_action_result(
+                    self._page.url,
+                    "send_unavailable",
+                    "LinkedIn did not confirm that the message was sent.",
+                    recipient_selected=recipient_selected,
+                )
+
+            return self._message_action_result(
+                self._page.url,
+                "sent",
+                "Message sent via existing conversation thread.",
+                recipient_selected=recipient_selected,
+                sent=True,
+            )
+
+        # Path 2 + 3: Profile-based (existing logic)
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
