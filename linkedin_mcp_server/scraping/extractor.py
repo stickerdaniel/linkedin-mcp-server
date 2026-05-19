@@ -3685,20 +3685,41 @@ class LinkedInExtractor:
             self._post_comment_last_diag = (
                 f"submit_unavailable reason={reason} candidates={cand} states={states}"
             )
-        # Verify by polling for the comment text in the DOM. LinkedIn appends
-        # the new comment to the comment thread below the post on success.
-        # We always run the poll: if the button click succeeded, this confirms
-        # it; if the button click failed but Ctrl+Enter worked, this catches it.
+        # Verify the submit landed. Two signals, polled in parallel:
+        # (a) Primary: the comment composer cleared. LinkedIn empties the
+        #     contenteditable on successful submit, so a now-empty composer
+        #     is strong evidence the comment was accepted.
+        # (b) Fallback: the comment text appears somewhere on the page that
+        #     looks like a comment item. Comment-item classes drift across
+        #     LinkedIn UI revisions, so this is a broad search.
         verified = False
         for _ in range(10):  # ~5s total
             await asyncio.sleep(0.5)
             verified = await self._page.evaluate(
                 """(needle) => {
-                    const probes = Array.from(document.querySelectorAll(
-                        'article .comments-comment-item, .comments-comment-item, '
-                        + '.update-components-comment, [data-test-id*="comment"]'
-                    ));
-                    return probes.some(el => (el.innerText || '').includes(needle));
+                    // Signal (a): composer cleared?
+                    const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                              + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                              + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                    const composer = document.querySelector(sel);
+                    const composerEmpty = !composer
+                        || (composer.innerText || composer.textContent || '').trim() === ''
+                        || composer.classList.contains('ql-blank');
+
+                    // Signal (b): comment text appears in any candidate comment
+                    // container that is NOT the composer itself (the composer
+                    // contains the typed text until LinkedIn accepts the submit
+                    // and clears it, so we have to exclude it from the search).
+                    const containers = Array.from(document.querySelectorAll(
+                        '.comments-comments-list, .comments-comment-entity,'
+                        + ' .comments-comment-item, .comments-comment-item__main-content,'
+                        + ' .update-components-comment, [data-id^="urn:li:comment"],'
+                        + ' [class*="comment-entity"], [class*="comment-item"]'
+                    )).filter(el => !el.contains(composer) && el !== composer);
+                    const textVisible = containers.some(el => (el.innerText || '').includes(needle));
+
+                    // Posted if EITHER signal fires.
+                    return composerEmpty || textVisible;
                 }""",
                 comment_text.strip()[:80],
             )
