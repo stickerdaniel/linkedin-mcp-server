@@ -3608,11 +3608,11 @@ class LinkedInExtractor:
         )
         await asyncio.sleep(1.5)  # let React process and enable the submit button
 
-        # Submit. The submit button's visible text is "Comment" (LinkedIn
-        # renamed it from "Post" / "Post comment"). Scope the search to the
-        # composer's parent form/container so we don't accidentally hit a
-        # feed-level Comment action button that just expands a different
-        # composer.
+        # Submit. The submit button's visible text is typically "Comment"
+        # (LinkedIn renamed it from "Post" / "Post comment"). Search ALL
+        # Comment/Post-labeled buttons on the page, then pick the one
+        # closest to the input by vertical position — this handles cases
+        # where the composer's parent form doesn't wrap the submit button.
         submitted = await self._page.evaluate(
             """() => {
                 const inputSel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
@@ -3620,61 +3620,75 @@ class LinkedInExtractor:
                                + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
                 const input = document.querySelector(inputSel);
                 if (!input) return { ok: false, reason: 'no_input' };
-                const composer = input.closest(
-                    'form, .comments-comment-box, .comments-comment-texteditor,'
-                    + ' .editor-container, [class*="comment-box"], [class*="comment-texteditor"]'
-                ) || input.parentElement;
-                const buttons = composer ? Array.from(composer.querySelectorAll('button')) : [];
-                const isEnabled = (b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true'
-                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
-                // Match by visible text or aria-label = "Comment" / "Post" / "Post comment"
+                const inputRect = input.getBoundingClientRect();
+                const isVisible = (b) => (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                const isEnabled = (b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true' && isVisible(b);
                 const looksLikeSubmit = (b) => {
                     const text = (b.innerText || b.textContent || '').trim().toLowerCase();
                     const aria = (b.getAttribute('aria-label') || '').trim().toLowerCase();
-                    return /^comment$|^post$|^post comment$/i.test(text)
-                        || /^comment$|^post$|^post comment$/i.test(aria);
+                    return /^(comment|post|post comment)$/i.test(text)
+                        || /^(comment|post|post comment)$/i.test(aria);
                 };
-                const candidates = buttons.filter(looksLikeSubmit);
-                const btn = candidates.find(isEnabled);
-                if (!btn) {
+                const allButtons = Array.from(document.querySelectorAll('button'));
+                const candidates = allButtons.filter(b => looksLikeSubmit(b) && isVisible(b));
+                // Pick the closest candidate to the input by vertical distance.
+                candidates.sort((a, b) => {
+                    const aD = Math.abs(a.getBoundingClientRect().top - inputRect.bottom);
+                    const bD = Math.abs(b.getBoundingClientRect().top - inputRect.bottom);
+                    return aD - bD;
+                });
+                const enabled = candidates.find(isEnabled);
+                if (!enabled) {
                     return {
                         ok: false,
-                        reason: 'no_enabled_submit',
+                        reason: candidates.length ? 'no_enabled_submit' : 'no_candidates',
                         candidates: candidates.length,
-                        disabled_states: candidates.map(b => ({
+                        states: candidates.slice(0, 6).map(b => ({
                             disabled: b.disabled,
                             aria_disabled: b.getAttribute('aria-disabled'),
-                            text: (b.innerText || b.textContent || '').trim().slice(0, 30)
+                            classes: b.className,
+                            text: (b.innerText || b.textContent || '').trim().slice(0, 40),
+                            aria_label: (b.getAttribute('aria-label') || '').slice(0, 40),
+                            top_diff: Math.round(b.getBoundingClientRect().top - inputRect.bottom)
                         }))
                     };
                 }
-                btn.click();
-                return { ok: true };
+                enabled.click();
+                return { ok: true, clicked_text: (enabled.innerText || enabled.textContent || '').trim().slice(0, 30) };
             }"""
         )
-        # `submitted` is now a dict for debugging. Old code expected a bool; normalize.
+        # Normalize and expose diagnostic info in the tool response so callers
+        # can see exactly what went wrong without grepping server logs.
         submitted_ok = bool(submitted and submitted.get('ok'))
         if not submitted_ok:
             reason = (submitted or {}).get('reason') or 'unknown'
             cand = (submitted or {}).get('candidates', 0)
-            states = (submitted or {}).get('disabled_states', [])
+            states = (submitted or {}).get('states', [])
             logger.info(
                 "post_comment submit failed: reason=%s candidates=%d states=%s",
                 reason,
                 cand,
                 states,
             )
-        submitted = submitted_ok
-        if not submitted:
-            return self._post_comment_result(
-                self._page.url,
-                "submit_unavailable",
-                "LinkedIn did not expose an enabled Post button after the comment was typed.",
-                composer_resolved=True,
+            # Try Ctrl+Enter as a fallback — LinkedIn accepts it as the
+            # comment-submit keyboard shortcut on most layouts. The existing
+            # verification poll below will detect whether the comment actually
+            # landed; if it did, we report success regardless of the missing
+            # button click. If it didn't, the early return below surfaces the
+            # full diagnostic state to the caller.
+            await self._page.keyboard.press("Control+Enter")
+            await asyncio.sleep(0.8)
+            # We don't know yet whether Ctrl+Enter worked. Fall through to the
+            # verification poll. If it didn't, the verify-step will report
+            # `post_unconfirmed`. We embed the diagnostic states into the
+            # message so the caller can see them either way.
+            self._post_comment_last_diag = (
+                f"submit_unavailable reason={reason} candidates={cand} states={states}"
             )
-
         # Verify by polling for the comment text in the DOM. LinkedIn appends
         # the new comment to the comment thread below the post on success.
+        # We always run the poll: if the button click succeeded, this confirms
+        # it; if the button click failed but Ctrl+Enter worked, this catches it.
         verified = False
         for _ in range(10):  # ~5s total
             await asyncio.sleep(0.5)
@@ -3692,10 +3706,24 @@ class LinkedInExtractor:
                 break
 
         if not verified:
+            # Surface the diagnostic from the JS submit attempt so the caller
+            # can see exactly what was on the page. This is the difference
+            # between "still guessing" and "next iteration knows what to do".
+            diag = getattr(self, '_post_comment_last_diag', None)
+            if submitted_ok:
+                msg = (
+                    "Button clicked but LinkedIn did not show the comment within 5s. "
+                    "It may still have posted; check the UI."
+                )
+            else:
+                msg = (
+                    f"No enabled submit button found and Ctrl+Enter fallback did not land. "
+                    f"Diagnostic: {diag}"
+                )
             return self._post_comment_result(
                 self._page.url,
-                "post_unconfirmed",
-                "Submit click fired but LinkedIn did not confirm the comment appeared within 5s. It may still have posted; check the UI.",
+                "post_unconfirmed" if submitted_ok else "submit_unavailable",
+                msg,
                 composer_resolved=True,
             )
 
