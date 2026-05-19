@@ -3590,24 +3590,81 @@ class LinkedInExtractor:
         await self._page.keyboard.type(comment_text, delay=15)
         await asyncio.sleep(0.5)
 
-        # Submit. LinkedIn's Post button is enabled once non-empty text is
-        # detected. JS click bypasses Patchright actionability.
-        await asyncio.sleep(0.6)  # let React enable the submit button
-        submitted = await self._page.evaluate(
+        # Nudge React. Patchright's keyboard.type fires keydown/keypress/keyup
+        # events but LinkedIn's Quill-based comment editor sometimes needs an
+        # explicit `input` event on the contenteditable element before it
+        # marks the comment as non-empty and enables the submit button.
+        await self._page.evaluate(
             """() => {
-                const buttons = Array.from(document.querySelectorAll(
-                    'button.comments-comment-box__submit-button,'
-                    + 'button[aria-label*="Post comment" i],'
-                    + 'button[type="submit"][aria-label*="Post" i]'
-                ));
-                const btn = buttons.find(b =>
-                    !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
-                );
-                if (!btn) return false;
-                btn.click();
+                const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                          + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                          + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
                 return true;
             }"""
         )
+        await asyncio.sleep(1.5)  # let React process and enable the submit button
+
+        # Submit. The submit button's visible text is "Comment" (LinkedIn
+        # renamed it from "Post" / "Post comment"). Scope the search to the
+        # composer's parent form/container so we don't accidentally hit a
+        # feed-level Comment action button that just expands a different
+        # composer.
+        submitted = await self._page.evaluate(
+            """() => {
+                const inputSel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                               + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                               + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                const input = document.querySelector(inputSel);
+                if (!input) return { ok: false, reason: 'no_input' };
+                const composer = input.closest(
+                    'form, .comments-comment-box, .comments-comment-texteditor,'
+                    + ' .editor-container, [class*="comment-box"], [class*="comment-texteditor"]'
+                ) || input.parentElement;
+                const buttons = composer ? Array.from(composer.querySelectorAll('button')) : [];
+                const isEnabled = (b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true'
+                    && (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                // Match by visible text or aria-label = "Comment" / "Post" / "Post comment"
+                const looksLikeSubmit = (b) => {
+                    const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    const aria = (b.getAttribute('aria-label') || '').trim().toLowerCase();
+                    return /^comment$|^post$|^post comment$/i.test(text)
+                        || /^comment$|^post$|^post comment$/i.test(aria);
+                };
+                const candidates = buttons.filter(looksLikeSubmit);
+                const btn = candidates.find(isEnabled);
+                if (!btn) {
+                    return {
+                        ok: false,
+                        reason: 'no_enabled_submit',
+                        candidates: candidates.length,
+                        disabled_states: candidates.map(b => ({
+                            disabled: b.disabled,
+                            aria_disabled: b.getAttribute('aria-disabled'),
+                            text: (b.innerText || b.textContent || '').trim().slice(0, 30)
+                        }))
+                    };
+                }
+                btn.click();
+                return { ok: true };
+            }"""
+        )
+        # `submitted` is now a dict for debugging. Old code expected a bool; normalize.
+        submitted_ok = bool(submitted and submitted.get('ok'))
+        if not submitted_ok:
+            reason = (submitted or {}).get('reason') or 'unknown'
+            cand = (submitted or {}).get('candidates', 0)
+            states = (submitted or {}).get('disabled_states', [])
+            logger.info(
+                "post_comment submit failed: reason=%s candidates=%d states=%s",
+                reason,
+                cand,
+                states,
+            )
+        submitted = submitted_ok
         if not submitted:
             return self._post_comment_result(
                 self._page.url,
