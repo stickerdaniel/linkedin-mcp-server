@@ -3453,3 +3453,199 @@ class LinkedInExtractor:
             {"selectors": selectors},
         )
         return result
+
+    @staticmethod
+    def _post_comment_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        composer_resolved: bool = False,
+        posted: bool = False,
+    ) -> dict[str, Any]:
+        """Build a structured response for the post_comment tool."""
+        return {
+            "url": url,
+            "status": status,
+            "message": message,
+            "composer_resolved": composer_resolved,
+            "posted": posted,
+        }
+
+    async def post_comment(
+        self,
+        post_url: str,
+        comment_text: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Post a comment on a LinkedIn post with explicit confirmation gating.
+
+        Navigates to the post, opens the comment composer if needed, types
+        the comment, and submits. Dry-runs the composer-reach step when
+        confirm_send is False so callers can validate addressability without
+        publishing.
+
+        Args:
+            post_url: Full LinkedIn activity URL.
+            comment_text: Body of the comment to post.
+            confirm_send: Must be True to actually submit the comment.
+        """
+        await self._navigate_to_page(post_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=15000)
+        except PlaywrightTimeoutError:
+            logger.debug("Post page did not load for %s", post_url)
+            return self._post_comment_result(
+                self._page.url,
+                "post_not_found",
+                "LinkedIn did not render the post page within 15s.",
+            )
+
+        await handle_modal_close(self._page)
+
+        # Open the comment composer. LinkedIn's posts may render the comment
+        # input inline (already visible below the post) OR require clicking
+        # the "Comment" action button to expand it. We try the inline path
+        # first, then click the Comment button as a fallback.
+        #
+        # Patchright actionability blocks click()/press_sequentially(), so
+        # interaction is via page.evaluate() for clicks and
+        # page.keyboard.type() for text input (same pattern as send_message).
+        composer_found = await self._page.evaluate(
+            """() => {
+                const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                          + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                          + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                const el = document.querySelector(sel);
+                return Boolean(el);
+            }"""
+        )
+        if not composer_found:
+            # Try clicking the Comment action button to expand the composer.
+            clicked = await self._page.evaluate(
+                """() => {
+                    const buttons = Array.from(document.querySelectorAll(
+                        'button[aria-label*="Comment" i], button[aria-label*="comment" i]'
+                    ));
+                    const btn = buttons.find(b =>
+                        /^comment/i.test((b.getAttribute('aria-label') || '').trim()) &&
+                        !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
+                    );
+                    if (!btn) return false;
+                    btn.click();
+                    return true;
+                }"""
+            )
+            if clicked:
+                await asyncio.sleep(0.8)
+                composer_found = await self._page.evaluate(
+                    """() => {
+                        const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                                  + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                                  + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                        return Boolean(document.querySelector(sel));
+                    }"""
+                )
+
+        if not composer_found:
+            return self._post_comment_result(
+                self._page.url,
+                "composer_unavailable",
+                "LinkedIn did not expose a usable comment composer on this post.",
+            )
+
+        if not confirm_send:
+            return self._post_comment_result(
+                self._page.url,
+                "confirmation_required",
+                "Set confirm_send=true to post the comment.",
+                composer_resolved=True,
+            )
+
+        # Focus the composer via JS (no actionability check) and type via
+        # keyboard so React sees real keydown/input/keyup events.
+        focused = await self._page.evaluate(
+            """() => {
+                const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                          + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                          + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                el.focus();
+                return true;
+            }"""
+        )
+        if not focused:
+            return self._post_comment_result(
+                self._page.url,
+                "composer_interact_failed",
+                "Could not focus comment composer via JavaScript.",
+                composer_resolved=True,
+            )
+
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(comment_text, delay=15)
+        await asyncio.sleep(0.5)
+
+        # Submit. LinkedIn's Post button is enabled once non-empty text is
+        # detected. JS click bypasses Patchright actionability.
+        await asyncio.sleep(0.6)  # let React enable the submit button
+        submitted = await self._page.evaluate(
+            """() => {
+                const buttons = Array.from(document.querySelectorAll(
+                    'button.comments-comment-box__submit-button,'
+                    + 'button[aria-label*="Post comment" i],'
+                    + 'button[type="submit"][aria-label*="Post" i]'
+                ));
+                const btn = buttons.find(b =>
+                    !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
+                );
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not submitted:
+            return self._post_comment_result(
+                self._page.url,
+                "submit_unavailable",
+                "LinkedIn did not expose an enabled Post button after the comment was typed.",
+                composer_resolved=True,
+            )
+
+        # Verify by polling for the comment text in the DOM. LinkedIn appends
+        # the new comment to the comment thread below the post on success.
+        verified = False
+        for _ in range(10):  # ~5s total
+            await asyncio.sleep(0.5)
+            verified = await self._page.evaluate(
+                """(needle) => {
+                    const probes = Array.from(document.querySelectorAll(
+                        'article .comments-comment-item, .comments-comment-item, '
+                        + '.update-components-comment, [data-test-id*="comment"]'
+                    ));
+                    return probes.some(el => (el.innerText || '').includes(needle));
+                }""",
+                comment_text.strip()[:80],
+            )
+            if verified:
+                break
+
+        if not verified:
+            return self._post_comment_result(
+                self._page.url,
+                "post_unconfirmed",
+                "Submit click fired but LinkedIn did not confirm the comment appeared within 5s. It may still have posted; check the UI.",
+                composer_resolved=True,
+            )
+
+        return self._post_comment_result(
+            self._page.url,
+            "posted",
+            "Comment posted successfully.",
+            composer_resolved=True,
+            posted=True,
+        )
