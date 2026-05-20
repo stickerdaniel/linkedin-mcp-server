@@ -1,7 +1,7 @@
 # -- Stage 1: Build virtual environment --
-FROM python:3.13.13-slim-bookworm@sha256:eabbb62836ee44c18d350821e9f78488bcf65134bf763ae9989d63e611fa04d9 AS builder
+FROM python:3.13.13-slim-bookworm@sha256:85cea6e0fd8234bb1ae0615828656e3e80c5876bd6f953f40480fb48566de6a6 AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest@sha256:3b7b60a81d3c57ef471703e5c83fd4aaa33abcd403596fb22ab07db85ae91347 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:latest@sha256:e590846f4776907b254ac0f44b5b380347af5d90d668138ca7938d1b0c2f98d3 /uv /uvx /bin/
 
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
@@ -12,7 +12,7 @@ RUN uv sync --frozen --no-dev --no-editable --compile-bytecode
 
 
 # -- Stage 2: Production runtime --
-FROM python:3.13.13-slim-bookworm@sha256:eabbb62836ee44c18d350821e9f78488bcf65134bf763ae9989d63e611fa04d9
+FROM python:3.13.13-slim-bookworm@sha256:85cea6e0fd8234bb1ae0615828656e3e80c5876bd6f953f40480fb48566de6a6
 
 RUN useradd -m -s /bin/bash pwuser
 
