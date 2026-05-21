@@ -768,7 +768,7 @@ class LinkedInExtractor:
         times out, so callers can fall back to a keyboard submit.
         """
         buttons = self._page.locator(
-            f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+            f":is({_DIALOG_SELECTOR}) button, :is({_DIALOG_SELECTOR}) [role='button']"
         )
         count = await buttons.count()
         if count == 0:
@@ -1591,7 +1591,7 @@ class LinkedInExtractor:
                 # then fails and the caller returns connect_unavailable
                 # without sending — the same outcome as today.
                 buttons = self._page.locator(
-                    f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+                    f":is({_DIALOG_SELECTOR}) button, :is({_DIALOG_SELECTOR}) [role='button']"
                 )
                 btn_count = await buttons.count()
                 if btn_count >= 2:
@@ -1616,7 +1616,7 @@ class LinkedInExtractor:
             # Enter targets it instead of a focused textarea (where Enter
             # would just insert a newline).
             buttons = self._page.locator(
-                f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+                f":is({_DIALOG_SELECTOR}) button, :is({_DIALOG_SELECTOR}) [role='button']"
             )
             btn_count = await buttons.count()
             if btn_count > 0:
