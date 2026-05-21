@@ -1597,8 +1597,41 @@ class LinkedInExtractor:
 
             note_sent = await self._fill_dialog_textarea(note)
             if not note_sent:
-                await self._dismiss_dialog()
-                return False, False
+                # The textarea never mounted. The most common cause as of
+                # 2026-05 is LinkedIn's "Send unlimited personalized
+                # invites with Premium" upsell, which replaces the
+                # invite dialog after "Add a note" is clicked once the
+                # account's free-note quota for the month is exhausted.
+                # Detect it by the rebuilt dialog content. If found, the
+                # connection request still has a viable path: dismiss
+                # the upsell, re-trigger the invite via the deeplink
+                # (URL is unchanged through the upsell), and fall through
+                # to the primary-button click below to send without a
+                # note. The caller sees note_sent=False so they know the
+                # personalization was dropped.
+                upsell_visible = False
+                try:
+                    upsell_visible = await self._page.locator(
+                        f':is({_DIALOG_SELECTOR}):has-text("free custom notes"), '
+                        f':is({_DIALOG_SELECTOR}):has-text("personalized invites with Premium")'
+                    ).first.is_visible()
+                except Exception:
+                    logger.debug("Premium upsell detection failed", exc_info=True)
+                if upsell_visible:
+                    logger.info(
+                        "Free-note quota exhausted (Premium upsell shown); "
+                        "falling back to no-note send."
+                    )
+                    invite_url = self._page.url
+                    await self._dismiss_dialog()
+                    await self._navigate_to_page(invite_url)
+                    if not await self._dialog_is_open(timeout=5000):
+                        return False, False
+                    # Fall through with note_sent=False so the primary
+                    # button (Send without a note) gets clicked below.
+                else:
+                    await self._dismiss_dialog()
+                    return False, False
 
         sent = await self._click_dialog_primary_button()
         if not sent:
