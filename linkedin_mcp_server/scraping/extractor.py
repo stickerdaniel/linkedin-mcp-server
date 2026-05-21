@@ -93,8 +93,18 @@ _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
 _NETWORK_TOKENS = ("F", "S", "O")
 
-_DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
-_DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
+_DIALOG_SELECTOR = (
+    'dialog[open], '
+    '[role="dialog"], '
+    '[role="alertdialog"], '
+    '[aria-modal="true"]'
+)
+_DIALOG_TEXTAREA_SELECTOR = (
+    '[role="dialog"] textarea, '
+    '[role="alertdialog"] textarea, '
+    '[aria-modal="true"] textarea, '
+    'dialog textarea'
+)
 
 _MESSAGING_COMPOSE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]'
 _MESSAGING_COMPOSE_SELECTOR = (
@@ -733,12 +743,19 @@ class LinkedInExtractor:
             return False
 
     async def _dialog_is_open(self, *, timeout: int = 1000) -> bool:
-        """Return whether a dialog is currently open (structural check)."""
-        locator = self._page.locator(_DIALOG_SELECTOR)
+        """Return whether a dialog is currently open (structural check).
+
+        Uses ``wait_for(state="visible", timeout=timeout)`` directly so the
+        full timeout budget is spent waiting for the dialog to mount —
+        important after navigations that auto-open a modal (e.g. the
+        ``/preload/custom-invite/`` deeplink), where the modal mounts a
+        few hundred ms after ``goto`` resolves on ``domcontentloaded``.
+        The previous early ``count() == 0`` short-circuit returned False
+        before the modal had a chance to render.
+        """
+        locator = self._page.locator(_DIALOG_SELECTOR).first
         try:
-            if await locator.count() == 0:
-                return False
-            await locator.first.wait_for(state="visible", timeout=timeout)
+            await locator.wait_for(state="visible", timeout=timeout)
             return True
         except Exception:
             return False
