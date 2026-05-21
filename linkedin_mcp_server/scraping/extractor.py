@@ -93,18 +93,8 @@ _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
 _NETWORK_TOKENS = ("F", "S", "O")
 
-_DIALOG_SELECTOR = (
-    'dialog[open], '
-    '[role="dialog"], '
-    '[role="alertdialog"], '
-    '[aria-modal="true"]'
-)
-_DIALOG_TEXTAREA_SELECTOR = (
-    '[role="dialog"] textarea, '
-    '[role="alertdialog"] textarea, '
-    '[aria-modal="true"] textarea, '
-    'dialog textarea'
-)
+_DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
+_DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
 _MESSAGING_COMPOSE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]'
 _MESSAGING_COMPOSE_SELECTOR = (
