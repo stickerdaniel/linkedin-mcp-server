@@ -94,6 +94,10 @@
       "description": "Send a message to a LinkedIn user with explicit confirmation and optional profile URN support"
     },
     {
+      "name": "star_conversation",
+      "description": "Mark a LinkedIn messaging conversation as starred using its thread ID"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
     }

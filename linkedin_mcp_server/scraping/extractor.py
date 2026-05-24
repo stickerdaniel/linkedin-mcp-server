@@ -288,6 +288,24 @@ class LinkedInExtractor:
             "sent": sent,
         }
 
+    @staticmethod
+    def _conversation_star_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        thread_id: str,
+        starred: bool = False,
+    ) -> dict[str, Any]:
+        """Build a structured response for conversation star actions."""
+        return {
+            "url": url,
+            "status": status,
+            "message": message,
+            "thread_id": thread_id,
+            "starred": starred,
+        }
+
     async def _log_navigation_failure(
         self,
         target_url: str,
@@ -2467,6 +2485,229 @@ class LinkedInExtractor:
             "conversation",
             cleaned,
             references=references,
+        )
+
+    async def _read_conversation_star_state(self) -> dict[str, Any]:
+        """Return whether the open conversation is starred."""
+        state = await self._page.evaluate(
+            """() => {
+                const normalize = value =>
+                    (value || '').replace(/\\s+/g, ' ').trim();
+                const isVisible = element =>
+                    !!(
+                        element &&
+                        (element.offsetWidth ||
+                            element.offsetHeight ||
+                            element.getClientRects().length)
+                    );
+                const isStarredLabel = aria => {
+                    const label = (aria || '').toLowerCase();
+                    return (
+                        label.includes('remove star') ||
+                        label.includes('unstar') ||
+                        label.includes('starred')
+                    );
+                };
+
+                const controls = Array.from(
+                    document.querySelectorAll('main button, main [role="button"]')
+                ).filter(isVisible);
+                for (const control of controls) {
+                    const aria = control.getAttribute('aria-label') || '';
+                    const text = normalize(
+                        control.innerText || control.textContent || ''
+                    );
+                    const starLike =
+                        /star/i.test(aria) || text === 'Star' || text === 'Remove star';
+                    if (!starLike) continue;
+
+                    const pressed = control.getAttribute('aria-pressed');
+                    return {
+                        available: true,
+                        starred: isStarredLabel(aria) || pressed === 'true',
+                    };
+                }
+
+                const selectedConversation = document.querySelector(
+                    'main label[aria-label^="Select conversation"][aria-current="true"],'
+                        + 'main label[aria-label^="Select conversation"][aria-selected="true"]'
+                )?.closest('li');
+                if (selectedConversation) {
+                    const starMarker = selectedConversation.querySelector(
+                        'button[aria-label*="Star"], [aria-label*="star"]'
+                    );
+                    if (starMarker) {
+                        return { available: true, starred: true };
+                    }
+                }
+
+                return { available: false, starred: false };
+            }"""
+        )
+        if not isinstance(state, dict):
+            return {"available": False, "starred": False}
+        return state
+
+    async def _click_conversation_star(self) -> bool:
+        """Click the Star control for the currently open conversation."""
+        clicked = await self._page.evaluate(
+            """() => {
+                const normalize = value =>
+                    (value || '').replace(/\\s+/g, ' ').trim();
+                const isVisible = element =>
+                    !!(
+                        element &&
+                        (element.offsetWidth ||
+                            element.offsetHeight ||
+                            element.getClientRects().length)
+                    );
+                const isStarredLabel = aria => {
+                    const label = (aria || '').toLowerCase();
+                    return (
+                        label.includes('remove star') ||
+                        label.includes('unstar') ||
+                        label.includes('starred')
+                    );
+                };
+
+                const controls = Array.from(
+                    document.querySelectorAll('main button, main [role="button"]')
+                ).filter(isVisible);
+                for (const control of controls) {
+                    const aria = control.getAttribute('aria-label') || '';
+                    const text = normalize(
+                        control.innerText || control.textContent || ''
+                    );
+                    const starLike =
+                        /star/i.test(aria) || text === 'Star' || text === 'Remove star';
+                    if (!starLike || control.disabled) continue;
+                    if (
+                        isStarredLabel(aria) ||
+                        control.getAttribute('aria-pressed') === 'true'
+                    ) {
+                        continue;
+                    }
+                    control.click();
+                    return true;
+                }
+                return false;
+            }"""
+        )
+        if clicked:
+            return True
+
+        opened_menu = await self._page.evaluate(
+            """() => {
+                const normalize = value =>
+                    (value || '').replace(/\\s+/g, ' ').trim();
+                const isVisible = element =>
+                    !!(
+                        element &&
+                        (element.offsetWidth ||
+                            element.offsetHeight ||
+                            element.getClientRects().length)
+                    );
+                const controls = Array.from(
+                    document.querySelectorAll('main button, main [role="button"]')
+                ).filter(isVisible);
+                const moreButton = controls.find(control => {
+                    const aria = (control.getAttribute('aria-label') || '').toLowerCase();
+                    const text = normalize(
+                        control.innerText || control.textContent || ''
+                    );
+                    return (
+                        aria.includes('more actions') ||
+                        aria === 'more' ||
+                        text === 'More'
+                    );
+                });
+                if (!moreButton) return false;
+                moreButton.click();
+                return true;
+            }"""
+        )
+        if not opened_menu:
+            return False
+
+        await asyncio.sleep(0.3)
+        return await self._page.evaluate(
+            """() => {
+                const normalize = value =>
+                    (value || '').replace(/\\s+/g, ' ').trim();
+                const isVisible = element =>
+                    !!(
+                        element &&
+                        (element.offsetWidth ||
+                            element.offsetHeight ||
+                            element.getClientRects().length)
+                    );
+                const menuItems = Array.from(
+                    document.querySelectorAll(
+                        '[role="menuitem"], [role="menu"] button, [role="menu"] [role="button"]'
+                    )
+                ).filter(isVisible);
+                const starItem = menuItems.find(item => {
+                    const text = normalize(item.innerText || item.textContent || '');
+                    const aria = normalize(item.getAttribute('aria-label') || '');
+                    return text === 'Star' || aria === 'Star';
+                });
+                if (!starItem) return false;
+                starItem.click();
+                return true;
+            }"""
+        )
+
+    async def star_conversation(self, thread_id: str) -> dict[str, Any]:
+        """Mark a messaging conversation as starred using its thread ID."""
+        url = f"https://www.linkedin.com/messaging/thread/{thread_id}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug(
+                "Conversation page did not fully load for thread %s", thread_id
+            )
+
+        await handle_modal_close(self._page)
+        await self._wait_for_main_text(log_context="Conversation star")
+
+        state = await self._read_conversation_star_state()
+        if state.get("starred"):
+            return self._conversation_star_result(
+                self._page.url,
+                "already_starred",
+                "Conversation is already starred.",
+                thread_id=thread_id,
+                starred=True,
+            )
+
+        clicked = await self._click_conversation_star()
+        if not clicked:
+            return self._conversation_star_result(
+                self._page.url,
+                "star_unavailable",
+                "LinkedIn did not expose a usable Star action for this conversation.",
+                thread_id=thread_id,
+            )
+
+        await asyncio.sleep(0.5)
+        verified = await self._read_conversation_star_state()
+        if verified.get("starred"):
+            return self._conversation_star_result(
+                self._page.url,
+                "starred",
+                "Conversation starred.",
+                thread_id=thread_id,
+                starred=True,
+            )
+
+        return self._conversation_star_result(
+            self._page.url,
+            "star_failed",
+            "Star action did not persist for this conversation.",
+            thread_id=thread_id,
         )
 
     async def search_conversations(self, keywords: str) -> dict[str, Any]:

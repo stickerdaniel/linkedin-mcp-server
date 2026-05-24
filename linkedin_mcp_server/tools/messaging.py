@@ -261,3 +261,55 @@ def register_messaging_tools(mcp: FastMCP) -> None:
                 raise_tool_error(relogin_exc, "send_message")
         except Exception as e:
             raise_tool_error(e, "send_message")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Star Conversation",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"messaging", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def star_conversation(
+        thread_id: str,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Mark a LinkedIn messaging conversation as starred (favorite).
+
+        Opens the conversation by thread_id and toggles the Star action in the
+        conversation header or overflow menu.
+
+        Args:
+            thread_id: LinkedIn messaging thread ID
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, status, message, thread_id, and starred.
+            Statuses: starred, already_starred, star_unavailable, star_failed.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="star_conversation"
+            )
+            logger.info("Starring conversation thread_id=%s", thread_id)
+
+            await ctx.report_progress(
+                progress=0,
+                total=100,
+                message="Starring conversation",
+            )
+
+            result = await extractor.star_conversation(thread_id)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "star_conversation")
+        except Exception as e:
+            raise_tool_error(e, "star_conversation")  # NoReturn
