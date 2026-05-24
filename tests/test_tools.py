@@ -33,6 +33,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
+    mock.star_conversation = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -779,6 +780,28 @@ class TestMessagingTools:
                 extractor=mock_extractor,
             )
 
+    async def test_star_conversation_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/abc123/",
+            "status": "starred",
+            "message": "Conversation starred.",
+            "thread_id": "abc123",
+            "starred": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "star_conversation")
+        result = await tool_fn("abc123", mock_context, extractor=mock_extractor)
+
+        assert result["status"] == "starred"
+        assert result["starred"] is True
+        mock_extractor.star_conversation.assert_awaited_once_with("abc123")
+
 
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
@@ -790,6 +813,8 @@ class TestToolTimeouts:
         tool_names = (
             "get_person_profile",
             "connect_with_person",
+            "get_connection_requests",
+            "accept_connection_request",
             "get_sidebar_profiles",
             "search_people",
             "get_company_profile",
@@ -800,6 +825,7 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "star_conversation",
             "close_session",
         )
 

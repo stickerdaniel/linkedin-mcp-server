@@ -3648,3 +3648,66 @@ class TestSendMessageComposerInteraction:
         assert result["status"] == "sent"
         # Enter was pressed as fallback
         mock_keyboard.press.assert_awaited_once_with("Enter")
+
+
+class TestStarConversation:
+    async def test_star_conversation_success(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_read_conversation_star_state",
+                new_callable=AsyncMock,
+                side_effect=[{"available": True, "starred": False}, {"starred": True}],
+            ),
+            patch.object(
+                extractor,
+                "_click_conversation_star",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.star_conversation("abc123")
+
+        assert result["status"] == "starred"
+        assert result["starred"] is True
+        assert result["thread_id"] == "abc123"
+
+    async def test_star_conversation_already_starred(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_read_conversation_star_state",
+                new_callable=AsyncMock,
+                return_value={"available": True, "starred": True},
+            ),
+        ):
+            result = await extractor.star_conversation("abc123")
+
+        assert result["status"] == "already_starred"
+        assert result["starred"] is True
