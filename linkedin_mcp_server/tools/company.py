@@ -16,7 +16,10 @@ from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import parse_company_sections
-from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG
+from linkedin_mcp_server.scraping.extractor import (
+    _RATE_LIMITED_MSG,
+    probe_post_permalinks_in_main,
+)
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
@@ -136,8 +139,42 @@ def register_company_tools(
             section_errors: dict[str, dict[str, Any]] = {}
             if extracted.text and extracted.text != _RATE_LIMITED_MSG:
                 sections["posts"] = extracted.text
-                if extracted.references:
-                    references["posts"] = extracted.references
+                refs = list(extracted.references) if extracted.references else []
+
+                # classify_link does not currently route /posts/<slug>-NNN-XXXX
+                # paths or /feed/update/urn:li:activity:NNN paths into a
+                # reference kind, so per-post permalinks get dropped from
+                # the standard references array. Probe the live DOM after
+                # extraction and promote any post permalinks we find. This
+                # is what makes the engagement console's Send / React
+                # buttons usable for peer-company posts (without it, all
+                # comment cards get null URLs and Send/React are disabled).
+                try:
+                    permalinks = await probe_post_permalinks_in_main(
+                        extractor._page
+                    )
+                except Exception as probe_exc:  # pragma: no cover
+                    logger.debug(
+                        "post-permalink probe failed for %s: %s",
+                        company_name,
+                        probe_exc,
+                    )
+                    permalinks = []
+                seen_urls = {r.get("url") for r in refs if isinstance(r, dict)}
+                for link in permalinks:
+                    if link in seen_urls:
+                        continue
+                    refs.append(
+                        {
+                            "kind": "feed_post",
+                            "url": link,
+                            "context": "company post",
+                        }
+                    )
+                    seen_urls.add(link)
+
+                if refs:
+                    references["posts"] = refs
             elif extracted.error:
                 section_errors["posts"] = extracted.error
 

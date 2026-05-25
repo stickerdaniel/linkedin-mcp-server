@@ -391,6 +391,57 @@ def _build_feed_references(
     return dedupe_references(refs, cap=50)
 
 
+async def probe_post_permalinks_in_main(page) -> list[str]:
+    """Return all per-post permalinks visible inside <main> on the current page.
+
+    LinkedIn's company posts page (and many other listing pages) renders each
+    post tile with at least one anchor whose href matches
+    ``/posts/<slug>-NNN-XXXX``. ``classify_link`` does not currently route
+    those paths to any reference kind, so they get dropped from the
+    ``references["posts"]`` array on ``get_company_posts``. Without permalinks,
+    downstream ``post_comment`` / ``react_to_post`` flows from the engagement
+    console artifact cannot reach the specific post and have to fall back to
+    the company page.
+
+    This helper probes the live DOM after extraction and returns the
+    permalinks in document order, deduped. Callers can promote the entries
+    into the ``references["posts"]`` array as ``feed_post`` kind so the
+    consumer treats them the same way as the SDUI-captured permalinks from
+    ``get_feed``.
+    """
+    try:
+        urls = await page.evaluate(
+            """() => {
+                const main = document.querySelector('main');
+                if (!main) return [];
+                // Match standard LinkedIn post permalinks. Two forms:
+                //   /posts/<slug>-<digits>-<suffix>
+                //   /feed/update/urn:li:activity:<digits>/
+                const anchors = Array.from(main.querySelectorAll('a[href]'));
+                const out = [];
+                const seen = new Set();
+                for (const a of anchors) {
+                    const href = a.getAttribute('href') || '';
+                    if (!href) continue;
+                    // Strip query string and trailing slash for dedup parity
+                    const noQuery = href.split('?')[0];
+                    const isPostPath =
+                        /^\\/posts\\/[^\\/]+-\\d+-\\w+\\/?$/.test(noQuery) ||
+                        /^\\/feed\\/update\\/urn:li:activity:\\d+\\/?$/.test(noQuery);
+                    if (!isPostPath) continue;
+                    if (seen.has(noQuery)) continue;
+                    seen.add(noQuery);
+                    out.push(noQuery);
+                }
+                return out;
+            }"""
+        )
+        return list(urls or [])
+    except Exception as exc:
+        logger.debug("probe_post_permalinks_in_main failed: %s", exc)
+        return []
+
+
 async def _drain_listener_tasks(pending: list[asyncio.Task[None]]) -> None:
     """Bounded teardown for fire-and-forget response listener tasks.
 
