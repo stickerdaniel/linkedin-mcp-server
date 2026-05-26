@@ -1,11 +1,14 @@
+ARG UV_PYTHON_INSTALL_DIR=/opt/uv-python
+
 # -- Stage 1: Build virtual environment --
 FROM python:3.13.13-slim-bookworm@sha256:eabbb62836ee44c18d350821e9f78488bcf65134bf763ae9989d63e611fa04d9 AS builder
 
+ARG UV_PYTHON_INSTALL_DIR
 COPY --from=ghcr.io/astral-sh/uv:latest@sha256:3b7b60a81d3c57ef471703e5c83fd4aaa33abcd403596fb22ab07db85ae91347 /uv /uvx /bin/
 
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
-ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
+ENV UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR
 RUN uv sync --frozen --no-install-project --no-dev --no-editable --compile-bytecode
 
 COPY . .
@@ -15,13 +18,15 @@ RUN uv sync --frozen --no-dev --no-editable --compile-bytecode
 # -- Stage 2: Production runtime --
 FROM python:3.13.13-slim-bookworm@sha256:eabbb62836ee44c18d350821e9f78488bcf65134bf763ae9989d63e611fa04d9
 
+ARG UV_PYTHON_INSTALL_DIR
+
 RUN useradd -m -s /bin/bash pwuser
 
 WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /opt/uv-python /opt/uv-python
-ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
+COPY --from=builder $UV_PYTHON_INSTALL_DIR $UV_PYTHON_INSTALL_DIR
+ENV UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright
 
