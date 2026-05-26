@@ -4528,9 +4528,7 @@ class TestSendMessageComposerInteraction:
         mock_keyboard.type.assert_has_awaits(
             [call("Hello", delay=15), call("World!", delay=15)]
         )
-        mock_keyboard.down.assert_awaited_with("Shift")
-        mock_keyboard.press.assert_has_awaits([call("Enter")])
-        mock_keyboard.up.assert_awaited_with("Shift")
+        mock_keyboard.press.assert_has_awaits([call("Shift+Enter")])
 
     async def test_compose_interact_failed_when_focus_fails(self, mock_page):
         """send_message returns compose_interact_failed when JS focus fails."""

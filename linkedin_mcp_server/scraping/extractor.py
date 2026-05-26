@@ -3158,9 +3158,7 @@ class LinkedInExtractor:
             if line:
                 await self._page.keyboard.type(line, delay=15)
             if i < len(lines) - 1:
-                await self._page.keyboard.down("Shift")
-                await self._page.keyboard.press("Enter")
-                await self._page.keyboard.up("Shift")
+                await self._page.keyboard.press("Shift+Enter")
                 await asyncio.sleep(0.1)
 
     async def send_message(
