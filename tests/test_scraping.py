@@ -4147,8 +4147,8 @@ class TestSendMessage:
         ):
             await extractor.send_message("testuser", "Hello!", confirm_send=False)
 
-        assert calls[0] == "dismiss"
-        assert calls[1] == "nav"
+        assert calls[0] == "nav"
+        assert calls[1] == "dismiss"
 
     async def test_dry_run_returns_confirmation_required(self, mock_page):
         """send_message with confirm_send=False returns confirmation_required status."""

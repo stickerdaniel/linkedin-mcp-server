@@ -3167,10 +3167,6 @@ class LinkedInExtractor:
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
                 compose URL directly, bypassing the Message-button lookup.
         """
-        # Clear any floating message overlay from previous tools/calls
-        # that might intercept the compose box or block page interactions.
-        await self._dismiss_message_ui()
-
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
@@ -3181,6 +3177,9 @@ class LinkedInExtractor:
             logger.debug("Profile page did not load for %s", linkedin_username)
 
         await handle_modal_close(self._page)
+        # Clear any floating message overlay from previous tool calls
+        # that might intercept the compose box or block interactions.
+        await self._dismiss_message_ui()
         display_name = await self._read_profile_display_name()
         if profile_urn:
             # Build the full compose URL that LinkedIn's own Message button
