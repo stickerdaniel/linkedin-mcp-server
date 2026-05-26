@@ -131,9 +131,9 @@ _MESSAGING_CLOSE_SELECTOR = (
 # single change to the heuristic propagates to both call sites.
 _FIND_ACTION_ROOT_FN_JS = r"""
 function findActionRoot(main) {
-  const composeAnchors = main.querySelectorAll('a[href*="/messaging/compose/"]');
-  for (const a of composeAnchors) {
-    let el = a.parentElement;
+  const candidates = main.querySelectorAll('button, a[href*="/messaging/compose/"]');
+  for (const c of candidates) {
+    let el = c.parentElement;
     while (el && el !== main) {
       const interactive = el.querySelectorAll('button, a').length;
       const buttons = el.querySelectorAll('button').length;
