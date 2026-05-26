@@ -4085,6 +4085,71 @@ class TestSearchConversations:
 
 
 class TestSendMessage:
+    async def test_dismisses_stale_overlay_before_navigating(self, mock_page):
+        """send_message calls _dismiss_message_ui before navigating to profile."""
+        extractor = LinkedInExtractor(mock_page)
+        nav_mock = AsyncMock()
+        dismiss_mock = AsyncMock()
+
+        # Track call order
+        calls = []
+
+        async def mock_nav(*args, **kwargs):
+            calls.append("nav")
+
+        async def mock_dismiss(*args, **kwargs):
+            calls.append("dismiss")
+
+        nav_mock.side_effect = mock_nav
+        dismiss_mock.side_effect = mock_dismiss
+
+        with (
+            patch.object(extractor, "_navigate_to_page", nav_mock),
+            patch.object(extractor, "_dismiss_message_ui", dismiss_mock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_read_profile_display_name",
+                new_callable=AsyncMock,
+                return_value="Test User",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_message_compose_href",
+                new_callable=AsyncMock,
+                return_value="https://www.linkedin.com/messaging/compose/?recipient=ACoAAB",
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_message_surface",
+                new_callable=AsyncMock,
+                return_value="composer",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_message_compose_box",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                extractor,
+                "_compose_page_matches_recipient",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            await extractor.send_message("testuser", "Hello!", confirm_send=False)
+
+        assert calls[0] == "dismiss"
+        assert calls[1] == "nav"
+
     async def test_dry_run_returns_confirmation_required(self, mock_page):
         """send_message with confirm_send=False returns confirmation_required status."""
         extractor = LinkedInExtractor(mock_page)
