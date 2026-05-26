@@ -1758,7 +1758,7 @@ class LinkedInExtractor:
             f"?vanityName={quote_plus(username)}"
         )
         # Issue 432: Clear any message composer overlay which might overlap the invite dialog
-        await self._dismiss_message_ui()
+        await self._dismiss_message_ui(fast=True)
         await self._navigate_to_page(invite_url)
 
         submitted, note_sent = await self._submit_invite_dialog(note)
@@ -2238,12 +2238,25 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             return False
 
-    async def _dismiss_message_ui(self) -> None:
-        """Best-effort dismissal for the profile messaging UI."""
-        if not await self._locator_is_visible(_MESSAGING_CLOSE_SELECTOR, timeout=750):
+    async def _dismiss_message_ui(self, fast: bool = False) -> None:
+        """Best-effort dismissal for the profile messaging UI.
+
+        Args:
+            fast: If True, uses a 0ms timeout for the initial visibility check
+                so it doesn't block the caller when no overlay is present.
+        """
+        # Prefix with aside to avoid matching generic page-level toasts/modals
+        # which might share common "Close" / "Dismiss" labels.
+        selector = ", ".join(
+            f"aside {s.strip()}"
+            for s in _MESSAGING_CLOSE_SELECTOR.split(",")
+            if s.strip()
+        )
+        timeout = 0 if fast else 750
+        if not await self._locator_is_visible(selector, timeout=timeout):
             return
         try:
-            await self._click_first(_MESSAGING_CLOSE_SELECTOR, timeout=1500)
+            await self._click_first(selector, timeout=1500)
             await asyncio.sleep(0.5)
         except Exception:
             logger.debug("Could not dismiss LinkedIn messaging UI", exc_info=True)

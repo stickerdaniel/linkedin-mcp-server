@@ -1005,10 +1005,10 @@ class TestConnectWithPerson:
         # Track call order
         calls = []
 
-        async def mock_nav(*args, **kwargs):
+        def mock_nav(*args, **kwargs):
             calls.append("nav")
 
-        async def mock_dismiss(*args, **kwargs):
+        def mock_dismiss(*args, **kwargs):
             calls.append("dismiss")
 
         with (
@@ -1028,7 +1028,7 @@ class TestConnectWithPerson:
                 "_dismiss_message_ui",
                 new_callable=AsyncMock,
                 side_effect=mock_dismiss,
-            ),
+            ) as mock_dismiss_call,
             patch.object(
                 extractor,
                 "_navigate_to_page",
@@ -1047,8 +1047,8 @@ class TestConnectWithPerson:
         ):
             await extractor.connect_with_person("testuser")
 
-        assert calls[0] == "dismiss"
-        assert calls[1] == "nav"
+        assert calls == ["dismiss", "nav"]
+        mock_dismiss_call.assert_awaited_once_with(fast=True)
 
     async def test_connectable_navigates_deeplink_and_verifies(self, mock_page):
         """Connect via deeplink: dialog opens, submit succeeds, anchor disappears."""
