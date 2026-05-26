@@ -3150,6 +3150,18 @@ class LinkedInExtractor:
             references=references,
         )
 
+    async def _type_message_with_newlines(self, message: str) -> None:
+        """Type a message honoring newlines via Shift+Enter."""
+        lines = message.split("\n")
+        for i, line in enumerate(lines):
+            if line:
+                await self._page.keyboard.type(line, delay=15)
+            if i < len(lines) - 1:
+                await self._page.keyboard.down("Shift")
+                await self._page.keyboard.press("Enter")
+                await self._page.keyboard.up("Shift")
+                await asyncio.sleep(0.1)
+
     async def send_message(
         self,
         linkedin_username: str,
@@ -3313,7 +3325,7 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         await asyncio.sleep(0.1)
-        await self._page.keyboard.type(message, delay=15)
+        await self._type_message_with_newlines(message)
         await asyncio.sleep(0.3)
 
         # patchright actionability also blocks send_button.click(). Use JS click

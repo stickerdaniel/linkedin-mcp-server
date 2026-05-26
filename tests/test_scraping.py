@@ -4451,6 +4451,54 @@ class TestSendMessageComposerInteraction:
         # Verify keyboard.type was used (not press_sequentially)
         mock_keyboard.type.assert_awaited_once_with("Hello!", delay=15)
 
+    async def test_multiline_message_uses_shift_enter(self, mock_page):
+        """send_message types newlines using Shift+Enter."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_keyboard.down = AsyncMock()
+        mock_keyboard.up = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        # evaluate returns: True (focus), True (send button click)
+        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
+            patch.object(
+                extractor,
+                "_message_text_visible",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello\nWorld!", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+
+        # Verify it split by newline and hit Shift+Enter
+        from unittest.mock import call
+
+        mock_keyboard.type.assert_has_awaits(
+            [call("Hello", delay=15), call("World!", delay=15)]
+        )
+        mock_keyboard.down.assert_awaited_with("Shift")
+        mock_keyboard.press.assert_has_awaits([call("Enter")])
+        mock_keyboard.up.assert_awaited_with("Shift")
+
     async def test_compose_interact_failed_when_focus_fails(self, mock_page):
         """send_message returns compose_interact_failed when JS focus fails."""
         extractor = LinkedInExtractor(mock_page)
