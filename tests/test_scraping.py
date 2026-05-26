@@ -998,6 +998,58 @@ class TestConnectWithPerson:
             has_labeled_action_anchor=labeled_anchor,
         )
 
+    async def test_dismisses_composer_overlay_before_invite(self, mock_page):
+        """connect_with_person dismisses any composer overlay before navigating to invite."""
+        extractor = LinkedInExtractor(mock_page)
+
+        # Track call order
+        calls = []
+
+        async def mock_nav(*args, **kwargs):
+            calls.append("nav")
+
+        async def mock_dismiss(*args, **kwargs):
+            calls.append("dismiss")
+
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                self._mock_scrape("Profile", follow_up_text="Profile"),
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(invite=True), self._signals()],
+            ),
+            patch.object(
+                extractor,
+                "_dismiss_message_ui",
+                new_callable=AsyncMock,
+                side_effect=mock_dismiss,
+            ),
+            patch.object(
+                extractor,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+                side_effect=mock_nav,
+            ),
+            patch.object(
+                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(True, False),
+            ),
+        ):
+            await extractor.connect_with_person("testuser")
+
+        assert calls[0] == "dismiss"
+        assert calls[1] == "nav"
+
     async def test_connectable_navigates_deeplink_and_verifies(self, mock_page):
         """Connect via deeplink: dialog opens, submit succeeds, anchor disappears."""
         extractor = LinkedInExtractor(mock_page)

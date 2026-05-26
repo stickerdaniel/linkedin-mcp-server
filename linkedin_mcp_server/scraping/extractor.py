@@ -736,10 +736,19 @@ class LinkedInExtractor:
         """Return whether a dialog is currently open (structural check)."""
         locator = self._page.locator(_DIALOG_SELECTOR)
         try:
-            if await locator.count() == 0:
+            count = await locator.count()
+            if count == 0:
                 return False
-            await locator.first.wait_for(state="visible", timeout=timeout)
-            return True
+
+            # Filter out composer overlays (they have [role="dialog"] but shouldn't count as modal dialogs)
+            for i in range(count):
+                el = locator.nth(i)
+                if await el.is_visible(timeout=timeout):
+                    # Check if it contains the messaging close button
+                    if await el.locator(_MESSAGING_CLOSE_SELECTOR).count() > 0:
+                        continue
+                    return True
+            return False
         except Exception:
             return False
 
@@ -1748,6 +1757,8 @@ class LinkedInExtractor:
             "https://www.linkedin.com/preload/custom-invite/"
             f"?vanityName={quote_plus(username)}"
         )
+        # Issue 432: Clear any message composer overlay which might overlap the invite dialog
+        await self._dismiss_message_ui()
         await self._navigate_to_page(invite_url)
 
         submitted, note_sent = await self._submit_invite_dialog(note)
