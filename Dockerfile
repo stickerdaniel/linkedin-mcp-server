@@ -5,6 +5,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest@sha256:3b7b60a81d3c57ef471703e5c83fd4aaa
 
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 RUN uv sync --frozen --no-install-project --no-dev --no-editable --compile-bytecode
 
 COPY . .
@@ -19,6 +20,8 @@ RUN useradd -m -s /bin/bash pwuser
 WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /opt/uv-python /opt/uv-python
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright
 
