@@ -4464,8 +4464,16 @@ class TestSendMessageComposerInteraction:
         patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with (
-            patches[0], patches[1], patches[2], patches[3], patches[4],
-            patches[5], patches[6], patches[7], patches[8], patches[9],
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patches[7],
+            patches[8],
+            patches[9],
             patch.object(
                 extractor,
                 "_message_text_visible",
@@ -4478,8 +4486,9 @@ class TestSendMessageComposerInteraction:
             )
 
         assert result["status"] == "sent"
-        
+
         from unittest.mock import call
+
         mock_keyboard.type.assert_has_awaits(
             [call("Hello", delay=15), call("World", delay=15), call("!", delay=15)]
         )
