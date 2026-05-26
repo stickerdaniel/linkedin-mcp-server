@@ -1730,17 +1730,18 @@ class LinkedInExtractor:
                     logger.debug("Escape after More-menu reread failed", exc_info=True)
                 logger.info("Post-More signals for %s: signals=%s", username, signals)
 
-        # Write-gate: the deeplink fires when we have a vanityName invite anchor,
-        # or when we detected a Connect button but couldn't find the anchor (Issue #454).
-        # A profile with neither returns connect_unavailable without navigating to
-        # the invite URL — protecting against accidental re-invitation of Pending profiles.
-        if not signals.has_invite_anchor and not signals.has_labeled_action_button:
-            return _connection_result(
-                url,
-                "connect_unavailable",
-                "LinkedIn did not expose a usable Connect action for this profile.",
-                profile=page_text,
-            )
+        # Write-gate: the deeplink fires when we have a vanityName invite anchor.
+        # Fallback (Issue #454): If we didn't find an invite anchor but the state
+        # is "unavailable" and there is a primary button, it might be a hidden Connect button.
+        # We strictly prevent probing for follow_only or pending states to preserve guardrails.
+        if not signals.has_invite_anchor:
+            if state != "unavailable" or not signals.has_labeled_action_button:
+                return _connection_result(
+                    url,
+                    "connect_unavailable",
+                    "LinkedIn did not expose a usable Connect action for this profile.",
+                    profile=page_text,
+                )
 
         invite_url = (
             "https://www.linkedin.com/preload/custom-invite/"
