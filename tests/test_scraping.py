@@ -4451,6 +4451,39 @@ class TestSendMessageComposerInteraction:
         # Verify keyboard.type was used (not press_sequentially)
         mock_keyboard.type.assert_awaited_once_with("Hello!", delay=15)
 
+    async def test_multiline_message_normalizes_crlf(self, mock_page):
+        """send_message normalizes CRLF and CR to LF before typing."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_keyboard.down = AsyncMock()
+        mock_keyboard.up = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+        patches = self._patch_send_message_to_compose(extractor, mock_page)
+
+        with (
+            patches[0], patches[1], patches[2], patches[3], patches[4],
+            patches[5], patches[6], patches[7], patches[8], patches[9],
+            patch.object(
+                extractor,
+                "_message_text_visible",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            result = await extractor.send_message(
+                "testuser", "Hello\r\nWorld\r!", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        
+        from unittest.mock import call
+        mock_keyboard.type.assert_has_awaits(
+            [call("Hello", delay=15), call("World", delay=15), call("!", delay=15)]
+        )
+
     async def test_multiline_message_uses_shift_enter(self, mock_page):
         """send_message types newlines using Shift+Enter."""
         extractor = LinkedInExtractor(mock_page)

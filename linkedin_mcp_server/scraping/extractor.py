@@ -3152,7 +3152,8 @@ class LinkedInExtractor:
 
     async def _type_message_with_newlines(self, message: str) -> None:
         """Type a message honoring newlines via Shift+Enter."""
-        lines = message.split("\n")
+        normalized_message = message.replace("\r\n", "\n").replace("\r", "\n")
+        lines = normalized_message.split("\n")
         for i, line in enumerate(lines):
             if line:
                 await self._page.keyboard.type(line, delay=15)
