@@ -998,6 +998,52 @@ class TestConnectWithPerson:
             has_labeled_action_anchor=labeled_anchor,
         )
 
+    async def test_connect_with_person_fallback_deeplink_probe(self, mock_page):
+        """connect_with_person probes deeplink even if has_invite_anchor is False."""
+        extractor = LinkedInExtractor(mock_page)
+
+        async def mock_dialog(*args, **kwargs):
+            return True
+
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                self._mock_scrape("Profile", follow_up_text="Profile"),
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(labeled_action=True), self._signals()],
+            ),
+            patch.object(
+                extractor, "_open_more_menu", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                side_effect=mock_dialog,
+            ),
+            patch.object(
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(True, False),
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+            assert result["status"] == "connected"
+            # It navigated to the invite deeplink despite has_invite_anchor=False
+            mock_nav.assert_any_call(
+                "https://www.linkedin.com/preload/custom-invite/?vanityName=testuser"
+            )
+
     async def test_connectable_navigates_deeplink_and_verifies(self, mock_page):
         """Connect via deeplink: dialog opens, submit succeeds, anchor disappears."""
         extractor = LinkedInExtractor(mock_page)

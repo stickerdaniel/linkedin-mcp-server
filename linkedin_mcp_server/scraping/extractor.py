@@ -1730,25 +1730,26 @@ class LinkedInExtractor:
                     logger.debug("Escape after More-menu reread failed", exc_info=True)
                 logger.info("Post-More signals for %s: signals=%s", username, signals)
 
-        # Write-gate: the deeplink fires only when we have a vanityName
-        # invite anchor at this point. A `follow_only` outcome with no
-        # invite anchor (Pending profile, restricted profile, or
-        # genuinely follow-only) returns connect_unavailable without
-        # navigating to the invite URL — protects against accidental
-        # re-invitation of Pending profiles.
-        if not signals.has_invite_anchor:
-            return _connection_result(
-                url,
-                "connect_unavailable",
-                "LinkedIn did not expose a usable Connect action for this profile.",
-                profile=page_text,
-            )
-
         invite_url = (
             "https://www.linkedin.com/preload/custom-invite/"
             f"?vanityName={quote_plus(username)}"
         )
-        await self._navigate_to_page(invite_url)
+
+        # Write-gate: Try to find the vanityName invite anchor. If missing,
+        # (e.g. because Connect is rendered as a <button> instead of an <a>,
+        # see Issue #454), fallback to probing the deeplink URL directly.
+        if not signals.has_invite_anchor:
+            logger.info("No invite anchor for %s, probing deeplink fallback", username)
+            await self._navigate_to_page(invite_url)
+            if not await self._dialog_is_open(timeout=5000):
+                return _connection_result(
+                    url,
+                    "connect_unavailable",
+                    "LinkedIn did not expose a usable Connect action for this profile.",
+                    profile=page_text,
+                )
+        else:
+            await self._navigate_to_page(invite_url)
 
         submitted, note_sent = await self._submit_invite_dialog(note)
         if not submitted:
