@@ -4094,10 +4094,10 @@ class TestSendMessage:
         # Track call order
         calls = []
 
-        async def mock_nav(*args, **kwargs):
+        def mock_nav(*args, **kwargs):
             calls.append("nav")
 
-        async def mock_dismiss(*args, **kwargs):
+        def mock_dismiss(*args, **kwargs):
             calls.append("dismiss")
 
         nav_mock.side_effect = mock_nav
@@ -4147,8 +4147,7 @@ class TestSendMessage:
         ):
             await extractor.send_message("testuser", "Hello!", confirm_send=False)
 
-        assert calls[0] == "nav"
-        assert calls[1] == "dismiss"
+        assert calls == ["nav", "dismiss", "nav", "dismiss"]
 
     async def test_dry_run_returns_confirmation_required(self, mock_page):
         """send_message with confirm_send=False returns confirmation_required status."""
