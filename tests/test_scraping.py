@@ -1002,9 +1002,6 @@ class TestConnectWithPerson:
         """connect_with_person probes deeplink even if has_invite_anchor is False."""
         extractor = LinkedInExtractor(mock_page)
 
-        async def mock_dialog(*args, **kwargs):
-            return True
-
         with (
             patch.object(
                 extractor,
@@ -1023,12 +1020,6 @@ class TestConnectWithPerson:
             patch.object(
                 extractor, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
-            patch.object(
-                extractor,
-                "_dialog_is_open",
-                new_callable=AsyncMock,
-                side_effect=mock_dialog,
-            ),
             patch.object(
                 extractor,
                 "_submit_invite_dialog",
