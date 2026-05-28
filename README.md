@@ -513,6 +513,16 @@ Built with [FastMCP](https://gofastmcp.com/) and [Patchright](https://github.com
 
 Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
 
+## Give a Gift
+
+I don't accept donations — I'm not in need of them — but if you'd like to send a small gift to show appreciation, you can use any of the addresses below. Your support is appreciated, but entirely optional.
+
+| Type | Address |
+|------|---------|
+| ETH on Ethereum | `0xb20b50f362d9F35CE1a311c0b4B15C2551A09567` |
+| SOL on Solana | `27rwcHUjQKNTMVnvsu1GhQ1RiVnLVy4WyFF8xJoz84DQ` |
+| BTC on Bitcoin | `bc1qrmppveguzaw6gqw6qphnc02sje6z80ql5rcdmr` |
+
 ## License
 
 This project is licensed under the Apache 2.0 license.
