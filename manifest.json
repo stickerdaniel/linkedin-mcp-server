@@ -112,6 +112,30 @@
     {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
+    },
+    {
+      "name": "search",
+      "description": "ChatGPT-compatible read-only search across LinkedIn people, companies, and jobs"
+    },
+    {
+      "name": "fetch",
+      "description": "ChatGPT-compatible read-only fetch for a LinkedIn result id returned by search"
+    },
+    {
+      "name": "research_lead",
+      "description": "Collect LinkedIn person and optional company context into a draft-first sales outreach brief"
+    },
+    {
+      "name": "draft_outreach_message",
+      "description": "Draft a LinkedIn outreach message and connection note without sending"
+    },
+    {
+      "name": "plan_follow_up",
+      "description": "Create a draft-only follow-up schedule and message sequence"
+    },
+    {
+      "name": "review_outreach_target",
+      "description": "Review outreach context and copy for fit, specificity, and spam-risk signals"
     }
   ],
   "user_config": {},

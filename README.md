@@ -35,6 +35,12 @@ Through this LinkedIn MCP server, AI assistants like Claude can connect to your 
 | `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | working |
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
+| `search` | ChatGPT-compatible read-only search across people, companies, and jobs | working |
+| `fetch` | ChatGPT-compatible read-only fetch for ids returned by `search` | working |
+| `research_lead` | Build a draft-first person/company outreach brief for sales workflows | working |
+| `draft_outreach_message` | Draft a LinkedIn outreach message and connection note without sending | working |
+| `plan_follow_up` | Create a draft-only follow-up schedule and message sequence | working |
+| `review_outreach_target` | Review outreach copy for fit, specificity, and spam-risk signals | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 <br/>
@@ -105,6 +111,24 @@ uvx linkedin-scraper-mcp@latest --log-level DEBUG
 uvx linkedin-scraper-mcp@latest --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
+For private remote MCP testing with ChatGPT or Claude over HTTP, set a bearer
+token and expose the server only through HTTPS:
+
+```bash
+MCP_AUTH_TOKEN="change-me" \
+uvx linkedin-scraper-mcp@latest \
+  --transport streamable-http \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --path /mcp
+```
+
+Clients must send:
+
+```text
+Authorization: Bearer change-me
+```
+
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
 Tool calls are serialized within a single server process to protect the shared
@@ -154,6 +178,40 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 - Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
 
 </details>
+
+<br/>
+<br/>
+
+## 🤖 ChatGPT and Claude Remote MCP
+
+This server exposes one unified MCP surface:
+
+- Claude Desktop and local clients can keep using the existing `stdio` setup.
+- Claude remote MCP, ChatGPT Developer Mode, and other HTTP MCP clients can use
+  `streamable-http` with `MCP_AUTH_TOKEN`.
+- ChatGPT data-only/deep-research style clients can use the generic read-only
+  `search` and `fetch` tools. `search` returns compact ids such as
+  `person:alice`, `company:acme`, and `job:12345`; `fetch` also accepts post
+  ids such as `post:/feed/update/...` when a post permalink is already known.
+
+For real remote use, put the HTTP endpoint behind HTTPS and do not bind directly
+to a public interface without authentication. The bearer token is intended for
+private deployments; OAuth remains the better fit for a public multi-user app.
+
+### Sales Outreach Workflow
+
+The outreach tools are draft-first. They help ChatGPT or Claude research a lead,
+draft a personalized note, plan follow-ups, and review risk, but they do not send
+messages. Actual sends still go through `send_message` or `connect_with_person`,
+which remain separate destructive tools requiring explicit approval.
+
+Typical flow:
+
+1. Use `search`/`search_people` or `search_companies` to find a target.
+2. Use `fetch` or `research_lead` to collect profile and company context.
+3. Use `draft_outreach_message` to create a connection note or DM.
+4. Use `review_outreach_target` to check specificity and spam-risk signals.
+5. Human approves before calling `send_message` or `connect_with_person`.
 
 <br/>
 <br/>
