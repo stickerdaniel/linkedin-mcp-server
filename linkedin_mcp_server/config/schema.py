@@ -74,6 +74,7 @@ class ServerConfig:
     port: int = 8000
     path: str = "/mcp"
     tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+    mcp_auth_token: str | None = None
 
     def validate(self) -> None:
         """Validate server configuration values."""
@@ -83,6 +84,8 @@ class ServerConfig:
             raise ConfigurationError(
                 f"tool_timeout_seconds must be a positive finite number, got {self.tool_timeout_seconds}"
             )
+        if self.mcp_auth_token is not None and not self.mcp_auth_token.strip():
+            raise ConfigurationError("mcp_auth_token must not be empty when set")
 
 
 @dataclass

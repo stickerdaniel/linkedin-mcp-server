@@ -7,35 +7,58 @@
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/badge/License-Apache%202.0-%233fb950?labelColor=32383f" alt="License"></a>
 </p>
 
-Through this LinkedIn MCP server, AI assistants like Claude can connect to your LinkedIn. Access profiles and companies, search for jobs, or get job details.
+Connect ChatGPT, Claude, and other MCP clients to a real logged-in LinkedIn
+browser session. The server can research profiles and companies, search people
+and jobs, read messages and feed posts, and prepare draft-first outreach while
+keeping write actions behind explicit approval.
 
+## What You Can Do
 
-## Installation Methods
+- **Research people and companies** with profile sections, company pages,
+  employee lists, and sidebar recommendations.
+- **Search LinkedIn** for people, companies, jobs, and conversations.
+- **Inspect jobs and feeds** with job details, company posts, home feed posts,
+  and reusable LinkedIn references.
+- **Prepare sales outreach** with lead briefs, personalized drafts, follow-up
+  plans, and message-risk review. These tools never send on their own.
+- **Use one server across clients**: Claude Desktop over `stdio`, Claude/ChatGPT
+  over streamable HTTP, and ChatGPT data-only flows through `search`/`fetch`.
+
+> [!IMPORTANT]
+> This project controls a browser logged in as you. Use it for personal,
+> low-volume workflows, respect LinkedIn's terms, and keep remote deployments
+> behind HTTPS and authentication.
+
+## Choose Your Setup
 
 [![uvx](https://img.shields.io/badge/uvx-Quick_Install-de5fe9?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDEiIGhlaWdodD0iNDEiIHZpZXdCb3g9IjAgMCA0MSA0MSIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTS01LjI4NjE5ZS0wNiAwLjE2ODYyOUwwLjA4NDMwOTggMjAuMTY4NUwwLjE1MTc2MiAzNi4xNjgzQzAuMTYxMDc1IDM4LjM3NzQgMS45NTk0NyA0MC4xNjA3IDQuMTY4NTkgNDAuMTUxNEwyMC4xNjg0IDQwLjA4NEwzMC4xNjg0IDQwLjA0MThMMzEuMTg1MiA0MC4wMzc1QzMzLjM4NzcgNDAuMDI4MiAzNS4xNjgzIDM4LjIwMjYgMzUuMTY4MyAzNlYzNkwzNy4wMDAzIDM2TDM3LjAwMDMgMzkuOTk5Mkw0MC4xNjgzIDM5Ljk5OTZMMzkuOTk5NiAtOS45NDY1M2UtMDdMMjEuNTk5OCAwLjA3NzU2ODlMMjEuNjc3NCAxNi4wMTg1TDIxLjY3NzQgMjUuOTk5OEwyMC4wNzc0IDI1Ljk5OThMMTguMzk5OCAyNS45OTk4TDE4LjQ3NzQgMTYuMDMyTDE4LjM5OTggMC4wOTEwNTkzTC01LjI4NjE5ZS0wNiAwLjE2ODYyOVoiIGZpbGw9IiNERTVGRTkiLz4KPC9zdmc+Cg==)](#-uvx-setup-recommended---universal)
 [![Install MCP Bundle](https://img.shields.io/badge/Claude_Desktop_MCPB-d97757?style=for-the-badge&logo=anthropic)](#-claude-desktop-mcp-bundle-formerly-dxt)
 [![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup)
 [![Development](https://img.shields.io/badge/Development-Local-ffdc53?style=for-the-badge&logo=python&logoColor=ffdc53)](#-local-setup-develop--contribute)
 
-| Tool | Description | Status |
-|------|-------------|--------|
-| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) | working |
-| `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) | working |
-| `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#407](https://github.com/stickerdaniel/linkedin-mcp-server/issues/407) [#432](https://github.com/stickerdaniel/linkedin-mcp-server/issues/432) [#448](https://github.com/stickerdaniel/linkedin-mcp-server/issues/448) [#454](https://github.com/stickerdaniel/linkedin-mcp-server/issues/454) |
-| `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
-| `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
-| `get_conversation` | Read a specific messaging conversation by username or thread ID | [#434](https://github.com/stickerdaniel/linkedin-mcp-server/issues/434) |
-| `search_conversations` | Search messages by keyword | working |
-| `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#433](https://github.com/stickerdaniel/linkedin-mcp-server/issues/433) [#441](https://github.com/stickerdaniel/linkedin-mcp-server/issues/441) |
-| `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet | working |
-| `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
-| `search_companies` | Search for companies on LinkedIn by keywords | working |
-| `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter | working |
-| `search_jobs` | Search for jobs with keywords and location filters | working |
-| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | working |
-| `get_job_details` | Get detailed information about a specific job posting | working |
-| `get_feed` | Get recent posts from the authenticated user's home feed | working |
-| `close_session` | Close browser session and clean up resources | working |
+| Use case | Best path | Why |
+|----------|-----------|-----|
+| Claude Desktop, easiest install | [MCP Bundle](#-claude-desktop-mcp-bundle-formerly-dxt) | One-click install and managed browser setup |
+| Claude Desktop or local MCP clients | [uvx](#-uvx-setup-recommended---universal) | No clone required, updates from PyPI |
+| ChatGPT/Claude remote MCP | [streamable HTTP](#-chatgpt-and-claude-remote-mcp) | Works with HTTPS plus `MCP_AUTH_TOKEN` |
+| Container/server runtime | [Docker](#-docker-setup) | Reproducible headless runtime |
+| Contributing | [Local setup](#-local-setup-develop--contribute) | Editable source, tests, linting |
+
+## Tools At A Glance
+
+| Group | Tools |
+|-------|-------|
+| People | `get_person_profile`, `get_my_profile`, `search_people`, `get_sidebar_profiles` |
+| Companies | `get_company_profile`, `get_company_posts`, `search_companies`, `get_company_employees` |
+| Jobs and feed | `search_jobs`, `get_job_details`, `get_feed` |
+| Messaging | `get_inbox`, `get_conversation`, `search_conversations`, `send_message` |
+| ChatGPT compatibility | `search`, `fetch` |
+| Outreach | `research_lead`, `draft_outreach_message`, `plan_follow_up`, `review_outreach_target` |
+| Session/actions | `connect_with_person`, `close_session` |
+
+> [!NOTE]
+> `send_message` and `connect_with_person` are write actions and require explicit
+> confirmation. Outreach tools are read-only/draft-only.
 
 <br/>
 <br/>
@@ -105,6 +128,24 @@ uvx linkedin-scraper-mcp@latest --log-level DEBUG
 uvx linkedin-scraper-mcp@latest --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
+For private remote MCP testing with ChatGPT or Claude over HTTP, set a bearer
+token and expose the server only through HTTPS:
+
+```bash
+MCP_AUTH_TOKEN="change-me" \
+uvx linkedin-scraper-mcp@latest \
+  --transport streamable-http \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --path /mcp
+```
+
+Clients must send:
+
+```text
+Authorization: Bearer change-me
+```
+
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
 Tool calls are serialized within a single server process to protect the shared
@@ -154,6 +195,40 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 - Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
 
 </details>
+
+<br/>
+<br/>
+
+## 🤖 ChatGPT and Claude Remote MCP
+
+This server exposes one unified MCP surface:
+
+- Claude Desktop and local clients can keep using the existing `stdio` setup.
+- Claude remote MCP, ChatGPT Developer Mode, and other HTTP MCP clients can use
+  `streamable-http` with `MCP_AUTH_TOKEN`.
+- ChatGPT data-only/deep-research style clients can use the generic read-only
+  `search` and `fetch` tools. `search` returns compact ids such as
+  `person:alice`, `company:acme`, and `job:12345`; `fetch` also accepts post
+  ids such as `post:/feed/update/...` when a post permalink is already known.
+
+For real remote use, put the HTTP endpoint behind HTTPS and do not bind directly
+to a public interface without authentication. The bearer token is intended for
+private deployments; OAuth remains the better fit for a public multi-user app.
+
+### Sales Outreach Workflow
+
+The outreach tools are draft-first. They help ChatGPT or Claude research a lead,
+draft a personalized note, plan follow-ups, and review risk, but they do not send
+messages. Actual sends still go through `send_message` or `connect_with_person`,
+which remain separate destructive tools requiring explicit approval.
+
+Typical flow:
+
+1. Use `search`/`search_people` or `search_companies` to find a target.
+2. Use `fetch` or `research_lead` to collect profile and company context.
+3. Use `draft_outreach_message` to create a connection note or DM.
+4. Use `review_outreach_target` to check specificity and spam-risk signals.
+5. Human approves before calling `send_message` or `connect_with_person`.
 
 <br/>
 <br/>
@@ -454,6 +529,16 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 Built with [FastMCP](https://gofastmcp.com/) and [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python).
 
 Use in accordance with [LinkedIn's Terms of Service](https://www.linkedin.com/legal/user-agreement). Web scraping may violate LinkedIn's terms. This tool is for personal use only.
+
+## Give a Gift
+
+I don't accept donations — I'm not in need of them — but if you'd like to send a small gift to show appreciation, you can use any of the addresses below. Your support is appreciated, but entirely optional.
+
+| Type | Address |
+|------|---------|
+| ETH on Ethereum | `0xb20b50f362d9F35CE1a311c0b4B15C2551A09567` |
+| SOL on Solana | `27rwcHUjQKNTMVnvsu1GhQ1RiVnLVy4WyFF8xJoz84DQ` |
+| BTC on Bitcoin | `bc1qrmppveguzaw6gqw6qphnc02sje6z80ql5rcdmr` |
 
 ## License
 

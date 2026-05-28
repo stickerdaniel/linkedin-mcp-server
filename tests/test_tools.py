@@ -1117,6 +1117,196 @@ class TestFeedTools:
             await mcp.call_tool("get_feed", {"num_posts": 51})
 
 
+class TestCompatTools:
+    async def test_search_returns_chatgpt_result_shape(self, mock_context):
+        mock_extractor = _make_mock_extractor({})
+        mock_extractor.search_people = AsyncMock(
+            return_value={
+                "references": {
+                    "search_results": [
+                        {
+                            "kind": "person",
+                            "url": "/in/alice/",
+                            "text": "Alice Example",
+                        }
+                    ]
+                }
+            }
+        )
+        mock_extractor.search_companies = AsyncMock(
+            return_value={
+                "references": {
+                    "search_results": [
+                        {
+                            "kind": "company",
+                            "url": "/company/acme/",
+                            "text": "Acme",
+                        }
+                    ]
+                }
+            }
+        )
+        mock_extractor.search_jobs = AsyncMock(
+            return_value={"job_ids": ["12345"], "references": {}}
+        )
+
+        from linkedin_mcp_server.tools.compat import register_compat_tools
+
+        mcp = FastMCP("test")
+        register_compat_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search")
+        result = await tool_fn(
+            "revenue leaders", mock_context, extractor=mock_extractor
+        )
+
+        assert result == {
+            "results": [
+                {
+                    "id": "person:alice",
+                    "title": "Alice Example",
+                    "url": "https://www.linkedin.com/in/alice/",
+                },
+                {
+                    "id": "company:acme",
+                    "title": "Acme",
+                    "url": "https://www.linkedin.com/company/acme/",
+                },
+                {
+                    "id": "job:12345",
+                    "title": "LinkedIn job 12345",
+                    "url": "https://www.linkedin.com/jobs/view/12345/",
+                },
+            ]
+        }
+
+    async def test_fetch_routes_person_id(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/in/alice/",
+            "sections": {"main_profile": "Alice Example\nVP Sales"},
+            "references": {},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.compat import register_compat_tools
+
+        mcp = FastMCP("test")
+        register_compat_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "fetch")
+        result = await tool_fn("person:alice", mock_context, extractor=mock_extractor)
+
+        assert result["id"] == "person:alice"
+        assert result["url"] == "https://www.linkedin.com/in/alice/"
+        assert "Alice Example" in result["text"]
+        mock_extractor.scrape_person.assert_awaited_once()
+
+    async def test_fetch_rejects_bad_id(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.compat import register_compat_tools
+
+        mcp = FastMCP("test")
+        register_compat_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "fetch")
+        with pytest.raises(ToolError, match="Invalid id"):
+            await tool_fn("not-a-valid-id", mock_context, extractor=MagicMock())
+
+
+class TestOutreachTools:
+    async def test_research_lead_builds_brief_without_sending(self, mock_context):
+        mock_extractor = _make_mock_extractor({})
+        mock_extractor.scrape_person = AsyncMock(
+            return_value={
+                "url": "https://www.linkedin.com/in/alice/",
+                "sections": {
+                    "main_profile": "Alice Example\nVP Sales",
+                    "experience": "Acme\nRevenue leadership",
+                    "skills": "Sales strategy",
+                },
+            }
+        )
+        mock_extractor.scrape_company = AsyncMock(
+            return_value={
+                "url": "https://www.linkedin.com/company/acme/",
+                "sections": {"about": "Acme builds revenue software."},
+            }
+        )
+
+        from linkedin_mcp_server.tools.outreach import register_outreach_tools
+
+        mcp = FastMCP("test")
+        register_outreach_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "research_lead")
+        result = await tool_fn(
+            "alice",
+            mock_context,
+            company_name="acme",
+            product_value_proposition="Pipeline analytics for sales teams.",
+            extractor=mock_extractor,
+        )
+
+        assert result["lead_id"] == "person:alice"
+        assert "VP Sales" in result["brief"]
+        assert result["source_urls"] == [
+            "https://www.linkedin.com/in/alice/",
+            "https://www.linkedin.com/company/acme/",
+        ]
+        assert "send_status" not in result
+
+    async def test_draft_outreach_message_is_draft_only(self):
+        from linkedin_mcp_server.tools.outreach import register_outreach_tools
+
+        mcp = FastMCP("test")
+        register_outreach_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "draft_outreach_message")
+        result = await tool_fn(
+            "Lead: Alice Example\nExperience: VP Sales at Acme",
+            "We help sales teams identify pipeline risk earlier.",
+            "Would a short conversation next week be useful?",
+            max_chars=280,
+        )
+
+        assert result["send_status"] == "draft_only"
+        assert result["requires_human_approval"] is True
+        assert len(result["draft"]) <= 280
+        assert len(result["connection_note"]) <= 280
+
+    async def test_plan_follow_up_is_draft_only(self):
+        from linkedin_mcp_server.tools.outreach import register_outreach_tools
+
+        mcp = FastMCP("test")
+        register_outreach_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "plan_follow_up")
+        result = await tool_fn(
+            "Lead: Alice Example",
+            "pipeline analytics",
+            "Open to a quick chat?",
+            cadence_days=[2, 5],
+        )
+
+        assert result["send_status"] == "draft_only"
+        assert result["schedule"] == ["Day 2", "Day 5"]
+        assert len(result["drafts"]) == 2
+
+    async def test_review_outreach_target_flags_risky_message(self):
+        from linkedin_mcp_server.tools.outreach import register_outreach_tools
+
+        mcp = FastMCP("test")
+        register_outreach_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "review_outreach_target")
+        result = await tool_fn("Lead: Alice", "Act now, guaranteed results!")
+
+        assert result["readiness"] == "needs_revision"
+        assert "spam_or_pressure_language" in result["flags"]
+        assert result["requires_human_approval"] is True
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.server import create_mcp_server
@@ -1138,6 +1328,12 @@ class TestToolTimeouts:
             "search_conversations",
             "send_message",
             "get_feed",
+            "search",
+            "fetch",
+            "research_lead",
+            "draft_outreach_message",
+            "plan_follow_up",
+            "review_outreach_target",
             "close_session",
         )
 
@@ -1169,6 +1365,12 @@ class TestToolTimeouts:
             "search_conversations",
             "send_message",
             "get_feed",
+            "search",
+            "fetch",
+            "research_lead",
+            "draft_outreach_message",
+            "plan_follow_up",
+            "review_outreach_target",
             "close_session",
         )
 

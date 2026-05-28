@@ -311,8 +311,15 @@ def main() -> None:
                 print("\n🚀 Server ready! Choose transport mode:")
                 transport = choose_transport_interactive()
 
-            # Create and run the MCP server
-            mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
+            # Create and run the MCP server. Static bearer auth is only applied
+            # to HTTP transports; stdio clients already communicate over a
+            # local process boundary.
+            mcp = create_mcp_server(
+                tool_timeout=config.server.tool_timeout_seconds,
+                mcp_auth_token=config.server.mcp_auth_token
+                if transport == "streamable-http"
+                else None,
+            )
 
             if transport == "streamable-http":
                 mcp.run(

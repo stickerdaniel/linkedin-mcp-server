@@ -64,6 +64,7 @@ class EnvironmentKeys:
     CHROME_PATH = "CHROME_PATH"
     USER_DATA_DIR = "USER_DATA_DIR"
     TOOL_TIMEOUT = "TOOL_TIMEOUT"
+    MCP_AUTH_TOKEN = "MCP_AUTH_TOKEN"
 
 
 def is_interactive_environment() -> bool:
@@ -137,6 +138,9 @@ def load_from_env(config: AppConfig) -> AppConfig:
                 f"Invalid TOOL_TIMEOUT: '{tool_timeout_env}'. Must be a positive finite number."
             )
         config.server.tool_timeout_seconds = tool_timeout_value
+
+    if mcp_auth_token := os.environ.get(EnvironmentKeys.MCP_AUTH_TOKEN):
+        config.server.mcp_auth_token = mcp_auth_token
 
     # Custom user agent
     if user_agent_env := os.environ.get(EnvironmentKeys.USER_AGENT):

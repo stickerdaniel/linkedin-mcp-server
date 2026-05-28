@@ -19,13 +19,16 @@ from linkedin_mcp_server.bootstrap import (
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.mcp_auth import StaticBearerAuthProvider
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
+from linkedin_mcp_server.tools.compat import register_compat_tools
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.messaging import register_messaging_tools
+from linkedin_mcp_server.tools.outreach import register_outreach_tools
 from linkedin_mcp_server.tools.person import register_person_tools
 
 logger = logging.getLogger(__name__)
@@ -47,12 +50,18 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     await close_browser()
 
 
-def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> FastMCP:
+def create_mcp_server(
+    *,
+    tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
+    mcp_auth_token: str | None = None,
+) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools."""
+    auth = StaticBearerAuthProvider(mcp_auth_token) if mcp_auth_token else None
     mcp = FastMCP(
         "linkedin_scraper",
         lifespan=browser_lifespan,
         mask_error_details=True,
+        auth=auth,
     )
     mcp.add_middleware(SequentialToolExecutionMiddleware())
 
@@ -62,6 +71,8 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
     register_job_tools(mcp, tool_timeout=tool_timeout)
     register_messaging_tools(mcp, tool_timeout=tool_timeout)
     register_feed_tools(mcp, tool_timeout=tool_timeout)
+    register_compat_tools(mcp, tool_timeout=tool_timeout)
+    register_outreach_tools(mcp, tool_timeout=tool_timeout)
 
     # Register session management tool
     @mcp.tool(

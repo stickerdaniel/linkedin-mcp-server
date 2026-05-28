@@ -16,6 +16,8 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Person Posts**: Get recent activity/posts from a person's profile
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed
+- **ChatGPT Compatibility**: Generic read-only `search` and `fetch` tools for data-only MCP clients
+- **Draft-First Outreach**: Research leads, draft outreach, plan follow-ups, and review message risk without sending
 - **Compact References**: Return typed per-section links alongside readable text without shipping full-page markdown
 
 ## Quick Start
@@ -68,6 +70,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
+| `MCP_AUTH_TOKEN` | - | Optional bearer token required by streamable-http clients when set |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |

@@ -33,6 +33,7 @@ class TestServerConfig:
         assert config.transport == "stdio"
         assert config.port == 8000
         assert config.tool_timeout_seconds == 180.0
+        assert config.mcp_auth_token is None
 
     def test_validate_passes(self):
         ServerConfig().validate()  # No error
@@ -43,6 +44,10 @@ class TestServerConfig:
     def test_validate_invalid_tool_timeout(self, bad_value):
         with pytest.raises(ConfigurationError):
             ServerConfig(tool_timeout_seconds=bad_value).validate()
+
+    def test_validate_empty_mcp_auth_token(self):
+        with pytest.raises(ConfigurationError):
+            ServerConfig(mcp_auth_token="   ").validate()
 
 
 class TestAppConfig:
@@ -131,12 +136,20 @@ class TestLoaders:
 
     def test_load_from_env_defaults(self, monkeypatch):
         # Clear env vars
-        for var in ["HEADLESS", "LOG_LEVEL"]:
+        for var in ["HEADLESS", "LOG_LEVEL", "MCP_AUTH_TOKEN"]:
             monkeypatch.delenv(var, raising=False)
         from linkedin_mcp_server.config.loaders import load_from_env
 
         config = load_from_env(AppConfig())
         assert config.browser.headless is True  # default
+        assert config.server.mcp_auth_token is None
+
+    def test_load_from_env_mcp_auth_token(self, monkeypatch):
+        monkeypatch.setenv("MCP_AUTH_TOKEN", "secret-token")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.server.mcp_auth_token == "secret-token"
 
     def test_load_from_env_transport(self, monkeypatch):
         monkeypatch.setenv("TRANSPORT", "streamable-http")
