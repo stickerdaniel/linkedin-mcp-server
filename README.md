@@ -7,41 +7,58 @@
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/badge/License-Apache%202.0-%233fb950?labelColor=32383f" alt="License"></a>
 </p>
 
-Through this LinkedIn MCP server, AI assistants like Claude can connect to your LinkedIn. Access profiles and companies, search for jobs, or get job details.
+Connect ChatGPT, Claude, and other MCP clients to a real logged-in LinkedIn
+browser session. The server can research profiles and companies, search people
+and jobs, read messages and feed posts, and prepare draft-first outreach while
+keeping write actions behind explicit approval.
 
+## What You Can Do
 
-## Installation Methods
+- **Research people and companies** with profile sections, company pages,
+  employee lists, and sidebar recommendations.
+- **Search LinkedIn** for people, companies, jobs, and conversations.
+- **Inspect jobs and feeds** with job details, company posts, home feed posts,
+  and reusable LinkedIn references.
+- **Prepare sales outreach** with lead briefs, personalized drafts, follow-up
+  plans, and message-risk review. These tools never send on their own.
+- **Use one server across clients**: Claude Desktop over `stdio`, Claude/ChatGPT
+  over streamable HTTP, and ChatGPT data-only flows through `search`/`fetch`.
+
+> [!IMPORTANT]
+> This project controls a browser logged in as you. Use it for personal,
+> low-volume workflows, respect LinkedIn's terms, and keep remote deployments
+> behind HTTPS and authentication.
+
+## Choose Your Setup
 
 [![uvx](https://img.shields.io/badge/uvx-Quick_Install-de5fe9?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDEiIGhlaWdodD0iNDEiIHZpZXdCb3g9IjAgMCA0MSA0MSIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTS01LjI4NjE5ZS0wNiAwLjE2ODYyOUwwLjA4NDMwOTggMjAuMTY4NUwwLjE1MTc2MiAzNi4xNjgzQzAuMTYxMDc1IDM4LjM3NzQgMS45NTk0NyA0MC4xNjA3IDQuMTY4NTkgNDAuMTUxNEwyMC4xNjg0IDQwLjA4NEwzMC4xNjg0IDQwLjA0MThMMzEuMTg1MiA0MC4wMzc1QzMzLjM4NzcgNDAuMDI4MiAzNS4xNjgzIDM4LjIwMjYgMzUuMTY4MyAzNlYzNkwzNy4wMDAzIDM2TDM3LjAwMDMgMzkuOTk5Mkw0MC4xNjgzIDM5Ljk5OTZMMzkuOTk5NiAtOS45NDY1M2UtMDdMMjEuNTk5OCAwLjA3NzU2ODlMMjEuNjc3NCAxNi4wMTg1TDIxLjY3NzQgMjUuOTk5OEwyMC4wNzc0IDI1Ljk5OThMMTguMzk5OCAyNS45OTk4TDE4LjQ3NzQgMTYuMDMyTDE4LjM5OTggMC4wOTEwNTkzTC01LjI4NjE5ZS0wNiAwLjE2ODYyOVoiIGZpbGw9IiNERTVGRTkiLz4KPC9zdmc+Cg==)](#-uvx-setup-recommended---universal)
 [![Install MCP Bundle](https://img.shields.io/badge/Claude_Desktop_MCPB-d97757?style=for-the-badge&logo=anthropic)](#-claude-desktop-mcp-bundle-formerly-dxt)
 [![Docker](https://img.shields.io/badge/Docker-Universal_MCP-008fe2?style=for-the-badge&logo=docker&logoColor=008fe2)](#-docker-setup)
 [![Development](https://img.shields.io/badge/Development-Local-ffdc53?style=for-the-badge&logo=python&logoColor=ffdc53)](#-local-setup-develop--contribute)
 
-| Tool | Description | Status |
-|------|-------------|--------|
-| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) | working |
-| `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) | working |
-| `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#407](https://github.com/stickerdaniel/linkedin-mcp-server/issues/407) [#432](https://github.com/stickerdaniel/linkedin-mcp-server/issues/432) [#448](https://github.com/stickerdaniel/linkedin-mcp-server/issues/448) [#454](https://github.com/stickerdaniel/linkedin-mcp-server/issues/454) |
-| `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
-| `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
-| `get_conversation` | Read a specific messaging conversation by username or thread ID | [#434](https://github.com/stickerdaniel/linkedin-mcp-server/issues/434) |
-| `search_conversations` | Search messages by keyword | working |
-| `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#433](https://github.com/stickerdaniel/linkedin-mcp-server/issues/433) [#441](https://github.com/stickerdaniel/linkedin-mcp-server/issues/441) |
-| `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet | working |
-| `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
-| `search_companies` | Search for companies on LinkedIn by keywords | working |
-| `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter | working |
-| `search_jobs` | Search for jobs with keywords and location filters | working |
-| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | working |
-| `get_job_details` | Get detailed information about a specific job posting | working |
-| `get_feed` | Get recent posts from the authenticated user's home feed | working |
-| `search` | ChatGPT-compatible read-only search across people, companies, and jobs | working |
-| `fetch` | ChatGPT-compatible read-only fetch for ids returned by `search` | working |
-| `research_lead` | Build a draft-first person/company outreach brief for sales workflows | working |
-| `draft_outreach_message` | Draft a LinkedIn outreach message and connection note without sending | working |
-| `plan_follow_up` | Create a draft-only follow-up schedule and message sequence | working |
-| `review_outreach_target` | Review outreach copy for fit, specificity, and spam-risk signals | working |
-| `close_session` | Close browser session and clean up resources | working |
+| Use case | Best path | Why |
+|----------|-----------|-----|
+| Claude Desktop, easiest install | [MCP Bundle](#-claude-desktop-mcp-bundle-formerly-dxt) | One-click install and managed browser setup |
+| Claude Desktop or local MCP clients | [uvx](#-uvx-setup-recommended---universal) | No clone required, updates from PyPI |
+| ChatGPT/Claude remote MCP | [streamable HTTP](#-chatgpt-and-claude-remote-mcp) | Works with HTTPS plus `MCP_AUTH_TOKEN` |
+| Container/server runtime | [Docker](#-docker-setup) | Reproducible headless runtime |
+| Contributing | [Local setup](#-local-setup-develop--contribute) | Editable source, tests, linting |
+
+## Tools At A Glance
+
+| Group | Tools |
+|-------|-------|
+| People | `get_person_profile`, `get_my_profile`, `search_people`, `get_sidebar_profiles` |
+| Companies | `get_company_profile`, `get_company_posts`, `search_companies`, `get_company_employees` |
+| Jobs and feed | `search_jobs`, `get_job_details`, `get_feed` |
+| Messaging | `get_inbox`, `get_conversation`, `search_conversations`, `send_message` |
+| ChatGPT compatibility | `search`, `fetch` |
+| Outreach | `research_lead`, `draft_outreach_message`, `plan_follow_up`, `review_outreach_target` |
+| Session/actions | `connect_with_person`, `close_session` |
+
+> [!NOTE]
+> `send_message` and `connect_with_person` are write actions and require explicit
+> confirmation. Outreach tools are read-only/draft-only.
 
 <br/>
 <br/>
