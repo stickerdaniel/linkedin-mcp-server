@@ -4,11 +4,61 @@ from unittest.mock import AsyncMock, MagicMock, call
 import mcp.types as mt
 from fastmcp import FastMCP
 from fastmcp.server.middleware import MiddlewareContext
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
+from linkedin_mcp_server.health import HEALTH_PATH
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
 from linkedin_mcp_server.server import create_mcp_server
+
+
+class TestHealthEndpoint:
+    def test_health_route_not_registered_for_stdio(self, monkeypatch):
+        from linkedin_mcp_server.config import reset_config
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        monkeypatch.delenv("TRANSPORT", raising=False)
+        reset_config()
+        mcp = create_mcp_server()
+        paths = [
+            route.path
+            for route in mcp._get_additional_http_routes()
+            if isinstance(route, Route)
+        ]
+        assert HEALTH_PATH not in paths
+
+    def test_health_returns_ok_without_auth(self, monkeypatch):
+        from linkedin_mcp_server.config import reset_config
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        monkeypatch.setenv("TRANSPORT", "streamable-http")
+        reset_config()
+        monkeypatch.setenv("MCP_AUTH_MODE", "bearer")
+        monkeypatch.setenv("MCP_BEARER_TOKEN", "test-token")
+        mcp = create_mcp_server()
+        app = mcp.http_app(transport="streamable-http")
+        client = TestClient(app)
+
+        response = client.get(HEALTH_PATH)
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    def test_health_head_returns_ok(self, monkeypatch):
+        from linkedin_mcp_server.config import reset_config
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        monkeypatch.setenv("TRANSPORT", "streamable-http")
+        reset_config()
+        mcp = create_mcp_server()
+        app = mcp.http_app(transport="streamable-http")
+        client = TestClient(app)
+
+        response = client.head(HEALTH_PATH)
+
+        assert response.status_code == 200
 
 
 class TestSequentialToolExecutionMiddleware:

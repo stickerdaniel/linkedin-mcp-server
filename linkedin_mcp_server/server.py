@@ -21,6 +21,7 @@ from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.health import register_health_route
 from linkedin_mcp_server.http_auth import BearerTokenVerifier
 from linkedin_mcp_server.oauth_auth import MinimalOAuthProvider
 from linkedin_mcp_server.sequential_tool_middleware import (
@@ -98,6 +99,9 @@ def create_mcp_server() -> FastMCP:
         auth=auth,
     )
     mcp.add_middleware(SequentialToolExecutionMiddleware())
+
+    if config.server.transport == "streamable-http":
+        register_health_route(mcp)
 
     # Register all tools
     register_person_tools(mcp)
