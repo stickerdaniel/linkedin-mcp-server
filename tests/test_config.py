@@ -72,6 +72,24 @@ class TestAppConfig:
         ):
             config.validate()
 
+    def test_validate_oauth_refresh_ttl_must_be_gte_access_ttl(self):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.mcp_auth_mode = "oauth"
+        config.server.mcp_oauth_base_url = "https://example.com"
+        config.server.mcp_oauth_client_id = "cid"
+        config.server.mcp_oauth_client_secret = "secret"
+        config.server.mcp_oauth_allowed_redirect_uris = [
+            "https://claude.ai/api/mcp/auth_callback"
+        ]
+        config.server.mcp_oauth_token_ttl_seconds = 86400
+        config.server.mcp_oauth_refresh_token_ttl_seconds = 3600
+        with pytest.raises(
+            ConfigurationError,
+            match="MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS",
+        ):
+            config.validate()
+
 
 class TestConfigSingleton:
     def test_get_config_returns_same_instance(self, monkeypatch):
@@ -295,6 +313,7 @@ class TestLoaders:
         monkeypatch.setenv("MCP_OAUTH_CLIENT_ID", "cid")
         monkeypatch.setenv("MCP_OAUTH_CLIENT_SECRET", "secret")
         monkeypatch.setenv("MCP_OAUTH_TOKEN_TTL_SECONDS", "1200")
+        monkeypatch.setenv("MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS", "604800")
         monkeypatch.setenv(
             "MCP_OAUTH_ALLOWED_REDIRECT_URIS",
             "https://claude.ai/api/mcp/auth_callback, https://example.com/cb",
@@ -306,6 +325,7 @@ class TestLoaders:
         assert config.server.mcp_oauth_client_id == "cid"
         assert config.server.mcp_oauth_client_secret == "secret"
         assert config.server.mcp_oauth_token_ttl_seconds == 1200
+        assert config.server.mcp_oauth_refresh_token_ttl_seconds == 604800
         assert config.server.mcp_oauth_allowed_redirect_uris == [
             "https://claude.ai/api/mcp/auth_callback",
             "https://example.com/cb",

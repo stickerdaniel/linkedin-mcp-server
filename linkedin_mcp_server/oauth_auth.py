@@ -16,9 +16,20 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Route
 
+# Defaults: 24h access, 7d refresh (override via MCP_OAUTH_*_TTL_SECONDS).
+DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 86400
+DEFAULT_REFRESH_TOKEN_TTL_SECONDS = 604800
+
 
 @dataclass
 class _TokenState:
+    client_id: str
+    expires_at: int
+    scopes: list[str]
+
+
+@dataclass
+class _RefreshTokenState:
     client_id: str
     expires_at: int
     scopes: list[str]
@@ -35,7 +46,7 @@ class _AuthorizationCodeState:
 
 
 class MinimalOAuthProvider(AuthProvider):
-    """OAuth provider with authorization_code + PKCE and client_credentials."""
+    """OAuth provider with authorization_code + PKCE, refresh_token, and client_credentials."""
 
     def __init__(
         self,
@@ -44,7 +55,8 @@ class MinimalOAuthProvider(AuthProvider):
         client_id: str,
         client_secret: str,
         allowed_redirect_uris: list[str],
-        token_ttl_seconds: int = 3600,
+        token_ttl_seconds: int = DEFAULT_ACCESS_TOKEN_TTL_SECONDS,
+        refresh_token_ttl_seconds: int = DEFAULT_REFRESH_TOKEN_TTL_SECONDS,
         auth_code_ttl_seconds: int = 120,
         required_scopes: list[str] | None = None,
     ) -> None:
@@ -53,8 +65,10 @@ class MinimalOAuthProvider(AuthProvider):
         self._client_secret = client_secret
         self._allowed_redirect_uris = set(allowed_redirect_uris)
         self._token_ttl_seconds = token_ttl_seconds
+        self._refresh_token_ttl_seconds = refresh_token_ttl_seconds
         self._auth_code_ttl_seconds = auth_code_ttl_seconds
         self._token_store: dict[str, _TokenState] = {}
+        self._refresh_token_store: dict[str, _RefreshTokenState] = {}
         self._auth_code_store: dict[str, _AuthorizationCodeState] = {}
 
     async def verify_token(self, token: str) -> AccessToken | None:
@@ -139,10 +153,15 @@ class MinimalOAuthProvider(AuthProvider):
         grant_type = str(form.get("grant_type") or "")
         if grant_type == "client_credentials":
             return self._issue_access_token(
-                client_id=client_id, scope_raw=form.get("scope")
+                client_id=client_id, scope_raw=form.get("scope"), include_refresh=False
             )
         if grant_type == "authorization_code":
             return self._exchange_authorization_code(client_id=client_id, form=form)
+        if grant_type == "refresh_token":
+            return self._exchange_refresh_token(
+                client_id=client_id,
+                refresh_token=str(form.get("refresh_token") or ""),
+            )
         return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
     def _exchange_authorization_code(
@@ -170,26 +189,70 @@ class MinimalOAuthProvider(AuthProvider):
         return self._issue_access_token(
             client_id=client_id,
             scope_raw=" ".join(state.scopes),
+            include_refresh=True,
         )
 
-    def _issue_access_token(self, *, client_id: str, scope_raw: Any) -> JSONResponse:
+    def _exchange_refresh_token(
+        self,
+        *,
+        client_id: str,
+        refresh_token: str,
+    ) -> JSONResponse:
+        if not refresh_token:
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
+
+        state = self._refresh_token_store.get(refresh_token)
+        if state is None or state.expires_at <= int(time.time()):
+            self._refresh_token_store.pop(refresh_token, None)
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+        if state.client_id != client_id:
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+
+        # Rotate refresh token: old refresh is single-use.
+        self._refresh_token_store.pop(refresh_token, None)
+        return self._issue_access_token(
+            client_id=client_id,
+            scope_raw=" ".join(state.scopes),
+            include_refresh=True,
+        )
+
+    def _issue_access_token(
+        self,
+        *,
+        client_id: str,
+        scope_raw: Any,
+        include_refresh: bool,
+    ) -> JSONResponse:
         scope_text = str(scope_raw or "").strip()
         scopes = [s for s in scope_text.split() if s] if scope_text else []
         now = int(time.time())
-        expires_at = now + self._token_ttl_seconds
-        token = secrets.token_urlsafe(48)
-        self._token_store[token] = _TokenState(
+        access_expires_at = now + self._token_ttl_seconds
+        access_token = secrets.token_urlsafe(48)
+        self._token_store[access_token] = _TokenState(
             client_id=client_id,
-            expires_at=expires_at,
+            expires_at=access_expires_at,
             scopes=scopes,
         )
+
+        payload: dict[str, Any] = {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": self._token_ttl_seconds,
+            "scope": " ".join(scopes),
+        }
+
+        if include_refresh:
+            refresh_expires_at = now + self._refresh_token_ttl_seconds
+            refresh_token = secrets.token_urlsafe(48)
+            self._refresh_token_store[refresh_token] = _RefreshTokenState(
+                client_id=client_id,
+                expires_at=refresh_expires_at,
+                scopes=scopes,
+            )
+            payload["refresh_token"] = refresh_token
+
         return JSONResponse(
-            {
-                "access_token": token,
-                "token_type": "Bearer",
-                "expires_in": self._token_ttl_seconds,
-                "scope": " ".join(scopes),
-            },
+            payload,
             headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
         )
 
@@ -201,7 +264,11 @@ class MinimalOAuthProvider(AuthProvider):
             "authorization_endpoint": f"{base}/authorize",
             "token_endpoint": f"{base}/token",
             "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "client_credentials"],
+            "grant_types_supported": [
+                "authorization_code",
+                "client_credentials",
+                "refresh_token",
+            ],
             "token_endpoint_auth_methods_supported": [
                 "client_secret_basic",
                 "client_secret_post",

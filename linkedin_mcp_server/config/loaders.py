@@ -59,6 +59,7 @@ class EnvironmentKeys:
     MCP_OAUTH_CLIENT_ID = "MCP_OAUTH_CLIENT_ID"
     MCP_OAUTH_CLIENT_SECRET = "MCP_OAUTH_CLIENT_SECRET"
     MCP_OAUTH_TOKEN_TTL_SECONDS = "MCP_OAUTH_TOKEN_TTL_SECONDS"
+    MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS = "MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS"
     MCP_OAUTH_ALLOWED_REDIRECT_URIS = "MCP_OAUTH_ALLOWED_REDIRECT_URIS"
 
 
@@ -164,6 +165,17 @@ def load_from_env(config: AppConfig) -> AppConfig:
         except ValueError:
             raise ConfigurationError(
                 f"Invalid MCP_OAUTH_TOKEN_TTL_SECONDS: '{ttl_env}'. Must be an integer."
+            )
+
+    if refresh_ttl_env := os.environ.get(
+        EnvironmentKeys.MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS
+    ):
+        try:
+            config.server.mcp_oauth_refresh_token_ttl_seconds = int(refresh_ttl_env)
+        except ValueError:
+            raise ConfigurationError(
+                "Invalid MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS: "
+                f"'{refresh_ttl_env}'. Must be an integer."
             )
 
     # Persistent browser profile directory

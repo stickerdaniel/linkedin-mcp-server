@@ -76,7 +76,8 @@ class ServerConfig:
     mcp_oauth_base_url: str | None = None
     mcp_oauth_client_id: str | None = None
     mcp_oauth_client_secret: str | None = None
-    mcp_oauth_token_ttl_seconds: int = 3600
+    mcp_oauth_token_ttl_seconds: int = 86400
+    mcp_oauth_refresh_token_ttl_seconds: int = 604800
     mcp_oauth_allowed_redirect_uris: list[str] = field(default_factory=list)
 
 
@@ -133,6 +134,18 @@ class AppConfig:
             if self.server.mcp_oauth_token_ttl_seconds <= 0:
                 raise ConfigurationError(
                     "MCP_OAUTH_TOKEN_TTL_SECONDS must be positive."
+                )
+            if self.server.mcp_oauth_refresh_token_ttl_seconds <= 0:
+                raise ConfigurationError(
+                    "MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS must be positive."
+                )
+            if (
+                self.server.mcp_oauth_refresh_token_ttl_seconds
+                < self.server.mcp_oauth_token_ttl_seconds
+            ):
+                raise ConfigurationError(
+                    "MCP_OAUTH_REFRESH_TOKEN_TTL_SECONDS must be >= "
+                    "MCP_OAUTH_TOKEN_TTL_SECONDS."
                 )
         if self.server.host in ("0.0.0.0", "::") and (
             self.server.mcp_auth_mode == "none"
