@@ -215,6 +215,110 @@ def register_person_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(
         timeout=TOOL_TIMEOUT_SECONDS,
+        title="Get Pending Invitations",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "connections", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_pending_invitations(
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List incoming LinkedIn connection invitations that have not been accepted.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, status, message, and invitations list.
+            Each invitation includes id, name, headline, and profile_url
+            (relative /in/username/ path).
+            Status is ok when invitations exist, or no_invitations when the list
+            is empty.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_pending_invitations"
+            )
+            logger.info("Fetching pending connection invitations")
+
+            await ctx.report_progress(
+                progress=0,
+                total=100,
+                message="Loading pending invitations",
+            )
+
+            result = await extractor.get_pending_invitations()
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_pending_invitations")
+        except Exception as e:
+            raise_tool_error(e, "get_pending_invitations")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
+        title="Accept Invitation",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"person", "connections", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def accept_invitation(
+        invitation_id: str,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Accept one pending incoming LinkedIn connection invitation by id.
+
+        The id comes from get_pending_invitations. LinkedIn username
+        (/in/username/) is also accepted when it matches a pending invitation.
+
+        Args:
+            invitation_id: Invitation id from get_pending_invitations
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, status, message, invitation_id, and optional name
+            and profile_url.
+            Statuses: accepted, already_accepted, invitation_not_found,
+            accept_failed.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="accept_invitation"
+            )
+            logger.info("Accepting connection invitation id=%s", invitation_id)
+
+            await ctx.report_progress(
+                progress=0,
+                total=100,
+                message="Accepting connection invitation",
+            )
+
+            result = await extractor.accept_invitation(invitation_id)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "accept_invitation")
+        except Exception as e:
+            raise_tool_error(e, "accept_invitation")  # NoReturn
+
+    @mcp.tool(
+        timeout=TOOL_TIMEOUT_SECONDS,
         title="Get Sidebar Profiles",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},

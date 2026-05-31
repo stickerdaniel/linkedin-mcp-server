@@ -24,6 +24,8 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock = MagicMock()
     mock.scrape_person = AsyncMock(return_value=scrape_result)
     mock.connect_with_person = AsyncMock(return_value=scrape_result)
+    mock.get_pending_invitations = AsyncMock(return_value=scrape_result)
+    mock.accept_invitation = AsyncMock(return_value=scrape_result)
     mock.scrape_company = AsyncMock(return_value=scrape_result)
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
@@ -285,6 +287,56 @@ class TestPersonTool:
             "test-user",
             note="Let us connect.",
         )
+
+    async def test_get_pending_invitations(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/mynetwork/invitation-manager/received/",
+            "status": "ok",
+            "message": "Found 1 pending invitation(s).",
+            "invitations": [
+                {
+                    "id": "inv-1",
+                    "name": "Jane Doe",
+                    "headline": "Engineer",
+                    "profile_url": "/in/jane-doe/",
+                }
+            ],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_pending_invitations")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        assert result["status"] == "ok"
+        assert len(result["invitations"]) == 1
+        mock_extractor.get_pending_invitations.assert_awaited_once_with()
+
+    async def test_accept_invitation(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/mynetwork/invitation-manager/received/",
+            "status": "accepted",
+            "message": "Connection invitation accepted.",
+            "invitation_id": "inv-1",
+            "name": "Jane Doe",
+            "profile_url": "/in/jane-doe/",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "accept_invitation")
+        result = await tool_fn("inv-1", mock_context, extractor=mock_extractor)
+
+        assert result["status"] == "accepted"
+        mock_extractor.accept_invitation.assert_awaited_once_with("inv-1")
 
     async def test_connect_with_person_no_note(self, mock_context):
         expected = {
@@ -804,17 +856,20 @@ class TestMessagingTools:
 
 
 class TestToolTimeouts:
-    async def test_all_tools_have_global_timeout(self):
+    async def test_all_tools_have_global_timeout(self, monkeypatch):
+        from linkedin_mcp_server.config import reset_config
         from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
         from linkedin_mcp_server.server import create_mcp_server
 
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        reset_config()
         mcp = create_mcp_server()
 
         tool_names = (
             "get_person_profile",
             "connect_with_person",
-            "get_connection_requests",
-            "accept_connection_request",
+            "get_pending_invitations",
+            "accept_invitation",
             "get_sidebar_profiles",
             "search_people",
             "get_company_profile",

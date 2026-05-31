@@ -31,6 +31,15 @@ from linkedin_mcp_server.core.utils import (
     scroll_to_bottom,
 )
 from linkedin_mcp_server.scraping.connection import ActionSignals
+from linkedin_mcp_server.scraping.invitations import (
+    CLICK_ACCEPT_INVITATION_SCRIPT,
+    EXTRACT_PENDING_INVITATIONS_SCRIPT,
+    RECEIVED_INVITATIONS_URL,
+    accept_invitation_result,
+    find_invitation,
+    invitation_id_to_username,
+    pending_invitations_result,
+)
 from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
     build_references,
@@ -1296,6 +1305,150 @@ class LinkedInExtractor:
             + (f" State after send: {verified_state}." if verified_state else ""),
             note_sent=note_sent,
             profile=verified_text or page_text,
+        )
+
+    async def get_pending_invitations(self) -> dict[str, Any]:
+        """List incoming connection invitations that have not been accepted."""
+        await self._navigate_to_page(RECEIVED_INVITATIONS_URL)
+        await detect_rate_limit(self._page)
+        await handle_modal_close(self._page)
+        await self._wait_for_main_text(log_context="Pending invitations")
+        await self._scroll_main_scrollable_region(
+            position="bottom", attempts=3, pause_time=0.5
+        )
+
+        invitations = await self._extract_pending_invitations_from_page()
+        if not invitations:
+            return pending_invitations_result(
+                self._page.url,
+                status="no_invitations",
+                message="No pending incoming connection invitations were found.",
+            )
+
+        return pending_invitations_result(
+            self._page.url,
+            status="ok",
+            message=f"Found {len(invitations)} pending invitation(s).",
+            invitations=invitations,
+        )
+
+    async def accept_invitation(self, invitation_id: str) -> dict[str, Any]:
+        """Accept one pending incoming connection invitation by id."""
+        invitation_id = invitation_id.strip()
+        if not invitation_id:
+            raise LinkedInScraperException("invitation_id must not be empty")
+
+        await self._navigate_to_page(RECEIVED_INVITATIONS_URL)
+        await detect_rate_limit(self._page)
+        await handle_modal_close(self._page)
+        await self._wait_for_main_text(log_context="Pending invitations")
+
+        invitations = await self._extract_pending_invitations_from_page()
+        match = find_invitation(invitations, invitation_id)
+        if match is None:
+            already_accepted = await self._invitation_already_accepted(invitation_id)
+            if already_accepted is not None:
+                return already_accepted
+            return accept_invitation_result(
+                self._page.url,
+                status="invitation_not_found",
+                message=(
+                    "No pending invitation matched the provided id. "
+                    "Use get_pending_invitations to list current ids."
+                ),
+                invitation_id=invitation_id,
+            )
+
+        clicked = await self._page.evaluate(
+            CLICK_ACCEPT_INVITATION_SCRIPT,
+            {"invitationId": invitation_id},
+        )
+        if not clicked:
+            return accept_invitation_result(
+                self._page.url,
+                status="accept_failed",
+                message="Could not click Accept for the matched invitation.",
+                invitation_id=invitation_id,
+                name=match.get("name", ""),
+                profile_url=match.get("profile_url", ""),
+            )
+
+        await asyncio.sleep(1.5)
+        remaining = await self._extract_pending_invitations_from_page()
+        if find_invitation(remaining, invitation_id) is not None:
+            return accept_invitation_result(
+                self._page.url,
+                status="accept_failed",
+                message=(
+                    "Accept was clicked but the invitation still appears pending."
+                ),
+                invitation_id=invitation_id,
+                name=match.get("name", ""),
+                profile_url=match.get("profile_url", ""),
+            )
+
+        return accept_invitation_result(
+            self._page.url,
+            status="accepted",
+            message="Connection invitation accepted.",
+            invitation_id=match.get("id", invitation_id),
+            name=match.get("name", ""),
+            profile_url=match.get("profile_url", ""),
+        )
+
+    async def _extract_pending_invitations_from_page(self) -> list[dict[str, str]]:
+        """Read pending invitation cards from the current invitation manager page."""
+        raw = await self._page.evaluate(EXTRACT_PENDING_INVITATIONS_SCRIPT)
+        if not isinstance(raw, list):
+            return []
+
+        invitations: list[dict[str, str]] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            invitation_id = str(entry.get("id") or "").strip()
+            profile_url = str(entry.get("profile_url") or "").strip()
+            if not invitation_id and not profile_url:
+                continue
+            invitations.append(
+                {
+                    "id": invitation_id,
+                    "name": str(entry.get("name") or "").strip(),
+                    "headline": str(entry.get("headline") or "").strip(),
+                    "profile_url": profile_url,
+                }
+            )
+        return invitations
+
+    async def _invitation_already_accepted(
+        self, invitation_id: str
+    ) -> dict[str, Any] | None:
+        """Return an already_accepted result when the profile is already connected."""
+        from linkedin_mcp_server.scraping.connection import detect_connection_state
+
+        username = invitation_id_to_username(invitation_id)
+        if username is None:
+            return None
+
+        profile_url = f"https://www.linkedin.com/in/{username}/"
+        profile = await self.scrape_person(username, {"main_profile"})
+        page_text = profile.get("sections", {}).get("main_profile", "")
+        if not page_text:
+            return None
+
+        signals = await self._read_action_signals()
+        state = detect_connection_state(page_text, signals)
+        if state != "already_connected":
+            return None
+
+        display_name = await self._read_profile_display_name()
+        return accept_invitation_result(
+            profile_url,
+            status="already_accepted",
+            message="You are already connected with this profile.",
+            invitation_id=invitation_id,
+            name=display_name or "",
+            profile_url=f"/in/{username}/",
         )
 
     async def _extract_profile_urn(self) -> str | None:

@@ -1170,6 +1170,149 @@ class TestConnectWithPerson:
 
         assert result["status"] == "unavailable"
 
+
+class TestPendingInvitations:
+    async def test_get_pending_invitations_empty(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_extract_pending_invitations_from_page",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            mock_page.url = (
+                "https://www.linkedin.com/mynetwork/invitation-manager/received/"
+            )
+            result = await extractor.get_pending_invitations()
+
+        assert result["status"] == "no_invitations"
+        assert result["invitations"] == []
+
+    async def test_get_pending_invitations_returns_list(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        invitations = [
+            {
+                "id": "inv-1",
+                "name": "Jane Doe",
+                "headline": "Engineer",
+                "profile_url": "/in/jane-doe/",
+            }
+        ]
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_extract_pending_invitations_from_page",
+                new_callable=AsyncMock,
+                return_value=invitations,
+            ),
+        ):
+            mock_page.url = (
+                "https://www.linkedin.com/mynetwork/invitation-manager/received/"
+            )
+            result = await extractor.get_pending_invitations()
+
+        assert result["status"] == "ok"
+        assert result["invitations"] == invitations
+
+    async def test_accept_invitation_success(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        pending = [
+            {
+                "id": "inv-1",
+                "name": "Jane Doe",
+                "headline": "Engineer",
+                "profile_url": "/in/jane-doe/",
+            }
+        ]
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_extract_pending_invitations_from_page",
+                new_callable=AsyncMock,
+                side_effect=[pending, []],
+            ),
+            patch.object(
+                mock_page, "evaluate", new_callable=AsyncMock, return_value=True
+            ),
+        ):
+            mock_page.url = (
+                "https://www.linkedin.com/mynetwork/invitation-manager/received/"
+            )
+            result = await extractor.accept_invitation("inv-1")
+
+        assert result["status"] == "accepted"
+        assert result["name"] == "Jane Doe"
+        assert result["profile_url"] == "/in/jane-doe/"
+
+    async def test_accept_invitation_not_found(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_extract_pending_invitations_from_page",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_invitation_already_accepted",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            mock_page.url = (
+                "https://www.linkedin.com/mynetwork/invitation-manager/received/"
+            )
+            result = await extractor.accept_invitation("missing-id")
+
+        assert result["status"] == "invitation_not_found"
+
+    async def test_accept_invitation_already_accepted(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        already = {
+            "url": "https://www.linkedin.com/in/jane-doe/",
+            "status": "already_accepted",
+            "message": "You are already connected with this profile.",
+            "invitation_id": "jane-doe",
+            "name": "Jane Doe",
+            "profile_url": "/in/jane-doe/",
+        }
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_extract_pending_invitations_from_page",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_invitation_already_accepted",
+                new_callable=AsyncMock,
+                return_value=already,
+            ),
+        ):
+            result = await extractor.accept_invitation("jane-doe")
+
+        assert result["status"] == "already_accepted"
+
     async def test_references_are_grouped_by_section(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with (
