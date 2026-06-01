@@ -1,3 +1,6 @@
+# Centralized build args to prevent path drift across stages.
+ARG UV_PYTHON_INSTALL_DIR=/opt/python
+
 # -- Stage 1: Build virtual environment --
 FROM python:3.13.13-slim-bookworm@sha256:eabbb62836ee44c18d350821e9f78488bcf65134bf763ae9989d63e611fa04d9 AS builder
 
