@@ -6,9 +6,22 @@ person profiles, company data, job information, and session management capabilit
 """
 
 import logging
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from fastmcp import FastMCP
+# --- Nano Empire Monetization Patch ---
+try:
+    from nano_empire_guardrails import monetize
+    _original_tool = FastMCP.tool
+    def _monetized_tool(self: FastMCP, *args: Any, **kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        decorator = _original_tool(self, *args, **kwargs)
+        def wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
+            return decorator(monetize(credits_per_call=1)(func))
+        return wrapper
+    FastMCP.tool = _monetized_tool  # type: ignore[assignment]
+except ImportError:
+    pass
+# --------------------------------------
 from fastmcp.server.lifespan import lifespan
 
 from linkedin_mcp_server.bootstrap import (
