@@ -35,15 +35,16 @@ _MAX_POST_IMAGES = 10
 # Minimum image dimension to be considered a post attachment (not icon/avatar)
 _MIN_IMAGE_SIZE_PX = 100
 
-# CSS selectors scoped to the primary post container on a post permalink page
+# CSS selectors scoped to the primary post container on a post permalink page.
+# All selectors are anchored to `article.feed-shared-update-v2` so that images
+# in comments, recommendations, reposts, or ads are excluded.
 _POST_IMAGE_SELECTORS = (
-    # Post permalink page — main post media container
-    ".update-components-image img",
-    ".feed-shared-image img",
-    ".update-components-linkedin-video__embed img",
-    # Document/article attachment thumbnails
-    ".feed-shared-document__container img",
-    # Fallback: any large image inside the top-level post article only
+    # Image/video attachments inside the top-level post article only
+    "article.feed-shared-update-v2 .update-components-image img",
+    "article.feed-shared-update-v2 .feed-shared-image img",
+    "article.feed-shared-update-v2 .update-components-linkedin-video__embed img",
+    "article.feed-shared-update-v2 .feed-shared-document__container img",
+    # Broad fallback still scoped to the article element
     "article.feed-shared-update-v2 img",
 )
 
@@ -170,18 +171,32 @@ def register_post_tools(
             )
 
             # Issue 9: Click inline "...more" / "see more" to expand truncated text
+            # Scope the click and re-extraction to the primary post container only,
+            # not the full page, to avoid pulling in comments or recommendations.
             page = extractor._page
             try:
+                # Target the see-more button scoped inside the top-level post article
+                post_container_sel = (
+                    "article.feed-shared-update-v2, "
+                    ".scaffold-layout__main .feed-shared-update-v2, "
+                    "main > div > div"
+                )
                 see_more = page.locator(
-                    "button.feed-shared-inline-show-more-text__see-more-less-toggle, "
-                    "button[aria-label*='see more'], "
-                    ".feed-shared-text .see-more"
+                    f"{post_container_sel} button.feed-shared-inline-show-more-text__see-more-less-toggle, "
+                    f"{post_container_sel} button[aria-label*='see more'], "
+                    f"{post_container_sel} .feed-shared-text .see-more"
                 ).first
                 if await see_more.count() > 0:
                     await see_more.click(timeout=3000)
-                    # Re-extract text after expansion
+                    # Re-extract only the post container text, not the full main area
                     expanded = await page.evaluate(
-                        "() => (document.querySelector('main') || document.body).innerText || ''"
+                        """() => {
+                            const post = document.querySelector(
+                                'article.feed-shared-update-v2, '
+                                + '.scaffold-layout__main .feed-shared-update-v2'
+                            );
+                            return post ? post.innerText : '';
+                        }"""
                     )
                     if expanded and len(expanded) > len(sections.get("post", "")):
                         sections["post"] = expanded
