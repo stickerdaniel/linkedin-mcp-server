@@ -10,7 +10,7 @@ from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -20,7 +20,30 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import parse_person_sections
 from linkedin_mcp_server.scraping.extractor import FilterValidationError
 
+
 logger = logging.getLogger(__name__)
+
+
+def _coerce_network(v: Any) -> list[str] | None:
+    """Coerce network filter to list[str], accepting JSON-serialised strings.
+
+    LLMs sometimes serialise the list as a JSON string (e.g. '["F"]' or '"F"')
+    instead of passing an actual list.  This validator normalises both forms so
+    Pydantic never rejects the parameter before the function body runs.
+    """
+    if v is None or isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        import json as _json
+        try:
+            parsed = _json.loads(v)
+            return parsed if isinstance(parsed, list) else [parsed]
+        except (_json.JSONDecodeError, TypeError):
+            return [v]
+    return v
+
+
+NetworkFilter = Annotated[list[str] | None, BeforeValidator(_coerce_network)]
 
 
 def register_person_tools(
@@ -112,7 +135,7 @@ def register_person_tools(
         keywords: str,
         ctx: Context,
         location: str | None = None,
-        network: list[str] | str | None = None,
+        network: NetworkFilter = None,
         current_company: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
@@ -139,16 +162,6 @@ def register_person_tools(
             Dict with url, sections (name -> raw text), and optional references.
             The LLM should parse the raw text to extract individual people and their profiles.
         """
-        # Coerce network from JSON string to list if an LLM passes it serialized
-        # (e.g. '["F"]' or '"F"' instead of the actual list ["F"]).
-        if isinstance(network, str):
-            import json as _json
-            try:
-                parsed = _json.loads(network)
-                network = parsed if isinstance(parsed, list) else [parsed]
-            except (_json.JSONDecodeError, TypeError):
-                network = [network]
-
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_people"
