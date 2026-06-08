@@ -1154,8 +1154,12 @@ class LinkedInExtractor:
         # Dismiss any modals blocking content
         await handle_modal_close(self._page)
 
-        # Activity feed pages lazy-load post content after the tab header
-        is_activity = "/recent-activity/" in url
+        # Activity feed pages lazy-load post content after the tab header.
+        # Company posts pages (/company/<slug>/posts/) lazy-load the same way
+        # but don't carry a /recent-activity/ path, so match them too.
+        is_activity = "/recent-activity/" in url or (
+            "/company/" in url and url.rstrip("/").endswith("/posts")
+        )
         if is_activity:
             try:
                 await self._page.wait_for_function(
