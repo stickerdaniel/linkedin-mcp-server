@@ -112,7 +112,7 @@ def register_person_tools(
         keywords: str,
         ctx: Context,
         location: str | None = None,
-        network: list[str] | None = None,
+        network: list[str] | str | None = None,
         current_company: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
@@ -139,6 +139,16 @@ def register_person_tools(
             Dict with url, sections (name -> raw text), and optional references.
             The LLM should parse the raw text to extract individual people and their profiles.
         """
+        # Coerce network from JSON string to list if an LLM passes it serialized
+        # (e.g. '["F"]' or '"F"' instead of the actual list ["F"]).
+        if isinstance(network, str):
+            import json as _json
+            try:
+                parsed = _json.loads(network)
+                network = parsed if isinstance(parsed, list) else [parsed]
+            except (_json.JSONDecodeError, TypeError):
+                network = [network]
+
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_people"
