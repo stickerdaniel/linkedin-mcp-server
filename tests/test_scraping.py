@@ -1466,6 +1466,78 @@ class TestConnectWithPerson:
         assert clicks == [0, 1]
         textarea_locator.fill.assert_awaited_once()
 
+    async def test_dialog_selector_matches_alertdialog_and_aria_modal(self):
+        """Regression for issue #455 (post-fix-456 breakage on Ivan's
+        account): the gating "Add a note to your invitation?" dialog
+        rendered by ``/preload/custom-invite/?vanityName=`` is an
+        ``artdeco-modal`` whose root carries ``role="alertdialog"`` and
+        ``aria-modal="true"`` rather than the legacy ``role="dialog"``.
+        The previous selector only matched ``dialog[open]`` and
+        ``[role="dialog"]``, so ``_dialog_is_open`` returned False even
+        though the dialog was visible — ``connect_with_person`` then
+        bailed out with ``connect_unavailable`` before ever clicking
+        "Send without a note" / "Add a note".
+
+        This guards the selector against future narrowing regressions
+        — if any of these substrings drop out, the gating dialog
+        stops being detected and connect attempts silently fail.
+        """
+        from linkedin_mcp_server.scraping.extractor import (
+            _DIALOG_SELECTOR,
+            _DIALOG_TEXTAREA_SELECTOR,
+        )
+
+        # Each of these ARIA patterns must independently be matched so
+        # we are robust to whichever attribute LinkedIn chooses on a
+        # given account/locale.
+        assert 'role="dialog"' in _DIALOG_SELECTOR
+        assert 'role="alertdialog"' in _DIALOG_SELECTOR
+        assert 'aria-modal="true"' in _DIALOG_SELECTOR
+        assert "dialog[open]" in _DIALOG_SELECTOR
+
+        # Textarea selector must be scoped under the same broadened
+        # dialog roots so the note textarea is found inside any of them.
+        assert 'role="dialog"' in _DIALOG_TEXTAREA_SELECTOR
+        assert 'role="alertdialog"' in _DIALOG_TEXTAREA_SELECTOR
+        assert 'aria-modal="true"' in _DIALOG_TEXTAREA_SELECTOR
+
+    async def test_dialog_is_open_waits_for_late_mounting_dialog(
+        self, mock_page
+    ):
+        """Regression for issue #455 (post-fix-456 follow-up): after
+        ``goto(/preload/custom-invite/?vanityName=)`` resolves on
+        ``domcontentloaded``, the gating dialog mounts a few hundred ms
+        later. The previous ``_dialog_is_open`` short-circuited on
+        ``count() == 0`` and returned False before the modal rendered,
+        causing ``submitted=False`` and ``connect_unavailable`` even
+        though the dialog was about to appear.
+
+        This asserts the helper now waits the full ``timeout`` budget
+        for the dialog to become visible rather than reading ``count``
+        eagerly."""
+        extractor = LinkedInExtractor(mock_page)
+
+        first_locator = MagicMock()
+        wait_calls: list[dict] = []
+
+        async def fake_wait_for(*args, **kwargs):
+            wait_calls.append(kwargs)
+            return None
+
+        first_locator.wait_for = AsyncMock(side_effect=fake_wait_for)
+
+        dialog_locator = MagicMock()
+        dialog_locator.first = first_locator
+
+        mock_page.locator = MagicMock(return_value=dialog_locator)
+
+        result = await extractor._dialog_is_open(timeout=5000)
+
+        assert result is True
+        # The helper must have spent its budget on wait_for(visible)
+        # rather than reading .count() and exiting early.
+        assert wait_calls == [{"state": "visible", "timeout": 5000}]
+
     async def test_references_are_grouped_by_section(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with (

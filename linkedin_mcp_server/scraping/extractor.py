@@ -844,12 +844,19 @@ class LinkedInExtractor:
             return False
 
     async def _dialog_is_open(self, *, timeout: int = 1000) -> bool:
-        """Return whether a dialog is currently open (structural check)."""
-        locator = self._page.locator(_DIALOG_SELECTOR)
+        """Return whether a dialog is currently open (structural check).
+
+        Uses ``wait_for(state="visible", timeout=timeout)`` directly so the
+        full timeout budget is spent waiting for the dialog to mount —
+        important after navigations that auto-open a modal (e.g. the
+        ``/preload/custom-invite/`` deeplink), where the modal mounts a
+        few hundred ms after ``goto`` resolves on ``domcontentloaded``.
+        The previous early ``count() == 0`` short-circuit returned False
+        before the modal had a chance to render.
+        """
+        locator = self._page.locator(_DIALOG_SELECTOR).first
         try:
-            if await locator.count() == 0:
-                return False
-            await locator.first.wait_for(state="visible", timeout=timeout)
+            await locator.wait_for(state="visible", timeout=timeout)
             return True
         except Exception:
             return False
@@ -862,7 +869,7 @@ class LinkedInExtractor:
         times out, so callers can fall back to a keyboard submit.
         """
         buttons = self._page.locator(
-            f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+            f":is({_DIALOG_SELECTOR}) button, :is({_DIALOG_SELECTOR}) [role='button']"
         )
         count = await buttons.count()
         if count == 0:
@@ -1685,7 +1692,7 @@ class LinkedInExtractor:
                 # then fails and the caller returns connect_unavailable
                 # without sending — the same outcome as today.
                 buttons = self._page.locator(
-                    f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+                    f":is({_DIALOG_SELECTOR}) button, :is({_DIALOG_SELECTOR}) [role='button']"
                 )
                 btn_count = await buttons.count()
                 if btn_count >= 2:
@@ -1701,8 +1708,41 @@ class LinkedInExtractor:
 
             note_sent = await self._fill_dialog_textarea(note)
             if not note_sent:
-                await self._dismiss_dialog()
-                return False, False
+                # The textarea never mounted. The most common cause as of
+                # 2026-05 is LinkedIn's "Send unlimited personalized
+                # invites with Premium" upsell, which replaces the
+                # invite dialog after "Add a note" is clicked once the
+                # account's free-note quota for the month is exhausted.
+                # Detect it by the rebuilt dialog content. If found, the
+                # connection request still has a viable path: dismiss
+                # the upsell, re-trigger the invite via the deeplink
+                # (URL is unchanged through the upsell), and fall through
+                # to the primary-button click below to send without a
+                # note. The caller sees note_sent=False so they know the
+                # personalization was dropped.
+                upsell_visible = False
+                try:
+                    upsell_visible = await self._page.locator(
+                        f':is({_DIALOG_SELECTOR}):has-text("free custom notes"), '
+                        f':is({_DIALOG_SELECTOR}):has-text("personalized invites with Premium")'
+                    ).first.is_visible()
+                except Exception:
+                    logger.debug("Premium upsell detection failed", exc_info=True)
+                if upsell_visible:
+                    logger.info(
+                        "Free-note quota exhausted (Premium upsell shown); "
+                        "falling back to no-note send."
+                    )
+                    invite_url = self._page.url
+                    await self._dismiss_dialog()
+                    await self._navigate_to_page(invite_url)
+                    if not await self._dialog_is_open(timeout=5000):
+                        return False, False
+                    # Fall through with note_sent=False so the primary
+                    # button (Send without a note) gets clicked below.
+                else:
+                    await self._dismiss_dialog()
+                    return False, False
 
         sent = await self._click_dialog_primary_button()
         if not sent:
@@ -1710,7 +1750,7 @@ class LinkedInExtractor:
             # Enter targets it instead of a focused textarea (where Enter
             # would just insert a newline).
             buttons = self._page.locator(
-                f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
+                f":is({_DIALOG_SELECTOR}) button, :is({_DIALOG_SELECTOR}) [role='button']"
             )
             btn_count = await buttons.count()
             if btn_count > 0:
