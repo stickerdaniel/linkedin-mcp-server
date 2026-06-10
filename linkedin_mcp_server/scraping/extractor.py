@@ -1847,18 +1847,60 @@ class LinkedInExtractor:
         # genuinely follow-only) returns connect_unavailable without
         # navigating to the invite URL — protects against accidental
         # re-invitation of Pending profiles.
+        #
+        # Deeplink fallback (issue #454): when state is "unavailable" and
+        # the action root could not find a compose anchor (e.g. hidden
+        # Connect on 3rd-degree profiles), probe the deeplink to see if
+        # LinkedIn actually offers a Connect dialog. Safety re-check:
+        # re-read signals on the profile page right before the probe and
+        # bail if the profile is already_connected or pending — prevents
+        # the regression reported by the owner where a 1st-degree
+        # connection could be re-invited.
         if not signals.has_invite_anchor:
-            return _connection_result(
-                url,
-                "connect_unavailable",
-                "LinkedIn did not expose a usable Connect action for this profile.",
-                profile=page_text,
+            if state != "unavailable":
+                return _connection_result(
+                    url,
+                    "connect_unavailable",
+                    "LinkedIn did not expose a usable Connect action for this profile.",
+                    profile=page_text,
+                )
+            # Safety re-check: re-read signals from the profile page
+            # before probing the deeplink. If the profile is actually
+            # already_connected or pending, return that state instead of
+            # attempting a (potentially destructive) deeplink probe.
+            recheck_signals = await self._read_action_signals(username)
+            recheck_state = detect_connection_state(page_text, recheck_signals)
+            logger.info(
+                "Deeplink fallback recheck for %s: state=%s signals=%s",
+                username,
+                recheck_state,
+                recheck_signals,
             )
+            if recheck_state == "already_connected":
+                return _connection_result(
+                    url,
+                    "already_connected",
+                    "You are already connected with this profile.",
+                    profile=page_text,
+                )
+            if recheck_state == "pending":
+                return _connection_result(
+                    url,
+                    "pending",
+                    "A connection request is already pending for this profile.",
+                    profile=page_text,
+                )
+            # Recheck found an invite anchor we missed the first time
+            if recheck_signals.has_invite_anchor:
+                signals = recheck_signals
 
         invite_url = (
             "https://www.linkedin.com/preload/custom-invite/"
             f"?vanityName={quote_plus(username)}"
         )
+        # Issue #432: Clear any message composer overlay which might
+        # overlap the invite dialog.
+        await self._dismiss_message_ui()
         await self._navigate_to_page(invite_url)
 
         submitted, note_sent = await self._submit_invite_dialog(note)
@@ -1880,6 +1922,19 @@ class LinkedInExtractor:
                 url,
                 "send_failed",
                 "Submitted the invite dialog but the profile still exposes Connect.",
+                note_sent=note_sent,
+                profile=verified_text or page_text,
+            )
+
+        # Post-send safety: if LinkedIn reports the profile as unavailable
+        # after submission, the invite may not have actually been sent.
+        # Return send_failed instead of connected to avoid false positives.
+        if verified_state == "unavailable":
+            return _connection_result(
+                url,
+                "send_failed",
+                "Submitted the invite dialog but the post-send profile state"
+                " is unavailable — the invitation may not have been sent.",
                 note_sent=note_sent,
                 profile=verified_text or page_text,
             )
@@ -3320,6 +3375,25 @@ class LinkedInExtractor:
             references=references,
         )
 
+    async def _type_message_with_newlines(self, message: str) -> None:
+        """Type a message honoring newlines via Shift+Enter.
+
+        Normalizes CRLF and bare CR line endings to LF before splitting so
+        Windows-originated messages don't leave stray ``\\r`` characters in
+        the compose box.  Uses atomic ``keyboard.press("Shift+Enter")``
+        instead of a ``down("Shift")`` / ``press("Enter")`` / ``up("Shift")``
+        sequence to avoid leaving the modifier "stuck" if an exception occurs
+        between calls.
+        """
+        normalized_message = message.replace("\r\n", "\n").replace("\r", "\n")
+        lines = normalized_message.split("\n")
+        for i, line in enumerate(lines):
+            if line:
+                await self._page.keyboard.type(line, delay=15)
+            if i < len(lines) - 1:
+                await self._page.keyboard.press("Shift+Enter")
+                await asyncio.sleep(0.1)
+
     async def send_message(
         self,
         linkedin_username: str,
@@ -3347,6 +3421,9 @@ class LinkedInExtractor:
             logger.debug("Profile page did not load for %s", linkedin_username)
 
         await handle_modal_close(self._page)
+        # Clear any floating message overlay from previous tool calls
+        # that might intercept the compose box or block interactions.
+        await self._dismiss_message_ui()
         display_name = await self._read_profile_display_name()
         if profile_urn:
             # Build the full compose URL that LinkedIn's own Message button
@@ -3483,7 +3560,7 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         await asyncio.sleep(0.1)
-        await self._page.keyboard.type(message, delay=15)
+        await self._type_message_with_newlines(message)
         await asyncio.sleep(0.3)
 
         # patchright actionability also blocks send_button.click(). Use JS click
