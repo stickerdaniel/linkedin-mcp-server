@@ -11,6 +11,20 @@
 
 An MCP server that lets AI assistants like Claude read LinkedIn data through your own logged-in browser session. Access profiles and companies, search for jobs, or get job details.
 
+## Sponsor
+
+<p align="center">
+  <a href="https://www.unipile.com/?utm_source=partner&utm_campaign=linkedin-mcp-server" target="_blank">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/c2e7f3b4-6812-4f28-8728-10f882a44e0e">
+      <img src="https://github.com/user-attachments/assets/89ab8932-ae79-41c2-8416-a699e924218b" alt="Unipile, one API for every LinkedIn feature" width="100%">
+    </picture>
+  </a>
+</p>
+
+This MCP server is **free** and **open source**, supported by [**Unipile**](https://www.unipile.com/?utm_source=partner&utm_campaign=linkedin-mcp-server). It runs locally with your own browser session. Unipile is the fully managed cloud alternative: a LinkedIn API for Classic, Sales Navigator, and Recruiter that handles all the infrastructure for you, with white-label auth (credential login without an extension, captcha solving, in-app validation, OTP/2FA, geo proxies), real-time webhooks, profile/company/post extraction and search, and outreach sequences (invitations, InMail, messages, post comments). [Try every feature free for 7 days →](https://www.unipile.com/?utm_source=partner&utm_campaign=linkedin-mcp-server)
+
+---
 
 ## Installation Methods
 
