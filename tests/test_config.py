@@ -26,6 +26,35 @@ class TestBrowserConfig:
         with pytest.raises(ConfigurationError):
             BrowserConfig(slow_mo=-1).validate()
 
+    def test_cdp_defaults(self):
+        config = BrowserConfig()
+        assert config.cdp_endpoint is None
+        assert config.cdp_persistent is False
+        assert config.cdp_enabled is False
+
+    def test_cdp_enabled_when_endpoint_set(self):
+        config = BrowserConfig(cdp_endpoint="http://127.0.0.1:9222")
+        assert config.cdp_enabled is True
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "ws://127.0.0.1:9222/devtools/browser/abc",
+            "wss://example.com/cdp",
+            "http://127.0.0.1:9222",
+            "https://example.com:9222",
+        ],
+    )
+    def test_validate_accepts_valid_cdp_endpoint(self, endpoint):
+        BrowserConfig(cdp_endpoint=endpoint).validate()  # No error
+
+    @pytest.mark.parametrize(
+        "endpoint", ["127.0.0.1:9222", "tcp://127.0.0.1:9222", "localhost"]
+    )
+    def test_validate_rejects_invalid_cdp_endpoint(self, endpoint):
+        with pytest.raises(ConfigurationError, match="cdp_endpoint"):
+            BrowserConfig(cdp_endpoint=endpoint).validate()
+
 
 class TestServerConfig:
     def test_defaults(self):
@@ -261,3 +290,61 @@ class TestLoaders:
 
         config = load_from_env(AppConfig())
         assert config.browser.user_data_dir == "/custom/profile"
+
+    def test_load_from_env_cdp_endpoint(self, monkeypatch):
+        monkeypatch.delenv("CDP_URL", raising=False)
+        monkeypatch.setenv("CDP_ENDPOINT", "http://127.0.0.1:9222")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.cdp_endpoint == "http://127.0.0.1:9222"
+        assert config.browser.cdp_enabled is True
+
+    def test_load_from_env_cdp_url_alias(self, monkeypatch):
+        monkeypatch.delenv("CDP_ENDPOINT", raising=False)
+        monkeypatch.setenv("CDP_URL", "ws://127.0.0.1:9222/devtools/browser/x")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.cdp_endpoint == "ws://127.0.0.1:9222/devtools/browser/x"
+
+    def test_load_from_env_cdp_endpoint_preferred_over_url(self, monkeypatch):
+        monkeypatch.setenv("CDP_ENDPOINT", "http://primary:9222")
+        monkeypatch.setenv("CDP_URL", "http://alias:9222")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.cdp_endpoint == "http://primary:9222"
+
+    def test_load_from_env_cdp_persistent_true(self, monkeypatch):
+        monkeypatch.setenv("CDP_PERSISTENT", "true")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.cdp_persistent is True
+
+    def test_load_from_env_cdp_persistent_false_alias(self, monkeypatch):
+        monkeypatch.setenv("CDP_PERSISTENT", "off")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.cdp_persistent is False
+
+    def test_load_from_args_cdp_endpoint_and_persistent(self, monkeypatch):
+        monkeypatch.delenv("CDP_ENDPOINT", raising=False)
+        monkeypatch.delenv("CDP_URL", raising=False)
+        monkeypatch.delenv("CDP_PERSISTENT", raising=False)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "linkedin-mcp-server",
+                "--cdp-endpoint",
+                "http://127.0.0.1:9222",
+                "--cdp-persistent",
+            ],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.browser.cdp_endpoint == "http://127.0.0.1:9222"
+        assert config.browser.cdp_persistent is True

@@ -64,6 +64,9 @@ class EnvironmentKeys:
     CHROME_PATH = "CHROME_PATH"
     USER_DATA_DIR = "USER_DATA_DIR"
     TOOL_TIMEOUT = "TOOL_TIMEOUT"
+    CDP_ENDPOINT = "CDP_ENDPOINT"
+    CDP_URL = "CDP_URL"
+    CDP_PERSISTENT = "CDP_PERSISTENT"
 
 
 def is_interactive_environment() -> bool:
@@ -181,6 +184,21 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
 
+    # Remote CDP endpoint (CDP_ENDPOINT preferred, CDP_URL accepted as alias)
+    cdp_endpoint_env = os.environ.get(EnvironmentKeys.CDP_ENDPOINT) or os.environ.get(
+        EnvironmentKeys.CDP_URL
+    )
+    if cdp_endpoint_env:
+        config.browser.cdp_endpoint = cdp_endpoint_env.strip()
+
+    # Persist the remote CDP browser across server shutdown
+    if cdp_persistent_env := os.environ.get(EnvironmentKeys.CDP_PERSISTENT):
+        cdp_persistent_value = _normalize_env(cdp_persistent_env)
+        if cdp_persistent_value in TRUTHY_VALUES:
+            config.browser.cdp_persistent = True
+        elif cdp_persistent_value in FALSY_VALUES:
+            config.browser.cdp_persistent = False
+
     return config
 
 
@@ -278,6 +296,27 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Path to Chrome/Chromium executable (for custom browser installations)",
     )
 
+    parser.add_argument(
+        "--cdp-endpoint",
+        type=str,
+        default=None,
+        metavar="URL",
+        help=(
+            "Connect to a remote browser over CDP (e.g. browser-use) instead of "
+            "launching a local Chrome. The LinkedIn session is managed on the "
+            "remote side. Example: http://127.0.0.1:9222"
+        ),
+    )
+
+    parser.add_argument(
+        "--cdp-persistent",
+        action="store_true",
+        help=(
+            "Keep the remote CDP browser running on shutdown (only disconnect). "
+            "Without this flag the remote browser is closed."
+        ),
+    )
+
     # Session management
     parser.add_argument(
         "--login",
@@ -353,6 +392,12 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path
+
+    if args.cdp_endpoint:
+        config.browser.cdp_endpoint = args.cdp_endpoint.strip()
+
+    if args.cdp_persistent:
+        config.browser.cdp_persistent = True
 
     # Session management
     if args.login:

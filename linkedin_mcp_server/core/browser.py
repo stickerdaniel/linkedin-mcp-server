@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from patchright.async_api import (
+    Browser,
     BrowserContext,
     Page,
     Playwright,
@@ -51,6 +52,11 @@ class BrowserManager:
     Session persistence is handled automatically by the persistent browser
     context -- all cookies, localStorage, and session state are retained in
     the ``user_data_dir`` between runs.
+
+    When ``cdp_endpoint`` is provided, the manager connects to a remote browser
+    over the Chrome DevTools Protocol (e.g. browser-use) instead of launching a
+    local Chrome. In that mode the LinkedIn session/profile is managed entirely
+    on the remote side and ``user_data_dir`` is unused.
     """
 
     def __init__(
@@ -60,6 +66,8 @@ class BrowserManager:
         slow_mo: int = 0,
         viewport: dict[str, int] | None = None,
         user_agent: str | None = None,
+        cdp_endpoint: str | None = None,
+        cdp_persistent: bool = False,
         **launch_options: Any,
     ):
         self.user_data_dir = str(Path(user_data_dir).expanduser())
@@ -67,12 +75,20 @@ class BrowserManager:
         self.slow_mo = slow_mo
         self.viewport = viewport or {"width": 1280, "height": 720}
         self.user_agent = user_agent
+        self.cdp_endpoint = cdp_endpoint
+        self.cdp_persistent = cdp_persistent
         self.launch_options = launch_options
 
         self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._is_authenticated = False
+
+    @property
+    def is_cdp(self) -> bool:
+        """Whether this manager connects to a remote browser over CDP."""
+        return self.cdp_endpoint is not None
 
     async def __aenter__(self) -> "BrowserManager":
         await self.start()
@@ -84,41 +100,16 @@ class BrowserManager:
         await self.close()
 
     async def start(self) -> None:
-        """Start Patchright and launch persistent browser context."""
+        """Start Patchright and launch persistent context or connect over CDP."""
         if self._context is not None:
             raise RuntimeError("Browser already started. Call close() first.")
         try:
             self._playwright = await async_playwright().start()
 
-            secure_mkdir(Path(self.user_data_dir))
-            _harden_linkedin_tree(Path(self.user_data_dir))
-
-            context_options: dict[str, Any] = {
-                "headless": self.headless,
-                "slow_mo": self.slow_mo,
-                "viewport": self.viewport,
-                **self.launch_options,
-                "locale": "en-US",
-            }
-
-            if self.user_agent:
-                context_options["user_agent"] = self.user_agent
-
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                self.user_data_dir,
-                **context_options,
-            )
-
-            logger.info(
-                "Persistent browser launched (headless=%s, user_data_dir=%s)",
-                self.headless,
-                self.user_data_dir,
-            )
-
-            if self._context.pages:
-                self._page = self._context.pages[0]
+            if self.is_cdp:
+                await self._start_over_cdp()
             else:
-                self._page = await self._context.new_page()
+                await self._start_persistent_context()
 
             logger.info("Browser context and page ready")
 
@@ -126,18 +117,102 @@ class BrowserManager:
             await self.close()
             raise NetworkError(f"Failed to start browser: {e}") from e
 
+    async def _start_persistent_context(self) -> None:
+        """Launch a local persistent browser context backed by ``user_data_dir``."""
+        assert self._playwright is not None
+
+        secure_mkdir(Path(self.user_data_dir))
+        _harden_linkedin_tree(Path(self.user_data_dir))
+
+        context_options: dict[str, Any] = {
+            "headless": self.headless,
+            "slow_mo": self.slow_mo,
+            "viewport": self.viewport,
+            **self.launch_options,
+            "locale": "en-US",
+        }
+
+        if self.user_agent:
+            context_options["user_agent"] = self.user_agent
+
+        self._context = await self._playwright.chromium.launch_persistent_context(
+            self.user_data_dir,
+            **context_options,
+        )
+
+        logger.info(
+            "Persistent browser launched (headless=%s, user_data_dir=%s)",
+            self.headless,
+            self.user_data_dir,
+        )
+
+        if self._context.pages:
+            self._page = self._context.pages[0]
+        else:
+            self._page = await self._context.new_page()
+
+    async def _start_over_cdp(self) -> None:
+        """Connect to a remote browser over CDP and reuse its context/page.
+
+        The remote browser (e.g. browser-use) owns the user data dir, profile,
+        and LinkedIn session, so no local profile is created and context-level
+        options (viewport, user_agent, locale) cannot be applied to the existing
+        remote context.
+        """
+        assert self._playwright is not None
+        assert self.cdp_endpoint is not None
+
+        self._browser = await self._playwright.chromium.connect_over_cdp(
+            self.cdp_endpoint,
+            slow_mo=self.slow_mo,
+        )
+
+        if self._browser.contexts:
+            self._context = self._browser.contexts[0]
+        else:
+            self._context = await self._browser.new_context()
+
+        if self._context.pages:
+            self._page = self._context.pages[0]
+        else:
+            self._page = await self._context.new_page()
+
+        logger.info(
+            "Connected to remote browser over CDP (endpoint=%s, persistent=%s)",
+            self.cdp_endpoint,
+            self.cdp_persistent,
+        )
+        if self.viewport or self.user_agent:
+            logger.debug(
+                "Ignoring viewport/user_agent on CDP connection: the remote "
+                "context configuration cannot be overridden"
+            )
+
     async def close(self) -> None:
-        """Close persistent context and cleanup resources."""
+        """Close (or disconnect from) the browser and cleanup resources.
+
+        In CDP mode the context belongs to the remote browser, so it is never
+        closed directly. When ``cdp_persistent`` is set we only stop the local
+        playwright connection (disconnect) and leave the remote browser running;
+        otherwise we close the remote browser before stopping playwright.
+        """
         context = self._context
+        browser = self._browser
         playwright = self._playwright
+        is_cdp = self.is_cdp
+        cdp_persistent = self.cdp_persistent
         self._context = None
+        self._browser = None
         self._page = None
         self._playwright = None
 
-        if context is None and playwright is None:
+        if context is None and browser is None and playwright is None:
             return
 
-        if context is not None:
+        if is_cdp:
+            if not cdp_persistent and browser is not None:
+                await self._close_remote_cdp_browser(browser)
+        elif context is not None:
             try:
                 await context.close()
             except Exception as exc:
@@ -149,7 +224,33 @@ class BrowserManager:
             except Exception as exc:
                 logger.error("Error stopping playwright: %s", exc)
 
-        logger.info("Browser closed")
+        if is_cdp and cdp_persistent:
+            logger.info("Disconnected from remote CDP browser (left running)")
+        else:
+            logger.info("Browser closed")
+
+    @staticmethod
+    async def _close_remote_cdp_browser(browser: Browser) -> None:
+        """Terminate the remote browser reached over CDP.
+
+        Over a CDP connection ``browser.close()`` only disconnects the client --
+        the remote browser keeps running. Issuing the CDP ``Browser.close``
+        command actually shuts the remote browser down. If the command cannot be
+        sent we fall back to disconnecting so we never leak the connection.
+        """
+        try:
+            session = await browser.new_browser_cdp_session()
+            await session.send("Browser.close")
+        except Exception as exc:
+            logger.warning(
+                "CDP Browser.close did not complete cleanly (%s); "
+                "disconnecting instead",
+                exc,
+            )
+            try:
+                await browser.close()
+            except Exception:
+                logger.debug("Fallback browser.close() failed", exc_info=True)
 
     @property
     def page(self) -> Page:

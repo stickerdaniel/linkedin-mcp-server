@@ -55,6 +55,10 @@ class DockerHostLoginRequiredError(LinkedInMCPError):
     """Docker runtime requires host-side login creation."""
 
 
+class CDPSessionUnauthenticatedError(LinkedInMCPError):
+    """Remote CDP browser has no authenticated LinkedIn session."""
+
+
 class LinuxBrowserDependencyError(LinkedInMCPError):
     """Linux host dependencies required for Chromium are missing."""
 

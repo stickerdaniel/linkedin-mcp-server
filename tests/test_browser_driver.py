@@ -121,6 +121,125 @@ async def test_get_or_create_browser_requires_source_state():
 
 
 @pytest.mark.asyncio
+async def test_cdp_mode_bypasses_source_state_and_validates_feed(monkeypatch):
+    config = AppConfig()
+    config.browser.cdp_endpoint = "http://127.0.0.1:9222"
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.get_config", lambda: config
+    )
+    cdp_browser = _make_mock_browser()
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=cdp_browser,
+        ) as ctor,
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        result = await get_or_create_browser()
+
+    assert result is cdp_browser
+    assert cdp_browser.is_authenticated is True
+    # No local profile artifacts read; constructed with the CDP endpoint.
+    assert ctor.call_args.kwargs["cdp_endpoint"] == "http://127.0.0.1:9222"
+    assert "user_data_dir" not in ctor.call_args.kwargs
+    cdp_browser.import_cookies.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cdp_mode_feed_check_failure_raises_and_closes(monkeypatch):
+    from linkedin_mcp_server.core import AuthenticationError
+
+    config = AppConfig()
+    config.browser.cdp_endpoint = "http://127.0.0.1:9222"
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.get_config", lambda: config
+    )
+    cdp_browser = _make_mock_browser()
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=cdp_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value="login title: linkedin login",
+        ),
+        pytest.raises(AuthenticationError, match="Remote CDP browser"),
+    ):
+        await get_or_create_browser()
+
+    cdp_browser.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ephemeral_cdp_closes_browser_after_tool(monkeypatch):
+    config = AppConfig()
+    config.browser.cdp_endpoint = "http://127.0.0.1:9222"
+    config.browser.cdp_persistent = False
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.get_config", lambda: config
+    )
+    from linkedin_mcp_server.drivers.browser import (
+        close_browser_after_tool_if_ephemeral,
+    )
+
+    with patch(
+        "linkedin_mcp_server.drivers.browser.close_browser",
+        new_callable=AsyncMock,
+    ) as mock_close:
+        await close_browser_after_tool_if_ephemeral()
+
+    mock_close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_persistent_cdp_keeps_browser_after_tool(monkeypatch):
+    config = AppConfig()
+    config.browser.cdp_endpoint = "http://127.0.0.1:9222"
+    config.browser.cdp_persistent = True
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.get_config", lambda: config
+    )
+    from linkedin_mcp_server.drivers.browser import (
+        close_browser_after_tool_if_ephemeral,
+    )
+
+    with patch(
+        "linkedin_mcp_server.drivers.browser.close_browser",
+        new_callable=AsyncMock,
+    ) as mock_close:
+        await close_browser_after_tool_if_ephemeral()
+
+    mock_close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_local_mode_keeps_browser_after_tool(monkeypatch):
+    config = AppConfig()  # no cdp_endpoint -> local persistent Chrome
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.get_config", lambda: config
+    )
+    from linkedin_mcp_server.drivers.browser import (
+        close_browser_after_tool_if_ephemeral,
+    )
+
+    with patch(
+        "linkedin_mcp_server.drivers.browser.close_browser",
+        new_callable=AsyncMock,
+    ) as mock_close:
+        await close_browser_after_tool_if_ephemeral()
+
+    mock_close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_same_runtime_uses_source_profile(tmp_path):
     _write_source_state(tmp_path, runtime_id="macos-arm64-host")
     source_browser = _make_mock_browser()

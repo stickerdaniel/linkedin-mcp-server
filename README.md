@@ -109,6 +109,8 @@ The `@latest` tag ensures you always run the newest version — `uvx` checks PyP
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
+- `--cdp-endpoint URL` - Connect to a remote browser over CDP (e.g. browser-use) instead of launching a local Chrome. The LinkedIn session is managed on the remote browser. Also `CDP_ENDPOINT` / `CDP_URL`.
+- `--cdp-persistent` - Reuse one remote CDP browser across all tool calls (only disconnect on shutdown). Without this flag (default), each tool call uses a fresh connection and the remote browser is closed when the call completes. Also `CDP_PERSISTENT`.
 
 **Basic Usage Examples:**
 
@@ -279,6 +281,8 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (rarely needed in Docker)
+- `--cdp-endpoint URL` - Connect to a remote browser over CDP (e.g. browser-use) instead of launching a local Chrome. The LinkedIn session is managed on the remote browser. Also `CDP_ENDPOINT` / `CDP_URL`.
+- `--cdp-persistent` - Reuse one remote CDP browser across all tool calls (only disconnect on shutdown). Without this flag (default), each tool call uses a fresh connection and the remote browser is closed when the call completes. Also `CDP_PERSISTENT`.
 
 > [!NOTE]
 > `--login` and `--no-headless` are not available in Docker (no display server). Use the [uvx setup](#-uvx-setup-recommended---universal) to create profiles.
@@ -389,6 +393,8 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 - `--user-agent STRING` - Custom browser user agent
 - `--viewport WxH` - Browser viewport size (default: 1280x720)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
+- `--cdp-endpoint URL` - Connect to a remote browser over CDP (e.g. browser-use) instead of launching a local Chrome. The LinkedIn session is managed on the remote browser. Also `CDP_ENDPOINT` / `CDP_URL`.
+- `--cdp-persistent` - Reuse one remote CDP browser across all tool calls (only disconnect on shutdown). Without this flag (default), each tool call uses a fresh connection and the remote browser is closed when the call completes. Also `CDP_PERSISTENT`.
 - `--help` - Show help
 
 > **Note:** Most CLI options have environment variable equivalents. See `.env.example` for details.
@@ -451,6 +457,17 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 - If Chrome is installed in a non-standard location, use `--chrome-path /path/to/chrome`
 - Can also set via environment variable: `CHROME_PATH=/path/to/chrome`
+
+**Remote browser over CDP (e.g. browser-use):**
+
+- Connect to an existing browser instead of launching a local Chrome:
+  `uv run -m linkedin_mcp_server --transport streamable-http --cdp-endpoint http://127.0.0.1:9222`
+  (or `CDP_ENDPOINT` / `CDP_URL`).
+- The LinkedIn session/profile is managed entirely on the remote browser. **You must be logged in to LinkedIn there** — the server does not create a local profile and does not run `--login` (it trusts the remote session and validates it with a `/feed/` check). If the remote browser is not authenticated, tools return an actionable error.
+- No local Patchright Chromium download is needed in this mode.
+- **Session lifecycle:** by default (non-persistent) the connection is **ephemeral** — each tool call connects, does its work, and then **closes the remote browser** (via the CDP `Browser.close` command). This means your CDP provider should hand out a fresh browser per connection. With `--cdp-persistent` (or `CDP_PERSISTENT=true`), one remote browser is reused across all tool calls and is only disconnected (left running) on shutdown / `close_session`.
+- `--status` connects over CDP and reports whether the remote LinkedIn session is valid without terminating the remote browser (it never closes it, even in non-persistent mode).
+- Limitation: the remote context's locale cannot be forced to `en-US`. Detection logic is locale-independent by design, but keep the remote browser in a supported language if you hit edge cases.
 
 </details>
 

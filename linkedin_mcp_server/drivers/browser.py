@@ -9,6 +9,7 @@ automatic profile persistence.
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from linkedin_mcp_server.common_utils import secure_mkdir
 from linkedin_mcp_server.core import (
@@ -180,23 +181,28 @@ async def _feed_auth_succeeds(
         return False
 
 
-def _launch_options() -> tuple[dict[str, str], dict[str, int]]:
+def _launch_options() -> tuple[dict[str, Any], dict[str, int]]:
     config = get_config()
     viewport = {
         "width": config.browser.viewport_width,
         "height": config.browser.viewport_height,
     }
-    launch_options: dict[str, str] = {}
+    launch_options: dict[str, Any] = {}
     if config.browser.chrome_path:
         launch_options["executable_path"] = config.browser.chrome_path
         logger.info("Using custom Chrome path: %s", config.browser.chrome_path)
     return launch_options, viewport
 
 
+def _cdp_enabled() -> bool:
+    """Return whether the server should connect over CDP instead of launching Chrome."""
+    return get_config().browser.cdp_enabled
+
+
 def _make_browser(
     profile_dir: Path,
     *,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
 ) -> BrowserManager:
     config = get_config()
@@ -210,10 +216,49 @@ def _make_browser(
     )
 
 
+def _make_cdp_browser() -> BrowserManager:
+    """Create a BrowserManager that connects to a remote browser over CDP."""
+    config = get_config()
+    return BrowserManager(
+        headless=_headless,
+        slow_mo=config.browser.slow_mo,
+        user_agent=config.browser.user_agent,
+        viewport={
+            "width": config.browser.viewport_width,
+            "height": config.browser.viewport_height,
+        },
+        cdp_endpoint=config.browser.cdp_endpoint,
+        cdp_persistent=config.browser.cdp_persistent,
+    )
+
+
+async def _connect_cdp_browser() -> BrowserManager:
+    """Connect to the remote CDP browser and validate the LinkedIn session.
+
+    The remote browser (e.g. browser-use) manages the profile and LinkedIn
+    session, so no local profile/cookie bridge applies. Authentication is
+    confirmed solely by the /feed/ check against the remote page.
+    """
+    browser = _make_cdp_browser()
+    try:
+        await browser.start()
+        if not await _feed_auth_succeeds(browser):
+            raise AuthenticationError(
+                "Remote CDP browser is not authenticated with LinkedIn. "
+                "Log in to LinkedIn in the remote browser (e.g. browser-use) "
+                "and retry."
+            )
+        browser.is_authenticated = True
+        return browser
+    except Exception:
+        await browser.close()
+        raise
+
+
 async def _authenticate_existing_profile(
     profile_dir: Path,
     *,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
 ) -> BrowserManager:
     browser = _make_browser(
@@ -238,7 +283,7 @@ async def _bridge_runtime_profile(
     cookie_path: Path,
     source_state: SourceState,
     runtime_id: str,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     persist_runtime: bool,
 ) -> BrowserManager:
@@ -366,6 +411,14 @@ async def get_or_create_browser(
         _headless = headless
 
     if _browser is not None:
+        return _browser
+
+    if _cdp_enabled():
+        logger.info("Connecting over CDP (profile managed on the remote browser)")
+        browser = await _connect_cdp_browser()
+        _apply_browser_settings(browser)
+        _browser = browser
+        _browser_cookie_export_path = None
         return _browser
 
     launch_options, viewport = _launch_options()
@@ -504,6 +557,19 @@ async def close_browser() -> None:
             logger.debug("Cookie export on close skipped", exc_info=True)
     await browser.close()
     logger.info("Browser closed")
+
+
+async def close_browser_after_tool_if_ephemeral() -> None:
+    """Close the browser after a tool call when the CDP session is ephemeral.
+
+    In non-persistent CDP mode the remote browser is not reused across tool
+    calls: each call connects fresh and the remote browser is terminated when
+    the call completes. In all other modes (local persistent Chrome, or
+    persistent CDP) the browser is kept for reuse and this is a no-op.
+    """
+    config = get_config().browser
+    if config.cdp_enabled and not config.cdp_persistent:
+        await close_browser()
 
 
 def get_profile_dir() -> Path:

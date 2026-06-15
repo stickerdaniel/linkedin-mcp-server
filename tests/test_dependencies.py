@@ -13,6 +13,7 @@ from linkedin_mcp_server.core.exceptions import (
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.exceptions import (
     AuthenticationStartedError,
+    CDPSessionUnauthenticatedError,
     DockerHostLoginRequiredError,
 )
 
@@ -53,6 +54,32 @@ class TestHandleAuthError:
                 await handle_auth_error(
                     AuthenticationError("Session expired"), ctx=None
                 )
+
+    async def test_cdp_raises_unauthenticated_without_relogin(self):
+        """On CDP runtime, raise CDPSessionUnauthenticatedError, never relogin."""
+        from linkedin_mcp_server.bootstrap import RuntimePolicy
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value=RuntimePolicy.CDP,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                new_callable=AsyncMock,
+            ) as mock_close,
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+            ) as mock_relogin,
+        ):
+            with pytest.raises(CDPSessionUnauthenticatedError, match="remote"):
+                await handle_auth_error(
+                    AuthenticationError("Session expired"), ctx=None
+                )
+
+            mock_close.assert_awaited_once()
+            mock_relogin.assert_not_awaited()
 
 
 class TestGetReadyExtractor:

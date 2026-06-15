@@ -73,6 +73,8 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
+| `CDP_ENDPOINT` | - | Connect to a remote browser over CDP (e.g. browser-use) instead of launching a local Chrome. The LinkedIn session is managed on the remote browser. `CDP_URL` is accepted as an alias. |
+| `CDP_PERSISTENT` | `false` | Reuse one remote CDP browser across all tool calls (only disconnect on shutdown). Default (false) is ephemeral: each tool call uses a fresh connection and closes the remote browser when done. |
 | `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: reuse checkpointed derived Linux runtime profiles across Docker restarts instead of fresh-bridging each startup |
 | `LINKEDIN_TRACE_MODE` | `on_error` | Trace/log retention mode: `on_error` keeps ephemeral artifacts only when a failure occurs, `always` keeps every run, `off` disables trace persistence |
 

@@ -28,6 +28,7 @@ from linkedin_mcp_server.exceptions import (
     BrowserBinaryMissingError,
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
+    CDPSessionUnauthenticatedError,
     CredentialsNotFoundError,
     DockerHostLoginRequiredError,
     LinuxBrowserDependencyError,
@@ -108,6 +109,10 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     elif isinstance(exception, DockerHostLoginRequiredError):
         logger.warning("Docker host login required%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    elif isinstance(exception, CDPSessionUnauthenticatedError):
+        logger.warning("CDP session unauthenticated%s: %s", ctx, exception)
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, LinuxBrowserDependencyError):
