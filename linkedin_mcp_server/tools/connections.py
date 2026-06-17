@@ -52,6 +52,10 @@ def register_connections_tools(
         Returns:
             Dict with connections (list of {username, name, headline}), total count,
             url visited, and pages_visited list.
+
+            Note: bulk-export tools intentionally return structured lists rather
+            than the standard ``{url, sections: {name: raw_text}}`` scrape shape,
+            since they emit per-record data, not page-section raw text.
         """
         try:
             extractor = extractor or await get_ready_extractor(
@@ -114,6 +118,10 @@ def register_connections_tools(
             - email, phone, website, birthday: From the contact info overlay
             - headline, location, company: From the main profile page
             - profile_raw, contact_info_raw: Original innerText as fallback
+
+            Note: bulk-export tools intentionally return structured lists rather
+            than the standard ``{url, sections: {name: raw_text}}`` scrape shape,
+            since they emit per-record data, not page-section raw text.
         """
         try:
             username_list = list(

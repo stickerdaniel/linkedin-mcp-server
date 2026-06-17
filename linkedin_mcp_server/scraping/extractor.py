@@ -698,6 +698,13 @@ def _parse_contact_record(
         Email\\n<email>
         Phone\\n<phone>
         Birthday\\n<date>
+
+    Locale note: the degree marker, the "Contact info" suffix, and the overlay
+    labels are English-UI strings, so the layout-derived fields (name, headline,
+    company, location) and the labelled overlay fields are best-effort and
+    populate only when the account language is English. Email is recovered
+    locale-independently via regex, and the original ``profile_raw`` /
+    ``contact_info_raw`` are always returned as a language-agnostic fallback.
     """
     result: dict[str, str | None] = {
         "first_name": None,
@@ -4130,35 +4137,23 @@ class LinkedInExtractor:
                     if (seen.has(username)) continue;
                     seen.add(username);
 
-                    // Walk up to the connection card container
+                    // Walk up to the connection card container (structural —
+                    // no layout class names, per the project scraping rules).
                     const card = a.closest('li') || a.parentElement;
+                    const lines = card
+                        ? card.innerText.split('\\n').map(l => l.trim()).filter(Boolean)
+                        : [];
 
-                    // Name: try known selectors, then the link's own visible text
-                    let name = '';
-                    if (card) {
-                        const nameEl = card.querySelector(
-                            '.mn-connection-card__name, .entity-result__title-text, span[dir="ltr"], span.t-bold'
-                        );
-                        if (nameEl) name = nameEl.innerText.trim();
-                    }
-                    if (!name) {
-                        // The profile link itself often contains the person's name
-                        const linkText = a.innerText.trim();
-                        if (linkText && linkText.length < 80) name = linkText;
-                    }
+                    // Name: the card renders the person's name as its first line.
+                    const name = lines.length ? lines[0] : '';
 
-                    // Headline: try known selectors, then parse card text
+                    // Headline: the longest of the remaining lines — descriptive
+                    // text wins over the short status/action lines ("Message",
+                    // "Connected on ..."). Structural heuristic, so it avoids
+                    // both layout classes and locale-specific text anchors.
                     let headline = '';
-                    if (card) {
-                        const headlineEl = card.querySelector(
-                            '.mn-connection-card__occupation, .entity-result__primary-subtitle, span.t-normal'
-                        );
-                        if (headlineEl) headline = headlineEl.innerText.trim();
-                    }
-                    if (!headline && card) {
-                        // Fallback: split card text by newlines, second non-empty line is usually headline
-                        const lines = card.innerText.split('\\n').map(l => l.trim()).filter(Boolean);
-                        if (lines.length >= 2) headline = lines[1];
+                    for (const line of lines.slice(1)) {
+                        if (line.length > headline.length) headline = line;
                     }
 
                     results.push({ username, name, headline });
