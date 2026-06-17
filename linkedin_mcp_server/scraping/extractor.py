@@ -3939,15 +3939,15 @@ class LinkedInExtractor:
                         let count = 0;
                         for (const btn of buttons) {
                             try {
-                                btn.dataset.mcpClicked = '1';
                                 btn.dispatchEvent(new MouseEvent('click', {
                                     bubbles: true,
                                     cancelable: true,
                                     view: window,
                                 }));
+                                btn.dataset.mcpClicked = '1';
                                 count++;
                             } catch (e) {
-                                /* ignore individual dispatch failures */
+                                /* leave unmarked so a later pass can retry */
                             }
                         }
                         // Let React render the expanded note bodies before
