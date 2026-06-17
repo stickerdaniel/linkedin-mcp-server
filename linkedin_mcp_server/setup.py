@@ -11,6 +11,7 @@ from typing import Any
 
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.constants import MANUAL_LOGIN_TIMEOUT_MINUTES, MANUAL_LOGIN_TIMEOUT_MS
 from linkedin_mcp_server.core import (
     BrowserManager,
     resolve_remember_me_prompt,
@@ -45,7 +46,7 @@ async def _perform_login(
         if await resolve_remember_me_prompt(browser.page):
             break
 
-    await wait_for_manual_login(browser.page, timeout=300000)
+    await wait_for_manual_login(browser.page, timeout=MANUAL_LOGIN_TIMEOUT_MS)
     await asyncio.sleep(2)
 
     cookies = await browser.context.cookies()
@@ -94,7 +95,10 @@ async def interactive_login(user_data_dir: Path | None = None, warm_up: bool = T
         user_data_dir = get_profile_dir()
 
     print("Opening browser for LinkedIn login...")
-    print("   Please log in manually. You have 5 minutes to complete authentication.")
+    print(
+        f"   Please log in manually. You have {MANUAL_LOGIN_TIMEOUT_MINUTES} minutes "
+        "to complete authentication."
+    )
     print("   (This handles 2FA, captcha, and any security challenges)")
 
     launch_options = _login_launch_options()
@@ -129,7 +133,10 @@ async def interactive_login_keep_alive(
         user_data_dir = get_profile_dir()
 
     print("Opening browser for LinkedIn login (login-serve mode)...")
-    print("   Please log in manually. You have 5 minutes to complete authentication.")
+    print(
+        f"   Please log in manually. You have {MANUAL_LOGIN_TIMEOUT_MINUTES} minutes "
+        "to complete authentication."
+    )
     print("   (This handles 2FA, captcha, and any security challenges)")
 
     launch_options = _login_launch_options()

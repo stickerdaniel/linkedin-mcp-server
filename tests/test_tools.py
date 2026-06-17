@@ -378,13 +378,27 @@ class TestPageTools:
 
 
 class TestToolTimeouts:
-    async def test_all_tools_have_global_timeout(self):
-        from linkedin_mcp_server.server import TOOL_TIMEOUT_SECONDS, create_mcp_server
+    async def test_get_person_profile_uses_extended_timeout(self):
+        from linkedin_mcp_server.constants import (
+            PERSON_PROFILE_TOOL_TIMEOUT_SECONDS,
+            TOOL_TIMEOUT_SECONDS,
+        )
+        from linkedin_mcp_server.server import create_mcp_server
+
+        mcp = create_mcp_server()
+
+        tool = await mcp.get_tool("get_person_profile")
+        assert tool is not None
+        assert tool.timeout == PERSON_PROFILE_TOOL_TIMEOUT_SECONDS
+        assert tool.timeout > TOOL_TIMEOUT_SECONDS
+
+    async def test_other_tools_keep_global_timeout(self):
+        from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+        from linkedin_mcp_server.server import create_mcp_server
 
         mcp = create_mcp_server()
 
         tool_names = (
-            "get_person_profile",
             "search_people",
             "get_company_profile",
             "get_company_posts",

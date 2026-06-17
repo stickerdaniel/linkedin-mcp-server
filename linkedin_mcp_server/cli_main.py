@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+from pathlib import Path
 from typing import Literal
 
 import inquirer
@@ -125,17 +126,21 @@ def _get_version() -> str:
                 return version(name)
             except PackageNotFoundError:
                 continue
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Could not read installed package version: %s", exc)
     try:
-        import os
         import tomllib
 
-        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pyproject.toml")
-        with open(path, "rb") as f:
+        path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        with path.open("rb") as f:
             return tomllib.load(f)["project"]["version"]
     except Exception:
         return "unknown"
+
+
+def _is_interrupt_shutdown_error(exc: Exception) -> bool:
+    """Return True for the known AnyIO/FastMCP shutdown interrupt race."""
+    return isinstance(exc, RuntimeError) and str(exc) == "Cannot close a running event loop"
 
 
 def main() -> None:
@@ -193,16 +198,14 @@ def main() -> None:
     except KeyboardInterrupt:
         _exit(0)
     except Exception as e:
+        if _is_interrupt_shutdown_error(e):
+            _exit(0)
         logger.exception("Server error: %s", e)
         _exit(1)
 
 
 def _exit(code: int = 0) -> None:
-    """Exit with browser cleanup."""
-    try:
-        asyncio.run(close_browser())
-    except Exception:
-        pass
+    """Exit the process."""
     sys.exit(code)
 
 

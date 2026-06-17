@@ -34,6 +34,7 @@ async def test_interactive_login_writes_source_state_when_cookie_export_succeeds
 ):
     browser = _make_browser(export_cookies=True)
     write_source_state = MagicMock(return_value=SimpleNamespace(login_generation="gen-123"))
+    wait_for_manual_login = AsyncMock()
 
     monkeypatch.setattr("linkedin_mcp_server.setup.get_config", lambda: AppConfig())
     monkeypatch.setattr(
@@ -47,16 +48,18 @@ async def test_interactive_login_writes_source_state_when_cookie_export_succeeds
     )
     monkeypatch.setattr(
         "linkedin_mcp_server.setup.wait_for_manual_login",
-        AsyncMock(),
+        wait_for_manual_login,
     )
     monkeypatch.setattr("linkedin_mcp_server.setup.write_source_state", write_source_state)
     monkeypatch.setattr("linkedin_mcp_server.setup.asyncio.sleep", AsyncMock())
 
     assert await interactive_login(tmp_path / "profile") is True
 
+    wait_for_manual_login.assert_awaited_once_with(browser.page, timeout=540000)
     browser.export_cookies.assert_awaited_once_with(portable_cookie_path(tmp_path / "profile"))
     write_source_state.assert_called_once_with(tmp_path / "profile")
     captured = capsys.readouterr()
+    assert "9 minutes" in captured.out.lower()
     assert "source session generation: gen-123" in captured.out.lower()
 
 

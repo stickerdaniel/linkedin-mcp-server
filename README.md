@@ -94,6 +94,7 @@ The server starts quickly, prepares the shared Patchright Chromium browser cache
 **CLI Options:**
 
 - `--login` - Open browser to log in and save persistent profile
+- `--login-serve` - Open browser to log in, then keep the MCP server running
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
@@ -224,7 +225,7 @@ Docker runs headless (no browser window), so you need to create a browser profil
 uvx linkedin-scraper-mcp --login
 ```
 
-This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. If you experience stability issues with Docker, consider using the [uvx setup](#-uvx-setup-recommended---universal) instead.
+This opens a browser window where you log in manually (9 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. If you experience stability issues with Docker, consider using the [uvx setup](#-uvx-setup-recommended---universal) instead.
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -357,7 +358,9 @@ uv run pre-commit install
 uv run -m linkedin_mcp_server
 ```
 
-The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepares the Patchright Chromium browser cache in the background and opens LinkedIn login on the first auth-requiring tool call. You can still run `uv run -m linkedin_mcp_server --login` when you want to create the session explicitly.
+The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepares the Patchright Chromium browser cache in the background and opens LinkedIn login on the first auth-requiring tool call. You can still run `uv run -m linkedin_mcp_server --login` when you want to create or refresh the session explicitly.
+
+`--login` saves the profile and exits. If you need to authenticate first and keep the MCP process running for a client that expects a live server after login, use `--login-serve`.
 
 ### Local Setup Help
 
@@ -367,6 +370,7 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 **CLI Options:**
 
 - `--login` - Open browser to log in and save persistent profile
+- `--login-serve` - Open browser to log in, then keep the MCP server running
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)

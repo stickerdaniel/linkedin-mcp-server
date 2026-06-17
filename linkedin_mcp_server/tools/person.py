@@ -11,7 +11,10 @@ from typing import Any
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import Depends
 
-from linkedin_mcp_server.constants import TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.constants import (
+    PERSON_PROFILE_TOOL_TIMEOUT_SECONDS,
+    TOOL_TIMEOUT_SECONDS,
+)
 from linkedin_mcp_server.dependencies import (
     get_person_profile_extractor,
     get_search_people_extractor,
@@ -28,7 +31,7 @@ def register_person_tools(mcp: FastMCP) -> None:
     """Register all person-related tools with the MCP server."""
 
     @mcp.tool(
-        timeout=TOOL_TIMEOUT_SECONDS,
+        timeout=PERSON_PROFILE_TOOL_TIMEOUT_SECONDS,
         title="Get Person Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},

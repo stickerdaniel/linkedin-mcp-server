@@ -140,6 +140,27 @@ def test_main_non_interactive_no_auth_still_starts_server(
     assert captured.out == ""
 
 
+def test_main_treats_shutdown_loop_error_as_clean_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _make_config(is_interactive=False, transport="stdio", transport_explicitly_set=False)
+    _patch_main_dependencies(monkeypatch, config)
+
+    class FailingMCP:
+        def run(self, **_kwargs) -> None:
+            raise RuntimeError("Cannot close a running event loop")
+
+    logger = MagicMock()
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.create_mcp_server", lambda: FailingMCP())
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.logger", logger)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.main()
+
+    assert exit_info.value.code == 0
+    logger.exception.assert_not_called()
+
+
 def test_clear_profile_and_exit_clears_all_auth_state(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

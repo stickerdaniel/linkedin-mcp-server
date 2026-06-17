@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 from patchright.async_api import Page
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.constants import MANUAL_LOGIN_TIMEOUT_MINUTES, MANUAL_LOGIN_TIMEOUT_MS
+
 from .exceptions import AuthenticationError
 
 logger = logging.getLogger(__name__)
@@ -254,18 +256,19 @@ def _is_auth_blocker_url(url: str) -> bool:
     )
 
 
-async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
+async def wait_for_manual_login(page: Page, timeout: int = MANUAL_LOGIN_TIMEOUT_MS) -> None:
     """Wait for user to manually complete login.
 
     Args:
         page: Patchright page object
-        timeout: Timeout in milliseconds (default: 5 minutes)
+        timeout: Timeout in milliseconds (default: 9 minutes)
 
     Raises:
         AuthenticationError: If timeout or login not completed
     """
     logger.info(
-        "Please complete the login process manually in the browser. Waiting up to 5 minutes..."
+        "Please complete the login process manually in the browser. Waiting up to %d minutes...",
+        MANUAL_LOGIN_TIMEOUT_MINUTES,
     )
 
     loop = asyncio.get_running_loop()
@@ -277,7 +280,8 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
             elapsed = (loop.time() - start_time) * 1000
             if elapsed > timeout:
                 raise AuthenticationError(
-                    "Manual login timeout. Please try again and complete login faster."
+                    f"Manual login timeout after {MANUAL_LOGIN_TIMEOUT_MINUTES} minutes. "
+                    "Please try again and complete login faster."
                 )
             continue
 
@@ -288,7 +292,8 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
         elapsed = (loop.time() - start_time) * 1000
         if elapsed > timeout:
             raise AuthenticationError(
-                "Manual login timeout. Please try again and complete login faster."
+                f"Manual login timeout after {MANUAL_LOGIN_TIMEOUT_MINUTES} minutes. "
+                "Please try again and complete login faster."
             )
 
         await asyncio.sleep(1)
