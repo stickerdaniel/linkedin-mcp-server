@@ -4122,6 +4122,9 @@ class LinkedInExtractor:
             )
             await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(2.0)
+            # Re-navigation may resolve to a challenge/checkpoint; surface it
+            # instead of silently returning zero connections.
+            await detect_rate_limit(self._page)
 
         # Extract connection data from profile link elements
         raw_connections: list[dict[str, str]] = await self._page.evaluate(
