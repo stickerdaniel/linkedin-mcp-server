@@ -3866,6 +3866,9 @@ class LinkedInExtractor:
 
         await self._expand_invitation_note_toggles()
 
+        if kind == "received" and await self._received_invitation_count_is_zero():
+            return self._single_section_result(url, "invitations", "", references=[])
+
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
         cleaned = strip_linkedin_noise(raw) if raw else ""
@@ -3881,6 +3884,38 @@ class LinkedInExtractor:
             cleaned,
             references=references,
         )
+
+    async def _received_invitation_count_is_zero(self) -> bool:
+        """Return True when the received invitation counter is explicitly zero.
+
+        The received manager can render unrelated "people you may know"
+        recommendations below the empty state. Anchors in that block are not
+        pending invitations, so if LinkedIn exposes the selected ALL-count tab
+        as zero we return an empty single-section result instead of scraping
+        the recommendation cards.
+
+        DOM dependency: the count itself is visible text, but the selected tab
+        is located through locale-independent structural signals: current link
+        state plus the stable ``/invitation-manager/received/ALL`` URL.
+        """
+        try:
+            return bool(
+                await self._page.evaluate(
+                    r"""() => {
+                        const currentAll = document.querySelector(
+                            'main a[aria-current="true"]'
+                            + '[href*="/mynetwork/invitation-manager/received/ALL"]'
+                        );
+                        if (!currentAll) return false;
+                        const text = currentAll.innerText || currentAll.textContent || '';
+                        const match = text.match(/\((\d+)\)/);
+                        return match ? Number(match[1]) === 0 : false;
+                    }"""
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed to read received invitation count: %s", exc)
+            return False
 
     async def _expand_invitation_note_toggles(self) -> None:
         """Click inline expand toggles on invitation cards to reveal full notes.

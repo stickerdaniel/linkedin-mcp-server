@@ -5240,6 +5240,12 @@ class TestGetPendingInvitations:
             ),
             patch.object(
                 extractor,
+                "_received_invitation_count_is_zero",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor,
                 "_extract_root_content",
                 new_callable=AsyncMock,
                 return_value={
@@ -5289,6 +5295,47 @@ class TestGetPendingInvitations:
             result = await extractor.get_pending_invitations(limit=3, kind="sent")
 
         assert result["url"].endswith("/invitation-manager/sent/")
+
+    async def test_received_zero_count_omits_recommendations(self, mock_page):
+        """When the selected received-count tab is zero, do not return
+        unrelated "people you may know" recommendations as invitations."""
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor, "_expand_invitation_note_toggles", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_received_invitation_count_is_zero",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_extract_root_content", new_callable=AsyncMock
+            ) as extract_root,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.get_pending_invitations(limit=1)
+
+        assert result == {
+            "url": "https://www.linkedin.com/mynetwork/invitation-manager/received/",
+            "sections": {},
+        }
+        extract_root.assert_not_awaited()
 
     async def test_expand_selector_skips_expanded_and_clicked(self, mock_page):
         """The expand-toggle selector must be locale-independent (testid-based)
