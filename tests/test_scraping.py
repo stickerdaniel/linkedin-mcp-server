@@ -1,5 +1,6 @@
 """Tests for the LinkedInExtractor scraping engine."""
 
+from contextlib import ExitStack
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -5214,3 +5215,94 @@ class TestBuildFeedReferences:
             "/posts/alice_x-ugcPost-1-xx",
         ]
         assert kinds == {"feed_post"}
+
+
+class TestGetPendingInvitations:
+    """Extractor-level tests for get_pending_invitations.
+
+    These lock the two non-obvious guarantees that earlier review feedback
+    introduced: the per-call ``limit`` trims the returned references, and the
+    note-expansion selector never touches an already-expanded toggle.
+    """
+
+    def _patch_invitation_helpers(self, extractor, raw_references):
+        """Context managers that stub the navigation/scroll/extract helpers so
+        the test exercises only the limit/cap/reference logic. Mirrors the
+        ``patch.object`` style used elsewhere in this module."""
+        return (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor, "_expand_invitation_note_toggles", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={
+                    "source": "main",
+                    "text": "Pending invitations text",
+                    "references": raw_references,
+                },
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        )
+
+    async def test_references_trimmed_to_limit(self, mock_page):
+        """References must not exceed the requested limit even when the page
+        renders more invitation cards than asked for."""
+        # 30 distinct inviter profile anchors — all classify as person refs.
+        raw_references = [
+            {"href": f"https://www.linkedin.com/in/user-{i}/", "text": f"User {i}"}
+            for i in range(30)
+        ]
+        extractor = LinkedInExtractor(mock_page)
+
+        with ExitStack() as stack:
+            for ctx in self._patch_invitation_helpers(extractor, raw_references):
+                stack.enter_context(ctx)
+            result = await extractor.get_pending_invitations(limit=5)
+
+        invitations = result["references"]["invitations"]
+        assert len(invitations) == 5
+        assert all(ref["kind"] == "person" for ref in invitations)
+        assert result["url"].endswith("/invitation-manager/received/")
+
+    async def test_sent_kind_navigates_to_sent_page(self, mock_page):
+        """kind='sent' targets the sent invitation-manager surface."""
+        extractor = LinkedInExtractor(mock_page)
+
+        with ExitStack() as stack:
+            for ctx in self._patch_invitation_helpers(extractor, []):
+                stack.enter_context(ctx)
+            result = await extractor.get_pending_invitations(limit=3, kind="sent")
+
+        assert result["url"].endswith("/invitation-manager/sent/")
+
+    async def test_expand_selector_skips_expanded_and_clicked(self, mock_page):
+        """The expand-toggle selector must be locale-independent (testid-based)
+        and skip both already-expanded and already-clicked toggles, so a pass
+        can never re-collapse a note it previously revealed."""
+        mock_page.evaluate = AsyncMock(return_value=0)
+        extractor = LinkedInExtractor(mock_page)
+
+        await extractor._expand_invitation_note_toggles()
+
+        assert mock_page.evaluate.await_count >= 1
+        js = mock_page.evaluate.await_args_list[0].args[0]
+        # locale-independent structural selector, not a visible verb
+        assert '[data-testid="expandable-text-button"]' in js
+        # the two regression guards from review feedback
+        assert ':not([aria-expanded="true"])' in js
+        assert ":not([data-mcp-clicked])" in js
