@@ -641,6 +641,53 @@ class TestJobTools:
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
 
+    async def test_get_job_details_writes_file(self, mock_context, tmp_path):
+        """output_mode='file' persists the result and returns a confirmation."""
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "sections": {"job_posting": "Software Engineer"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        target = tmp_path / "job.json"
+        tool_fn = await get_tool_fn(mcp, "get_job_details")
+        result = await tool_fn(
+            "12345",
+            mock_context,
+            output_path=str(target),
+            output_mode="file",
+            extractor=mock_extractor,
+        )
+
+        assert result["saved_path"] == str(target)
+        # Confirmation lists section names, not the full text payload.
+        assert result["sections"] == ["job_posting"]
+        assert target.exists()
+
+    async def test_search_jobs_default_mode_returns_content(self, mock_context):
+        """The default output_mode keeps the existing display behaviour."""
+        expected = {
+            "url": "https://www.linkedin.com/jobs/search/?keywords=python",
+            "sections": {"search_results": "Job 1\nJob 2"},
+            "job_ids": ["1", "2"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+        result = await tool_fn("python", mock_context, extractor=mock_extractor)
+        assert "search_results" in result["sections"]
+        assert "saved_path" not in result
+
 
 class TestGetSidebarProfilesTool:
     async def test_get_sidebar_profiles_success(self, mock_context):
