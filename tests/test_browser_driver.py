@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.core import NetworkError
 from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
+    _is_transient_network_error,
     get_or_create_browser,
     reset_browser_for_testing,
 )
@@ -233,6 +235,46 @@ async def test_feed_auth_records_single_post_recovery_trace():
     steps = [call.args[1] for call in record_page_trace.await_args_list]
     assert "feed-after-remember-me-error-recovery" in steps
     assert "feed-navigation-error-before-remember-me-retry" not in steps
+
+
+def test_is_transient_network_error_detects_dns_and_connectivity():
+    assert _is_transient_network_error(
+        Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://...")
+    )
+    assert _is_transient_network_error(Exception("net::ERR_INTERNET_DISCONNECTED"))
+    assert _is_transient_network_error(Exception("net::ERR_CONNECTION_RESET"))
+    # An auth barrier / redirect is NOT a network error — must stay quarantinable.
+    assert not _is_transient_network_error(Exception("net::ERR_TOO_MANY_REDIRECTS"))
+    assert not _is_transient_network_error(Exception("auth barrier URL: /login"))
+
+
+@pytest.mark.asyncio
+async def test_feed_auth_raises_network_error_on_dns_failure():
+    """A DNS/connectivity failure must raise NetworkError, not return False.
+
+    Returning False is read by callers as "session invalid" and quarantines a
+    valid login. NetworkError is surfaced as retriable and preserves the session.
+    """
+    browser = _make_mock_browser()
+    browser.page.goto = AsyncMock(
+        side_effect=Exception(
+            "Page.goto: net::ERR_NAME_NOT_RESOLVED at https://www.linkedin.com/feed/"
+        )
+    )
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.record_page_trace",
+            new_callable=AsyncMock,
+        ),
+    ):
+        with pytest.raises(NetworkError):
+            await _feed_auth_succeeds(browser)
 
 
 @pytest.mark.asyncio
