@@ -3260,9 +3260,7 @@ class LinkedInExtractor:
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
             result = await self._extract_saved_jobs_page_once(url, section_name)
             if result.text == _RATE_LIMITED_MSG:
-                logger.warning(
-                    "Saved jobs page %s still rate-limited after retry", url
-                )
+                logger.warning("Saved jobs page %s still rate-limited after retry", url)
             return result
 
         except LinkedInScraperException:
