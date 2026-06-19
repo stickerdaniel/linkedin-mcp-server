@@ -404,6 +404,8 @@ def _tool_name_for_context(payload: dict[str, Any]) -> str | None:
             return "search_people"
         if "/jobs/search" in target_url:
             return "search_jobs"
+    if context in {"extract_saved_jobs_page", "get_saved_jobs"}:
+        return "get_saved_jobs"
 
     return None
 

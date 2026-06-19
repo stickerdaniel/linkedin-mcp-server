@@ -58,6 +58,8 @@ _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again lat
 # LinkedIn shows 25 results per page
 _PAGE_SIZE = 25
 
+_SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
+
 # Normalization maps for job search filters
 _DATE_POSTED_MAP = {
     "past_hour": "r3600",
@@ -3234,6 +3236,226 @@ class LinkedInExtractor:
         if page_references:
             result["references"] = {
                 "search_results": dedupe_references(page_references, cap=15)
+            }
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def _extract_saved_jobs_page(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
+        """Extract innerText from a saved-jobs page with soft rate-limit retry."""
+        try:
+            result = await self._extract_saved_jobs_page_once(url, section_name)
+            if result.text != _RATE_LIMITED_MSG:
+                return result
+
+            logger.info(
+                "Retrying saved jobs page %s after %.0fs backoff",
+                url,
+                _RATE_LIMIT_RETRY_DELAY,
+            )
+            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            result = await self._extract_saved_jobs_page_once(url, section_name)
+            if result.text == _RATE_LIMITED_MSG:
+                logger.warning(
+                    "Saved jobs page %s still rate-limited after retry", url
+                )
+            return result
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to extract saved jobs page %s: %s", url, e)
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="extract_saved_jobs_page",
+                    target_url=url,
+                    section_name=section_name,
+                ),
+            )
+
+    async def _extract_saved_jobs_page_once(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
+        """Single attempt: navigate, scroll list, and extract innerText."""
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        main_found = True
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s", url)
+            main_found = False
+
+        await handle_modal_close(self._page)
+        if main_found:
+            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        if raw_result["source"] == "body":
+            logger.debug("No <main> at evaluation time on %s, using body fallback", url)
+        elif not main_found:
+            logger.debug(
+                "<main> appeared after wait timeout on %s, scroll was skipped",
+                url,
+            )
+
+        if not raw:
+            return ExtractedSection(text="", references=[])
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
+            logger.warning(
+                "Saved jobs page %s returned only LinkedIn chrome (likely rate-limited)",
+                url,
+            )
+            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = _filter_linkedin_noise_lines(truncated)
+        return ExtractedSection(
+            text=cleaned,
+            references=build_references(raw_result["references"], section_name),
+        )
+
+    async def _get_total_list_pages(self) -> int | None:
+        """Read last page number from artdeco pagination buttons.
+
+        Parses numeric page labels from ``ul.artdeco-pagination__pages`` so
+        pagination works on locale-independent my-items list pages. Returns
+        ``None`` when pagination is absent or unparseable.
+        """
+        value = await self._page.evaluate(
+            """() => {
+                const buttons = document.querySelectorAll(
+                    'ul.artdeco-pagination__pages li button'
+                );
+                if (!buttons.length) return null;
+                const nums = [...buttons]
+                    .map((b) => parseInt(b.textContent.trim(), 10))
+                    .filter((n) => !Number.isNaN(n));
+                return nums.length ? Math.max(...nums) : null;
+            }"""
+        )
+        return int(value) if value is not None else None
+
+    async def get_saved_jobs(self, max_pages: int = 3) -> dict[str, Any]:
+        """List the authenticated user's saved job postings.
+
+        Navigates to ``/my-items/saved-jobs/``, extracts innerText and job IDs
+        from each page, and paginates with ``?start=`` offsets (25 per step).
+
+        Args:
+            max_pages: Maximum pages to load (1-10, default 3)
+
+        Returns:
+            {url, sections: {saved_jobs: text}, job_ids: [str]}
+        """
+        base_url = _SAVED_JOBS_URL
+        all_job_ids: list[str] = []
+        seen_ids: set[str] = set()
+        page_texts: list[str] = []
+        page_references: list[Reference] = []
+        section_errors: dict[str, dict[str, Any]] = {}
+        total_pages: int | None = None
+        total_pages_queried = False
+
+        for page_num in range(max_pages):
+            if total_pages is not None and page_num >= total_pages:
+                logger.debug("All %d saved-jobs pages fetched, stopping", total_pages)
+                break
+
+            if page_num > 0:
+                await asyncio.sleep(_NAV_DELAY)
+
+            url = (
+                base_url
+                if page_num == 0
+                else f"{base_url}?start={page_num * _PAGE_SIZE}"
+            )
+
+            try:
+                extracted = await self._extract_saved_jobs_page(
+                    url, section_name="saved_jobs"
+                )
+
+                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                    if extracted.error:
+                        section_errors["saved_jobs"] = extracted.error
+                    break
+
+                if not total_pages_queried:
+                    total_pages_queried = True
+                    try:
+                        total_pages = await self._get_total_list_pages()
+                    except Exception as e:
+                        logger.debug("Could not read saved-jobs page count: %s", e)
+                    else:
+                        if total_pages is not None:
+                            logger.debug(
+                                "LinkedIn reports %d saved-jobs pages", total_pages
+                            )
+
+                if "/my-items/saved-jobs" not in self._page.url:
+                    logger.debug(
+                        "Unexpected page URL after saved-jobs extraction: %s — "
+                        "skipping job ID extraction",
+                        self._page.url,
+                    )
+                    page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
+                    break
+
+                page_ids = await self._extract_job_ids()
+                new_ids = [jid for jid in page_ids if jid not in seen_ids]
+
+                if not new_ids:
+                    page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
+                    logger.debug(
+                        "No new saved job IDs on page %d, stopping", page_num + 1
+                    )
+                    break
+
+                for jid in new_ids:
+                    seen_ids.add(jid)
+                    all_job_ids.append(jid)
+
+                page_texts.append(extracted.text)
+                if extracted.references:
+                    page_references.extend(extracted.references)
+
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Error on saved jobs page %d: %s", page_num + 1, e)
+                section_errors["saved_jobs"] = build_issue_diagnostics(
+                    e,
+                    context="get_saved_jobs",
+                    target_url=url,
+                    section_name="saved_jobs",
+                )
+                break
+
+        result: dict[str, Any] = {
+            "url": base_url,
+            "sections": {"saved_jobs": "\n---\n".join(page_texts)}
+            if page_texts
+            else {},
+            "job_ids": all_job_ids,
+        }
+        if page_references:
+            result["references"] = {
+                "saved_jobs": dedupe_references(page_references, cap=15)
             }
         if section_errors:
             result["section_errors"] = section_errors
