@@ -3245,8 +3245,15 @@ class LinkedInExtractor:
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        max_pages: int = 1,
     ) -> dict[str, Any]:
-        """Search for people and extract the results page.
+        """Search for people and extract the results page(s).
+
+        Paginates through LinkedIn's people search via the ``&page=N`` URL
+        parameter (1-based). Each page yields ~10 results; ``max_pages`` caps
+        how many are fetched. Pagination stops early when a page surfaces no
+        new ``person`` references (the locale-independent end-of-results
+        signal), so requesting more pages than exist is harmless.
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
@@ -3262,9 +3269,13 @@ class LinkedInExtractor:
                 unfiltered result set. Look up a company's URN via
                 ``get_company_profile`` -- it is exposed under
                 ``references["about"]``.
+            max_pages: Maximum number of result pages to load (default 1).
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {search_results: text}} where ``url`` is the
+            first-page URL and ``search_results`` joins each page's text with
+            ``\\n---\\n``. Optional ``references`` and ``section_errors`` keys
+            follow the standard tool return shape.
         """
         if network is not None:
             invalid = [t for t in network if t not in _NETWORK_TOKENS]
@@ -3290,21 +3301,52 @@ class LinkedInExtractor:
         if current_company:
             params += f"&currentCompany={_encode_list_facet([current_company])}"
 
-        url = f"https://www.linkedin.com/search/results/people/?{params}"
-        extracted = await self.extract_page(url, section_name="search_results")
+        base_url = f"https://www.linkedin.com/search/results/people/?{params}"
+
+        page_texts: list[str] = []
+        all_references: list[Reference] = []
+        seen_person_urls: set[str] = set()
+        section_errors: dict[str, dict[str, Any]] = {}
+
+        for page_num in range(max_pages):
+            if page_num > 0:
+                await asyncio.sleep(_NAV_DELAY)
+
+            url = base_url if page_num == 0 else f"{base_url}&page={page_num + 1}"
+            extracted = await self.extract_page(url, section_name="search_results")
+
+            if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                if extracted.error:
+                    section_errors["search_results"] = extracted.error
+                # Navigation failed or rate-limited; nothing more to paginate.
+                break
+
+            # End-of-results detection (locale-independent): a page beyond the
+            # first that surfaces no new /in/ profile anchors means we have run
+            # past the last page of results.
+            page_person_urls = {
+                ref["url"] for ref in extracted.references if ref["kind"] == "person"
+            }
+            new_person_urls = page_person_urls - seen_person_urls
+            if page_num > 0 and not new_person_urls:
+                logger.debug("No new person results on page %d, stopping", page_num + 1)
+                break
+
+            seen_person_urls |= page_person_urls
+            page_texts.append(extracted.text)
+            if extracted.references:
+                all_references.extend(extracted.references)
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-            sections["search_results"] = extracted.text
-            if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
+        if page_texts:
+            sections["search_results"] = "\n---\n".join(page_texts)
+            deduped = dedupe_references(all_references)
+            if deduped:
+                references["search_results"] = deduped
 
         result: dict[str, Any] = {
-            "url": url,
+            "url": base_url,
             "sections": sections,
         }
         if references:

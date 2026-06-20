@@ -114,6 +114,7 @@ def register_person_tools(
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 1,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -126,6 +127,9 @@ def register_person_tools(
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
                 Example: ["F"] to only return 1st-degree connections.
+            max_pages: Maximum number of result pages to load (1-10, default 1).
+                Each page holds ~10 results. Pagination stops early once a page
+                returns no new people, so over-requesting pages is safe.
             current_company: Optional current-employer filter. LinkedIn's
                 currentCompany facet only filters on the numeric company URN id
                 (e.g. "1115" for SAP); plain company names are accepted by the
@@ -144,11 +148,13 @@ def register_person_tools(
                 ctx, tool_name="search_people"
             )
             logger.info(
-                "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
+                "Searching people: keywords='%s', location='%s', network=%s, "
+                "current_company='%s', max_pages=%d",
                 keywords,
                 location,
                 network,
                 current_company,
+                max_pages,
             )
 
             await ctx.report_progress(
@@ -161,6 +167,7 @@ def register_person_tools(
                     location,
                     network=network,
                     current_company=current_company,
+                    max_pages=max_pages,
                 )
             except FilterValidationError as e:
                 # Validation messages carry actionable detail; surface
