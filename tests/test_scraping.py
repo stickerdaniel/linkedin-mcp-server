@@ -2763,7 +2763,9 @@ class TestSearchJobs:
 
     async def test_search_people_stops_when_page_adds_no_new_people(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        repeated = [{"kind": "person", "url": "/in/jane/", "text": "Jane Doe"}]
+        repeated: list[Reference] = [
+            {"kind": "person", "url": "/in/jane/", "text": "Jane Doe"}
+        ]
         pages = [
             extracted("Jane Doe", repeated),
             # Same person, no new /in/ anchors -> past the last page.
