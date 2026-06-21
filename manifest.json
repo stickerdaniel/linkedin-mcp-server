@@ -105,6 +105,10 @@
       "description": "Get recent posts from the authenticated user's LinkedIn home feed"
     },
     {
+      "name": "search_posts",
+      "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month)"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
     }
