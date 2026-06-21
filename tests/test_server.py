@@ -1,14 +1,30 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import mcp.types as mt
+import pytest
 from fastmcp import FastMCP
 from fastmcp.server.middleware import MiddlewareContext
 
+from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
 from linkedin_mcp_server.server import create_mcp_server
+
+
+@pytest.fixture(autouse=True)
+def _stub_browser_config(monkeypatch):
+    """Give the middleware teardown a clean local config.
+
+    The middleware closes the browser after each tool call in ephemeral CDP
+    mode by reading ``get_config()``. Under pytest the config singleton is reset
+    between tests, so without this stub it would re-parse pytest's argv. A plain
+    AppConfig (no CDP endpoint) makes the teardown a safe no-op.
+    """
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.get_config", lambda: AppConfig()
+    )
 
 
 class TestSequentialToolExecutionMiddleware:
@@ -87,3 +103,38 @@ class TestSequentialToolExecutionMiddleware:
                 ),
             ]
         )
+
+    async def test_on_call_tool_closes_ephemeral_cdp_browser(self):
+        middleware = SequentialToolExecutionMiddleware()
+        call_next = AsyncMock(return_value=MagicMock())
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="get_person_profile", arguments={}),
+            method="tools/call",
+            fastmcp_context=None,
+        )
+
+        with patch(
+            "linkedin_mcp_server.drivers.browser.close_browser_after_tool_if_ephemeral",
+            new_callable=AsyncMock,
+        ) as mock_teardown:
+            await middleware.on_call_tool(context, call_next)
+
+        mock_teardown.assert_awaited_once()
+
+    async def test_on_call_tool_closes_ephemeral_cdp_browser_even_on_error(self):
+        middleware = SequentialToolExecutionMiddleware()
+        call_next = AsyncMock(side_effect=RuntimeError("boom"))
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="get_person_profile", arguments={}),
+            method="tools/call",
+            fastmcp_context=None,
+        )
+
+        with patch(
+            "linkedin_mcp_server.drivers.browser.close_browser_after_tool_if_ephemeral",
+            new_callable=AsyncMock,
+        ) as mock_teardown:
+            with pytest.raises(RuntimeError, match="boom"):
+                await middleware.on_call_tool(context, call_next)
+
+        mock_teardown.assert_awaited_once()

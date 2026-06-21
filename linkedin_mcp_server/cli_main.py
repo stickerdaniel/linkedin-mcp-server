@@ -117,10 +117,58 @@ def get_profile_and_exit() -> None:
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Session Creation mode")
 
+    if config.browser.cdp_enabled:
+        print("ℹ️  CDP mode is enabled (--cdp-endpoint / CDP_ENDPOINT).")
+        print("   LinkedIn login is managed on the remote browser (e.g. browser-use).")
+        print("   No local profile is created. Log in there, then start the server.")
+        sys.exit(0)
+
     user_data_dir = config.browser.user_data_dir
     success = run_profile_creation(user_data_dir)
 
     sys.exit(0 if success else 1)
+
+
+def _cdp_status_and_exit() -> None:
+    """Validate the remote CDP LinkedIn session and exit.
+
+    A status check must never terminate the remote browser, so persistence is
+    forced for the duration of the check (close only disconnects).
+    """
+    config = get_config()
+    # Forcing persistence guarantees both the success path and the connect
+    # failure path (which closes the browser) only disconnect from the remote.
+    config.browser.cdp_persistent = True
+
+    print(f"CDP endpoint: {config.browser.cdp_endpoint}")
+
+    async def check_session() -> bool:
+        try:
+            set_headless(True)
+            browser = await get_or_create_browser()
+            return browser.is_authenticated
+        except AuthenticationError:
+            return False
+        except Exception as e:
+            logger.exception(f"Unexpected error checking CDP session: {e}")
+            raise
+        finally:
+            await close_browser()
+
+    try:
+        valid = asyncio.run(check_session())
+    except Exception as e:
+        print(f"❌ Could not validate remote CDP session: {e}")
+        print("   Check the CDP endpoint and that the remote browser is reachable.")
+        sys.exit(1)
+
+    if valid:
+        print("✅ Remote CDP session is valid (LinkedIn authenticated)")
+        sys.exit(0)
+
+    print("❌ Remote CDP session is not authenticated with LinkedIn")
+    print("   Log in to LinkedIn in the remote browser (e.g. browser-use), then retry")
+    sys.exit(1)
 
 
 def profile_info_and_exit() -> None:
@@ -134,6 +182,10 @@ def profile_info_and_exit() -> None:
 
     version = get_version()
     logger.info(f"LinkedIn MCP Server v{version} - Session Info mode")
+
+    if config.browser.cdp_enabled:
+        _cdp_status_and_exit()
+        return
 
     profile_dir = get_profile_dir()
     cookies_path = portable_cookie_path(profile_dir)
@@ -293,7 +345,10 @@ def main() -> None:
 
         # Ensure browser is installed for CLI modes that need it.
         # Normal server startup uses async background setup instead.
-        if config.server.login or config.server.status:
+        # CDP mode connects to a remote browser, so no local Chromium is needed.
+        if (config.server.login or config.server.status) and not (
+            config.browser.cdp_enabled
+        ):
             ensure_browser_installed()
 
         # Handle --login flag

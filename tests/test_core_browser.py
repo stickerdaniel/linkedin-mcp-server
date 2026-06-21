@@ -161,3 +161,147 @@ async def test_close_is_idempotent_and_resets_state(tmp_path):
     assert browser._context is None
     assert browser._page is None
     assert browser._playwright is None
+
+
+def _make_cdp_playwright(existing_context=None, existing_page=None):
+    """Build a fake playwright whose chromium.connect_over_cdp returns a Browser."""
+    page = existing_page or MagicMock()
+    context = existing_context or MagicMock()
+    context.pages = [page] if existing_page is not None else []
+    context.new_page = AsyncMock(return_value=page)
+    remote_browser = MagicMock()
+    remote_browser.contexts = [context] if existing_context is not None else []
+    remote_browser.new_context = AsyncMock(return_value=context)
+    remote_browser.close = AsyncMock()
+    chromium = MagicMock()
+    chromium.connect_over_cdp = AsyncMock(return_value=remote_browser)
+    playwright = MagicMock()
+    playwright.chromium = chromium
+    playwright.stop = AsyncMock()
+    return playwright, remote_browser, context, page
+
+
+@pytest.mark.asyncio
+async def test_start_over_cdp_reuses_existing_context_and_page(monkeypatch):
+    page = MagicMock()
+    context = MagicMock()
+    playwright, remote_browser, context, page = _make_cdp_playwright(
+        existing_context=context, existing_page=page
+    )
+
+    starter = MagicMock()
+    starter.start = AsyncMock(return_value=playwright)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.browser.async_playwright", lambda: starter
+    )
+
+    browser = BrowserManager(cdp_endpoint="http://127.0.0.1:9222", slow_mo=7)
+    await browser.start()
+
+    chromium = playwright.chromium
+    chromium.connect_over_cdp.assert_awaited_once_with(
+        "http://127.0.0.1:9222", slow_mo=7
+    )
+    remote_browser.new_context.assert_not_awaited()
+    context.new_page.assert_not_awaited()
+    assert browser._browser is remote_browser
+    assert browser._context is context
+    assert browser._page is page
+    assert browser.is_cdp is True
+
+
+@pytest.mark.asyncio
+async def test_start_over_cdp_creates_context_and_page_when_missing(monkeypatch):
+    playwright, remote_browser, context, page = _make_cdp_playwright()
+
+    starter = MagicMock()
+    starter.start = AsyncMock(return_value=playwright)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.browser.async_playwright", lambda: starter
+    )
+
+    browser = BrowserManager(cdp_endpoint="ws://remote/cdp")
+    await browser.start()
+
+    remote_browser.new_context.assert_awaited_once()
+    context.new_page.assert_awaited_once()
+    assert browser._page is page
+
+
+@pytest.mark.asyncio
+async def test_cdp_close_non_persistent_sends_browser_close_command():
+    browser = BrowserManager(cdp_endpoint="http://127.0.0.1:9222")
+    session = MagicMock()
+    session.send = AsyncMock()
+    remote_browser = MagicMock()
+    remote_browser.new_browser_cdp_session = AsyncMock(return_value=session)
+    remote_browser.close = AsyncMock()
+    context = MagicMock()
+    context.close = AsyncMock()
+    playwright = MagicMock()
+    playwright.stop = AsyncMock()
+    browser._browser = remote_browser
+    browser._context = context
+    browser._page = MagicMock()
+    browser._playwright = playwright
+
+    await browser.close()
+
+    # The remote browser is terminated via the CDP Browser.close command, not
+    # via browser.close() (which would only disconnect the client).
+    remote_browser.new_browser_cdp_session.assert_awaited_once()
+    session.send.assert_awaited_once_with("Browser.close")
+    remote_browser.close.assert_not_awaited()
+    context.close.assert_not_awaited()
+    playwright.stop.assert_awaited_once()
+    assert browser._browser is None
+    assert browser._context is None
+
+
+@pytest.mark.asyncio
+async def test_cdp_close_non_persistent_falls_back_to_disconnect_on_error():
+    browser = BrowserManager(cdp_endpoint="http://127.0.0.1:9222")
+    remote_browser = MagicMock()
+    remote_browser.new_browser_cdp_session = AsyncMock(
+        side_effect=RuntimeError("no cdp session")
+    )
+    remote_browser.close = AsyncMock()
+    playwright = MagicMock()
+    playwright.stop = AsyncMock()
+    browser._browser = remote_browser
+    browser._context = MagicMock()
+    browser._page = MagicMock()
+    browser._playwright = playwright
+
+    await browser.close()
+
+    remote_browser.new_browser_cdp_session.assert_awaited_once()
+    remote_browser.close.assert_awaited_once()
+    playwright.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cdp_close_persistent_only_disconnects():
+    browser = BrowserManager(cdp_endpoint="http://127.0.0.1:9222", cdp_persistent=True)
+    session = MagicMock()
+    session.send = AsyncMock()
+    remote_browser = MagicMock()
+    remote_browser.new_browser_cdp_session = AsyncMock(return_value=session)
+    remote_browser.close = AsyncMock()
+    context = MagicMock()
+    context.close = AsyncMock()
+    playwright = MagicMock()
+    playwright.stop = AsyncMock()
+    browser._browser = remote_browser
+    browser._context = context
+    browser._page = MagicMock()
+    browser._playwright = playwright
+
+    await browser.close()
+
+    remote_browser.new_browser_cdp_session.assert_not_awaited()
+    remote_browser.close.assert_not_awaited()
+    session.send.assert_not_awaited()
+    context.close.assert_not_awaited()
+    playwright.stop.assert_awaited_once()
+    assert browser._browser is None

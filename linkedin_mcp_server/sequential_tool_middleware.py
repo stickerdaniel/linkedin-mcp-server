@@ -70,3 +70,24 @@ class SequentialToolExecutionMiddleware(Middleware):
                     tool_name,
                     hold_seconds,
                 )
+                await self._close_ephemeral_cdp_browser(tool_name)
+
+    @staticmethod
+    async def _close_ephemeral_cdp_browser(tool_name: str) -> None:
+        """Tear down the remote browser after the call in ephemeral CDP mode.
+
+        Imported lazily to keep this middleware import-light and avoid pulling
+        the browser driver into modules that only need request serialization.
+        """
+        from linkedin_mcp_server.drivers.browser import (
+            close_browser_after_tool_if_ephemeral,
+        )
+
+        try:
+            await close_browser_after_tool_if_ephemeral()
+        except Exception as exc:
+            logger.warning(
+                "Failed to close ephemeral CDP browser after tool '%s': %s",
+                tool_name,
+                exc,
+            )

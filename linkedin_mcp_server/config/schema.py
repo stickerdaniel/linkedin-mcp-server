@@ -20,6 +20,9 @@ class ConfigurationError(Exception):
     """Raised when configuration validation fails."""
 
 
+_CDP_ENDPOINT_SCHEMES = ("ws://", "wss://", "http://", "https://")
+
+
 @dataclass
 class BrowserConfig:
     """Configuration for browser settings."""
@@ -32,6 +35,18 @@ class BrowserConfig:
     default_timeout: int = 5000  # Milliseconds for page operations
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
     user_data_dir: str = "~/.linkedin-mcp/profile"  # Persistent browser profile
+    # Remote Chrome DevTools Protocol endpoint (e.g. browser-use). When set, the
+    # server connects to this browser instead of launching a local Chrome and
+    # trusts the LinkedIn session managed on the remote side.
+    cdp_endpoint: str | None = None
+    # When True, closing only disconnects from the CDP endpoint and leaves the
+    # remote browser running. When False (default) the remote browser is closed.
+    cdp_persistent: bool = False
+
+    @property
+    def cdp_enabled(self) -> bool:
+        """Whether the server should connect over CDP instead of launching Chrome."""
+        return bool(self.cdp_endpoint)
 
     def validate(self) -> None:
         """Validate browser configuration values."""
@@ -57,6 +72,13 @@ class BrowserConfig:
                 raise ConfigurationError(
                     f"chrome_path '{self.chrome_path}' is not a file"
                 )
+        if self.cdp_endpoint and not self.cdp_endpoint.startswith(
+            _CDP_ENDPOINT_SCHEMES
+        ):
+            raise ConfigurationError(
+                f"cdp_endpoint '{self.cdp_endpoint}' must start with one of "
+                f"{', '.join(_CDP_ENDPOINT_SCHEMES)}"
+            )
 
 
 @dataclass

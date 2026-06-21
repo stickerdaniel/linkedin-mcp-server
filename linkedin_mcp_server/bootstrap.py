@@ -19,6 +19,7 @@ from fastmcp import Context
 
 from linkedin_mcp_server.authentication import get_authentication_source
 from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
+from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.drivers.browser import get_profile_dir
 from linkedin_mcp_server.exceptions import (
     AuthenticationBootstrapFailedError,
@@ -59,6 +60,7 @@ _REGISTRY_NAME_TO_DIR_PREFIX = {
 class RuntimePolicy(str, Enum):
     MANAGED = "managed"
     DOCKER = "docker"
+    CDP = "cdp"
 
 
 class SetupState(str, Enum):
@@ -114,6 +116,8 @@ def get_runtime_policy() -> RuntimePolicy:
     """Return the active bootstrap runtime policy."""
     if _state.runtime_policy is not None:
         return _state.runtime_policy
+    if get_config().browser.cdp_enabled:
+        return RuntimePolicy.CDP
     return (
         RuntimePolicy.DOCKER
         if get_runtime_id().endswith("-container")
@@ -386,6 +390,12 @@ async def ensure_tool_ready_or_raise(
     """Gate scrape/search tools on browser setup and authentication readiness."""
     initialize_bootstrap()
     await _refresh_background_task_state()
+
+    if get_runtime_policy() == RuntimePolicy.CDP:
+        # No local Chromium install and no local auth artifacts: the remote
+        # browser manages the profile/session. Validation happens when the
+        # driver connects over CDP and runs the /feed/ check.
+        return
 
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         _raise_if_docker_auth_missing()

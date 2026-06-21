@@ -21,6 +21,7 @@ from linkedin_mcp_server.drivers.browser import (
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
     BrowserBinaryMissingError,
+    CDPSessionUnauthenticatedError,
     DockerHostLoginRequiredError,
     LinuxBrowserDependencyError,
 )
@@ -57,8 +58,21 @@ async def handle_auth_error(
     """Close the stale browser and trigger interactive re-login.
 
     In Docker mode a GUI browser cannot be opened, so we raise
-    ``DockerHostLoginRequiredError`` for a consistent user message.
+    ``DockerHostLoginRequiredError`` for a consistent user message. In CDP mode
+    the session is managed on the remote browser, so we cannot open an
+    interactive login and raise ``CDPSessionUnauthenticatedError`` instead.
     """
+    if get_runtime_policy() == RuntimePolicy.CDP:
+        try:
+            await close_browser()
+        except Exception as close_exc:
+            logger.warning("Failed to close stale CDP browser (ignored): %s", close_exc)
+        raise CDPSessionUnauthenticatedError(
+            "No valid LinkedIn session is available on the remote CDP browser. "
+            "Log in to LinkedIn in the remote browser (e.g. browser-use), "
+            "then retry this tool."
+        ) from error
+
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         raise DockerHostLoginRequiredError(
             "No valid LinkedIn session is available in Docker. "

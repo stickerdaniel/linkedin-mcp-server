@@ -21,9 +21,11 @@ from linkedin_mcp_server.bootstrap import (
     invalidate_auth_and_trigger_relogin,
     invalidate_browser_setup,
     reset_bootstrap_for_testing,
+    RuntimePolicy,
     SetupState,
     start_background_browser_setup_if_needed,
 )
+from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
     AuthenticationStartedError,
@@ -146,6 +148,30 @@ class TestBootstrap:
     def test_runtime_policy_uses_initialized_value(self):
         initialize_bootstrap("managed")
         assert get_runtime_policy() == "managed"
+
+    def test_runtime_policy_cdp_when_endpoint_set(self, monkeypatch):
+        config = AppConfig()
+        config.browser.cdp_endpoint = "http://127.0.0.1:9222"
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        assert get_runtime_policy() == RuntimePolicy.CDP
+
+    async def test_cdp_bypasses_setup_and_auth_gating(self, monkeypatch):
+        config = AppConfig()
+        config.browser.cdp_endpoint = "http://127.0.0.1:9222"
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        # browser_setup_ready / _auth_ready must never be consulted in CDP mode.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.browser_setup_ready",
+            lambda: pytest.fail("browser setup should not be checked in CDP mode"),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._auth_ready",
+            lambda: pytest.fail("auth should not be checked in CDP mode"),
+        )
+
+        # Returns without raising and without requiring local setup or auth.
+        await ensure_tool_ready_or_raise("get_person_profile")
+        assert get_runtime_policy() == RuntimePolicy.CDP
 
 
 def _make_auth_ready(profile_dir):
