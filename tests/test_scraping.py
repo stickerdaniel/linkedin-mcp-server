@@ -2733,6 +2733,12 @@ class TestBuildContentSearchUrl:
         url = LinkedInExtractor._build_content_search_url("python")
         assert "datePosted" not in url
 
+    def test_whitespace_date_posted_omits_facet(self):
+        # Whitespace-only date_posted must be ignored, not appended as an
+        # invalid facet token (regression guard).
+        url = LinkedInExtractor._build_content_search_url("python", date_posted="   ")
+        assert "datePosted" not in url
+
 
 @pytest.mark.asyncio
 class TestSearchPosts:
@@ -2813,6 +2819,24 @@ class TestSearchPosts:
 
         assert result["sections"] == {}
         assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
+
+    async def test_navigation_error_surfaces_section_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "", error={"error_type": "navigation_error", "error_message": "timeout"}
+            ),
+        ):
+            result = await extractor.search_posts("python")
+
+        assert result["sections"] == {}
+        assert result["section_errors"]["search_results"] == {
+            "error_type": "navigation_error",
+            "error_message": "timeout",
+        }
 
 
 class TestStripLinkedInNoise:

@@ -3382,8 +3382,10 @@ class LinkedInExtractor:
         through unchanged (callers validate first).
         """
         params = f"keywords={quote_plus(keywords)}&origin=FACETED_SEARCH"
-        if date_posted:
-            token = _CONTENT_DATE_POSTED_MAP.get(date_posted.strip(), date_posted)
+        if date_posted and date_posted.strip():
+            token = _CONTENT_DATE_POSTED_MAP.get(
+                date_posted.strip(), date_posted.strip()
+            )
             params += f"&datePosted={_encode_list_facet([token])}"
         return f"https://www.linkedin.com/search/results/content/?{params}"
 
