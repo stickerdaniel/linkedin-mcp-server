@@ -89,6 +89,25 @@ _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
+# Content (post) search uses literal ``datePosted`` tokens inside a JSON-list
+# facet, e.g. ``datePosted=["past-week"]`` — unlike job search, which uses
+# ``f_TPR=r<seconds>`` codes. Human-friendly underscore aliases map onto
+# LinkedIn's exact tokens; the tokens themselves also pass through unchanged.
+_CONTENT_DATE_POSTED_MAP = {
+    "past-24h": "past-24h",
+    "past_24_hours": "past-24h",
+    "past-24-hours": "past-24h",
+    "past-week": "past-week",
+    "past_week": "past-week",
+    "past-month": "past-month",
+    "past_month": "past-month",
+}
+
+# Content search is an infinite scroll (no ``&start=`` pagination), so
+# ``search_posts`` expresses depth as result "pages" of roughly this many
+# scrolls each.
+_CONTENT_SCROLLS_PER_PAGE = 5
+
 # Valid tokens for the people-search ``network`` facet.
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
 _NETWORK_TOKENS = ("F", "S", "O")
@@ -3339,6 +3358,97 @@ class LinkedInExtractor:
             "url": url,
             "sections": sections,
         }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    @staticmethod
+    def _build_content_search_url(
+        keywords: str,
+        date_posted: str | None = None,
+    ) -> str:
+        """Build a LinkedIn content (post) search URL.
+
+        Reproduces the ``FACETED_SEARCH`` URL LinkedIn produces from the
+        Posts results tab, e.g. for "Buscamos Unity" in the past week:
+        ``/search/results/content/?keywords=Buscamos+Unity&origin=FACETED_SEARCH&datePosted=%5B%22past-week%22%5D``
+
+        The ``datePosted`` facet is a one-element JSON list carrying a literal
+        token (``past-24h`` / ``past-week`` / ``past-month``), URL-encoded —
+        unlike job search, which uses ``f_TPR=r<seconds>``. Aliases are
+        normalized via ``_CONTENT_DATE_POSTED_MAP``; unknown values pass
+        through unchanged (callers validate first).
+        """
+        params = f"keywords={quote_plus(keywords)}&origin=FACETED_SEARCH"
+        if date_posted:
+            token = _CONTENT_DATE_POSTED_MAP.get(date_posted.strip(), date_posted)
+            params += f"&datePosted={_encode_list_facet([token])}"
+        return f"https://www.linkedin.com/search/results/content/?{params}"
+
+    async def search_posts(
+        self,
+        keywords: str,
+        date_posted: str | None = None,
+        max_pages: int = 3,
+    ) -> dict[str, Any]:
+        """Search LinkedIn posts/content and extract the results page.
+
+        Reproduces the LinkedIn "Posts" content-search tab — the surface for
+        catching informal "we're hiring" / "Buscamos ..." posts before a
+        formal job listing exists.
+
+        Args:
+            keywords: Free-text query (e.g. "Buscamos Unity", "estamos contratando").
+            date_posted: Optional recency filter. One of ``"past-24h"``,
+                ``"past-week"``, ``"past-month"`` (underscore aliases also
+                accepted). Invalid values raise ``FilterValidationError``
+                (a ``ValueError`` subclass).
+            max_pages: Scroll depth, expressed in result "pages" of roughly
+                ``_CONTENT_SCROLLS_PER_PAGE`` scrolls each (default 3). Content
+                search is an infinite scroll with no per-page URL, so this caps
+                how far the page is scrolled rather than fetching discrete
+                ``&start=`` pages.
+
+        Returns:
+            {url, sections: {search_results: text}} plus optional ``references``
+            (``feed_post`` permalinks, post authors, companies) and
+            ``section_errors``. The LLM should parse the raw text to extract
+            each post's author, headline, body, date, and reaction counts.
+        """
+        if (
+            date_posted is not None
+            and date_posted.strip()
+            and date_posted.strip() not in _CONTENT_DATE_POSTED_MAP
+        ):
+            raise FilterValidationError(
+                f"Invalid date_posted {date_posted!r}; expected one of "
+                "'past-24h', 'past-week', 'past-month'."
+            )
+
+        url = self._build_content_search_url(keywords, date_posted=date_posted)
+        max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_PAGE
+        extracted = await self.extract_page(
+            url, section_name="search_results", max_scrolls=max_scrolls
+        )
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["search_results"] = extracted.text
+            if extracted.references:
+                references["search_results"] = extracted.references
+        elif extracted.text == _RATE_LIMITED_MSG:
+            section_errors["search_results"] = {
+                "error_type": "rate_limit",
+                "error_message": extracted.text,
+            }
+        elif extracted.error:
+            section_errors["search_results"] = extracted.error
+
+        result: dict[str, Any] = {"url": url, "sections": sections}
         if references:
             result["references"] = references
         if section_errors:

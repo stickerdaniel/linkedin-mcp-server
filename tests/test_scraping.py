@@ -2707,6 +2707,114 @@ class TestSearchJobs:
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
 
 
+class TestBuildContentSearchUrl:
+    """Tests for _build_content_search_url URL construction."""
+
+    def test_basic_keywords(self):
+        url = LinkedInExtractor._build_content_search_url("Buscamos Unity")
+        assert url == (
+            "https://www.linkedin.com/search/results/content/"
+            "?keywords=Buscamos+Unity&origin=FACETED_SEARCH"
+        )
+
+    def test_date_posted_past_week(self):
+        url = LinkedInExtractor._build_content_search_url(
+            "Buscamos Unity", date_posted="past-week"
+        )
+        assert "datePosted=%5B%22past-week%22%5D" in url
+
+    def test_date_posted_alias_normalized(self):
+        url = LinkedInExtractor._build_content_search_url(
+            "python", date_posted="past_24_hours"
+        )
+        assert "datePosted=%5B%22past-24h%22%5D" in url
+
+    def test_no_date_posted_omits_facet(self):
+        url = LinkedInExtractor._build_content_search_url("python")
+        assert "datePosted" not in url
+
+
+@pytest.mark.asyncio
+class TestSearchPosts:
+    async def test_returns_results_and_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("We're hiring a Unity dev"),
+        ) as mock_extract:
+            result = await extractor.search_posts("Buscamos Unity")
+
+        assert "/search/results/content/" in result["url"]
+        assert "origin=FACETED_SEARCH" in result["url"]
+        assert result["sections"]["search_results"] == "We're hiring a Unity dev"
+        # max_pages default (3) -> 15 scrolls
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="search_results", max_scrolls=15
+        )
+
+    async def test_date_posted_in_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ):
+            result = await extractor.search_posts(
+                "Buscamos Unity", date_posted="past-week"
+            )
+
+        assert "datePosted=%5B%22past-week%22%5D" in result["url"]
+
+    async def test_max_pages_controls_scroll_depth(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ) as mock_extract:
+            await extractor.search_posts("python", max_pages=2)
+
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="search_results", max_scrolls=10
+        )
+
+    async def test_invalid_date_posted_raises(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="Invalid date_posted"):
+            await extractor.search_posts("python", date_posted="last-year")
+
+    async def test_empty_results_omit_optional_keys(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(""),
+        ):
+            result = await extractor.search_posts("nothing matches this query")
+
+        assert result["sections"] == {}
+        assert "references" not in result
+        assert "section_errors" not in result
+
+    async def test_rate_limited_surfaces_section_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(_RATE_LIMITED_MSG),
+        ):
+            result = await extractor.search_posts("python")
+
+        assert result["sections"] == {}
+        assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
+
+
 class TestStripLinkedInNoise:
     def test_strips_footer(self):
         text = "Bill Gates\nChair, Gates Foundation\n\nAbout\nAccessibility\nTalent Solutions\nCareers"

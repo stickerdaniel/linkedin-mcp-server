@@ -35,6 +35,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.send_message = AsyncMock(return_value=scrape_result)
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
+    mock.search_posts = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -1151,6 +1152,76 @@ class TestFeedTools:
             await mcp.call_tool("get_feed", {"num_posts": 51})
 
 
+class TestPostTools:
+    async def test_search_posts_success(self, mock_context):
+        expected = {
+            "url": (
+                "https://www.linkedin.com/search/results/content/"
+                "?keywords=Buscamos+Unity&origin=FACETED_SEARCH"
+            ),
+            "sections": {"search_results": "Acme is hiring a Unity dev!"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_posts")
+        result = await tool_fn(
+            "Buscamos Unity",
+            mock_context,
+            date_posted="past-week",
+            extractor=mock_extractor,
+        )
+        assert "search_results" in result["sections"]
+        mock_extractor.search_posts.assert_awaited_once_with(
+            "Buscamos Unity",
+            date_posted="past-week",
+            max_pages=3,
+        )
+
+    async def test_search_posts_validation_error_surfaced_as_tool_error(
+        self, mock_context
+    ):
+        """A FilterValidationError from the extractor surfaces to the client as
+        a ToolError carrying the same message, not the generic mask."""
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.scraping.extractor import FilterValidationError
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mock_extractor = MagicMock()
+        mock_extractor.search_posts = AsyncMock(
+            side_effect=FilterValidationError("Invalid date_posted 'last-year'")
+        )
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "search_posts")
+
+        with pytest.raises(ToolError, match="Invalid date_posted"):
+            await tool_fn(
+                "python",
+                mock_context,
+                date_posted="last-year",
+                extractor=mock_extractor,
+            )
+
+    async def test_search_posts_rejects_zero_max_pages(self, mock_context):
+        """Verify max_pages=0 is rejected by Field(ge=1) validation."""
+        from pydantic import ValidationError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        with pytest.raises(ValidationError, match="max_pages"):
+            await mcp.call_tool("search_posts", {"keywords": "python", "max_pages": 0})
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.server import create_mcp_server
@@ -1172,6 +1243,7 @@ class TestToolTimeouts:
             "search_conversations",
             "send_message",
             "get_feed",
+            "search_posts",
             "close_session",
         )
 
@@ -1203,6 +1275,7 @@ class TestToolTimeouts:
             "search_conversations",
             "send_message",
             "get_feed",
+            "search_posts",
             "close_session",
         )
 
