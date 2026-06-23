@@ -112,6 +112,10 @@
       "description": "Get recent posts from the authenticated user's LinkedIn home feed"
     },
     {
+      "name": "get_saved_posts",
+      "description": "List posts saved (bookmarked) by the authenticated LinkedIn user"
+    },
+    {
       "name": "search_posts",
       "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month)"
     },

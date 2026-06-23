@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from linkedin_mcp_server.core.exceptions import RateLimitError
-from linkedin_mcp_server.core.utils import detect_rate_limit
+from linkedin_mcp_server.core.utils import detect_rate_limit, scroll_to_bottom
 
 
 @pytest.fixture
@@ -109,3 +109,43 @@ class TestDetectRateLimit:
 
         mock_page.locator = MagicMock(side_effect=locator_side_effect)
         await detect_rate_limit(mock_page)
+
+
+class TestScrollToBottom:
+    async def test_stop_fingerprint_halts_before_scrolling(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value="A post already processed")
+
+        await scroll_to_bottom(
+            page, pause_time=0, stop_fingerprints=["already processed"]
+        )
+
+        # Only the fingerprint probe ran — nothing was scrolled
+        page.evaluate.assert_awaited_once()
+        await_args = page.evaluate.await_args
+        assert await_args is not None
+        assert "innerText" in await_args.args[0]
+
+    async def test_without_fingerprints_scrolls_until_height_stable(self):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value=1000)  # height never grows
+
+        await scroll_to_bottom(page, pause_time=0, max_scrolls=5)
+
+        scripts = [call.args[0] for call in page.evaluate.await_args_list]
+        assert "window.scrollTo(0, document.body.scrollHeight)" in scripts
+        assert not any("innerText" in s for s in scripts)
+        assert len(scripts) == 3  # prev height, scroll, new height -> stop
+
+    async def test_empty_fingerprint_is_dropped(self):
+        """An empty string matches every page — it must not stop the scroll."""
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value=1000)
+
+        await scroll_to_bottom(
+            page, pause_time=0, max_scrolls=5, stop_fingerprints=[""]
+        )
+
+        scripts = [call.args[0] for call in page.evaluate.await_args_list]
+        assert "window.scrollTo(0, document.body.scrollHeight)" in scripts
+        assert not any("innerText" in s for s in scripts)

@@ -42,6 +42,9 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
         return_value=ExtractedSection(text="some text", references=[])
     )
     mock.extract_feed = AsyncMock(return_value=ExtractedSection(text="", references=[]))
+    mock.extract_saved_posts = AsyncMock(
+        return_value=ExtractedSection(text="", references=[])
+    )
     return mock
 
 
@@ -1171,6 +1174,71 @@ class TestFeedTools:
         with pytest.raises(ValidationError, match="num_posts"):
             await mcp.call_tool("get_feed", {"num_posts": 51})
 
+    async def test_get_saved_posts_success(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_saved_posts = AsyncMock(
+            return_value=ExtractedSection(
+                text="Saved post 1\nSaved post 2",
+                references=[
+                    {
+                        "kind": "feed_post",
+                        "url": "/feed/update/urn:li:activity:1234567890/",
+                    }
+                ],
+            )
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_saved_posts")
+        result = await tool_fn(
+            mock_context,
+            num_posts=5,
+            stop_fingerprints=["already seen"],
+            extractor=mock_extractor,
+        )
+        assert result["url"] == "https://www.linkedin.com/my-items/saved-posts/"
+        assert result["sections"]["saved_posts"] == "Saved post 1\nSaved post 2"
+        assert result["references"]["saved_posts"][0]["url"] == (
+            "/feed/update/urn:li:activity:1234567890/"
+        )
+        mock_extractor.extract_saved_posts.assert_awaited_once_with(
+            num_posts=5, stop_fingerprints=["already seen"]
+        )
+
+    async def test_get_saved_posts_rate_limited_surfaces_section_error(
+        self, mock_context
+    ):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_saved_posts = AsyncMock(
+            return_value=ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_saved_posts")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert "saved_posts" not in result["sections"]
+        assert result["section_errors"]["saved_posts"]["error_type"] == "rate_limit"
+
+    async def test_get_saved_posts_rejects_excessive_num_posts(self, mock_context):
+        """Verify num_posts=51 is rejected by Field(le=50) validation."""
+        from pydantic import ValidationError
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        with pytest.raises(ValidationError, match="num_posts"):
+            await mcp.call_tool("get_saved_posts", {"num_posts": 51})
+
 
 class TestPostTools:
     async def test_search_posts_success(self, mock_context):
@@ -1264,6 +1332,7 @@ class TestToolTimeouts:
             "search_conversations",
             "send_message",
             "get_feed",
+            "get_saved_posts",
             "search_posts",
             "close_session",
         )
@@ -1297,6 +1366,7 @@ class TestToolTimeouts:
             "search_conversations",
             "send_message",
             "get_feed",
+            "get_saved_posts",
             "search_posts",
             "close_session",
         )
