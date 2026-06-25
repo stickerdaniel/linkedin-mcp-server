@@ -50,7 +50,7 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
 def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools."""
     mcp = FastMCP(
-        "linkedin_scraper",
+        "mcp-server-linkedin",
         lifespan=browser_lifespan,
         mask_error_details=True,
     )

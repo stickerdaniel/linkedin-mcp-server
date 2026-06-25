@@ -69,7 +69,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 ```json
 {
   "mcpServers": {
-    "linkedin": {
+    "mcp-server-linkedin": {
       "command": "uvx",
       "args": ["mcp-server-linkedin@latest"],
       "env": { "UV_HTTP_TIMEOUT": "300" }
@@ -262,7 +262,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```json
 {
   "mcpServers": {
-    "linkedin": {
+    "mcp-server-linkedin": {
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
@@ -434,7 +434,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 ```json
 {
   "mcpServers": {
-    "linkedin": {
+    "mcp-server-linkedin": {
       "command": "uv",
       "args": ["--directory", "/path/to/linkedin-mcp-server", "run", "-m", "linkedin_mcp_server"]
     }

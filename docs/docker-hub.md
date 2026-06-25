@@ -39,7 +39,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```json
 {
   "mcpServers": {
-    "linkedin": {
+    "mcp-server-linkedin": {
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
@@ -86,7 +86,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```json
 {
   "mcpServers": {
-    "linkedin": {
+    "mcp-server-linkedin": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
