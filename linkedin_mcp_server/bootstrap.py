@@ -587,7 +587,13 @@ async def ensure_tool_ready_or_raise(
                 message=f"{tool_name}: Patchright Chromium browser setup still in progress",
             )
         raise BrowserSetupInProgressError(
-            "LinkedIn setup is not complete yet. The Patchright Chromium browser is still downloading in the background. Retry this tool in a few minutes."
+            "LinkedIn setup is not complete yet: the server is downloading the "
+            "Patchright Chromium browser in the background and will use it "
+            "automatically once ready. Do not install the browser yourself (no "
+            "`patchright install` or `uv run patchright install`), and do not "
+            "restart the server. A manual install only fights the background one "
+            "for the same lock and slows it down. Just wait and call this tool "
+            "again in a minute or two."
         )
 
     if _auth_ready():
