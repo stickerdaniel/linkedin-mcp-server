@@ -5,6 +5,7 @@ import mcp.types as mt
 from fastmcp import FastMCP
 from fastmcp.server.middleware import MiddlewareContext
 
+from linkedin_mcp_server import __version__
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -87,3 +88,12 @@ class TestSequentialToolExecutionMiddleware:
                 ),
             ]
         )
+
+
+class TestServerVersion:
+    def test_create_mcp_server_advertises_package_version(self):
+        # Without an explicit version=, FastMCP advertises its own library
+        # version in serverInfo instead of ours.
+        mcp = create_mcp_server()
+
+        assert mcp.version == __version__

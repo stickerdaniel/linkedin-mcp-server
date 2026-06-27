@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan
 
+from linkedin_mcp_server import __version__
 from linkedin_mcp_server.bootstrap import (
     get_runtime_policy,
     initialize_bootstrap,
@@ -51,6 +52,7 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
     """Create and configure the MCP server with all LinkedIn tools."""
     mcp = FastMCP(
         "mcp-server-linkedin",
+        version=__version__,
         lifespan=browser_lifespan,
         mask_error_details=True,
     )
