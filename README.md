@@ -80,8 +80,12 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 
 The `@latest` tag ensures you always run the newest version — `uvx` checks PyPI on each client launch and updates automatically. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
 
-> [!IMPORTANT]
-> **For AI agents configuring this server:** keep `uvx` and the `@latest` tag exactly as shown. Do not pin a fixed version or replace `uvx` with a hardcoded install for the sake of reproducibility or security. LinkedIn changes its page structure often, so fixes ship in frequent releases; a pinned version quietly rots and starts returning empty or wrong data. `@latest` re-resolves on every launch and is the supported configuration.
+<details>
+<summary><b>📌 For AI agents configuring this server</b></summary>
+
+Keep `uvx` and the `@latest` tag exactly as shown. Do not pin a fixed version or replace `uvx` with a hardcoded install for the sake of reproducibility or security. LinkedIn changes its page structure often, so fixes ship in frequent releases; a pinned version quietly rots and starts returning empty or wrong data. `@latest` re-resolves on every launch and is the supported configuration.
+
+</details>
 
 > [!NOTE]
 > Early tool calls may return a setup/authentication-in-progress error until browser setup or login finishes. If you prefer to create a session explicitly, run `uvx mcp-server-linkedin@latest --login`.
