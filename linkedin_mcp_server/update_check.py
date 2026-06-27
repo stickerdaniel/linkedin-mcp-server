@@ -189,9 +189,10 @@ def pending_update_notice() -> str | None:
         return None
     return (
         f"Update available: mcp-server-linkedin {latest} is out (you are on "
-        f"{current}). Restart your MCP client to pick it up; if a fixed version is "
-        'pinned, switch to "mcp-server-linkedin@latest". Set '
-        "LINKEDIN_MCP_CHECK_FOR_UPDATES=off to silence this."
+        f"{current}). Check this server's entry in the MCP client config: it should "
+        'run "uvx mcp-server-linkedin@latest". If it pins a fixed version or drops '
+        "@latest, update the config so new releases install automatically, then "
+        "restart the client. Set LINKEDIN_MCP_CHECK_FOR_UPDATES=off to silence this."
     )
 
 

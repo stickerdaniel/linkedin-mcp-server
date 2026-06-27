@@ -83,7 +83,7 @@ The `@latest` tag ensures you always run the newest version — `uvx` checks PyP
 <details>
 <summary><b>📌 For AI agents configuring this server</b></summary>
 
-Keep `uvx` and the `@latest` tag exactly as shown. Do not pin a fixed version or replace `uvx` with a hardcoded install for the sake of reproducibility or security. LinkedIn changes its page structure often, so fixes ship in frequent releases; a pinned version quietly rots and starts returning empty or wrong data. `@latest` re-resolves on every launch and is the supported configuration.
+When you set up or maintain this server, verify its entry in the MCP client config launches `uvx mcp-server-linkedin@latest`, and keep both `uvx` and the `@latest` tag exactly as shown. Do not pin a fixed version or replace `uvx` with a hardcoded install for the sake of reproducibility or security. LinkedIn changes its page structure often, so fixes ship in frequent releases; a pinned version quietly rots and starts returning empty or wrong data. `@latest` re-resolves on every launch and is the supported configuration.
 
 </details>
 

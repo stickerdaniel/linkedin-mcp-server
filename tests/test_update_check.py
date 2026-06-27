@@ -31,6 +31,8 @@ class TestPendingUpdateNotice:
         assert notice is not None
         assert "4.18.0" in notice
         assert "4.16.1" in notice
+        assert "uvx mcp-server-linkedin@latest" in notice
+        assert "config" in notice
 
     def test_notice_on_two_patches_behind(self, monkeypatch):
         monkeypatch.setattr(update_check, "__version__", "4.16.1")
