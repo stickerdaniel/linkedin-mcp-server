@@ -174,6 +174,31 @@ def _is_meaningfully_behind(current: Version, latest: Version) -> bool:
     return (latest.micro - current.micro) >= 2
 
 
+def _update_action() -> str:
+    """Method-specific instruction for getting onto the latest release.
+
+    Only Docker is reliably detectable at runtime; uvx, a local ``uv run``, and a
+    Claude Desktop bundle all report as the managed runtime, so the managed branch
+    covers both the uvx-config and the bundle-reinstall paths.
+    """
+    try:
+        from linkedin_mcp_server.bootstrap import RuntimePolicy, get_runtime_policy
+
+        if get_runtime_policy() == RuntimePolicy.DOCKER:
+            return (
+                "You are running in Docker: pull the newest image tag and recreate "
+                "the container."
+            )
+    except Exception:  # noqa: BLE001 - fall back to the managed guidance
+        logger.debug("Could not resolve runtime policy", exc_info=True)
+    return (
+        "If this server is configured via uvx, make sure the entry runs "
+        '"uvx mcp-server-linkedin@latest" rather than a pinned version, then restart '
+        "the client. If you installed it as a Claude Desktop bundle (.mcpb), install "
+        "the latest bundle."
+    )
+
+
 def pending_update_notice() -> str | None:
     """A one-line notice when the installed version is meaningfully behind, else None."""
     if _latest_known is None:
@@ -189,10 +214,8 @@ def pending_update_notice() -> str | None:
         return None
     return (
         f"Update available: mcp-server-linkedin {latest} is out (you are on "
-        f"{current}). Check this server's entry in the MCP client config: it should "
-        'run "uvx mcp-server-linkedin@latest". If it pins a fixed version or drops '
-        "@latest, update the config so new releases install automatically, then "
-        "restart the client. Set LINKEDIN_MCP_CHECK_FOR_UPDATES=off to silence this."
+        f"{current}). {_update_action()} Set LINKEDIN_MCP_CHECK_FOR_UPDATES=off to "
+        "silence this."
     )
 
 

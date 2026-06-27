@@ -4,7 +4,7 @@ import mcp.types as mt
 import pytest
 from fastmcp.tools import ToolResult
 
-from linkedin_mcp_server import update_check
+from linkedin_mcp_server import bootstrap, update_check
 from linkedin_mcp_server.update_check import (
     UpdateNoticeMiddleware,
     _check_disabled,
@@ -22,17 +22,34 @@ def _not_editable(monkeypatch):
 
 
 class TestPendingUpdateNotice:
-    def test_notice_on_minor_bump(self, monkeypatch):
+    def test_notice_on_minor_bump_managed(self, monkeypatch):
         monkeypatch.setattr(update_check, "__version__", "4.16.1")
         monkeypatch.setattr(update_check, "_latest_known", "4.18.0")
+        monkeypatch.setattr(
+            bootstrap, "get_runtime_policy", lambda: bootstrap.RuntimePolicy.MANAGED
+        )
 
         notice = pending_update_notice()
 
         assert notice is not None
         assert "4.18.0" in notice
         assert "4.16.1" in notice
+        # Managed runtime covers both the uvx-config and bundle-reinstall paths.
         assert "uvx mcp-server-linkedin@latest" in notice
-        assert "config" in notice
+        assert ".mcpb" in notice
+
+    def test_notice_for_docker_targets_the_image(self, monkeypatch):
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", "4.18.0")
+        monkeypatch.setattr(
+            bootstrap, "get_runtime_policy", lambda: bootstrap.RuntimePolicy.DOCKER
+        )
+
+        notice = pending_update_notice()
+
+        assert notice is not None
+        assert "Docker" in notice
+        assert "uvx" not in notice
 
     def test_notice_on_two_patches_behind(self, monkeypatch):
         monkeypatch.setattr(update_check, "__version__", "4.16.1")
