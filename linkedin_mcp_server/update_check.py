@@ -36,10 +36,9 @@ _PYPI_URL = "https://pypi.org/pypi/mcp-server-linkedin/json"
 _CACHE_PATH = Path.home() / ".linkedin-mcp" / "update-check.json"
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 _REQUEST_TIMEOUT_SECONDS = 2.0
-_DEV_VERSION = "0.0.0.dev"
 _DISABLED_VALUES = {"0", "false", "off", "no"}
 
-# Latest version learned this process. None until the background check resolves.
+# Latest version learned this process. None until the check resolves.
 _latest_known: str | None = None
 
 
@@ -50,7 +49,12 @@ def _check_disabled() -> bool:
         return True
     if os.environ.get("CI"):
         return True
-    if __version__ == _DEV_VERSION:
+    try:
+        # Source / dev builds (the 0.0.0.dev fallback and PEP 440 dev releases
+        # like 4.17.0.dev1) should never poll PyPI.
+        if Version(__version__).is_devrelease:
+            return True
+    except InvalidVersion:
         return True
     return False
 
@@ -90,6 +94,27 @@ def _fetch_latest_from_pypi() -> str | None:
         return None
 
 
+def _fresh_cached_latest() -> str | None:
+    cached = _read_cache()
+    if cached is not None and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
+        return cached[1]
+    return None
+
+
+def prime_from_cache() -> None:
+    """Synchronously seed ``_latest_known`` from a fresh cache (no network).
+
+    Lets a single fast tool call still surface a notice when an earlier session
+    already wrote the cache, instead of waiting on the background task.
+    """
+    global _latest_known
+    if _check_disabled():
+        return
+    fresh = _fresh_cached_latest()
+    if fresh is not None:
+        _latest_known = fresh
+
+
 async def refresh_latest_version() -> None:
     """Populate ``_latest_known`` from cache or a throttled PyPI request.
 
@@ -100,13 +125,14 @@ async def refresh_latest_version() -> None:
     if _check_disabled():
         return
 
-    cached = _read_cache()
-    if cached is not None and (time.time() - cached[0]) < _CACHE_TTL_SECONDS:
-        _latest_known = cached[1]
+    fresh = _fresh_cached_latest()
+    if fresh is not None:
+        _latest_known = fresh
         return
 
     latest = await asyncio.to_thread(_fetch_latest_from_pypi)
     if latest is None:
+        cached = _read_cache()
         if cached is not None:  # fail open to whatever we last knew
             _latest_known = cached[1]
         return
@@ -129,7 +155,7 @@ def _is_meaningfully_behind(current: Version, latest: Version) -> bool:
 
 def pending_update_notice() -> str | None:
     """A one-line notice when the installed version is meaningfully behind, else None."""
-    if _latest_known is None or __version__ == _DEV_VERSION:
+    if _latest_known is None:
         return None
     try:
         current = Version(__version__)
@@ -163,6 +189,9 @@ class UpdateNoticeMiddleware(Middleware):
     ) -> ToolResult:
         if not self._kicked:
             self._kicked = True
+            # Seed from a fresh cache synchronously so even a single fast call can
+            # surface the notice, then refresh over the network in the background.
+            prime_from_cache()
             # Retain a reference so the task is not garbage-collected mid-flight.
             self._task = asyncio.create_task(refresh_latest_version())
 

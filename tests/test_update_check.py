@@ -6,7 +6,9 @@ from fastmcp.tools import ToolResult
 from linkedin_mcp_server import update_check
 from linkedin_mcp_server.update_check import (
     UpdateNoticeMiddleware,
+    _check_disabled,
     pending_update_notice,
+    prime_from_cache,
     refresh_latest_version,
 )
 
@@ -71,6 +73,21 @@ class TestRefreshLatestVersion:
         fetch.assert_not_called()
         assert update_check._latest_known is None
 
+    async def test_pep440_dev_release_does_not_poll(self, monkeypatch):
+        # A real installed dev build, not just the 0.0.0.dev fallback.
+        monkeypatch.delenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", raising=False)
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.setattr(update_check, "__version__", "4.17.0.dev1")
+        monkeypatch.setattr(update_check, "_latest_known", None)
+        fetch = MagicMock()
+        monkeypatch.setattr(update_check, "_fetch_latest_from_pypi", fetch)
+
+        assert _check_disabled() is True
+        await refresh_latest_version()
+
+        fetch.assert_not_called()
+        assert update_check._latest_known is None
+
     async def test_fetches_and_caches_when_stale(self, monkeypatch):
         monkeypatch.delenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", raising=False)
         monkeypatch.delenv("CI", raising=False)
@@ -107,10 +124,28 @@ class TestRefreshLatestVersion:
         assert update_check._latest_known == "4.17.0"
 
 
+class TestPrimeFromCache:
+    def test_seeds_latest_from_fresh_cache(self, monkeypatch):
+        import time
+
+        monkeypatch.delenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", raising=False)
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", None)
+        monkeypatch.setattr(
+            update_check, "_read_cache", lambda: (time.time(), "4.18.0")
+        )
+
+        prime_from_cache()
+
+        assert update_check._latest_known == "4.18.0"
+
+
 class TestUpdateNoticeMiddleware:
     async def test_appends_notice_once(self, monkeypatch):
         monkeypatch.setattr(update_check, "__version__", "4.16.1")
         monkeypatch.setattr(update_check, "_latest_known", "4.18.0")
+        monkeypatch.setattr(update_check, "prime_from_cache", lambda: None)
 
         async def _noop() -> None:
             return None
