@@ -46,20 +46,20 @@ _DISABLED_VALUES = {"0", "false", "off", "no"}
 _latest_known: str | None = None
 
 
-def _is_editable_install() -> bool:
-    """True for an editable/source checkout (PEP 610 direct_url.json, editable)."""
+def _is_source_install() -> bool:
+    """True for any non-index install: local path, editable, or VCS.
+
+    PEP 610 writes ``direct_url.json`` only for installs that did not come from a
+    package index, so its mere presence marks a source/editable/VCS checkout. Index
+    installs from PyPI (uvx, pip, pipx, including pinned versions) have no such file
+    and remain the audience for the update nudge.
+    """
     for name in ("mcp-server-linkedin", "linkedin-scraper-mcp"):
         try:
             text = distribution(name).read_text("direct_url.json")
         except PackageNotFoundError:
             continue
-        if not text:
-            continue
-        try:
-            info = json.loads(text)
-        except ValueError:
-            continue
-        if info.get("dir_info", {}).get("editable"):
+        if text:
             return True
     return False
 
@@ -71,7 +71,7 @@ def _check_disabled() -> bool:
         return True
     if os.environ.get("CI"):
         return True
-    if _is_editable_install():
+    if _is_source_install():
         return True
     try:
         # Source / dev builds (the 0.0.0.dev fallback and PEP 440 dev releases
