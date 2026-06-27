@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import time
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -42,12 +43,32 @@ _DISABLED_VALUES = {"0", "false", "off", "no"}
 _latest_known: str | None = None
 
 
+def _is_editable_install() -> bool:
+    """True for an editable/source checkout (PEP 610 direct_url.json, editable)."""
+    for name in ("mcp-server-linkedin", "linkedin-scraper-mcp"):
+        try:
+            text = distribution(name).read_text("direct_url.json")
+        except PackageNotFoundError:
+            continue
+        if not text:
+            continue
+        try:
+            info = json.loads(text)
+        except ValueError:
+            continue
+        if info.get("dir_info", {}).get("editable"):
+            return True
+    return False
+
+
 def _check_disabled() -> bool:
     """Whether the network check should be skipped entirely."""
     value = os.environ.get("LINKEDIN_MCP_CHECK_FOR_UPDATES", "").strip().lower()
     if value in _DISABLED_VALUES:
         return True
     if os.environ.get("CI"):
+        return True
+    if _is_editable_install():
         return True
     try:
         # Source / dev builds (the 0.0.0.dev fallback and PEP 440 dev releases

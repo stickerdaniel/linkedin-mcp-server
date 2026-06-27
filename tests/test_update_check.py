@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import mcp.types as mt
+import pytest
 from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server import update_check
@@ -11,6 +12,13 @@ from linkedin_mcp_server.update_check import (
     prime_from_cache,
     refresh_latest_version,
 )
+
+
+@pytest.fixture(autouse=True)
+def _not_editable(monkeypatch):
+    # Keep tests deterministic regardless of how the package under test is
+    # installed; a pip -e checkout would otherwise disable the network path.
+    monkeypatch.setattr(update_check, "_is_editable_install", lambda: False)
 
 
 class TestPendingUpdateNotice:
@@ -78,6 +86,21 @@ class TestRefreshLatestVersion:
         monkeypatch.delenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", raising=False)
         monkeypatch.delenv("CI", raising=False)
         monkeypatch.setattr(update_check, "__version__", "4.17.0.dev1")
+        monkeypatch.setattr(update_check, "_latest_known", None)
+        fetch = MagicMock()
+        monkeypatch.setattr(update_check, "_fetch_latest_from_pypi", fetch)
+
+        assert _check_disabled() is True
+        await refresh_latest_version()
+
+        fetch.assert_not_called()
+        assert update_check._latest_known is None
+
+    async def test_editable_install_does_not_poll(self, monkeypatch):
+        monkeypatch.delenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", raising=False)
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_is_editable_install", lambda: True)
         monkeypatch.setattr(update_check, "_latest_known", None)
         fetch = MagicMock()
         monkeypatch.setattr(update_check, "_fetch_latest_from_pypi", fetch)
