@@ -22,21 +22,21 @@ def _not_editable(monkeypatch):
 
 
 class TestPendingUpdateNotice:
-    def test_notice_on_minor_bump_managed(self, monkeypatch):
+    def test_notice_managed_points_at_uvx_config(self, monkeypatch):
         monkeypatch.setattr(update_check, "__version__", "4.16.1")
         monkeypatch.setattr(update_check, "_latest_known", "4.18.0")
         monkeypatch.setattr(
             bootstrap, "get_runtime_policy", lambda: bootstrap.RuntimePolicy.MANAGED
         )
+        monkeypatch.delenv("LINKEDIN_MCP_RUNTIME", raising=False)
 
         notice = pending_update_notice()
 
         assert notice is not None
         assert "4.18.0" in notice
         assert "4.16.1" in notice
-        # Managed runtime covers both the uvx-config and bundle-reinstall paths.
         assert "uvx mcp-server-linkedin@latest" in notice
-        assert ".mcpb" in notice
+        assert ".mcpb" not in notice
 
     def test_notice_for_docker_targets_the_image(self, monkeypatch):
         monkeypatch.setattr(update_check, "__version__", "4.16.1")
@@ -49,6 +49,21 @@ class TestPendingUpdateNotice:
 
         assert notice is not None
         assert "Docker" in notice
+        assert "uvx" not in notice
+
+    def test_notice_for_mcpb_links_latest_release(self, monkeypatch):
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", "4.18.0")
+        monkeypatch.setattr(
+            bootstrap, "get_runtime_policy", lambda: bootstrap.RuntimePolicy.MANAGED
+        )
+        monkeypatch.setenv("LINKEDIN_MCP_RUNTIME", "mcpb")
+
+        notice = pending_update_notice()
+
+        assert notice is not None
+        assert "releases/latest" in notice
+        assert ".mcpb" in notice
         assert "uvx" not in notice
 
     def test_notice_on_two_patches_behind(self, monkeypatch):

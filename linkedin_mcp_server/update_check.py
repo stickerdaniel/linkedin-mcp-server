@@ -34,6 +34,9 @@ from linkedin_mcp_server import __version__
 logger = logging.getLogger(__name__)
 
 _PYPI_URL = "https://pypi.org/pypi/mcp-server-linkedin/json"
+_LATEST_RELEASE_URL = (
+    "https://github.com/stickerdaniel/linkedin-mcp-server/releases/latest"
+)
 _CACHE_PATH = Path.home() / ".linkedin-mcp" / "update-check.json"
 _CACHE_TTL_SECONDS = 24 * 60 * 60
 _REQUEST_TIMEOUT_SECONDS = 2.0
@@ -174,28 +177,43 @@ def _is_meaningfully_behind(current: Version, latest: Version) -> bool:
     return (latest.micro - current.micro) >= 2
 
 
-def _update_action() -> str:
-    """Method-specific instruction for getting onto the latest release.
+def _runtime_kind() -> str:
+    """Best-effort install method: ``docker``, ``mcpb``, or ``managed`` (uvx/local).
 
-    Only Docker is reliably detectable at runtime; uvx, a local ``uv run``, and a
-    Claude Desktop bundle all report as the managed runtime, so the managed branch
-    covers both the uvx-config and the bundle-reinstall paths.
+    Docker is detected from the runtime policy. A Claude Desktop bundle is otherwise
+    indistinguishable from uvx, so the bundle build sets ``LINKEDIN_MCP_RUNTIME=mcpb``
+    in its manifest; everything else is treated as the uvx/local managed case.
     """
     try:
         from linkedin_mcp_server.bootstrap import RuntimePolicy, get_runtime_policy
 
         if get_runtime_policy() == RuntimePolicy.DOCKER:
-            return (
-                "You are running in Docker: pull the newest image tag and recreate "
-                "the container."
-            )
-    except Exception:  # noqa: BLE001 - fall back to the managed guidance
+            return "docker"
+    except Exception:  # noqa: BLE001 - fall back to env / managed detection
         logger.debug("Could not resolve runtime policy", exc_info=True)
+    if os.environ.get("LINKEDIN_MCP_RUNTIME", "").strip().lower() == "mcpb":
+        return "mcpb"
+    return "managed"
+
+
+def _update_action() -> str:
+    """Method-specific instruction for getting onto the latest release."""
+    kind = _runtime_kind()
+    if kind == "docker":
+        return (
+            "You are running in Docker: pull the newest image tag and recreate the "
+            "container."
+        )
+    if kind == "mcpb":
+        return (
+            "You are running the Claude Desktop bundle, which does not auto-update. "
+            f"Download the latest .mcpb from {_LATEST_RELEASE_URL} and reinstall it "
+            "in Claude Desktop."
+        )
     return (
-        "If this server is configured via uvx, make sure the entry runs "
-        '"uvx mcp-server-linkedin@latest" rather than a pinned version, then restart '
-        "the client. If you installed it as a Claude Desktop bundle (.mcpb), install "
-        "the latest bundle."
+        "Check this server's entry in the MCP client config: it should run "
+        '"uvx mcp-server-linkedin@latest" rather than a pinned version. If it pins a '
+        "version or drops @latest, fix it and restart the client."
     )
 
 

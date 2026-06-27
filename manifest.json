@@ -36,7 +36,10 @@
         "${__dirname}",
         "-m",
         "linkedin_mcp_server"
-      ]
+      ],
+      "env": {
+        "LINKEDIN_MCP_RUNTIME": "mcpb"
+      }
     }
   },
   "tools": [
