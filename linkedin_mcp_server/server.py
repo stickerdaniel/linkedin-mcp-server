@@ -23,6 +23,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
+from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
@@ -57,6 +58,7 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
         mask_error_details=True,
     )
     mcp.add_middleware(SequentialToolExecutionMiddleware())
+    mcp.add_middleware(UpdateNoticeMiddleware())
 
     # Register all tools
     register_person_tools(mcp, tool_timeout=tool_timeout)

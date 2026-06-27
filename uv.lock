@@ -1046,6 +1046,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "fastmcp" },
     { name = "inquirer" },
+    { name = "packaging" },
     { name = "patchright" },
     { name = "python-dotenv" },
 ]
@@ -1067,6 +1068,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "fastmcp", specifier = ">=3.0.0" },
     { name = "inquirer", specifier = ">=3.4.0" },
+    { name = "packaging", specifier = ">=26.2" },
     { name = "patchright", specifier = ">=1.40.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
 ]

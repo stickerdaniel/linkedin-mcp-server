@@ -1,0 +1,134 @@
+from unittest.mock import AsyncMock, MagicMock
+
+import mcp.types as mt
+from fastmcp.tools import ToolResult
+
+from linkedin_mcp_server import update_check
+from linkedin_mcp_server.update_check import (
+    UpdateNoticeMiddleware,
+    pending_update_notice,
+    refresh_latest_version,
+)
+
+
+class TestPendingUpdateNotice:
+    def test_notice_on_minor_bump(self, monkeypatch):
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", "4.18.0")
+
+        notice = pending_update_notice()
+
+        assert notice is not None
+        assert "4.18.0" in notice
+        assert "4.16.1" in notice
+
+    def test_notice_on_two_patches_behind(self, monkeypatch):
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", "4.16.3")
+
+        assert pending_update_notice() is not None
+
+    def test_no_notice_for_single_patch(self, monkeypatch):
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", "4.16.2")
+
+        assert pending_update_notice() is None
+
+    def test_no_notice_when_current(self, monkeypatch):
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", "4.16.1")
+
+        assert pending_update_notice() is None
+
+    def test_no_notice_for_prerelease_latest(self, monkeypatch):
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", "4.18.0rc1")
+
+        assert pending_update_notice() is None
+
+    def test_no_notice_for_dev_install(self, monkeypatch):
+        monkeypatch.setattr(update_check, "__version__", "0.0.0.dev")
+        monkeypatch.setattr(update_check, "_latest_known", "9.9.9")
+
+        assert pending_update_notice() is None
+
+    def test_no_notice_when_latest_unknown(self, monkeypatch):
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", None)
+
+        assert pending_update_notice() is None
+
+
+class TestRefreshLatestVersion:
+    async def test_disabled_skips_network(self, monkeypatch):
+        monkeypatch.setenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", "off")
+        monkeypatch.setattr(update_check, "_latest_known", None)
+        fetch = MagicMock()
+        monkeypatch.setattr(update_check, "_fetch_latest_from_pypi", fetch)
+
+        await refresh_latest_version()
+
+        fetch.assert_not_called()
+        assert update_check._latest_known is None
+
+    async def test_fetches_and_caches_when_stale(self, monkeypatch):
+        monkeypatch.delenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", raising=False)
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", None)
+        monkeypatch.setattr(update_check, "_read_cache", lambda: None)
+        written = {}
+        monkeypatch.setattr(
+            update_check, "_write_cache", lambda latest: written.update(latest=latest)
+        )
+        monkeypatch.setattr(update_check, "_fetch_latest_from_pypi", lambda: "4.18.0")
+
+        await refresh_latest_version()
+
+        assert update_check._latest_known == "4.18.0"
+        assert written == {"latest": "4.18.0"}
+
+    async def test_fresh_cache_skips_network(self, monkeypatch):
+        import time
+
+        monkeypatch.delenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", raising=False)
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", None)
+        monkeypatch.setattr(
+            update_check, "_read_cache", lambda: (time.time(), "4.17.0")
+        )
+        fetch = MagicMock()
+        monkeypatch.setattr(update_check, "_fetch_latest_from_pypi", fetch)
+
+        await refresh_latest_version()
+
+        fetch.assert_not_called()
+        assert update_check._latest_known == "4.17.0"
+
+
+class TestUpdateNoticeMiddleware:
+    async def test_appends_notice_once(self, monkeypatch):
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+        monkeypatch.setattr(update_check, "_latest_known", "4.18.0")
+
+        async def _noop() -> None:
+            return None
+
+        monkeypatch.setattr(update_check, "refresh_latest_version", _noop)
+
+        middleware = UpdateNoticeMiddleware()
+
+        def fresh_result() -> ToolResult:
+            return ToolResult(content=[mt.TextContent(type="text", text="payload")])
+
+        call_next = AsyncMock(side_effect=lambda _ctx: fresh_result())
+
+        first = await middleware.on_call_tool(MagicMock(), call_next)
+        assert len(first.content) == 2
+        assert isinstance(first.content[-1], mt.TextContent)
+        assert "4.18.0" in first.content[-1].text
+
+        # A second call must not nag again.
+        second = await middleware.on_call_tool(MagicMock(), call_next)
+        assert len(second.content) == 1
