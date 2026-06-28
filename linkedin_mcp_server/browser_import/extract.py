@@ -716,6 +716,90 @@ def _release_windows_file_lock(file_path: str, copy_to: str | None = None) -> No
     )
 
 
+def _release_windows_file_lock_batch(copies: list[tuple[str, str]]) -> None:
+    """Release locks on multiple files in a single Restart Manager session.
+
+    Each tuple is ``(source_path, dest_path)``. All source files are registered
+    with one ``RmStartSession`` so they are unlocked atomically, copied to their
+    destinations within the unlock window, and the session is ended once.
+    """
+    import time
+    from ctypes import (
+        windll,  # ty: ignore[unresolved-import]
+        byref,
+        create_unicode_buffer,
+        pointer,
+        WINFUNCTYPE,  # ty: ignore[unresolved-import]
+    )
+    from ctypes.wintypes import DWORD, WCHAR, UINT
+
+    if not copies:
+        return
+
+    RmForceShutdown = 1
+    rstrtmgr = windll.LoadLibrary("Rstrtmgr")
+
+    @WINFUNCTYPE(None, UINT)
+    def _rm_callback(_percent: UINT) -> None:
+        pass
+
+    session_handle = DWORD(0)
+    session_flags = DWORD(0)
+    session_key = (WCHAR * 256)()
+    rstrtmgr.RmStartSession(byref(session_handle), session_flags, session_key)
+    try:
+        for src, _dst in copies:
+            buf = create_unicode_buffer(src)
+            rstrtmgr.RmRegisterResources(
+                session_handle, 1, byref(pointer(buf)), 0, None, 0, None
+            )
+        proc_info_needed = DWORD(0)
+        proc_info = DWORD(0)
+        reboot_reasons = DWORD(0)
+        rstrtmgr.RmGetList(
+            session_handle,
+            byref(proc_info_needed),
+            byref(proc_info),
+            None,
+            byref(reboot_reasons),
+        )
+        if proc_info_needed.value:
+            rstrtmgr.RmShutdown(session_handle, RmForceShutdown, _rm_callback)
+            for _sub in range(100):
+                try:
+                    fd = os.open(
+                        copies[0][0],
+                        os.O_RDONLY | os.O_BINARY,  # ty: ignore[unresolved-attribute]
+                    )
+                    os.close(fd)
+                    break
+                except PermissionError:
+                    time.sleep(0.001)
+            import shutil
+
+            for src, dst in copies:
+                shutil.copy2(src, dst)
+        rstrtmgr.RmEndSession(session_handle)
+    except BaseException:
+        rstrtmgr.RmEndSession(session_handle)
+        raise
+
+
+def _copy_file_via_duplicate_or_rm(src: Path, dst: Path) -> bool:
+    """Try DuplicateHandle for *src*; return True on success.
+
+    On failure return False so the caller can batch into
+    ``_release_windows_file_lock_batch``.
+    """
+    data = _read_locked_file_via_duplicate_handle(os.fspath(src))
+    if data is not None:
+        logger.debug("DuplicateHandle succeeded for %s", src.name)
+        dst.write_bytes(data)
+        os.chmod(dst, 0o600)
+        return True
+    return False
+
+
 def _copy_cookies_db(cookies_db: Path) -> tuple[Path, Path]:
     """Copy the Cookies DB and its WAL/SHM sidecars into a hardened temp dir.
 
@@ -725,7 +809,9 @@ def _copy_cookies_db(cookies_db: Path) -> tuple[Path, Path]:
 
     On Windows, when the source database is locked by a running browser,
     a zero-kill DuplicateHandle approach is tried first (no processes
-    terminated), falling back to the Restart Manager API.
+    terminated). If DuplicateHandle fails for any file, ALL files that still
+    need unlocking are handled within a single Restart Manager session so
+    the DB, WAL, and SHM are captured as one consistent snapshot.
     """
     temp_dir = Path(tempfile.mkdtemp(prefix="linkedin-cookie-import-"))
     try:
@@ -733,58 +819,45 @@ def _copy_cookies_db(cookies_db: Path) -> tuple[Path, Path]:
             os.chmod(temp_dir, 0o700)
         except OSError:
             pass
+
+        # Collect all source files (DB + sidecars)
+        copies: list[tuple[Path, Path]] = []
         db_copy = temp_dir / "Cookies"
-        try:
-            shutil.copy2(cookies_db, db_copy)
-        except PermissionError:
-            if os.name == "nt":
-                data = _read_locked_file_via_duplicate_handle(os.fspath(cookies_db))
-                if data is not None:
-                    logger.debug("DuplicateHandle succeeded for Cookies DB")
-                    db_copy.write_bytes(data)
-                else:
-                    logger.debug(
-                        "DuplicateHandle failed, falling back to Restart "
-                        "Manager for Cookies DB"
-                    )
-                    _release_windows_file_lock(
-                        os.fspath(cookies_db), copy_to=os.fspath(db_copy)
-                    )
-            else:
-                raise
-        os.chmod(db_copy, 0o600)
+        copies.append((cookies_db, db_copy))
         for suffix in ("-wal", "-shm"):
             sidecar = cookies_db.with_name(cookies_db.name + suffix)
             if sidecar.is_file():
-                sidecar_copy = temp_dir / (db_copy.name + suffix)
-                try:
-                    shutil.copy2(sidecar, sidecar_copy)
-                    os.chmod(sidecar_copy, 0o600)
-                except PermissionError:
-                    if os.name == "nt":
-                        data = _read_locked_file_via_duplicate_handle(
-                            os.fspath(sidecar)
-                        )
-                        if data is not None:
-                            logger.debug(
-                                f"DuplicateHandle succeeded for "
-                                f"{cookies_db.name}{suffix}"
-                            )
-                            sidecar_copy.write_bytes(data)
-                            os.chmod(sidecar_copy, 0o600)
-                        else:
-                            logger.debug(
-                                f"DuplicateHandle failed, falling back to "
-                                f"Restart Manager for "
-                                f"{cookies_db.name}{suffix}"
-                            )
-                            _release_windows_file_lock(
-                                os.fspath(sidecar),
-                                copy_to=os.fspath(sidecar_copy),
-                            )
-                            os.chmod(sidecar_copy, 0o600)
-                    else:
-                        raise
+                copies.append((sidecar, temp_dir / (db_copy.name + suffix)))
+
+        # Phase 1: try plain shutil.copy2 for each
+        need_duphandle: list[tuple[Path, Path]] = []
+        for src, dst in copies:
+            try:
+                shutil.copy2(src, dst)
+                os.chmod(dst, 0o600)
+            except PermissionError:
+                if os.name == "nt":
+                    need_duphandle.append((src, dst))
+                else:
+                    raise
+
+        # Phase 2: try DuplicateHandle for locked files
+        need_rm: list[tuple[str, str]] = []
+        for src, dst in need_duphandle:
+            if not _copy_file_via_duplicate_or_rm(src, dst):
+                need_rm.append((os.fspath(src), os.fspath(dst)))
+
+        # Phase 3: single Restart Manager session for ALL remaining files
+        if need_rm:
+            logger.debug(
+                "DuplicateHandle failed for %d file(s), falling back to "
+                "a single Restart Manager batch for all",
+                len(need_rm),
+            )
+            _release_windows_file_lock_batch(need_rm)
+            for _src, dst in need_rm:
+                os.chmod(dst, 0o600)
+
     except BaseException:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
