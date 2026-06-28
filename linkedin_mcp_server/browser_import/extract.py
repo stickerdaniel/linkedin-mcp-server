@@ -629,7 +629,13 @@ def _release_windows_file_lock(file_path: str) -> None:
        ``RmEndSession``, to hit that tiny window.
     """
     import time
-    from ctypes import windll, byref, create_unicode_buffer, pointer, WINFUNCTYPE  # ty: ignore[unresolved-import]
+    from ctypes import (
+        windll,  # ty: ignore[unresolved-import]
+        byref,
+        create_unicode_buffer,
+        pointer,
+        WINFUNCTYPE,  # ty: ignore[unresolved-import]
+    )
     from ctypes.wintypes import DWORD, WCHAR, UINT
 
     RmForceShutdown = 1
@@ -641,7 +647,10 @@ def _release_windows_file_lock(file_path: str) -> None:
 
     for _attempt in range(10):
         try:
-            fd = os.open(file_path, os.O_RDONLY | os.O_BINARY)  # ty: ignore[unresolved-attribute]
+            fd = os.open(
+                file_path,
+                os.O_RDONLY | os.O_BINARY,  # ty: ignore[unresolved-attribute]
+            )
             os.close(fd)
             return  # file is now free
         except PermissionError:
@@ -674,7 +683,10 @@ def _release_windows_file_lock(file_path: str) -> None:
             # retries before RmEndSession.
             for _sub in range(100):
                 try:
-                    fd = os.open(file_path, os.O_RDONLY | os.O_BINARY)  # ty: ignore[unresolved-attribute]
+                    fd = os.open(
+                        file_path,
+                        os.O_RDONLY | os.O_BINARY,  # ty: ignore[unresolved-attribute]
+                    )
                     os.close(fd)
                     break
                 except PermissionError:
