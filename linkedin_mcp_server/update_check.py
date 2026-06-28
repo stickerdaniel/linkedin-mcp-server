@@ -232,8 +232,7 @@ def pending_update_notice() -> str | None:
         return None
     return (
         f"Update available: mcp-server-linkedin {latest} is out (you are on "
-        f"{current}). {_update_action()} Set LINKEDIN_MCP_CHECK_FOR_UPDATES=off to "
-        "silence this."
+        f"{current}). {_update_action()}"
     )
 
 
