@@ -204,8 +204,8 @@ def _windows_master_key(local_state_path: Path) -> bytes:  # pragma: no cover
     buffer_in = ctypes.create_string_buffer(blob_in, len(blob_in))
     blob_in_struct = DATA_BLOB(len(blob_in), buffer_in)
     blob_out = DATA_BLOB()
-    crypt32 = ctypes.windll.crypt32
-    kernel32 = ctypes.windll.kernel32
+    crypt32 = ctypes.windll.crypt32  # ty: ignore[unresolved-attribute]
+    kernel32 = ctypes.windll.kernel32  # ty: ignore[unresolved-attribute]
     if not crypt32.CryptUnprotectData(
         ctypes.byref(blob_in_struct),
         None,
@@ -380,7 +380,7 @@ def _read_locked_file_via_duplicate_handle(file_path: str) -> bytes | None:
     import subprocess
     import threading
     from ctypes import (
-        WinDLL,
+        WinDLL,  # ty: ignore[unresolved-import]
         byref,
         c_long,
         c_longlong,
@@ -629,7 +629,7 @@ def _release_windows_file_lock(file_path: str) -> None:
        ``RmEndSession``, to hit that tiny window.
     """
     import time
-    from ctypes import windll, byref, create_unicode_buffer, pointer, WINFUNCTYPE
+    from ctypes import windll, byref, create_unicode_buffer, pointer, WINFUNCTYPE  # ty: ignore[unresolved-import]
     from ctypes.wintypes import DWORD, WCHAR, UINT
 
     RmForceShutdown = 1
@@ -641,7 +641,7 @@ def _release_windows_file_lock(file_path: str) -> None:
 
     for _attempt in range(10):
         try:
-            fd = os.open(file_path, os.O_RDONLY | os.O_BINARY)
+            fd = os.open(file_path, os.O_RDONLY | os.O_BINARY)  # ty: ignore[unresolved-attribute]
             os.close(fd)
             return  # file is now free
         except PermissionError:
@@ -674,7 +674,7 @@ def _release_windows_file_lock(file_path: str) -> None:
             # retries before RmEndSession.
             for _sub in range(100):
                 try:
-                    fd = os.open(file_path, os.O_RDONLY | os.O_BINARY)
+                    fd = os.open(file_path, os.O_RDONLY | os.O_BINARY)  # ty: ignore[unresolved-attribute]
                     os.close(fd)
                     break
                 except PermissionError:
