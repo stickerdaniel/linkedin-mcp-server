@@ -344,32 +344,48 @@ def discover_profiles(browser: str | None = None) -> list[BrowserProfile]:
 
     Keeps only profiles with a resolvable Cookies DB. Does not decrypt; ``li_at``
     candidacy is decided later during extraction.
+
+    For browsers declared as ``layout="flat"`` (Opera, Opera GX) the flat root
+    is tried first; if no cookies DB is found there, the standard ``Default/``
+    profile layout is attempted as a fallback. Some Opera-on-Windows
+    installations use the standard Chromium profile subdirectory instead of
+    placing cookies at the user-data root.
     """
     discovered: list[BrowserProfile] = []
     for browser_key, root in browser_roots(browser):
         spec = SUPPORTED_BROWSERS[browser_key]
         layout = str(spec.get("layout", "profiles"))
-        for dir_name, display_name in enumerate_profiles(root, layout=layout):
-            profile_path = root / dir_name  # root / "." == root for flat layout
-            cookies_db = resolve_cookies_db(profile_path)
-            if cookies_db is None:
+        layouts_to_try: list[str] = (
+            ["profiles", "flat"] if layout == "flat" else [layout]
+        )
+        tried_layouts: set[str] = set()
+        for current_layout in layouts_to_try:
+            if current_layout in tried_layouts:
                 continue
-            discovered.append(
-                BrowserProfile(
-                    browser=browser_key,
-                    browser_label=str(spec["label"]),
-                    safe_storage_label=str(spec["safe_storage"]),
-                    profile_dir_name=dir_name,
-                    display_name=display_name,
-                    user_data_root=root,
-                    profile_path=profile_path,
-                    cookies_db=cookies_db,
-                    local_state_path=root / "Local State",
-                    mac_keychain_service=str(spec.get("mac_keychain_service", "")),
-                    mac_keychain_account=str(spec.get("mac_keychain_account", "")),
-                    layout=layout,
+            tried_layouts.add(current_layout)
+            for dir_name, display_name in enumerate_profiles(
+                root, layout=current_layout
+            ):
+                profile_path = root / dir_name
+                cookies_db = resolve_cookies_db(profile_path)
+                if cookies_db is None:
+                    continue
+                discovered.append(
+                    BrowserProfile(
+                        browser=browser_key,
+                        browser_label=str(spec["label"]),
+                        safe_storage_label=str(spec["safe_storage"]),
+                        profile_dir_name=dir_name,
+                        display_name=display_name,
+                        user_data_root=root,
+                        profile_path=profile_path,
+                        cookies_db=cookies_db,
+                        local_state_path=root / "Local State",
+                        mac_keychain_service=str(spec.get("mac_keychain_service", "")),
+                        mac_keychain_account=str(spec.get("mac_keychain_account", "")),
+                        layout=current_layout,
+                    )
                 )
-            )
     logger.debug(
         "Discovered %d browser profile(s)%s",
         len(discovered),
