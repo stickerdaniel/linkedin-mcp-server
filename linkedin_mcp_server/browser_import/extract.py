@@ -613,8 +613,12 @@ def _read_locked_file_via_duplicate_handle(file_path: str) -> bytes | None:
     return data
 
 
-def _release_windows_file_lock(file_path: str) -> None:
+def _release_windows_file_lock(file_path: str, copy_to: str | None = None) -> None:
     """Use the Windows Restart Manager to kill processes holding a lock on *file_path*.
+
+    When *copy_to* is provided, the file is copied there during the lock-release
+    window (before ``RmEndSession``), so the browser cannot reacquire the lock
+    before the copy completes.
 
     The Restart Manager (``Rstrtmgr.dll``) terminates only the specific utility
     process that holds the file lock (e.g. the Chromium network service), not the
@@ -688,6 +692,10 @@ def _release_windows_file_lock(file_path: str) -> None:
                         os.O_RDONLY | os.O_BINARY,  # ty: ignore[unresolved-attribute]
                     )
                     os.close(fd)
+                    if copy_to is not None:
+                        import shutil
+
+                        shutil.copy2(file_path, copy_to)
                     break
                 except PermissionError:
                     time.sleep(0.001)
@@ -731,18 +739,9 @@ def _copy_cookies_db(cookies_db: Path) -> tuple[Path, Path]:
                         "DuplicateHandle failed, falling back to Restart "
                         "Manager for Cookies DB"
                     )
-                    _release_windows_file_lock(os.fspath(cookies_db))
-                    for _copy_retry in range(10):
-                        try:
-                            shutil.copy2(cookies_db, db_copy)
-                            break
-                        except PermissionError:
-                            if _copy_retry < 9:
-                                import time
-
-                                time.sleep(0.001)
-                            else:
-                                raise
+                    _release_windows_file_lock(
+                        os.fspath(cookies_db), copy_to=os.fspath(db_copy)
+                    )
             else:
                 raise
         os.chmod(db_copy, 0o600)
