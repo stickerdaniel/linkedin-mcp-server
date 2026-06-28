@@ -85,6 +85,13 @@
       "url": "https://github.com/pyca/cryptography",
       "branch": "main",
       "specialNotes": "PyCA cryptography. AES-CBC/GCM + PBKDF2 for Chromium cookie decryption (browser session import, #534)."
+    },
+    {
+      "type": "git",
+      "name": "packaging",
+      "url": "https://github.com/pypa/packaging",
+      "branch": "main",
+      "specialNotes": "PyPA packaging. version.Version parsing/comparison for the PyPI update check (update_check.py)."
     }
   ]
 }
