@@ -656,6 +656,10 @@ def _release_windows_file_lock(file_path: str, copy_to: str | None = None) -> No
                 os.O_RDONLY | os.O_BINARY,  # ty: ignore[unresolved-attribute]
             )
             os.close(fd)
+            if copy_to is not None:
+                import shutil
+
+                shutil.copy2(file_path, copy_to)
             return  # file is now free
         except PermissionError:
             pass
@@ -679,6 +683,7 @@ def _release_windows_file_lock(file_path: str, copy_to: str | None = None) -> No
             None,
             byref(reboot_reasons),
         )
+        copied: bool = False
         if proc_info_needed.value:
             rstrtmgr.RmShutdown(session_handle, RmForceShutdown, _rm_callback)
 
@@ -696,11 +701,14 @@ def _release_windows_file_lock(file_path: str, copy_to: str | None = None) -> No
                         import shutil
 
                         shutil.copy2(file_path, copy_to)
+                        copied = True
                     break
                 except PermissionError:
                     time.sleep(0.001)
 
         rstrtmgr.RmEndSession(session_handle)
+        if copied:
+            return
         time.sleep(0.5)
 
     raise PermissionError(
@@ -770,8 +778,10 @@ def _copy_cookies_db(cookies_db: Path) -> tuple[Path, Path]:
                                 f"Restart Manager for "
                                 f"{cookies_db.name}{suffix}"
                             )
-                            _release_windows_file_lock(os.fspath(sidecar))
-                            shutil.copy2(sidecar, sidecar_copy)
+                            _release_windows_file_lock(
+                                os.fspath(sidecar),
+                                copy_to=os.fspath(sidecar_copy),
+                            )
                             os.chmod(sidecar_copy, 0o600)
                     else:
                         raise
