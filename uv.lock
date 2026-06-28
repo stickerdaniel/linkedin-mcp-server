@@ -1040,7 +1040,7 @@ wheels = [
 
 [[package]]
 name = "mcp-server-linkedin"
-version = "4.16.1"
+version = "4.17.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
