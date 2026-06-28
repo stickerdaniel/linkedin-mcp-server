@@ -560,7 +560,7 @@ def _read_locked_file_via_duplicate_handle(file_path: str) -> bytes | None:
         try:
             for hval in handles:
                 path = _try_get_path(h_proc, hval, timeout_s=0.15)
-                if path and target_norm in path.lower().replace("\\??\\", "").replace(
+                if path and target_norm == path.lower().replace("\\??\\", "").replace(
                     "\\\\?\\", ""
                 ):
                     found_handle_val = hval
@@ -732,7 +732,17 @@ def _copy_cookies_db(cookies_db: Path) -> tuple[Path, Path]:
                         "Manager for Cookies DB"
                     )
                     _release_windows_file_lock(os.fspath(cookies_db))
-                    shutil.copy2(cookies_db, db_copy)
+                    for _copy_retry in range(10):
+                        try:
+                            shutil.copy2(cookies_db, db_copy)
+                            break
+                        except PermissionError:
+                            if _copy_retry < 9:
+                                import time
+
+                                time.sleep(0.001)
+                            else:
+                                raise
             else:
                 raise
         os.chmod(db_copy, 0o600)
