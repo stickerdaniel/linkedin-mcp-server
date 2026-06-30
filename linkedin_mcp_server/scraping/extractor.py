@@ -1526,11 +1526,19 @@ class LinkedInExtractor:
                     break
 
         if is_job:
+            # Expand the collapsed job description by clicking the "See more" button.
+            # Uses a text-based selector scoped to <main> — no class names tied to
+            # LinkedIn's CSS bundle (per project scraping rules in CLAUDE.md).
+            button = self._page.locator("main button").filter(
+                has_text=re.compile(r"^See more\b", re.IGNORECASE)
+            )
             try:
-                button = self._page.locator("button.show-more-less-html__button--more")
-                if await button.count() > 0 and await button.first.is_visible():
-                    await button.first.click(timeout=3000)
-                    await asyncio.sleep(0.5)
+                if await button.count() > 0:
+                    target = button.first
+                    await target.scroll_into_view_if_needed(timeout=2000)
+                    if await target.is_visible():
+                        await target.click(timeout=3000)
+                        await asyncio.sleep(0.5)
             except Exception as e:
                 logger.debug("Job description 'See more' click failed: %s", e)
 
