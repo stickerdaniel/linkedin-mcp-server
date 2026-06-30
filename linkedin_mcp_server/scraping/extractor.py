@@ -1483,6 +1483,7 @@ class LinkedInExtractor:
         # panel loads asynchronously. Wait until the panel replaces the sidebar.
         # The sidebar placeholder starts with "Load more" or "More profiles for you".
         is_details = "/details/" in url
+        is_job = "/jobs/view/" in url
         if is_details:
             try:
                 await self._page.wait_for_function(
@@ -1523,6 +1524,15 @@ class LinkedInExtractor:
                 except Exception as e:
                     logger.debug("Show more click failed: %s", e)
                     break
+
+        if is_job:
+            try:
+                button = self._page.locator("button.show-more-less-html__button--more")
+                if await button.count() > 0 and await button.first.is_visible():
+                    await button.first.click(timeout=3000)
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.debug("Job description 'See more' click failed: %s", e)
 
         # Scroll to trigger lazy loading
         if is_activity:
