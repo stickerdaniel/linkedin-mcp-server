@@ -3656,7 +3656,6 @@ class LinkedInExtractor:
 
         compose_box = await self._resolve_message_compose_box()
         if compose_box is None:
-            await self._dismiss_message_ui()
             return self._message_action_result(
                 thread_url,
                 "composer_unavailable",
@@ -3664,7 +3663,6 @@ class LinkedInExtractor:
             )
 
         if not confirm_send:
-            await self._dismiss_message_ui()
             return self._message_action_result(
                 thread_url,
                 "confirmation_required",
@@ -3682,7 +3680,6 @@ class LinkedInExtractor:
             }"""
         )
         if not focused:
-            await self._dismiss_message_ui()
             return self._message_action_result(
                 thread_url,
                 "compose_interact_failed",
@@ -3707,7 +3704,6 @@ class LinkedInExtractor:
             await self._page.keyboard.press("Enter")
 
         if not await self._message_text_visible(message):
-            await self._dismiss_message_ui()
             return self._message_action_result(
                 thread_url,
                 "send_unavailable",
