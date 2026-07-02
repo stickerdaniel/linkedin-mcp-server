@@ -3718,6 +3718,7 @@ class LinkedInExtractor:
             thread_url,
             "sent",
             "Reply sent.",
+            recipient_selected=True,
             sent=True,
         )
 
