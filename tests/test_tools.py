@@ -824,6 +824,40 @@ class TestMessagingTools:
             thread_id=None,
         )
 
+    async def test_send_message_with_thread_id(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc123/",
+            "status": "sent",
+            "message": "Reply sent.",
+            "recipient_selected": True,
+            "sent": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        result = await tool_fn(
+            "testuser",
+            "Hello!",
+            True,
+            mock_context,
+            thread_id="2-abc123",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "sent"
+        mock_extractor.send_message.assert_awaited_once_with(
+            "testuser",
+            "Hello!",
+            confirm_send=True,
+            profile_urn=None,
+            thread_id="2-abc123",
+        )
+
     async def test_send_message_error(self, mock_context):
         from fastmcp.exceptions import ToolError
 

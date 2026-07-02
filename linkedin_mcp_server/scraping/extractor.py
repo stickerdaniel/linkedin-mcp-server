@@ -3674,8 +3674,7 @@ class LinkedInExtractor:
         focused = await self._page.evaluate(
             """() => {
                 const el = document.querySelector(
-                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
-                    + 'div[role="textbox"][contenteditable="true"]'
+                    'div[role="textbox"][contenteditable="true"]'
                 );
                 if (!el) return false;
                 el.focus();
@@ -3697,8 +3696,7 @@ class LinkedInExtractor:
         sent_via_js = await self._page.evaluate(
             """() => {
                 const btn = Array.from(document.querySelectorAll(
-                    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
-                    + 'button[data-control-name="send"]'
+                    'button[type="submit"], button[data-control-name="send"]'
                 )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
                 if (!btn) return false;
                 btn.click();
