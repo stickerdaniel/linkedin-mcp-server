@@ -787,7 +787,7 @@ class TestMessagingTools:
         assert result["status"] == "sent"
         assert result["sent"] is True
         mock_extractor.send_message.assert_awaited_once_with(
-            "testuser", "Hello!", confirm_send=True, profile_urn=None
+            "testuser", "Hello!", confirm_send=True, profile_urn=None, thread_id=None
         )
 
     async def test_send_message_with_profile_urn(self, mock_context):
@@ -817,7 +817,11 @@ class TestMessagingTools:
 
         assert result["status"] == "sent"
         mock_extractor.send_message.assert_awaited_once_with(
-            "testuser", "Hello!", confirm_send=True, profile_urn="ACoAAB1IelEB"
+            "testuser",
+            "Hello!",
+            confirm_send=True,
+            profile_urn="ACoAAB1IelEB",
+            thread_id=None,
         )
 
     async def test_send_message_error(self, mock_context):

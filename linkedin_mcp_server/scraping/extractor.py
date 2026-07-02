@@ -3621,6 +3621,108 @@ class LinkedInExtractor:
             references=references,
         )
 
+    async def _reply_in_thread(
+        self,
+        thread_id: str,
+        message: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Reply to an existing messaging thread by thread ID.
+
+        Navigates to the thread page and uses the inline reply input at the
+        bottom, avoiding the compose overlay that creates a new DM thread.
+
+        Args:
+            thread_id: LinkedIn messaging thread ID.
+            message: The message text to send.
+            confirm_send: Must be True to actually send (False does a dry run).
+        """
+        thread_url = f"https://www.linkedin.com/messaging/thread/{thread_id}/"
+        await self._navigate_to_page(thread_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Thread page did not load for thread_id=%s", thread_id)
+            return self._message_action_result(
+                thread_url,
+                "send_failed",
+                "Thread page did not load.",
+            )
+
+        await handle_modal_close(self._page)
+
+        compose_box = await self._resolve_message_compose_box()
+        if compose_box is None:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                thread_url,
+                "composer_unavailable",
+                "LinkedIn did not expose a usable reply composer on the thread page.",
+            )
+
+        if not confirm_send:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                thread_url,
+                "confirmation_required",
+                "Set confirm_send=true to send the message.",
+            )
+
+        focused = await self._page.evaluate(
+            """() => {
+                const el = document.querySelector(
+                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
+                    + 'div[role="textbox"][contenteditable="true"]'
+                );
+                if (!el) return false;
+                el.focus();
+                return true;
+            }"""
+        )
+        if not focused:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                thread_url,
+                "compose_interact_failed",
+                "Could not focus reply compose box via JavaScript.",
+            )
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(message, delay=15)
+        await asyncio.sleep(0.3)
+
+        await asyncio.sleep(1.0)
+        sent_via_js = await self._page.evaluate(
+            """() => {
+                const btn = Array.from(document.querySelectorAll(
+                    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
+                    + 'button[data-control-name="send"]'
+                )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not sent_via_js:
+            await self._page.keyboard.press("Enter")
+
+        if not await self._message_text_visible(message):
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                thread_url,
+                "send_unavailable",
+                "LinkedIn did not confirm that the reply was sent.",
+            )
+
+        return self._message_action_result(
+            thread_url,
+            "sent",
+            "Reply sent.",
+            sent=True,
+        )
+
     async def send_message(
         self,
         linkedin_username: str,
@@ -3628,16 +3730,35 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
         """Send a message to a LinkedIn user with explicit confirmation gating.
 
+        When ``thread_id`` is provided, the tool replies to the existing
+        messaging thread instead of opening a new compose overlay. When
+        ``thread_id`` is not provided, the tool navigates to the recipient's
+        profile and opens the compose overlay as before.
+
         Args:
-            linkedin_username: LinkedIn username of the recipient.
+            linkedin_username: LinkedIn username of the recipient. Ignored when
+                ``thread_id`` is provided.
             message: The message text to send.
             confirm_send: Must be True to actually send (False does a dry run).
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
                 compose URL directly, bypassing the Message-button lookup.
+                Ignored when ``thread_id`` is provided.
+            thread_id: Optional LinkedIn messaging thread ID. When provided the
+                tool replies inline to the existing thread instead of creating
+                a new compose overlay. Use ``get_conversation`` or
+                ``search_conversations`` to obtain thread IDs.
         """
+        if thread_id:
+            return await self._reply_in_thread(
+                thread_id,
+                message,
+                confirm_send=confirm_send,
+            )
+
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
