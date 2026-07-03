@@ -106,6 +106,7 @@ Keep `uvx` and the `@latest` tag exactly as shown. Do not pin a fixed version or
 
 - `--login` - Open browser to log in and save persistent profile
 - `--import-from-browser [BROWSER]` - Import a LinkedIn session from a locally logged-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, or `auto`). Bare flag picks `auto`, which auto-selects the most recently used browser with a live LinkedIn session.
+- `--cookie LI_AT` - Authenticate non-interactively with a LinkedIn cookie (no browser window — for headless / remote servers and Docker). Pass the `li_at` cookie value, or a `li_at=...; JSESSIONID=...` cookie string. Overrides the `LINKEDIN_COOKIE` env var. See [Headless / remote server](#headless--remote-server-no-browser). Note: a value passed on the command line is visible to other local processes via `ps`; on a shared host prefer the `LINKEDIN_COOKIE` env var.
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
@@ -204,6 +205,46 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 
 </details>
 
+### Headless / remote server (no browser)
+
+On a remote or headless host there is no display for the `--login` window and no local browser to import from. Pass your LinkedIn `li_at` cookie with `--cookie` and the server authenticates and scrapes fully headless — **no browser window is ever opened**.
+
+**1. Get your `li_at` cookie.** In a desktop browser where you are logged into LinkedIn: open DevTools → **Application** (Chrome) / **Storage** (Firefox) → **Cookies** → `https://www.linkedin.com` → copy the value of the `li_at` cookie.
+
+**2. Configure the MCP client** to pass it as an argument (the form MCP clients use):
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "uvx",
+      "args": ["mcp-server-linkedin@latest", "--cookie", "AQEDAReplaceWithYourLiAtValue"]
+    }
+  }
+}
+```
+
+You can also pass a full cookie string instead of the bare value: `--cookie "li_at=...; JSESSIONID=..."`. The server validates the cookie against your feed on first use, then reuses it from `~/.linkedin-mcp/`.
+
+**Choosing how clients reach a remote server:**
+
+- **stdio over SSH** (nothing exposed on the network; SSH provides auth/encryption) — the client runs, e.g., `ssh user@host uvx mcp-server-linkedin@latest --cookie "$LI_AT" --transport stdio`.
+- **streamable-http** (reachable over the network):
+
+  ```bash
+  uvx mcp-server-linkedin@latest --cookie "$LI_AT" --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
+  ```
+
+  > [!WARNING]
+  > The MCP endpoint has **no built-in authentication** — anyone who can reach the port can use your LinkedIn session. Bind to a loopback/private interface and put it behind a reverse proxy or firewall (or an SSH tunnel) rather than exposing `0.0.0.0` directly.
+
+**Notes:**
+
+- `--cookie` overrides the `LINKEDIN_COOKIE` environment variable. On a shared host prefer `LINKEDIN_COOKIE` (a value passed on the command line is visible to other local processes via `ps`).
+- The stored `~/.linkedin-mcp/cookies.json` is written with `0o600` permissions. The `li_at` cookie is a long-lived credential — treat it like a password.
+- If the cookie is expired or revoked the first tool call returns a clear authentication error (it will **not** try to open a login window). Copy a fresh `li_at` and pass it again; run `--logout` first if a stale session is cached.
+- For Docker, see the [Docker Setup](#-docker-setup) section — `--cookie` removes the need to create and mount a host profile.
+
 <br/>
 <br/>
 
@@ -254,7 +295,28 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 ### Authentication
 
-Docker runs headless (no browser window), so you need to create a browser profile locally first and mount it into the container.
+Docker runs headless (no browser window). You have two options:
+
+- **Option A — Pass a cookie (no host browser needed).** Supply your LinkedIn `li_at` cookie with `--cookie`; the container authenticates headless with nothing to mount. Easiest for remote/CI hosts. See [Headless / remote server](#headless--remote-server-no-browser) for how to obtain `li_at`.
+
+  ```json
+  {
+    "mcpServers": {
+      "mcp-server-linkedin": {
+        "command": "docker",
+        "args": [
+          "run", "--rm", "-i",
+          "stickerdaniel/linkedin-mcp-server:latest",
+          "--cookie", "AQEDAReplaceWithYourLiAtValue"
+        ]
+      }
+    }
+  }
+  ```
+
+  Or via Docker Compose / `-e`: `docker run --rm -i -e LINKEDIN_COOKIE=AQED... stickerdaniel/linkedin-mcp-server:latest`. Without a mounted `~/.linkedin-mcp` volume the session lives only for the container's lifetime and is re-seeded from the cookie on each start.
+
+- **Option B — Create and mount a host profile** (below). Useful if you can't easily extract a raw cookie.
 
 **Step 1: Create profile on the host (one-time setup)**
 
@@ -285,7 +347,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 > Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx mcp-server-linkedin@latest --login` again if you encounter authentication issues.
 
 > [!NOTE]
-> **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
+> **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Either authenticate non-interactively with `--cookie` / `LINKEDIN_COOKIE` (Option A above), or create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
 
 ### Docker Setup Help
 
@@ -301,6 +363,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 
 **CLI Options:**
 
+- `--cookie LI_AT` - Authenticate non-interactively with a LinkedIn cookie — the simplest way to authenticate Docker without mounting a host profile. Pass the `li_at` cookie value, or a `li_at=...; JSESSIONID=...` cookie string. Equivalent env var: `LINKEDIN_COOKIE` (preferred for compose / shared hosts). See [Headless / remote server](#headless--remote-server-no-browser).
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
@@ -316,7 +379,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (rarely needed in Docker)
 
 > [!NOTE]
-> `--login` and `--no-headless` are not available in Docker (no display server). Use the [uvx setup](#-uvx-setup-recommended---universal) to create profiles.
+> `--login` and `--no-headless` are not available in Docker (no display server). Either pass `--cookie` / `LINKEDIN_COOKIE` (above), or create a profile with the [uvx setup](#-uvx-setup-recommended---universal) and mount it.
 
 **HTTP Mode Example (for web-based MCP clients):**
 
@@ -411,6 +474,7 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 
 - `--login` - Open browser to log in and save persistent profile
 - `--import-from-browser [BROWSER]` - Import a LinkedIn session from a locally logged-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, or `auto`). Bare flag picks `auto`, which auto-selects the most recently used browser with a live LinkedIn session.
+- `--cookie LI_AT` - Authenticate non-interactively with a LinkedIn cookie (no browser window — for headless / remote servers and Docker). Pass the `li_at` cookie value, or a `li_at=...; JSESSIONID=...` cookie string. Overrides the `LINKEDIN_COOKIE` env var. See [Headless / remote server](#headless--remote-server-no-browser). Note: a value passed on the command line is visible to other local processes via `ps`; on a shared host prefer the `LINKEDIN_COOKIE` env var.
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)

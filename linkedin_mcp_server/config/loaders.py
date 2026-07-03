@@ -79,6 +79,7 @@ class EnvironmentKeys:
     IMPORT_FROM_BROWSER = "IMPORT_FROM_BROWSER"
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
+    LINKEDIN_COOKIE = "LINKEDIN_COOKIE"
 
 
 def is_interactive_environment() -> bool:
@@ -243,6 +244,13 @@ def load_from_env(config: AppConfig) -> AppConfig:
         elif auto_import_value in TRUTHY_VALUES:
             config.browser.auto_import_from_browser = True
 
+    # Raw LinkedIn cookie for non-interactive headless / remote auth. The
+    # --cookie argument is the preferred form (see load_from_args) and overrides
+    # this env fallback. Not normalized: a cookie value is case- and
+    # whitespace-sensitive.
+    if cookie_env := os.environ.get(EnvironmentKeys.LINKEDIN_COOKIE):
+        config.server.cookie = cookie_env
+
     # Install full chromium up front instead of lazily on the first headed login.
     if eager_full_env := os.environ.get(EnvironmentKeys.EAGER_FULL_CHROMIUM):
         eager_full_value = _normalize_env(eager_full_env)
@@ -395,6 +403,21 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
+        "--cookie",
+        type=str,
+        default=None,
+        metavar="LI_AT",
+        help=(
+            "Authenticate non-interactively with a LinkedIn cookie (headless / "
+            "remote servers, no browser window). Pass the 'li_at' cookie value, "
+            "or a 'li_at=...; JSESSIONID=...' cookie string. Overrides the "
+            "LINKEDIN_COOKIE env var. NOTE: the value is visible to other local "
+            "processes via the process list (ps); on a shared host prefer the "
+            "LINKEDIN_COOKIE env var."
+        ),
+    )
+
+    parser.add_argument(
         "--import-from-browser",
         nargs="?",
         const="auto",
@@ -522,6 +545,10 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.user_data_dir:
         config.browser.user_data_dir = args.user_data_dir
+
+    # CLI --cookie wins over the LINKEDIN_COOKIE env fallback set in load_from_env.
+    if args.cookie:
+        config.server.cookie = args.cookie
 
     if args.import_from_browser is not None:
         value = args.import_from_browser.strip().lower()

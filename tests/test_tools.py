@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import Any, Callable, Coroutine, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -218,6 +219,11 @@ class TestPersonTool:
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.get_runtime_policy",
             lambda: "managed",
+        )
+        # No cookie configured, so handle_auth_error takes the relogin path.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_config",
+            lambda: SimpleNamespace(server=SimpleNamespace(cookie=None)),
         )
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.close_browser",
@@ -441,6 +447,11 @@ class TestPersonTool:
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.get_runtime_policy",
             lambda: "managed",
+        )
+        # No cookie configured, so handle_auth_error takes the relogin path.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_config",
+            lambda: SimpleNamespace(server=SimpleNamespace(cookie=None)),
         )
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.close_browser",

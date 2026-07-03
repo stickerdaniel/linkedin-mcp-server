@@ -12,6 +12,7 @@ from linkedin_mcp_server.bootstrap import (
     invalidate_auth_and_trigger_relogin,
     invalidate_browser_setup,
 )
+from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core.exceptions import AuthenticationError, NetworkError
 from linkedin_mcp_server.drivers.browser import (
     close_browser,
@@ -21,6 +22,7 @@ from linkedin_mcp_server.drivers.browser import (
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
     BrowserBinaryMissingError,
+    CookieAuthenticationError,
     DockerHostLoginRequiredError,
     LinuxBrowserDependencyError,
 )
@@ -56,9 +58,25 @@ async def handle_auth_error(
 ) -> NoReturn:
     """Close the stale browser and trigger interactive re-login.
 
-    In Docker mode a GUI browser cannot be opened, so we raise
-    ``DockerHostLoginRequiredError`` for a consistent user message.
+    Two cases cannot open a GUI login window and instead raise a terminal error:
+    a supplied cookie (--cookie / LINKEDIN_COOKIE), checked first so its message
+    is accurate even inside Docker, and Docker mode itself.
     """
+    if get_config().server.cookie:
+        # Headless / remote auth: the cookie is invalid or expired and there is
+        # no display to recover on. Surface a terminal error (the operator must
+        # supply a fresh cookie) rather than looping on a relogin that can't run.
+        try:
+            await close_browser()
+        except Exception as close_exc:
+            logger.warning("Failed to close browser (ignored): %s", close_exc)
+        raise CookieAuthenticationError(
+            "The supplied LinkedIn cookie (--cookie / LINKEDIN_COOKIE) is invalid "
+            "or expired. A login window cannot be opened on a headless/remote "
+            "server. Supply a fresh 'li_at' cookie and restart the server "
+            "(run --logout first if a stale session is cached)."
+        ) from error
+
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         raise DockerHostLoginRequiredError(
             "No valid LinkedIn session is available in Docker. "

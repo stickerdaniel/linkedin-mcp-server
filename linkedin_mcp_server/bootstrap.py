@@ -20,6 +20,7 @@ from fastmcp import Context
 from linkedin_mcp_server.authentication import get_authentication_source
 from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.core import AuthenticationError
 from linkedin_mcp_server.drivers.browser import (
     close_browser,
     current_headless,
@@ -103,6 +104,8 @@ class BootstrapState:
     login_task: asyncio.Task[None] | None = None
     import_task: asyncio.Task[bool] | None = None
     import_attempted: bool = False
+    cookie_seed_task: asyncio.Task[bool] | None = None
+    cookie_seed_attempted: bool = False
     initialized: bool = False
 
 
@@ -113,7 +116,12 @@ _lock = asyncio.Lock()
 def reset_bootstrap_for_testing() -> None:
     """Reset bootstrap singleton state for test isolation."""
     global _state, _lock, _AUTO_IMPORT_ANNOUNCED
-    for task in (_state.setup_task, _state.login_task, _state.import_task):
+    for task in (
+        _state.setup_task,
+        _state.login_task,
+        _state.import_task,
+        _state.cookie_seed_task,
+    ):
         if task is not None and not task.done():
             task.cancel()
     _state = BootstrapState()
@@ -557,6 +565,12 @@ async def ensure_tool_ready_or_raise(
     await _refresh_background_task_state()
 
     if get_runtime_policy() == RuntimePolicy.DOCKER:
+        # A supplied cookie is the only non-interactive way to authenticate a
+        # container (no host browser/keychain inside Docker). Seed from it before
+        # the "login on the host" error.
+        if not _auth_ready() and get_config().server.cookie:
+            await _seed_cookie_or_raise(ctx)
+            return
         _raise_if_docker_auth_missing()
         return
 
@@ -568,7 +582,7 @@ async def ensure_tool_ready_or_raise(
         if _auth_ready():
             _state.auth_state = AuthState.READY
             return
-        await _start_login_if_needed(ctx)
+        await _authenticate_or_raise(ctx)
         return
 
     if _browser_setup_ready():
@@ -600,7 +614,20 @@ async def ensure_tool_ready_or_raise(
         _state.auth_state = AuthState.READY
         return
 
-    await _start_login_if_needed(ctx)
+    await _authenticate_or_raise(ctx)
+
+
+async def _authenticate_or_raise(ctx: Context | None = None) -> None:
+    """Authenticate a managed runtime: cookie seed if configured, else login.
+
+    A supplied cookie (--cookie / LINKEDIN_COOKIE) is the non-interactive path
+    for headless / remote hosts and takes priority over the interactive headed
+    login. On a cookie failure it raises rather than opening a browser window.
+    """
+    if get_config().server.cookie:
+        await _seed_cookie_or_raise(ctx)
+    else:
+        await _start_login_if_needed(ctx)
 
 
 def _raise_if_docker_auth_missing() -> None:
@@ -775,6 +802,102 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
         return False
     finally:
         set_headless(prev_headless)
+
+
+async def _try_seed_from_cookie(cookie_value: str) -> bool:
+    """Validate and persist a session from the operator-supplied cookie.
+
+    Runs outside ``_lock``. Unlike browser auto-import, this is NOT gated by
+    Docker or a non-loopback HTTP bind: the cookie is an explicit credential the
+    operator passed in (--cookie / LINKEDIN_COOKIE), safe to use on any headless
+    or remote host. Returns True only when a validated session was persisted.
+    Every expected failure (timeout, malformed value, LinkedIn rejection)
+    returns False; the cookie value is never logged.
+    """
+    from linkedin_mcp_server.core.exceptions import NetworkError
+    from linkedin_mcp_server.cookie_auth import seed_session_from_cookie
+
+    user_data_dir = get_profile_dir()
+    # The seed opens a persistent context on user_data_dir; the singleton may
+    # hold a SingletonLock on that same dir, so release it first (no-op when
+    # _browser is None).
+    await close_browser()
+    prev_headless = current_headless()
+    set_headless(True)  # background validation; never pop a visible window
+    try:
+        # Hard ceiling on the whole seed: validate_imported_cookies launches a
+        # persistent Chromium context with no launch timeout, so a wedged binary
+        # would otherwise hang the first tool call. Mirrors the auto-import bound.
+        return await asyncio.wait_for(
+            seed_session_from_cookie(cookie_value, user_data_dir),
+            timeout=60,
+        )
+    except TimeoutError:
+        logger.warning("Cookie seed timed out after 60s")
+        return False
+    except ValueError as exc:
+        # Malformed cookie value (no li_at) — an operator config error.
+        logger.error("Invalid LinkedIn cookie value: %s", exc)
+        return False
+    except (AuthenticationError, NetworkError) as exc:
+        logger.warning("Cookie seed could not validate the session: %s", exc)
+        return False
+    finally:
+        set_headless(prev_headless)
+
+
+async def _seed_cookie_or_raise(ctx: Context | None = None) -> None:
+    """Seed a session from the configured cookie, or raise a clear auth error.
+
+    One-shot per process. On success leaves auth READY and returns. On failure
+    raises ``AuthenticationError`` WITHOUT falling back to a headed login (which
+    is impossible / undesirable on a headless or remote server). Concurrency-safe:
+    only one seed task ever runs; concurrent callers await the same task.
+    """
+    cookie_value = get_config().server.cookie
+    if not cookie_value:  # defensive; callers gate on this
+        raise AuthenticationError("No LinkedIn cookie configured")
+
+    async with _lock:
+        await _refresh_background_task_state()
+        if _auth_ready():
+            _state.auth_state = AuthState.READY
+            return
+
+        seed_task: asyncio.Task[bool] | None
+        if _state.cookie_seed_task is not None and not _state.cookie_seed_task.done():
+            seed_task = _state.cookie_seed_task
+        elif not _state.cookie_seed_attempted:
+            _state.cookie_seed_attempted = True
+            _state.cookie_seed_task = asyncio.create_task(
+                _try_seed_from_cookie(cookie_value), name="linkedin-cookie-seed"
+            )
+            seed_task = _state.cookie_seed_task
+        else:
+            seed_task = None  # already attempted and failed -> raise below
+
+    # ---- lock released ----
+
+    if seed_task is not None:
+        try:
+            await seed_task
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - any failure becomes the clear error below
+            logger.debug("Cookie seed task failed", exc_info=True)
+        async with _lock:
+            if _state.cookie_seed_task is not None and _state.cookie_seed_task.done():
+                _state.cookie_seed_task = None
+            if _auth_ready():
+                _state.auth_state = AuthState.READY
+                return
+
+    _state.auth_state = AuthState.FAILED
+    raise AuthenticationError(
+        "The provided LinkedIn cookie (--cookie / LINKEDIN_COOKIE) did not "
+        "produce a valid session. It is most likely expired or revoked. Copy a "
+        "fresh 'li_at' cookie from a logged-in browser session and pass it again."
+    )
 
 
 async def _start_login_if_needed(ctx: Context | None = None) -> None:

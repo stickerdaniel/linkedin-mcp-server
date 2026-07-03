@@ -65,7 +65,7 @@ def _patch_inline_wait(monkeypatch, seconds: float, *, auto_import=False) -> Non
             chrome_path=None,
             headless=True,
         ),
-        server=SimpleNamespace(transport="stdio", host="127.0.0.1"),
+        server=SimpleNamespace(transport="stdio", host="127.0.0.1", cookie=None),
         is_interactive=False,
     )
     monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
@@ -157,6 +157,12 @@ class TestBootstrap:
 
     async def test_docker_requires_host_login(self, monkeypatch):
         monkeypatch.setattr("linkedin_mcp_server.bootstrap._auth_ready", lambda: False)
+        # No --cookie: the Docker branch reads get_config().server.cookie before
+        # the host-login error, so give it a config with cookie unset.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.get_config",
+            lambda: SimpleNamespace(server=SimpleNamespace(cookie=None)),
+        )
         initialize_bootstrap("docker")
         with pytest.raises(DockerHostLoginRequiredError):
             await ensure_tool_ready_or_raise("search_jobs")

@@ -22,7 +22,32 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-Create a browser profile locally, then mount it into Docker. You still need [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on the host for the one-time `uvx mcp-server-linkedin@latest --login` step. Docker already includes its own Chromium runtime, so the managed Patchright Chromium browser download used by MCPB/`uvx` is not needed here.
+There are two ways to authenticate a container.
+
+### Option A — Pass a cookie (no host browser needed)
+
+Supply your LinkedIn `li_at` cookie and the container authenticates headless with nothing to mount — easiest for remote/CI hosts. Get `li_at` from a logged-in desktop browser via DevTools → Application/Storage → Cookies → `https://www.linkedin.com` → `li_at`.
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "stickerdaniel/linkedin-mcp-server:latest",
+        "--cookie", "AQEDAReplaceWithYourLiAtValue"
+      ]
+    }
+  }
+}
+```
+
+Or via `-e`: `docker run --rm -i -e LINKEDIN_COOKIE=AQED... stickerdaniel/linkedin-mcp-server:latest`. Without a mounted `~/.linkedin-mcp` volume the session lasts only for the container's lifetime and is re-seeded from the cookie on each start. The `li_at` value is a long-lived credential — treat it like a password (prefer `LINKEDIN_COOKIE` over a command-line value, which is visible via `ps`). If the cookie is expired, the first tool call returns a clear auth error rather than opening a login window.
+
+### Option B — Create a host profile and mount it
+
+Create a browser profile locally, then mount it into Docker. You need [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on the host for the one-time `uvx mcp-server-linkedin@latest --login` step. Docker already includes its own Chromium runtime, so the managed Patchright Chromium browser download used by MCPB/`uvx` is not needed here.
 
 **Step 1: Create profile on the host (one-time setup)**
 
@@ -51,7 +76,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 }
 ```
 
-> **Note:** Docker containers don't have a display server, so you can't use the `--login` command in Docker. Create a source profile on your host first.
+> **Note:** Docker containers don't have a display server, so you can't use the `--login` command in Docker. Either pass `--cookie` / `LINKEDIN_COOKIE` (Option A), or create a source profile on your host first (Option B).
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
@@ -64,6 +89,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `USER_DATA_DIR` | `~/.linkedin-mcp/profile` | Path to persistent browser profile directory |
+| `LINKEDIN_COOKIE` | - | LinkedIn `li_at` cookie (or a `li_at=...; JSESSIONID=...` string) for non-interactive headless auth — authenticates a container with no host browser/profile (Option A). The `--cookie` CLI argument overrides it. Long-lived credential; treat like a password. |
 | `LOG_LEVEL` | `WARNING` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
 | `TOOL_TIMEOUT` | `180` | Per-tool MCP execution timeout in seconds. Increase further for heavy scrapes (multi-section profiles, cold-start Chromium, slow networks/containers). |

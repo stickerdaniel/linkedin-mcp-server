@@ -1,5 +1,6 @@
 """Tests for dependencies.py — bootstrap gating and auto-relogin."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,8 +14,21 @@ from linkedin_mcp_server.core.exceptions import (
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.exceptions import (
     AuthenticationStartedError,
+    CookieAuthenticationError,
     DockerHostLoginRequiredError,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_cookie_config(monkeypatch):
+    """handle_auth_error reads get_config().server.cookie before the relogin /
+    Docker branches; default it to unset so those paths run and get_config()
+    never parses pytest's argv. Cookie tests override this.
+    """
+    monkeypatch.setattr(
+        "linkedin_mcp_server.dependencies.get_config",
+        lambda: SimpleNamespace(server=SimpleNamespace(cookie=None)),
+    )
 
 
 class TestHandleAuthError:
@@ -53,6 +67,33 @@ class TestHandleAuthError:
                 await handle_auth_error(
                     AuthenticationError("Session expired"), ctx=None
                 )
+
+    async def test_cookie_set_raises_terminal_error_no_relogin(self, monkeypatch):
+        """A configured cookie must surface a terminal error, never open a login
+        window — even on a managed runtime."""
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_config",
+            lambda: SimpleNamespace(server=SimpleNamespace(cookie="li_at=expired")),
+        )
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+            ) as mock_relogin,
+        ):
+            with pytest.raises(CookieAuthenticationError):
+                await handle_auth_error(
+                    AuthenticationError("Session expired"), ctx=None
+                )
+            mock_relogin.assert_not_awaited()
 
 
 class TestGetReadyExtractor:

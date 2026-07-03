@@ -127,6 +127,11 @@ class ServerConfig:
     logout: bool = False
     # Browser key or "auto"; triggers import-from-browser-and-exit.
     import_from_browser: str | None = None
+    # Raw LinkedIn cookie supplied non-interactively for headless / remote use.
+    # Either a bare li_at value or a "li_at=...; JSESSIONID=..." cookie string.
+    # Seeds a session on first use with no browser window. Sourced from the
+    # --cookie argument (preferred) or the LINKEDIN_COOKIE env fallback.
+    cookie: str | None = None
     # HTTP transport configuration
     host: str = "127.0.0.1"
     port: int = 8000

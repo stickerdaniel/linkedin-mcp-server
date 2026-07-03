@@ -55,6 +55,14 @@ class DockerHostLoginRequiredError(LinkedInMCPError):
     """Docker runtime requires host-side login creation."""
 
 
+class CookieAuthenticationError(LinkedInMCPError):
+    """A supplied LinkedIn cookie (--cookie / LINKEDIN_COOKIE) is invalid/expired.
+
+    Terminal on a headless or remote server: no interactive login window can be
+    opened to recover, so the operator must supply a fresh cookie.
+    """
+
+
 class LinuxBrowserDependencyError(LinkedInMCPError):
     """Linux host dependencies required for Chromium are missing."""
 
