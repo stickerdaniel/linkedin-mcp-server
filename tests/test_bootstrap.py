@@ -654,7 +654,7 @@ class TestTwoStageInstall:
         """Replace the patchright subprocess with a recorder of the install flags."""
         calls: list[str] = []
 
-        async def fake_install(extra_arg: str) -> None:
+        async def fake_install(extra_arg: str, **kwargs: object) -> None:
             calls.append(extra_arg)
 
         monkeypatch.setattr(
@@ -699,7 +699,7 @@ class TestTwoStageInstall:
 
         calls: list[str] = []
 
-        async def fake_install(extra_arg: str) -> None:
+        async def fake_install(extra_arg: str, **kwargs: object) -> None:
             calls.append(extra_arg)
             if extra_arg == "--no-shell":
                 raise BrowserSetupFailedError("network down")
@@ -791,10 +791,10 @@ class TestEnsureBrowserInstalledTarget:
         shell_calls = {"value": 0}
         full_calls = {"value": 0}
 
-        async def fake_shell() -> None:
+        async def fake_shell(**kwargs: object) -> None:
             shell_calls["value"] += 1
 
-        async def fake_full() -> None:
+        async def fake_full(**kwargs: object) -> None:
             full_calls["value"] += 1
 
         monkeypatch.setattr(
@@ -856,7 +856,7 @@ class TestLazyFullChromiumTrigger:
     def _stub(self, monkeypatch, *, custom_chrome: bool):
         order: list[str] = []
 
-        async def fake_full() -> None:
+        async def fake_full(**kwargs: object) -> None:
             order.append("full")
 
         async def fake_login(_profile_dir) -> bool:
