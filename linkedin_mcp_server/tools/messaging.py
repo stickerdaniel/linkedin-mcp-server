@@ -217,24 +217,35 @@ def register_messaging_tools(
         confirm_send: bool,
         ctx: Context,
         profile_urn: str | None = None,
+        thread_id: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
-        Send a message to a LinkedIn user.
+        Send a message to a LinkedIn user or reply to an existing thread.
+
+        When ``thread_id`` is provided, the tool replies inline to the existing
+        messaging thread — use this to reply to InMail/recruiter conversations.
+        When ``thread_id`` is omitted, the tool opens a new compose overlay to
+        send a direct message to the specified user (which may create a separate
+        DM instead of replying to an existing thread — see issue #483).
 
         The recipient must be directly messageable from the profile page. This is a
         write operation when confirm_send is True.
 
         Args:
-            linkedin_username: LinkedIn username of the recipient
+            linkedin_username: LinkedIn username of the recipient. Ignored when
+                thread_id is provided.
             message: The message text to send
             confirm_send: Must be True to send the message
             ctx: FastMCP context for progress reporting
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
                 compose URL directly. Providing this bypasses the Message-button
                 lookup and is more reliable when available. Obtain via
-                get_person_profile. Note: inbox may not always show all
-                messages; use search_conversations as a fallback.
+                get_person_profile. Ignored when thread_id is provided.
+            thread_id: Optional LinkedIn messaging thread ID. When provided, the
+                tool replies inline to the existing thread instead of creating a
+                new compose overlay. Obtain thread IDs via get_conversation or
+                search_conversations.
 
         Returns:
             Dict with url, status, message, recipient_selected, and sent.
@@ -244,9 +255,10 @@ def register_messaging_tools(
                 ctx, tool_name="send_message"
             )
             logger.info(
-                "Sending message to %s (confirm_send=%s)",
+                "Sending message to %s (confirm_send=%s, thread_id=%s)",
                 linkedin_username,
                 confirm_send,
+                thread_id,
             )
 
             await ctx.report_progress(progress=0, total=100, message="Sending message")
@@ -256,6 +268,7 @@ def register_messaging_tools(
                 message,
                 confirm_send=confirm_send,
                 profile_urn=profile_urn,
+                thread_id=thread_id,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
