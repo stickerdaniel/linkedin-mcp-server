@@ -158,6 +158,35 @@ async def test_import_writes_full_set_then_persists_source_state(
 
 
 @pytest.mark.asyncio
+async def test_import_persists_synthesized_user_agent(isolate_profile_dir, monkeypatch):
+    """The source browser's UA reaches validation AND source-state.json."""
+    user_data_dir = isolate_profile_dir
+    profile = _profile("chrome")
+    ua = "Mozilla/5.0 (test) Chrome/148.0.0.0"
+
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
+    )
+    monkeypatch.setattr(orchestrate, "synthesize_user_agent", lambda p: ua)
+    validate = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies", validate
+    )
+
+    ok = await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+
+    assert ok is True
+    assert validate.await_args is not None
+    assert validate.await_args.kwargs.get("user_agent") == ua
+    state = json.loads(source_state_path(user_data_dir).read_text())
+    assert state["user_agent"] == ua
+
+
+@pytest.mark.asyncio
 async def test_import_tries_next_browser_when_first_rejected(
     isolate_profile_dir, monkeypatch
 ):

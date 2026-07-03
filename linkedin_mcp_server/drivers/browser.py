@@ -199,13 +199,17 @@ def _make_browser(
     *,
     launch_options: dict[str, str],
     viewport: dict[str, int],
+    user_agent: str | None = None,
 ) -> BrowserManager:
+    """Build a BrowserManager. An explicit USER_AGENT (env/CLI) always wins;
+    *user_agent* is the session's own UA (the source browser's, recorded at
+    import time) and applies only when no override is configured."""
     config = get_config()
     return BrowserManager(
         user_data_dir=profile_dir,
         headless=_headless,
         slow_mo=config.browser.slow_mo,
-        user_agent=config.browser.user_agent,
+        user_agent=config.browser.user_agent or user_agent,
         viewport=viewport,
         **launch_options,
     )
@@ -216,9 +220,13 @@ async def _authenticate_existing_profile(
     *,
     launch_options: dict[str, str],
     viewport: dict[str, int],
+    user_agent: str | None = None,
 ) -> BrowserManager:
     browser = _make_browser(
-        profile_dir, launch_options=launch_options, viewport=viewport
+        profile_dir,
+        launch_options=launch_options,
+        viewport=viewport,
+        user_agent=user_agent,
     )
     try:
         await browser.start()
@@ -233,13 +241,17 @@ async def _authenticate_existing_profile(
         raise
 
 
-async def validate_imported_cookies(cookie_path: Path, profile_dir: Path) -> bool:
+async def validate_imported_cookies(
+    cookie_path: Path, profile_dir: Path, *, user_agent: str | None = None
+) -> bool:
     """Validate freshly imported cookies against /feed/ before persisting.
 
     Starts a headless browser on *profile_dir*, injects the LinkedIn cookies
     from *cookie_path*, and proves /feed/ with the same validator login and the
     Docker bridge use (``_feed_auth_succeeds``: remember-me resolution plus
     auth-barrier detection). Used only by the browser-import CLI path.
+    *user_agent* is the source browser's synthesized UA — validating under the
+    same UA the runtime will use keeps the proof representative.
 
     A local :class:`BrowserManager` is used (never the singleton), so
     ``close_browser()``'s export-on-close is not involved and cannot shrink
@@ -252,7 +264,10 @@ async def validate_imported_cookies(cookie_path: Path, profile_dir: Path) -> boo
     secure_mkdir(profile_dir)
     harden_linkedin_tree(profile_dir)
     browser = _make_browser(
-        profile_dir, launch_options=launch_options, viewport=viewport
+        profile_dir,
+        launch_options=launch_options,
+        viewport=viewport,
+        user_agent=user_agent,
     )
     try:
         await browser.start()
@@ -284,7 +299,10 @@ async def _bridge_runtime_profile(
     secure_mkdir(profile_dir.parent)
     storage_state_path = runtime_storage_state_path(runtime_id, source_profile_dir)
     browser = _make_browser(
-        profile_dir, launch_options=launch_options, viewport=viewport
+        profile_dir,
+        launch_options=launch_options,
+        viewport=viewport,
+        user_agent=source_state.user_agent,
     )
     try:
         await browser.start()
@@ -341,6 +359,7 @@ async def _bridge_runtime_profile(
             profile_dir,
             launch_options=launch_options,
             viewport=viewport,
+            user_agent=source_state.user_agent,
         )
         try:
             await reopened.start()
@@ -429,6 +448,7 @@ async def get_or_create_browser(
             source_profile_dir,
             launch_options=launch_options,
             viewport=viewport,
+            user_agent=source_state.user_agent,
         )
         _apply_browser_settings(browser)
         _browser = browser
@@ -483,6 +503,7 @@ async def get_or_create_browser(
                 derived_profile_dir,
                 launch_options=launch_options,
                 viewport=viewport,
+                user_agent=source_state.user_agent,
             )
             _apply_browser_settings(browser)
             _browser = browser

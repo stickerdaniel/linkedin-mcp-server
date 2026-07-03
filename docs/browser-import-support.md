@@ -75,6 +75,29 @@ Before adding or trusting a browser, confirm each line:
 The fourth line is the one that bites: confirm the service against a real
 browser or against yt-dlp / HackBrowserData, never a guess.
 
+## User agent of an imported session
+
+LinkedIn ties a session token to the browser fingerprint it was minted under, so
+an imported cookie is replayed under the source browser's user agent rather than
+the runtime browser's default. Since Chromium's user-agent reduction (Chromium
+101+) the desktop UA is frozen: it varies only in the platform token and the
+engine major (minor/build/patch are always `0.0.0`). `browser_import/user_agent.py`
+reconstructs it from two on-disk inputs, no network call:
+
+- the OS platform token (frozen per platform), and
+- the Chromium major, read from `<user-data-root>/Last Version` with the
+  `Local State` `stats_version` as fallback.
+
+Only browsers whose version string leads with the Chromium engine major qualify,
+marked `chromium_versioned` in the registry: Chrome, Chromium, Edge, Arc, Brave
+(prefixes the engine major, e.g. `138.1.80.113`), and Helium. Edge appends its
+own brand token via `ua_brand_suffix` (`Edg/<major>.0.0.0`). Opera, Opera GX,
+Vivaldi, Yandex, Whale and Cốc Cốc version independently of the engine, so no UA
+is synthesized and they keep the runtime default. The UA is recorded in
+`source-state.json` (`user_agent`, absent for manual logins where the cookie is
+minted in the runtime browser itself) and every runtime replay adopts it. An
+explicit `USER_AGENT` env var or `--user-agent` flag always overrides it.
+
 ## Flat layout (Opera)
 
 Opera and Opera GX keep `Local State` at the user-data root (so the install gate

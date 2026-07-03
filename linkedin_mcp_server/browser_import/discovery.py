@@ -53,6 +53,14 @@ class BrowserProfile:
 # token (``<safe_storage> Safe Storage``); it is a distinct token from both the
 # canonical key and the human label. Subpaths are relative to the per-OS base
 # directory resolved in ``_os_base_dirs``.
+#
+# ``chromium_versioned`` marks browsers whose on-disk version string leads with
+# the Chromium engine major (Chrome/Chromium/Edge/Arc report it directly, Brave
+# prefixes it, Helium tracks upstream) — the input user_agent.py needs to
+# synthesize the frozen UA for an imported session. Browsers that version
+# independently of the engine (Opera, Vivaldi, Yandex, Whale, Cốc Cốc) omit it
+# and get no synthesized UA. ``ua_brand_suffix`` is the extra brand token some
+# forks append to the frozen UA (Edge: ``Edg/<major>.0.0.0``).
 SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
     "chrome": {
         "label": "Google Chrome",
@@ -61,6 +69,7 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "linux_subpaths": ("google-chrome",),
         "linux_app_token": "chrome",
         "win_subpath": "Google/Chrome/User Data",
+        "chromium_versioned": True,
     },
     "chromium": {
         "label": "Chromium",
@@ -69,6 +78,7 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "linux_subpaths": ("chromium",),
         "linux_app_token": "chromium",
         "win_subpath": "Chromium/User Data",
+        "chromium_versioned": True,
     },
     "brave": {
         "label": "Brave",
@@ -77,6 +87,7 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "linux_subpaths": ("BraveSoftware/Brave-Browser",),
         "linux_app_token": "brave",
         "win_subpath": "BraveSoftware/Brave-Browser/User Data",
+        "chromium_versioned": True,
     },
     "edge": {
         "label": "Microsoft Edge",
@@ -85,6 +96,8 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "linux_subpaths": ("microsoft-edge",),
         "linux_app_token": "microsoft-edge",
         "win_subpath": "Microsoft/Edge/User Data",
+        "chromium_versioned": True,
+        "ua_brand_suffix": "Edg",
     },
     "arc": {
         "label": "Arc",
@@ -93,6 +106,7 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         # Arc has no stable Linux build; omit on Linux.
         "linux_subpaths": (),
         "win_subpath": "Arc/User Data",
+        "chromium_versioned": True,
     },
     "vivaldi": {
         "label": "Vivaldi",
@@ -116,6 +130,7 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "mac_subpath": "net.imput.helium",
         "linux_subpaths": (),
         "win_subpath": "net.imput.helium/User Data",
+        "chromium_versioned": True,
     },
     # Standard-Chromium browsers. Paths and keychain labels cross-checked against
     # yt-dlp (yt_dlp/cookies.py) and HackBrowserData (browser/browser_darwin.go):

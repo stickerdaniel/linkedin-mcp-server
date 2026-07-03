@@ -36,6 +36,7 @@ from linkedin_mcp_server.browser_import.extract import (
     extract_linkedin_cookies,
     read_li_at_meta,
 )
+from linkedin_mcp_server.browser_import.user_agent import synthesize_user_agent
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_write_text
 
 from linkedin_mcp_server.exceptions import (
@@ -221,8 +222,14 @@ async def import_session_from_browser(
             continue
         staged_any = True
 
-        if await validate_imported_cookies(cookie_path, user_data_dir):
-            write_source_state(user_data_dir)
+        # Synthesize the source browser's UA so validation and every later
+        # runtime session replay the cookie under the fingerprint it was minted
+        # with (None keeps the runtime default; file I/O, so off the loop).
+        user_agent = await asyncio.to_thread(synthesize_user_agent, profile)
+        if await validate_imported_cookies(
+            cookie_path, user_data_dir, user_agent=user_agent
+        ):
+            write_source_state(user_data_dir, user_agent=user_agent)
             logger.info(
                 "Imported LinkedIn session from %s/%s",
                 profile.browser,
