@@ -554,7 +554,7 @@ async def _refresh_background_task_state() -> None:
             if _state.setup_started_at:
                 try:
                     started = datetime.fromisoformat(
-                        _state.setup_started_at.rstrip("Z")
+                        _state.setup_started_at.replace("Z", "+00:00")
                     )
                     elapsed = (
                         f"{(datetime.now(timezone.utc) - started).total_seconds():.0f}s"
