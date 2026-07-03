@@ -53,7 +53,7 @@ _NAV_DELAY = 2.0
 _RATE_LIMIT_RETRY_DELAY = 5.0
 
 # Returned as section text when LinkedIn rate-limits the page
-_RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
+RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
 # LinkedIn shows 25 results per page
 _PAGE_SIZE = 25
@@ -1344,7 +1344,7 @@ class LinkedInExtractor:
             logger.warning(
                 "Page %s returned only LinkedIn chrome (likely rate-limited)", url
             )
-            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+            return ExtractedSection(text=RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
@@ -1364,12 +1364,12 @@ class LinkedInExtractor:
         rate limit.
 
         Raises LinkedInScraperException subclasses (rate limit, auth, etc.).
-        Returns _RATE_LIMITED_MSG sentinel when soft-rate-limited after retry.
+        Returns RATE_LIMITED_MSG sentinel when soft-rate-limited after retry.
         Returns empty string for unexpected non-domain failures (error isolation).
         """
         try:
             result = await self._extract_page_once(url, section_name, max_scrolls)
-            if result.text != _RATE_LIMITED_MSG:
+            if result.text != RATE_LIMITED_MSG:
                 return result
 
             # Retry once after backoff
@@ -1543,7 +1543,7 @@ class LinkedInExtractor:
             logger.warning(
                 "Page %s returned only LinkedIn chrome (likely rate-limited)", url
             )
-            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+            return ExtractedSection(text=RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
@@ -1565,7 +1565,7 @@ class LinkedInExtractor:
         """
         try:
             result = await self._extract_overlay_once(url, section_name)
-            if result.text != _RATE_LIMITED_MSG:
+            if result.text != RATE_LIMITED_MSG:
                 return result
 
             logger.info(
@@ -1623,7 +1623,7 @@ class LinkedInExtractor:
                 "Overlay %s returned only LinkedIn chrome (likely rate-limited)",
                 url,
             )
-            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+            return ExtractedSection(text=RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
@@ -1687,7 +1687,7 @@ class LinkedInExtractor:
                             section_name=section_name,
                             max_scrolls=max_scrolls,
                         )
-                        if extracted.text == _RATE_LIMITED_MSG:
+                        if extracted.text == RATE_LIMITED_MSG:
                             logger.info(
                                 "Reuse path soft-rate-limited; falling back "
                                 "to extract_page for retry parity"
@@ -1708,7 +1708,7 @@ class LinkedInExtractor:
                             max_scrolls=max_scrolls,
                         )
 
-                    if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                    if extracted.text and extracted.text != RATE_LIMITED_MSG:
                         sections[section_name] = extracted.text
                         if extracted.references:
                             references[section_name] = extracted.references
@@ -2816,7 +2816,7 @@ class LinkedInExtractor:
                             url, section_name=section_name
                         )
 
-                    if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                    if extracted.text and extracted.text != RATE_LIMITED_MSG:
                         sections[section_name] = extracted.text
                         if extracted.references:
                             references[section_name] = extracted.references
@@ -2877,7 +2877,7 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+        if extracted.text and extracted.text != RATE_LIMITED_MSG:
             sections["employees"] = extracted.text
             if extracted.references:
                 references["employees"] = extracted.references
@@ -2906,7 +2906,7 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+        if extracted.text and extracted.text != RATE_LIMITED_MSG:
             sections["job_posting"] = extracted.text
             if extracted.references:
                 references["job_posting"] = extracted.references
@@ -2954,11 +2954,11 @@ class LinkedInExtractor:
 
         Mirrors the noise-only detection and single-retry behavior of
         ``extract_page`` / ``_extract_page_once`` so that callers get a
-        ``_RATE_LIMITED_MSG`` sentinel instead of silent empty results.
+        ``RATE_LIMITED_MSG`` sentinel instead of silent empty results.
         """
         try:
             result = await self._extract_search_page_once(url, section_name)
-            if result.text != _RATE_LIMITED_MSG:
+            if result.text != RATE_LIMITED_MSG:
                 return result
 
             logger.info(
@@ -2968,7 +2968,7 @@ class LinkedInExtractor:
             )
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
             result = await self._extract_search_page_once(url, section_name)
-            if result.text == _RATE_LIMITED_MSG:
+            if result.text == RATE_LIMITED_MSG:
                 logger.warning("Search page %s still rate-limited after retry", url)
             return result
 
@@ -3025,7 +3025,7 @@ class LinkedInExtractor:
                 "Search page %s returned only LinkedIn chrome (likely rate-limited)",
                 url,
             )
-            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+            return ExtractedSection(text=RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
@@ -3164,7 +3164,7 @@ class LinkedInExtractor:
                     url, section_name="search_results"
                 )
 
-                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                if not extracted.text or extracted.text == RATE_LIMITED_MSG:
                     if extracted.error:
                         section_errors["search_results"] = extracted.error
                     # Navigation failed or rate-limited; skip ID extraction
@@ -3296,7 +3296,7 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+        if extracted.text and extracted.text != RATE_LIMITED_MSG:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references
@@ -3328,7 +3328,7 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+        if extracted.text and extracted.text != RATE_LIMITED_MSG:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references

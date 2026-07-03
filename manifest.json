@@ -13,7 +13,7 @@
   "homepage": "https://github.com/stickerdaniel/linkedin-mcp-server",
   "documentation": "https://github.com/stickerdaniel/linkedin-mcp-server#readme",
   "support": "https://github.com/stickerdaniel/linkedin-mcp-server/issues",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "mcp",
     "mcpb",
@@ -112,7 +112,57 @@
       "description": "Properly close browser session and clean up resources"
     }
   ],
-  "user_config": {},
+  "user_config": {
+    "properties": {
+      "HEADLESS": {
+        "type": "boolean",
+        "default": true,
+        "description": "Run browser in headless mode (set to false for headed login/debugging)"
+      },
+      "LOG_LEVEL": {
+        "type": "string",
+        "default": "WARNING",
+        "enum": ["DEBUG", "INFO", "WARNING", "ERROR"],
+        "description": "Logging verbosity level"
+      },
+      "TIMEOUT": {
+        "type": "integer",
+        "default": 5000,
+        "description": "Browser page operation timeout in milliseconds"
+      },
+      "TOOL_TIMEOUT": {
+        "type": "number",
+        "default": 180,
+        "description": "Per-tool MCP execution timeout in seconds"
+      },
+      "LOGIN_TIMEOUT": {
+        "type": "number",
+        "default": 1800,
+        "description": "Manual login wait timeout in seconds (0 = no limit)"
+      },
+      "TRANSPORT": {
+        "type": "string",
+        "default": "stdio",
+        "enum": ["stdio", "streamable-http"],
+        "description": "MCP transport mode"
+      },
+      "HOST": {
+        "type": "string",
+        "default": "127.0.0.1",
+        "description": "HTTP server host (only used with streamable-http transport)"
+      },
+      "PORT": {
+        "type": "integer",
+        "default": 8000,
+        "description": "HTTP server port (only used with streamable-http transport)"
+      },
+      "AUTO_IMPORT_FROM_BROWSER": {
+        "type": "boolean",
+        "default": true,
+        "description": "Auto-import LinkedIn session from a locally logged-in browser on first use"
+      }
+    }
+  },
   "compatibility": {
     "claude_desktop": ">=0.10.0",
     "platforms": [

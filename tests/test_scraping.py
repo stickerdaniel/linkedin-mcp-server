@@ -16,7 +16,7 @@ from linkedin_mcp_server.scraping.connection import (
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
-    _RATE_LIMITED_MSG,
+    RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
     strip_conversation_chrome,
@@ -292,7 +292,7 @@ class TestExtractPage:
                 section_name="experience",
             )
 
-        assert result.text == _RATE_LIMITED_MSG
+        assert result.text == RATE_LIMITED_MSG
         # goto called twice (initial + retry)
         assert mock_page.goto.await_count == 2
 
@@ -1888,7 +1888,7 @@ class TestConnectWithPerson:
                 "extract_page",
                 new_callable=AsyncMock,
                 side_effect=[
-                    extracted(_RATE_LIMITED_MSG),
+                    extracted(RATE_LIMITED_MSG),
                     extracted("Post text"),
                 ],
             ),
@@ -1987,7 +1987,7 @@ class TestScrapeCompany:
                 "extract_page",
                 new_callable=AsyncMock,
                 side_effect=[
-                    extracted(_RATE_LIMITED_MSG),
+                    extracted(RATE_LIMITED_MSG),
                     extracted("Posts text"),
                 ],
             ),
@@ -2088,7 +2088,7 @@ class TestScrapeJob:
             extractor,
             "extract_page",
             new_callable=AsyncMock,
-            return_value=extracted(_RATE_LIMITED_MSG),
+            return_value=extracted(RATE_LIMITED_MSG),
         ):
             result = await extractor.scrape_job("12345")
 
@@ -2574,7 +2574,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                return_value=extracted(_RATE_LIMITED_MSG),
+                return_value=extracted(RATE_LIMITED_MSG),
             ),
             patch.object(
                 extractor,
@@ -3645,14 +3645,14 @@ class TestMainProfileAlreadyLoaded:
         extractor = LinkedInExtractor(mock_page)
         mock_page.url = "https://www.linkedin.com/in/foo/"
 
-        from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG
+        from linkedin_mcp_server.scraping.extractor import RATE_LIMITED_MSG
 
         with (
             patch.object(
                 extractor,
                 "_extract_loaded_section",
                 new_callable=AsyncMock,
-                return_value=extracted(_RATE_LIMITED_MSG),
+                return_value=extracted(RATE_LIMITED_MSG),
             ) as loaded,
             patch.object(
                 extractor,

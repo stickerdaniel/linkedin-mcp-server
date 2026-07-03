@@ -663,7 +663,8 @@ def _auto_import_allowed() -> bool:
         "::1",
         "localhost",
     ):
-        return False
+        if not config.server.allow_external_bind:
+            return False
     return True
 
 

@@ -18,7 +18,7 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG
+from linkedin_mcp_server.scraping.extractor import RATE_LIMITED_MSG
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
@@ -80,11 +80,11 @@ def register_feed_tools(
             sections: dict[str, str] = {}
             references: dict[str, list[Reference]] = {}
             section_errors: dict[str, dict[str, Any]] = {}
-            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            if extracted.text and extracted.text != RATE_LIMITED_MSG:
                 sections["feed"] = extracted.text
                 if extracted.references:
                     references["feed"] = extracted.references
-            elif extracted.text == _RATE_LIMITED_MSG:
+            elif extracted.text == RATE_LIMITED_MSG:
                 section_errors["feed"] = {
                     "error_type": "rate_limit",
                     "error_message": extracted.text,

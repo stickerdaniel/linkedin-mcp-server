@@ -1,7 +1,9 @@
 """Custom exceptions for LinkedIn scraping operations."""
 
+from linkedin_mcp_server.exceptions import LinkedInMCPError
 
-class LinkedInScraperException(Exception):
+
+class LinkedInScraperException(LinkedInMCPError):
     """Base exception for LinkedIn scraper."""
 
     pass
