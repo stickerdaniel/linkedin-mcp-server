@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 import functools
 import importlib.metadata
@@ -13,6 +14,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+from collections.abc import Callable
 from typing import NoReturn
 
 from fastmcp import Context
@@ -571,12 +573,19 @@ def _start_browser_setup_task_locked() -> None:
     _state.setup_task = asyncio.create_task(_run_browser_setup(), name="browser-setup")
 
 
-async def _run_patchright_install(extra_arg: str) -> None:
+async def _run_patchright_install(
+    extra_arg: str, *, line_callback: Callable[[str], None] | None = None
+) -> None:
     """Run one ``patchright install chromium`` stage with the given flag.
 
     The patchright registry lock serializes concurrent installs, so two
     processes reaching this at once queue on the same browsers path rather than
     corrupting it.
+
+    Subprocess output is streamed to the logger in real-time so users see
+    download progress when running with ``--log-level DEBUG``.  When a
+    *line_callback* is provided (e.g. ``print`` in CLI mode) each line is
+    forwarded to it as well.
     """
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -586,13 +595,21 @@ async def _run_patchright_install(extra_arg: str) -> None:
         "chromium",
         extra_arg,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
-    stdout, stderr = await proc.communicate()
+    lines: list[str] = []
+    stdout_stream = proc.stdout
+    assert stdout_stream is not None
+    async for raw in stdout_stream:
+        text = raw.decode("utf-8", errors="replace").rstrip()
+        if text:
+            logger.debug("patchright: %s", text)
+            lines.append(text)
+            if line_callback is not None:
+                line_callback(text)
+    await proc.wait()
     if proc.returncode != 0:
-        output = "\n".join(
-            text for text in (stderr.decode().strip(), stdout.decode().strip()) if text
-        )
+        output = "\n".join(lines)
         raise BrowserSetupFailedError(
             output or "Patchright Chromium browser setup failed."
         )
@@ -618,7 +635,9 @@ def _write_install_metadata(
     )
 
 
-async def _run_browser_setup() -> None:
+async def _run_browser_setup(
+    *, line_callback: Callable[[str], None] | None = None
+) -> None:
     """Install full Chrome for Testing, in one stage.
 
     The two-stage shell-first arrangement existed to make the headless path
@@ -642,7 +661,7 @@ async def _run_browser_setup() -> None:
     browser_dir = configure_browser_environment()
     secure_mkdir(browser_dir)
 
-    await _run_patchright_install("--no-shell")
+    await _run_patchright_install("--no-shell", line_callback=line_callback)
     _write_install_metadata(
         browser_dir,
         {_SHELL_DIR_PREFIX: False, _FULL_DIR_PREFIX: True},
@@ -654,11 +673,13 @@ async def _run_browser_setup() -> None:
     _schedule_retained_browser_revision_report()
 
 
-async def _ensure_browser_installed() -> None:
+async def _ensure_browser_installed(
+    *, line_callback: Callable[[str], None] | None = None
+) -> None:
     """Install the browser on demand. A no-op once it is present."""
     if browser_ready():
         return
-    await _run_browser_setup()
+    await _run_browser_setup(line_callback=line_callback)
 
 
 def ensure_browser_installed() -> None:
@@ -683,7 +704,7 @@ def ensure_browser_installed() -> None:
         return
     print("   Installing Patchright Chromium browser...")
     try:
-        asyncio.run(_ensure_browser_installed())
+        asyncio.run(_ensure_browser_installed(line_callback=print))
     except Exception as exc:
         print(f"   ❌ Browser installation failed: {exc}")
         raise
@@ -712,6 +733,21 @@ async def _refresh_background_task_state() -> None:
         else:
             _state.setup_state = SetupState.READY
             _state.setup_completed_at = utcnow_iso()
+            elapsed = "unknown"
+            if _state.setup_started_at:
+                try:
+                    started = datetime.fromisoformat(
+                        _state.setup_started_at.rstrip("Z")
+                    )
+                    elapsed = (
+                        f"{(datetime.now(timezone.utc) - started).total_seconds():.0f}s"
+                    )
+                except (ValueError, TypeError):
+                    pass
+            logger.info(
+                "Patchright Chromium browser setup completed in %s",
+                elapsed,
+            )
 
     if _safe_task_done(_state.login_task):
         task = _state.login_task

@@ -923,7 +923,7 @@ class TestRetainedRevisionReportCallSites:
         )
         monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
 
-        async def fake_install(extra_arg: str) -> None:
+        async def fake_install(extra_arg: str, **kwargs: object) -> None:
             return None
 
         monkeypatch.setattr(
@@ -1072,7 +1072,7 @@ class TestTwoStageInstall:
         """Replace the patchright subprocess with a recorder of the install flags."""
         calls: list[str] = []
 
-        async def fake_install(extra_arg: str) -> None:
+        async def fake_install(extra_arg: str, **kwargs: object) -> None:
             calls.append(extra_arg)
 
         monkeypatch.setattr(
@@ -1124,7 +1124,7 @@ class TestTwoStageInstall:
         )
         monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
 
-        async def fake_install(extra_arg: str) -> None:
+        async def fake_install(extra_arg: str, **kwargs: object) -> None:
             raise BrowserSetupFailedError("network down")
 
         monkeypatch.setattr(
@@ -1185,7 +1185,7 @@ class TestEnsureBrowserInstalledSkipsCustomChrome:
 
         called = {"value": 0}
 
-        async def fake_install() -> None:
+        async def fake_install(**kwargs: object) -> None:
             called["value"] += 1
 
         monkeypatch.setattr(
@@ -1208,7 +1208,7 @@ class TestEnsureBrowserInstalledSkipsCustomChrome:
 
         called = {"value": 0}
 
-        async def fake_install() -> None:
+        async def fake_install(**kwargs: object) -> None:
             called["value"] += 1
 
         monkeypatch.setattr(
@@ -1238,7 +1238,7 @@ class TestEnsureBrowserInstalled:
     def _stub(self, monkeypatch):
         calls = {"value": 0}
 
-        async def fake_install() -> None:
+        async def fake_install(**kwargs: object) -> None:
             calls["value"] += 1
 
         monkeypatch.setattr(
@@ -1289,7 +1289,7 @@ class TestLoginInstallBackstop:
     def _stub(self, monkeypatch, *, custom_chrome: bool):
         order: list[str] = []
 
-        async def fake_full() -> None:
+        async def fake_full(**kwargs: object) -> None:
             order.append("full")
 
         async def fake_login(_profile_dir, *, superseded_by=None) -> bool:
