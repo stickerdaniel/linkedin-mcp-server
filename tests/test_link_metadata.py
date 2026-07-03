@@ -257,6 +257,53 @@ class TestBuildReferences:
             }
         ]
 
+    def test_keeps_cyrillic_only_names(self):
+        """Regression: a non-Latin (Cyrillic) name must survive label
+        cleaning — the alphanumeric guard uses a Unicode word check, not
+        [A-Za-z0-9], so search results from RU/BY/other locales keep
+        their person references instead of being dropped."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/margo-yunanova/",
+                    "text": "Маргарита Юнанова",
+                }
+            ],
+            "search_results",
+        )
+
+        assert references == [
+            {
+                "kind": "person",
+                "url": "/in/margo-yunanova/",
+                "text": "Маргарита Юнанова",
+                "context": "search result",
+            }
+        ]
+
+    def test_rejects_punctuation_only_labels_across_scripts(self):
+        """The Unicode word guard must still reject pure punctuation and
+        symbols (no letter or digit in any script)."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/williamhgates/",
+                    "text": "—·—",
+                    "aria_label": "Bill Gates",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references == [
+            {
+                "kind": "person",
+                "url": "/in/williamhgates/",
+                "text": "Bill Gates",
+                "context": "top card",
+            }
+        ]
+
     def test_preserves_words_starting_with_view(self):
         references = build_references(
             [

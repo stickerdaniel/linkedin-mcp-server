@@ -322,7 +322,13 @@ def choose_reference_text(
 
 
 def clean_label(value: str, kind: ReferenceKind) -> str | None:
-    """Normalize and compact a candidate label."""
+    """Normalize and compact a candidate label.
+
+    A label must contain at least one letter or digit in any script —
+    ``[^\\W_]`` matches a Unicode word character that is not an
+    underscore, so Cyrillic (and other non-Latin) profile names survive
+    while punctuation-only strings are rejected.
+    """
     value = _WHITESPACE_RE.sub(" ", value).strip()
     if not value:
         return None
@@ -358,7 +364,7 @@ def clean_label(value: str, kind: ReferenceKind) -> str | None:
         return None
     if len(value) > 80:
         return None
-    if not re.search(r"[A-Za-z0-9]", value):
+    if not re.search(r"[^\W_]", value):
         return None
 
     return value
