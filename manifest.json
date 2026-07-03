@@ -38,7 +38,17 @@
         "linkedin_mcp_server"
       ],
       "env": {
-        "LINKEDIN_MCP_RUNTIME": "mcpb"
+        "LINKEDIN_MCP_RUNTIME": "mcpb",
+        "HEADLESS": "true",
+        "LOG_LEVEL": "WARNING",
+        "TIMEOUT": "5000",
+        "TOOL_TIMEOUT": "180",
+        "LOGIN_TIMEOUT": "1800",
+        "TRANSPORT": "stdio",
+        "HOST": "127.0.0.1",
+        "PORT": "8000",
+        "AUTO_IMPORT_FROM_BROWSER": "true",
+        "ALLOW_EXTERNAL_BIND": "false"
       }
     }
   },
@@ -160,6 +170,11 @@
         "type": "boolean",
         "default": true,
         "description": "Auto-import LinkedIn session from a locally logged-in browser on first use"
+      },
+      "ALLOW_EXTERNAL_BIND": {
+        "type": "boolean",
+        "default": false,
+        "description": "Allow binding to all network interfaces (0.0.0.0 or ::) — understand the security risk before enabling"
       }
     }
   },
