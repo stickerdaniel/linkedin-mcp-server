@@ -38,7 +38,11 @@
         "linkedin_mcp_server"
       ],
       "env": {
-        "LINKEDIN_MCP_RUNTIME": "mcpb"
+        "LINKEDIN_MCP_RUNTIME": "mcpb",
+        "TRANSPORT": "stdio",
+        "HOST": "127.0.0.1",
+        "PORT": "8000",
+        "ALLOW_EXTERNAL_BIND": "false"
       }
     }
   },
