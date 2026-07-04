@@ -786,8 +786,22 @@ class LinkedInExtractor:
         *,
         wait_until: WaitUntil = "domcontentloaded",
         allow_remember_me: bool = True,
+        allow_redirect_loop_recovery: bool = True,
     ) -> None:
-        """Navigate to a LinkedIn page and fail fast on auth barriers."""
+        """Navigate to a LinkedIn page and fail fast on auth barriers.
+
+        A ``net::ERR_TOO_MANY_REDIRECTS`` navigation failure is treated as a
+        stale/corrupt LinkedIn cookie state (login <-> checkpoint loop): the
+        live context's cookies and the persisted auth artifacts are cleared
+        automatically — so a server restart does not re-seed the broken
+        state — and the navigation is retried once. The retry then lands on
+        a logged-out page, the auth-barrier check raises
+        AuthenticationError, and the interactive re-login flow takes over —
+        no manual profile cleanup needed. Artifact cleanup is best-effort
+        per target: even if the live profile directory cannot be fully
+        removed (locked files on Windows), dropping ``source-state.json``
+        alone forces the interactive re-login on the next start.
+        """
         hops: list[str] = []
         listener_registered = False
 
@@ -822,6 +836,58 @@ class LinkedInExtractor:
                     extra={"target_url": url, "wait_until": wait_until},
                 )
             except Exception as exc:
+                if allow_redirect_loop_recovery and "ERR_TOO_MANY_REDIRECTS" in str(
+                    exc
+                ):
+                    logger.warning(
+                        "Redirect loop navigating to %s — clearing browser "
+                        "cookies and persisted auth state, then retrying once "
+                        "(stale/corrupt LinkedIn session state).",
+                        url,
+                    )
+                    try:
+                        await record_page_trace(
+                            self._page,
+                            "extractor-redirect-loop-recovery",
+                            extra={"target_url": url, "hops": hops},
+                        )
+                    except Exception:
+                        logger.debug(
+                            "record_page_trace during redirect-loop recovery failed",
+                            exc_info=True,
+                        )
+                    try:
+                        await self._page.context.clear_cookies()
+                    except Exception:
+                        logger.debug(
+                            "clear_cookies during redirect-loop recovery failed",
+                            exc_info=True,
+                        )
+                    try:
+                        from linkedin_mcp_server.session_state import (
+                            clear_auth_state,
+                        )
+
+                        if not clear_auth_state():
+                            logger.warning(
+                                "Some persisted auth artifacts could not be "
+                                "removed during redirect-loop recovery; if the "
+                                "loop returns after a restart, delete "
+                                "~/.linkedin-mcp/profile manually."
+                            )
+                    except Exception:
+                        logger.debug(
+                            "clear_auth_state during redirect-loop recovery failed",
+                            exc_info=True,
+                        )
+                    unregister_navigation_listener()
+                    await self._goto_with_auth_checks(
+                        url,
+                        wait_until=wait_until,
+                        allow_remember_me=allow_remember_me,
+                        allow_redirect_loop_recovery=False,
+                    )
+                    return
                 if allow_remember_me and await resolve_remember_me_prompt(self._page):
                     await stabilize_navigation(
                         f"remember-me resolution for {url}", logger
@@ -849,6 +915,7 @@ class LinkedInExtractor:
                         url,
                         wait_until=wait_until,
                         allow_remember_me=False,
+                        allow_redirect_loop_recovery=allow_redirect_loop_recovery,
                     )
                     return
                 await record_page_trace(
@@ -881,6 +948,7 @@ class LinkedInExtractor:
                     url,
                     wait_until=wait_until,
                     allow_remember_me=False,
+                    allow_redirect_loop_recovery=allow_redirect_loop_recovery,
                 )
                 return
 
