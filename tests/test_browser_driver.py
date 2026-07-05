@@ -867,3 +867,32 @@ async def test_validate_uses_local_manager_not_singleton(tmp_path):
     # The singleton globals must remain untouched by the import validator.
     assert browser_module._browser is None
     assert browser_module._browser_cookie_export_path is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_get_or_create_creates_single_browser(monkeypatch):
+    """Two concurrent callers (a tool call and a background caller resuming at
+    startup) must not both launch a browser against the same profile."""
+    import asyncio
+    from typing import Any, cast
+
+    from linkedin_mcp_server.drivers import browser as browser_module
+
+    # Clean starting state regardless of test order; auto-restored at teardown.
+    monkeypatch.setattr(browser_module, "_browser", None)
+
+    calls = {"n": 0}
+    sentinel = cast(Any, object())
+
+    async def fake_create():
+        calls["n"] += 1
+        await asyncio.sleep(0.02)  # hold the lock so the second caller waits
+        browser_module._browser = sentinel
+        return sentinel
+
+    monkeypatch.setattr(browser_module, "_create_browser", fake_create)
+    first, second = await asyncio.gather(
+        get_or_create_browser(), get_or_create_browser()
+    )
+    assert first is sentinel and second is sentinel
+    assert calls["n"] == 1
