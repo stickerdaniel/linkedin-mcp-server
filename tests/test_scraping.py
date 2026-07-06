@@ -2706,6 +2706,44 @@ class TestSearchJobs:
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
 
+    async def test_search_people_geo_urn_filter(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("Jane Doe"),
+        ):
+            result = await extractor.search_people("engineer", geo_urn=["101728296"])
+
+        assert "geoUrn=%5B%22101728296%22%5D" in result["url"]
+
+    async def test_search_people_geo_urn_multi(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("Jane Doe"),
+        ):
+            result = await extractor.search_people(
+                "engineer", geo_urn=["101728296", "102257491"]
+            )
+
+        assert "geoUrn=%5B%22101728296%22%2C%22102257491%22%5D" in result["url"]
+
+    async def test_search_people_rejects_non_numeric_geo_urn(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="numeric LinkedIn geo URN"):
+            await extractor.search_people("engineer", geo_urn=["abc"])
+
+    async def test_search_people_rejects_unicode_digit_geo_urn(self, mock_page):
+        """geoUrn ids are ASCII decimal; reject Unicode digits that
+        ``str.isdigit()`` would otherwise accept."""
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="numeric LinkedIn geo URN"):
+            await extractor.search_people("engineer", geo_urn=["١٠١"])
+
 
 class TestStripLinkedInNoise:
     def test_strips_footer(self):
