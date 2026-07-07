@@ -50,9 +50,13 @@ def register_person_tools(
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The main profile page is always included.
-                Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts
-                Examples: "experience,education", "contact_info", "skills,projects", "honors,languages", "posts"
+                Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts, comments
+                Examples: "experience,education", "contact_info", "skills,projects", "honors,languages", "posts", "comments"
                 Default (None) scrapes only the main profile page.
+                The "comments" section is the person's comment activity —
+                comments and replies they wrote on other posts. To read the
+                comments other people left on a specific post, pass a post
+                URL from the "posts" section's references to get_post_comments.
             max_scrolls: Maximum pagination attempts per section to load more content.
                 On detail sections (experience, certifications, skills, etc.) this
                 is the max number of "Show more" button clicks. On activity/posts
@@ -330,9 +334,13 @@ def register_person_tools(
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The main profile page is always included.
-                Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts
-                Examples: "experience,education", "contact_info", "skills,projects"
+                Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts, comments
+                Examples: "experience,education", "contact_info", "posts,comments"
                 Default (None) scrapes only the main profile page.
+                "posts" lists the user's own posts; "comments" lists the
+                comments and replies the user wrote on other posts. To read
+                the comments others left on one of the user's posts, pass a
+                post URL from the "posts" references to get_post_comments.
             max_scrolls: Maximum pagination attempts per section (same as get_person_profile).
 
         Returns:

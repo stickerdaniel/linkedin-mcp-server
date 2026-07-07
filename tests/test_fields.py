@@ -22,6 +22,7 @@ class TestPersonSections:
             "projects",
             "contact_info",
             "posts",
+            "comments",
         }
         assert set(PERSON_SECTIONS) == expected
 
@@ -91,7 +92,7 @@ class TestParsePersonSections:
 
     def test_all_sections(self):
         requested, unknown = parse_person_sections(
-            "experience,education,interests,honors,languages,certifications,skills,projects,contact_info,posts"
+            "experience,education,interests,honors,languages,certifications,skills,projects,contact_info,posts,comments"
         )
         assert requested == set(PERSON_SECTIONS)
         assert unknown == []

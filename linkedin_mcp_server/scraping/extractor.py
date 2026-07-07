@@ -33,6 +33,7 @@ from linkedin_mcp_server.core.utils import (
 from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
+    _is_linkedin_host,
     build_references,
     dedupe_references,
 )
@@ -431,6 +432,60 @@ _POST_SLUG_URL_RE = re.compile(
 _FEED_DOCUMENT_URLS = {
     "https://www.linkedin.com/feed",
     "https://www.linkedin.com/feed/",
+}
+
+# Post permalink path shapes: /feed/update/<urn>/ (colons in the URN may be
+# percent-encoded in copied URLs) and /posts/<slug>. Matched against the URL
+# path only — query and fragment are stripped before navigation.
+_POST_PATH_RE = re.compile(
+    r"^/(?:feed/update/urn(?::|%3[Aa])li(?::|%3[Aa])(?:activity|ugcPost|share)"
+    r"(?::|%3[Aa])\d+|posts/[^/?#]+)/?$"
+)
+_POST_URN_RE = re.compile(r"^urn:li:(?:activity|ugcPost|share):\d+$")
+
+
+def normalize_post_url(post: str) -> str | None:
+    """Canonicalize a user-supplied post identifier to a permalink URL.
+
+    Accepts a bare activity/ugcPost/share URN, a relative permalink path
+    (``/feed/update/<urn>/`` or ``/posts/<slug>``), or a full http(s) URL on
+    a LinkedIn host with one of those paths. Returns None for anything else
+    so the tool layer can reject non-post targets before navigating.
+    """
+    value = post.strip()
+    if not value:
+        return None
+    if _POST_URN_RE.match(value):
+        return f"https://www.linkedin.com/feed/update/{value}/"
+    if value.startswith("/"):
+        path = value
+    else:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        if not _is_linkedin_host(parsed.netloc.lower()):
+            return None
+        path = parsed.path
+    if not _POST_PATH_RE.match(path):
+        return None
+    if not path.endswith("/"):
+        path += "/"
+    return f"https://www.linkedin.com{path}"
+
+
+# Comment pagination on a post permalink page is a plain <button> with no
+# structural signal — no href, no distinguishing ARIA attribute — so per the
+# Scraping Rules the visible label is matched via an explicit per-locale
+# table. BrowserManager forces the context locale to en-US (core/browser.py),
+# so the "en" entry is the operative one; a locale without an entry skips
+# pagination and returns only the initially rendered comments. The pattern
+# covers both thread-level pagination ("Load more comments") and collapsed
+# reply expansion ("See previous replies" / "Show more replies").
+_POST_MORE_COMMENTS_RE: dict[str, re.Pattern[str]] = {
+    "en": re.compile(
+        r"^(?:Load|Show|See)\s+(?:more|previous)\s+(?:comments|replies)\b",
+        re.IGNORECASE,
+    ),
 }
 
 
@@ -1350,6 +1405,166 @@ class LinkedInExtractor:
             text=cleaned,
             references=_build_feed_references(raw_result["references"], captured_urls),
         )
+
+    async def get_post_comments(
+        self,
+        url: str,
+        max_scrolls: int | None = None,
+    ) -> ExtractedSection:
+        """Scrape a single post permalink page including its comment thread.
+
+        ``url`` must already be canonicalized via ``normalize_post_url``.
+        Comments (and collapsed replies) are paginated up to *max_scrolls*
+        button clicks before extraction. Retries once after a backoff when
+        the page returns only LinkedIn chrome (soft rate limit), mirroring
+        ``extract_page``.
+        """
+        try:
+            result = await self._get_post_comments_once(url, max_scrolls)
+            if result.text != _RATE_LIMITED_MSG:
+                return result
+
+            logger.info("Retrying %s after %.0fs backoff", url, _RATE_LIMIT_RETRY_DELAY)
+            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            return await self._get_post_comments_once(url, max_scrolls)
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to extract post %s: %s", url, e)
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="get_post_comments",
+                    target_url=url,
+                ),
+            )
+
+    async def _get_post_comments_once(
+        self,
+        url: str,
+        max_scrolls: int | None = None,
+    ) -> ExtractedSection:
+        """Single attempt: navigate, expand the comment thread, extract."""
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s", url)
+
+        await handle_modal_close(self._page)
+        await self._wait_for_main_text(minimum_length=200, log_context="Post permalink")
+
+        # The comment block (composer + thread) hydrates well after the post
+        # body — extracting immediately captures only the reaction/comment
+        # counts. The composer is the structural, locale-independent signal
+        # that the block is attached: a contenteditable role="textbox" inside
+        # main, rendered on every post where commenting is enabled (attribute
+        # presence only, no label text). Timeout is tolerated — posts with
+        # comments disabled never render it.
+        try:
+            await self._page.wait_for_selector(
+                'main [role="textbox"][contenteditable="true"]',
+                timeout=7000,
+            )
+            # Give the first batch of comments a beat to attach below it.
+            await asyncio.sleep(1.0)
+        except PlaywrightTimeoutError:
+            logger.debug("Comment composer did not appear on %s", url)
+
+        max_rounds = max_scrolls if max_scrolls is not None else 5
+        await self._expand_post_comments(max_rounds)
+
+        # _extract_loaded_section re-runs the cheap rate-limit/modal checks,
+        # then handles scrolling, extraction, noise stripping, and reference
+        # building — identical to any other full-page section.
+        return await self._extract_loaded_section(url, "post", max_scrolls)
+
+    async def _main_text_length(self) -> int:
+        """Length of main's innerText — the comment-expansion progress signal."""
+        try:
+            length = await self._page.evaluate(
+                "() => document.querySelector('main')?.innerText.length || 0"
+            )
+            return int(length)
+        except Exception:
+            return 0
+
+    async def _click_more_comments_button(self, pattern: re.Pattern[str]) -> bool:
+        """Click a comment/reply pagination button when one is rendered.
+
+        Buttons are located by visible label through the per-locale
+        ``_POST_MORE_COMMENTS_RE`` table (see its docstring for why text
+        matching is unavoidable here). Returns True iff a click landed.
+        """
+        button = self._page.locator("main button").filter(has_text=pattern)
+        try:
+            if await button.count() == 0:
+                return False
+            target = button.first
+            if not await target.is_visible():
+                return False
+            await target.scroll_into_view_if_needed(timeout=2000)
+            await target.click(timeout=2000)
+            return True
+        except PlaywrightTimeoutError:
+            logger.debug("Comment pagination click timed out")
+            return False
+        except Exception as e:
+            logger.debug("Comment pagination click failed: %s", e)
+            return False
+
+    async def _expand_post_comments(self, max_rounds: int, locale: str = "en") -> None:
+        """Expand the comment thread on a post permalink page.
+
+        LinkedIn serves two pagination mechanisms depending on the
+        rendering: a "Load more comments" button (classic layout, matched
+        via the per-locale table) and lazy batches that attach when the
+        post's own scroll container scrolls (SDUI layout — window scrolling
+        is a no-op there, so mouse wheel is used, mirroring the feed;
+        verified live 2026-07-07). Each round clicks the button when
+        present, otherwise wheel-scrolls. Progress is measured by
+        main.innerText growth — locale-independent — and the loop stops
+        after two stale rounds or when the budget is spent.
+        """
+        pattern = _POST_MORE_COMMENTS_RE.get(locale)
+        stale = 0
+        last_length = -1
+
+        viewport = self._page.viewport_size or {"width": 1280, "height": 720}
+        try:
+            await self._page.mouse.move(viewport["width"] // 2, viewport["height"] // 2)
+        except Exception:
+            logger.debug("Mouse move over post failed", exc_info=True)
+            return
+
+        for i in range(max_rounds):
+            clicked = False
+            if pattern is not None:
+                clicked = await self._click_more_comments_button(pattern)
+            if not clicked:
+                try:
+                    await self._page.mouse.wheel(0, 2000)
+                except Exception:
+                    logger.debug("Wheel scroll over post failed", exc_info=True)
+                    break
+            await asyncio.sleep(1.0)
+
+            length = await self._main_text_length()
+            if length > last_length:
+                stale = 0
+                last_length = length
+            else:
+                stale += 1
+                if stale >= 2:
+                    logger.debug(
+                        "Comment thread stopped growing after %d rounds", i + 1
+                    )
+                    break
 
     async def extract_page(
         self,
