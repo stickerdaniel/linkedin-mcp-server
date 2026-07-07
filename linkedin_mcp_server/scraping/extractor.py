@@ -38,7 +38,12 @@ from linkedin_mcp_server.scraping.link_metadata import (
     dedupe_references,
 )
 
-from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from .fields import (
+    ANALYTICS_SECTIONS,
+    ANALYTICS_TIME_RANGE_SECTIONS,
+    COMPANY_SECTIONS,
+    PERSON_SECTIONS,
+)
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -87,6 +92,19 @@ _JOB_TYPE_MAP = {
 }
 
 _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
+
+# Canonical values LinkedIn's analytics ?timeRange= param accepts (verified
+# live 2026-07-07), plus short aliases for tool ergonomics.
+_ANALYTICS_TIME_RANGE_MAP = {
+    "7d": "past_7_days",
+    "28d": "past_28_days",
+    "90d": "past_90_days",
+    "365d": "past_365_days",
+    "past_7_days": "past_7_days",
+    "past_28_days": "past_28_days",
+    "past_90_days": "past_90_days",
+    "past_365_days": "past_365_days",
+}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
@@ -1656,6 +1674,22 @@ class LinkedInExtractor:
             except PlaywrightTimeoutError:
                 logger.debug("Activity feed content did not appear on %s", url)
 
+        # Analytics dashboards render the page shell first and hydrate the
+        # stat cards afterwards; wait for enough text that the numbers are in.
+        is_analytics = "/analytics/" in url
+        if is_analytics:
+            try:
+                await self._page.wait_for_function(
+                    """() => {
+                        const main = document.querySelector('main');
+                        if (!main) return false;
+                        return main.innerText.length > 200;
+                    }""",
+                    timeout=10000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Analytics content did not appear on %s", url)
+
         # Search results pages load a placeholder first then fill in results
         # via JavaScript. Wait for actual content before extracting.
         is_search = "/search/results/" in url
@@ -1999,6 +2033,113 @@ class LinkedInExtractor:
             max_scrolls=max_scrolls,
             main_profile_already_loaded=True,
         )
+
+    async def get_my_analytics(
+        self,
+        requested: set[str],
+        time_range: str | None = None,
+        callbacks: ProgressCallback | None = None,
+        max_scrolls: int | None = None,
+    ) -> dict[str, Any]:
+        """Scrape the authenticated user's own analytics dashboards.
+
+        Navigates one page per requested ``ANALYTICS_SECTIONS`` entry
+        (content, audience, top_posts, profile_views, search_appearances).
+        ``time_range`` applies only to the sections in
+        ``ANALYTICS_TIME_RANGE_SECTIONS``; the other dashboards use
+        LinkedIn's fixed windows.
+
+        Returns:
+            {url, sections: {name: text}, references?, section_errors?}
+
+        Raises:
+            FilterValidationError: for an unrecognised ``time_range``.
+        """
+        normalized_range: str | None = None
+        if time_range is not None:
+            normalized_range = _ANALYTICS_TIME_RANGE_MAP.get(time_range.strip().lower())
+            if normalized_range is None:
+                raise FilterValidationError(
+                    f"Invalid time_range {time_range!r}. Valid values: "
+                    "7d, 28d, 90d, 365d (or past_7_days, past_28_days, "
+                    "past_90_days, past_365_days)."
+                )
+
+        base_url = "https://www.linkedin.com/analytics"
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+
+        requested_ordered = [
+            (name, suffix)
+            for name, suffix in ANALYTICS_SECTIONS.items()
+            if name in requested
+        ]
+        total = len(requested_ordered)
+
+        if callbacks:
+            await callbacks.on_start("analytics", base_url)
+
+        try:
+            for i, (section_name, suffix) in enumerate(requested_ordered):
+                if i > 0:
+                    await asyncio.sleep(_NAV_DELAY)
+
+                url = base_url + suffix
+                if (
+                    normalized_range is not None
+                    and section_name in ANALYTICS_TIME_RANGE_SECTIONS
+                ):
+                    url += f"?timeRange={normalized_range}"
+
+                try:
+                    extracted = await self.extract_page(
+                        url,
+                        section_name=section_name,
+                        max_scrolls=max_scrolls,
+                    )
+                    if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                        sections[section_name] = extracted.text
+                        if extracted.references:
+                            references[section_name] = extracted.references
+                    elif extracted.error:
+                        section_errors[section_name] = extracted.error
+                except LinkedInScraperException:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        "Error scraping analytics section %s: %s", section_name, e
+                    )
+                    section_errors[section_name] = build_issue_diagnostics(
+                        e,
+                        context="get_my_analytics",
+                        target_url=url,
+                        section_name=section_name,
+                    )
+
+                if callbacks:
+                    percent = round((i + 1) / total * 95)
+                    await callbacks.on_progress(
+                        f"Scraped {section_name} ({i + 1}/{total})", percent
+                    )
+        except LinkedInScraperException as e:
+            if callbacks:
+                await callbacks.on_error(e)
+            raise
+
+        result: dict[str, Any] = {
+            "url": f"{base_url}/",
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+
+        if callbacks:
+            await callbacks.on_complete("analytics", result)
+
+        return result
 
     async def _read_action_signals(self, username: str) -> ActionSignals:
         """Read locale-independent structural signals for a profile's

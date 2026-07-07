@@ -5439,3 +5439,122 @@ class TestGetPostComments:
         ):
             await extractor._expand_post_comments(4)
         assert mock_page.mouse.wheel.await_count == 4
+
+
+class TestGetMyAnalytics:
+    """Tests for the get_my_analytics extractor method."""
+
+    async def test_all_sections_visit_analytics_urls(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("21,182\nImpressions"),
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_my_analytics(
+                {
+                    "content",
+                    "audience",
+                    "top_posts",
+                    "profile_views",
+                    "search_appearances",
+                }
+            )
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert len(urls) == 5
+        assert any(u.endswith("/analytics/creator/content/") for u in urls)
+        assert any(u.endswith("/analytics/creator/audience/") for u in urls)
+        assert any(u.endswith("/analytics/creator/top-posts/") for u in urls)
+        assert any(u.endswith("/analytics/profile-views/") for u in urls)
+        assert any(u.endswith("/analytics/search-appearances/") for u in urls)
+        assert result["url"] == "https://www.linkedin.com/analytics/"
+        assert set(result["sections"]) == {
+            "content",
+            "audience",
+            "top_posts",
+            "profile_views",
+            "search_appearances",
+        }
+
+    async def test_time_range_applied_only_to_range_sections(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.get_my_analytics(
+                {"content", "audience", "profile_views"}, time_range="28d"
+            )
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        with_range = [u for u in urls if "timeRange=past_28_days" in u]
+        assert len(with_range) == 2
+        assert all(
+            "/creator/content/" in u or "/creator/audience/" in u for u in with_range
+        )
+        profile_views_url = next(u for u in urls if "/profile-views/" in u)
+        assert "timeRange" not in profile_views_url
+
+    async def test_time_range_accepts_canonical_form(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.get_my_analytics({"content"}, time_range="past_90_days")
+
+        url = mock_extract.call_args.args[0]
+        assert "timeRange=past_90_days" in url
+
+    async def test_invalid_time_range_raises(self, mock_page):
+        from linkedin_mcp_server.scraping.extractor import FilterValidationError
+
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(FilterValidationError, match="time_range"):
+            await extractor.get_my_analytics({"content"}, time_range="14d")
+
+    async def test_section_error_isolated(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[
+                    extracted("stats"),
+                    RuntimeError("boom"),
+                ],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_my_analytics({"content", "audience"})
+
+        assert len(result["sections"]) == 1
+        assert len(result["section_errors"]) == 1

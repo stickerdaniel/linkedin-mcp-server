@@ -54,6 +54,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `get_post_comments` | Read a single post's permalink page including its comment thread (the comments and replies left on the post) | working |
+| `get_my_analytics` | Get the authenticated user's own analytics dashboards with explicit section selection (content, audience, top_posts, profile_views, search_appearances) and optional time range (7d/28d/90d/365d) | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 <br/>

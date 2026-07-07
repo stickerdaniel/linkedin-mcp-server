@@ -20,6 +20,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Post Comments**: Read a single post with the comment thread others left on it
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed
+- **Analytics**: Read the authenticated user's own analytics dashboards (content performance, audience demographics, top posts, profile views, search appearances)
 - **Compact References**: Return typed per-section links alongside readable text without shipping full-page markdown
 
 ## Quick Start
