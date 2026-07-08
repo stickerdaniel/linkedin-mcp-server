@@ -3846,10 +3846,9 @@ class LinkedInExtractor:
         preview LinkedIn renders by default.
 
         ``limit`` controls how many inviter ``references`` are returned and
-        how many scroll passes pre-load the list. The ``sections`` text
-        always reflects whatever was rendered when extraction ran — typically
-        rounded up to LinkedIn's screenful (~10 cards), so the visible
-        section text may include slightly more invitations than ``limit``.
+        how many scroll passes pre-load the list. The ``sections`` text is
+        trimmed at the first omitted invitation's profile label when possible,
+        keeping the readable text aligned with the returned references.
         """
         url = f"https://www.linkedin.com/mynetwork/invitation-manager/{kind}/"
         await self._navigate_to_page(url)
@@ -3872,10 +3871,14 @@ class LinkedInExtractor:
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
         cleaned = strip_linkedin_noise(raw) if raw else ""
-        references: list[Reference] = (
-            build_references(raw_result["references"], "invitations")[:limit]
-            if cleaned
-            else []
+        all_references: list[Reference] = (
+            build_references(raw_result["references"], "invitations") if cleaned else []
+        )
+        references = all_references[:limit]
+        cleaned = self._trim_invitation_text_to_limit(
+            cleaned,
+            all_references,
+            limit,
         )
 
         return self._single_section_result(
@@ -3884,6 +3887,42 @@ class LinkedInExtractor:
             cleaned,
             references=references,
         )
+
+    @staticmethod
+    def _trim_invitation_text_to_limit(
+        text: str,
+        references: list[Reference],
+        limit: int,
+    ) -> str:
+        """Trim invitation text at the first omitted profile label.
+
+        LinkedIn lazy-loads invitations in screenfuls, so even ``limit=1`` can
+        render several cards before extraction. The profile references preserve
+        DOM order, and each invitation card includes the inviter/invitee profile
+        label in its readable text. Cutting before the first omitted reference
+        keeps ``sections["invitations"]`` aligned with the sliced references
+        without relying on LinkedIn layout class names.
+        """
+        if limit < 1 or len(references) <= limit or not text:
+            return text
+
+        search_from = 0
+        for reference in references[:limit]:
+            label = reference.get("text")
+            if not label:
+                continue
+            index = text.find(label, search_from)
+            if index >= 0:
+                search_from = index + len(label)
+
+        next_label = references[limit].get("text")
+        if not next_label:
+            return text
+
+        next_index = text.find(next_label, search_from)
+        if next_index <= 0:
+            return text
+        return text[:next_index].rstrip()
 
     async def _received_invitation_count_is_zero(self) -> bool:
         """Return True when the received invitation counter is explicitly zero.

@@ -5225,7 +5225,12 @@ class TestGetPendingInvitations:
     note-expansion selector never touches an already-expanded toggle.
     """
 
-    def _patch_invitation_helpers(self, extractor, raw_references):
+    def _patch_invitation_helpers(
+        self,
+        extractor,
+        raw_references,
+        raw_text="Pending invitations text",
+    ):
         """Context managers that stub the navigation/scroll/extract helpers so
         the test exercises only the limit/cap/reference logic. Mirrors the
         ``patch.object`` style used elsewhere in this module."""
@@ -5250,7 +5255,7 @@ class TestGetPendingInvitations:
                 new_callable=AsyncMock,
                 return_value={
                     "source": "main",
-                    "text": "Pending invitations text",
+                    "text": raw_text,
                     "references": raw_references,
                 },
             ),
@@ -5284,6 +5289,32 @@ class TestGetPendingInvitations:
         assert len(invitations) == 5
         assert all(ref["kind"] == "person" for ref in invitations)
         assert result["url"].endswith("/invitation-manager/received/")
+
+    async def test_text_trimmed_to_limit_reference_boundary(self, mock_page):
+        """Returned section text should stop before the first omitted card so
+        text and references describe the same invitation count."""
+        raw_references = [
+            {"href": f"https://www.linkedin.com/in/user-{i}/", "text": f"User {i}"}
+            for i in range(3)
+        ]
+        raw_text = (
+            "User 0\nInvited you to connect\n\n"
+            "User 1\nInvited you to connect\n\n"
+            "User 2\nInvited you to connect"
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        with ExitStack() as stack:
+            for ctx in self._patch_invitation_helpers(
+                extractor,
+                raw_references,
+                raw_text=raw_text,
+            ):
+                stack.enter_context(ctx)
+            result = await extractor.get_pending_invitations(limit=1)
+
+        assert result["sections"]["invitations"] == "User 0\nInvited you to connect"
+        assert len(result["references"]["invitations"]) == 1
 
     async def test_sent_kind_navigates_to_sent_page(self, mock_page):
         """kind='sent' targets the sent invitation-manager surface."""

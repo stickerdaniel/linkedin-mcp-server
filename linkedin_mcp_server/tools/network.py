@@ -48,9 +48,9 @@ def register_network_tools(
 
         Args:
             ctx: FastMCP context for progress reporting
-            limit: Maximum number of invitations to load (1-100, default 20).
-                Invitations load in batches of ~10 as the list scrolls, so
-                the actual count may slightly exceed the target.
+            limit: Maximum number of invitations to return (1-100, default 20).
+                References are capped exactly; readable text is trimmed at the
+                first omitted invitation when LinkedIn renders extra cards.
             kind: "received" (default) for incoming invitations, "sent" for
                 outgoing ones awaiting the recipient's response.
 
