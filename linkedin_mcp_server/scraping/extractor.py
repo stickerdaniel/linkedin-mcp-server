@@ -125,6 +125,125 @@ _MESSAGING_CLOSE_SELECTOR = (
     'button[aria-label*="Close"]'
 )
 
+# Shared by baseline counting and post-send polling so both paths always use
+# identical visibility and editable-ancestor rules.
+_MESSAGE_CONFIRMATION_RETRY_TIMEOUT_MS = 5_000
+_PROFILE_INFO_SHARE_PROMPT_LOCALES = {
+    "de": {
+        "prompts": (
+            "profilinformationen teilen",
+            "profil teilen",
+            "kontaktdaten teilen",
+        ),
+        "negative_actions": (
+            "nicht teilen",
+            "jetzt nicht",
+            "überspringen",
+            "nein, danke",
+        ),
+    },
+    "en": {
+        "prompts": (
+            "profile information",
+            "share profile",
+            "share your profile",
+            "share your contact",
+        ),
+        "negative_actions": (
+            "don't share",
+            "do not share",
+            "not now",
+            "skip",
+            "no, thanks",
+        ),
+    },
+    "es": {
+        "prompts": (
+            "compartir la información del perfil",
+            "compartir tu perfil",
+            "compartir tus datos de contacto",
+        ),
+        "negative_actions": (
+            "no compartir",
+            "ahora no",
+            "omitir",
+            "no, gracias",
+        ),
+    },
+    "fr": {
+        "prompts": (
+            "partager les informations du profil",
+            "partager votre profil",
+            "partager vos coordonnées",
+        ),
+        "negative_actions": (
+            "ne pas partager",
+            "pas maintenant",
+            "ignorer",
+            "non merci",
+        ),
+    },
+    "pl": {
+        "prompts": (
+            "udostępn",
+            "informacje profil",
+        ),
+        "negative_actions": (
+            "nie udostępniaj",
+            "nie teraz",
+            "pomiń",
+            "odrzuć",
+        ),
+    },
+    "pt": {
+        "prompts": (
+            "compartilhar informações do perfil",
+            "compartilhar seu perfil",
+            "compartilhar suas informações de contato",
+        ),
+        "negative_actions": (
+            "não compartilhar",
+            "agora não",
+            "pular",
+            "não, obrigado",
+            "não, obrigada",
+        ),
+    },
+}
+_MESSAGE_TEXT_OCCURRENCES_OUTSIDE_COMPOSER_JS = r"""({ expected, afterCount }) => {
+    const normalize = value =>
+        (value || '').replace(/\s+/g, ' ').trim();
+    const target = normalize(expected);
+    if (!target) return afterCount === null ? 0 : false;
+    const root = document.querySelector('main') || document.body;
+    if (!root) return afterCount === null ? 0 : false;
+    const walker = document.createTreeWalker(
+        root,
+        NodeFilter.SHOW_TEXT,
+        {
+            acceptNode: node => {
+                const parent = node.parentElement;
+                if (!parent) return NodeFilter.FILTER_REJECT;
+                if (parent.closest('[contenteditable="true"], [role="textbox"]')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                if (!(parent.offsetWidth || parent.offsetHeight || parent.getClientRects().length)) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            },
+        }
+    );
+    let count = 0;
+    let node;
+    while ((node = walker.nextNode())) {
+        if (normalize(node.nodeValue || '').includes(target)) {
+            count++;
+        }
+    }
+    return afterCount === null ? count : count > afterCount;
+}"""
+
 # Shared JS function that walks up from any /messaging/compose/ anchor
 # inside <main> to find the smallest ancestor that satisfies the
 # action-root predicate (>=2 interactive children, >=1 button). This is
@@ -2624,40 +2743,8 @@ class LinkedInExtractor:
         """Count visible message text occurrences outside editable compose boxes."""
         return int(
             await self._page.evaluate(
-                """({ expected }) => {
-                    const normalize = value =>
-                        (value || '').replace(/\\s+/g, ' ').trim();
-                    const target = normalize(expected);
-                    if (!target) return 0;
-                    const root = document.querySelector('main') || document.body;
-                    if (!root) return 0;
-                    const walker = document.createTreeWalker(
-                        root,
-                        NodeFilter.SHOW_TEXT,
-                        {
-                            acceptNode: node => {
-                                const parent = node.parentElement;
-                                if (!parent) return NodeFilter.FILTER_REJECT;
-                                if (parent.closest('[contenteditable="true"], [role="textbox"]')) {
-                                    return NodeFilter.FILTER_REJECT;
-                                }
-                                if (!(parent.offsetWidth || parent.offsetHeight || parent.getClientRects().length)) {
-                                    return NodeFilter.FILTER_REJECT;
-                                }
-                                return NodeFilter.FILTER_ACCEPT;
-                            },
-                        }
-                    );
-                    let count = 0;
-                    let node;
-                    while ((node = walker.nextNode())) {
-                        if (normalize(node.nodeValue || '').includes(target)) {
-                            count++;
-                        }
-                    }
-                    return count;
-                }""",
-                {"expected": message},
+                _MESSAGE_TEXT_OCCURRENCES_OUTSIDE_COMPOSER_JS,
+                {"expected": message, "afterCount": None},
             )
         )
 
@@ -2666,44 +2753,18 @@ class LinkedInExtractor:
         message: str,
         *,
         after_count: int = 0,
+        timeout_ms: float | None = None,
     ) -> bool:
         """Wait until message text gains a non-composer occurrence."""
+        wait_options: dict[str, Any] = {
+            "arg": {"expected": message, "afterCount": after_count}
+        }
+        if timeout_ms is not None:
+            wait_options["timeout"] = timeout_ms
         try:
             await self._page.wait_for_function(
-                """({ expected, afterCount }) => {
-                    const normalize = value =>
-                        (value || '').replace(/\\s+/g, ' ').trim();
-                    const target = normalize(expected);
-                    if (!target) return false;
-                    const root = document.querySelector('main') || document.body;
-                    if (!root) return false;
-                    const walker = document.createTreeWalker(
-                        root,
-                        NodeFilter.SHOW_TEXT,
-                        {
-                            acceptNode: node => {
-                                const parent = node.parentElement;
-                                if (!parent) return NodeFilter.FILTER_REJECT;
-                                if (parent.closest('[contenteditable="true"], [role="textbox"]')) {
-                                    return NodeFilter.FILTER_REJECT;
-                                }
-                                if (!(parent.offsetWidth || parent.offsetHeight || parent.getClientRects().length)) {
-                                    return NodeFilter.FILTER_REJECT;
-                                }
-                                return NodeFilter.FILTER_ACCEPT;
-                            },
-                        }
-                    );
-                    let count = 0;
-                    let node;
-                    while ((node = walker.nextNode())) {
-                        if (normalize(node.nodeValue || '').includes(target)) {
-                            count++;
-                        }
-                    }
-                    return count > afterCount;
-                }""",
-                arg={"expected": message, "afterCount": after_count},
+                _MESSAGE_TEXT_OCCURRENCES_OUTSIDE_COMPOSER_JS,
+                **wait_options,
             )
             return True
         except PlaywrightTimeoutError:
@@ -2719,12 +2780,12 @@ class LinkedInExtractor:
 
         DOM dependency: LinkedIn exposes this as a transient modal without a
         stable URL or data attribute, so text matching is the only practical
-        signal. Keep the phrase tables explicit and limited to observed PL/EN
-        prompt/action copy.
+        signal. Matching is selected from an explicit per-locale table using
+        the document language; unsupported locales are left untouched.
         """
         try:
             handled = await self._page.evaluate(
-                r"""() => {
+                r"""({ localeTable }) => {
                     const visible = el => !!(
                         el &&
                         (el.offsetWidth || el.offsetHeight || el.getClientRects().length)
@@ -2734,6 +2795,13 @@ class LinkedInExtractor:
                         .trim()
                         .toLowerCase();
 
+                    const language = norm(document.documentElement.lang || 'en')
+                        .split('-')[0];
+                    const locale = localeTable[language];
+                    if (!locale) return false;
+                    const promptNeedles = locale.prompts.map(norm);
+                    const negativeButtonNeedles = locale.negative_actions.map(norm);
+
                     const dialogSelectors = [
                         'dialog[open]',
                         '[role="dialog"]',
@@ -2742,25 +2810,6 @@ class LinkedInExtractor:
                     const dialogs = [...new Set(
                         dialogSelectors.flatMap(sel => [...document.querySelectorAll(sel)])
                     )].filter(visible);
-
-                    const promptNeedles = [
-                        'udostępn',
-                        'informacje profil',
-                        'profile information',
-                        'share profile',
-                        'share your profile',
-                        'share your contact',
-                    ];
-                    const negativeButtonNeedles = [
-                        'nie udostępniaj',
-                        'nie teraz',
-                        'pomiń',
-                        'odrzuć',
-                        "don't share",
-                        'do not share',
-                        'not now',
-                        'skip',
-                    ];
 
                     for (const dialog of dialogs) {
                         const dialogText = norm(dialog.innerText || dialog.textContent || '');
@@ -2783,7 +2832,8 @@ class LinkedInExtractor:
                         return true;
                     }
                     return false;
-                }"""
+                }""",
+                {"localeTable": _PROFILE_INFO_SHARE_PROMPT_LOCALES},
             )
             if handled:
                 await asyncio.sleep(1.0)
@@ -3841,10 +3891,6 @@ class LinkedInExtractor:
                 if (!textbox) return false;
                 const sendSelector = [
                     'button[type="submit"]',
-                    'button[aria-label*="Send"]',
-                    'button[aria-label*="send"]',
-                    'button[aria-label*="Wyślij"]',
-                    'button[aria-label*="wyślij"]',
                     'button[data-control-name="send"]',
                 ].join(',');
                 let scope = textbox;
@@ -3878,6 +3924,7 @@ class LinkedInExtractor:
                 if await self._message_text_visible_outside_composer(
                     message,
                     after_count=pre_send_count,
+                    timeout_ms=_MESSAGE_CONFIRMATION_RETRY_TIMEOUT_MS,
                 ):
                     return self._message_action_result(
                         self._page.url,
