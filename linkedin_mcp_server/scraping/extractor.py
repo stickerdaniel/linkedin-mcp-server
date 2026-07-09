@@ -3826,6 +3826,253 @@ class LinkedInExtractor:
             sent=True,
         )
 
+    async def get_pending_invitations(
+        self,
+        limit: int = 20,
+        kind: Literal["received", "sent"] = "received",
+    ) -> dict[str, Any]:
+        """List pending LinkedIn network invitations (received or sent).
+
+        Mirrors ``/mynetwork/invitation-manager/{received|sent}/``. Returns
+        the standard single-section payload (``sections["invitations"]`` +
+        optional ``references["invitations"]``) so the consumer can read
+        invite text and follow inviter/invitee profile links. Read-only:
+        no accept/ignore/withdraw side effects.
+
+        Truncated invitation notes are auto-expanded before extraction by
+        clicking the inline ``data-testid="expandable-text-button"`` toggles
+        that are not already in the expanded state, so the returned section
+        text contains the full invite body rather than the "... see more"
+        preview LinkedIn renders by default.
+
+        ``limit`` controls how many inviter ``references`` are returned and
+        how many scroll passes pre-load the list. The ``sections`` text is
+        trimmed at the first omitted invitation's profile label when possible,
+        with a blank-line card-boundary fallback for visible cards that do not
+        produce distinct usable profile references.
+        """
+        url = f"https://www.linkedin.com/mynetwork/invitation-manager/{kind}/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context=f"Invitations ({kind})")
+        await handle_modal_close(self._page)
+
+        # Invitations paginate as the list scrolls, ~10 cards per screenful,
+        # so reuse the same heuristic as get_inbox.
+        scrolls = max(1, limit // 10)
+        await self._scroll_main_scrollable_region(
+            position="bottom", attempts=scrolls, pause_time=0.5
+        )
+
+        await self._expand_invitation_note_toggles()
+
+        if kind == "received" and await self._received_invitation_count_is_zero():
+            return self._single_section_result(url, "invitations", "", references=[])
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+        all_references: list[Reference] = (
+            build_references(raw_result["references"], "invitations") if cleaned else []
+        )
+        references = all_references[:limit]
+        cleaned = self._trim_invitation_text_to_limit(
+            cleaned,
+            all_references,
+            limit,
+        )
+
+        return self._single_section_result(
+            url,
+            "invitations",
+            cleaned,
+            references=references,
+        )
+
+    @staticmethod
+    def _trim_invitation_text_to_limit(
+        text: str,
+        references: list[Reference],
+        limit: int,
+    ) -> str:
+        """Trim invitation text at the first omitted profile label.
+
+        LinkedIn lazy-loads invitations in screenfuls, so even ``limit=1`` can
+        render several cards before extraction. The profile references preserve
+        DOM order, and each invitation card usually includes the inviter/invitee
+        profile label in its readable text. Cutting before the first omitted
+        reference keeps ``sections["invitations"]`` aligned with the sliced
+        references when that signal is available. If later visible cards do not
+        produce usable references, fall back to the blank line separation that
+        LinkedIn's readable text emits between invitation cards.
+        """
+        if limit < 1 or not text:
+            return text
+
+        search_from = 0
+        for reference in references[:limit]:
+            label = reference.get("text")
+            if not label:
+                continue
+            index = text.find(label, search_from)
+            if index >= 0:
+                search_from = index + len(label)
+
+        if len(references) > limit:
+            next_label = references[limit].get("text")
+            if next_label:
+                next_index = text.find(next_label, search_from)
+                if next_index > 0:
+                    return text[:next_index].rstrip()
+
+        return LinkedInExtractor._trim_invitation_text_to_block_limit(
+            text,
+            references,
+            limit,
+        )
+
+    @staticmethod
+    def _trim_invitation_text_to_block_limit(
+        text: str,
+        references: list[Reference],
+        limit: int,
+    ) -> str:
+        """Fallback trim using blank-line card boundaries after first reference."""
+        first_label = next(
+            (
+                reference.get("text")
+                for reference in references
+                if reference.get("text")
+            ),
+            None,
+        )
+        if not first_label:
+            return text
+
+        first_index = text.find(first_label)
+        if first_index < 0:
+            return text
+
+        prefix = text[:first_index]
+        card_text = text[first_index:].strip()
+        blocks = [
+            block.strip() for block in re.split(r"\n\s*\n", card_text) if block.strip()
+        ]
+        if len(blocks) <= limit:
+            return text
+        return (prefix + "\n\n".join(blocks[:limit])).rstrip()
+
+    async def _received_invitation_count_is_zero(self) -> bool:
+        """Return True when the received invitation counter is explicitly zero.
+
+        The received manager can render unrelated "people you may know"
+        recommendations below the empty state. Anchors in that block are not
+        pending invitations, so if LinkedIn exposes the selected ALL-count tab
+        as zero we return an empty single-section result instead of scraping
+        the recommendation cards.
+
+        DOM dependency: the count itself is visible text, but the selected tab
+        is located through locale-independent structural signals: current link
+        state plus the stable ``/invitation-manager/received/ALL`` URL.
+        """
+        try:
+            return bool(
+                await self._page.evaluate(
+                    r"""() => {
+                        const currentAll = document.querySelector(
+                            'main a[aria-current="true"]'
+                            + '[href*="/mynetwork/invitation-manager/received/ALL"]'
+                        );
+                        if (!currentAll) return false;
+                        const text = currentAll.innerText || currentAll.textContent || '';
+                        const match = text.match(/\((\d+)\)/);
+                        return match ? Number(match[1]) === 0 : false;
+                    }"""
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed to read received invitation count: %s", exc)
+            return False
+
+    async def _expand_invitation_note_toggles(self) -> None:
+        """Click inline expand toggles on invitation cards to reveal full notes.
+
+        LinkedIn truncates invitation notes longer than ~5 lines and renders
+        an inline ``<button data-testid="expandable-text-button">`` inside
+        a ``<span data-testid="expandable-text-box">``. The testid attribute
+        is the locale-independent signal — the visible verb ("see more" /
+        "pokaż więcej" / "voir plus") varies by locale and is unreliable.
+
+        The button ships with inline ``pointer-events: none`` and
+        ``aria-hidden="true"``, which blocks Playwright's standard
+        ``.click()`` from delivering the event to the React handler. We
+        therefore (a) inject a one-shot stylesheet re-enabling pointer
+        events on these specific testid'd nodes and (b) dispatch a
+        synthetic bubbling MouseEvent so the handler fires. The injected
+        style is scoped narrowly enough that it does not affect any other
+        element on the page.
+
+        Each dispatched click can cause LinkedIn to lazy-load further
+        invitation cards with their own collapsed notes, so we run a second
+        pass to pick up the newly-mounted toggles. Already-clicked buttons
+        are tagged with ``data-mcp-clicked="1"`` so the second pass never
+        re-clicks them — without the marker the post-click "collapse"
+        button (same testid, different visible verb) would be re-toggled
+        and silently re-truncate notes the first pass just expanded.
+
+        The selector additionally excludes ``aria-expanded="true"`` so any
+        notes LinkedIn happens to render pre-expanded on initial load are
+        left alone instead of being toggled closed by the first pass.
+        Collapsed toggles ship without an ``aria-expanded`` attribute at
+        all on this surface, so the ``:not([aria-expanded="true"])`` filter
+        is the conservative shape: it matches both the unset and the
+        explicit ``"false"`` states while skipping the expanded ones.
+        """
+        try:
+            for _ in range(2):
+                dispatched = await self._page.evaluate(
+                    """async () => {
+                        if (!document.getElementById('__linkedin_mcp_expand_style')) {
+                            const styleNode = document.createElement('style');
+                            styleNode.id = '__linkedin_mcp_expand_style';
+                            styleNode.textContent = `
+                                [data-testid="expandable-text-button"],
+                                [data-testid="expandable-text-box"] {
+                                    pointer-events: auto !important;
+                                }
+                            `;
+                            document.head.appendChild(styleNode);
+                        }
+                        const buttons = Array.from(document.querySelectorAll(
+                            'main [data-testid="expandable-text-button"]'
+                            + ':not([aria-expanded="true"])'
+                            + ':not([data-mcp-clicked])'
+                        ));
+                        let count = 0;
+                        for (const btn of buttons) {
+                            try {
+                                btn.dispatchEvent(new MouseEvent('click', {
+                                    bubbles: true,
+                                    cancelable: true,
+                                    view: window,
+                                }));
+                                btn.dataset.mcpClicked = '1';
+                                count++;
+                            } catch (e) {
+                                /* leave unmarked so a later pass can retry */
+                            }
+                        }
+                        // Let React render the expanded note bodies before
+                        // the caller extracts innerText.
+                        await new Promise(r => setTimeout(r, 400));
+                        return count;
+                    }"""
+                )
+                if not dispatched:
+                    break
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Failed to expand invitation note toggles: %s", exc)
+
     async def _extract_root_content(
         self,
         selectors: list[str],
