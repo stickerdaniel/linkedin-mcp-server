@@ -43,12 +43,13 @@ class TestApplyOutputMode:
 
         returned = apply_output_mode(result, "job.json", "file")
 
-        # Confirmation carries section names, not the full sections payload.
+        # Confirmation carries section names without changing the standard
+        # mapping type of the optional `sections` response field.
         assert returned["saved_path"] == str(target)
         assert returned["url"] == result["url"]
         assert returned["job_ids"] == result["job_ids"]
-        assert returned["sections"] == ["job_posting"]
-        assert returned["sections"] != result["sections"]
+        assert returned["section_names"] == ["job_posting"]
+        assert "sections" not in returned
 
         on_disk = json.loads(target.read_text())
         assert on_disk == result

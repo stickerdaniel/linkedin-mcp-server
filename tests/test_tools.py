@@ -605,7 +605,7 @@ class TestCompanyTools:
 
 
 class TestJobTools:
-    async def test_file_capable_job_tools_are_not_annotated_read_only(self):
+    async def test_file_capable_job_tools_have_conservative_annotations(self):
         from linkedin_mcp_server.tools.job import register_job_tools
 
         mcp = FastMCP("test")
@@ -616,6 +616,9 @@ class TestJobTools:
             assert tool is not None
             assert tool.annotations is not None
             assert tool.annotations.readOnlyHint is False
+            assert tool.annotations.destructiveHint is True
+            assert tool.annotations.idempotentHint is False
+            assert tool.annotations.openWorldHint is True
 
     async def test_get_job_details(self, mock_context):
         expected = {
@@ -680,8 +683,9 @@ class TestJobTools:
         )
 
         assert result["saved_path"] == str(target)
-        # Confirmation lists section names, not the full text payload.
-        assert result["sections"] == ["job_posting"]
+        # Confirmation lists section names without changing the `sections` type.
+        assert result["section_names"] == ["job_posting"]
+        assert "sections" not in result
         assert target.exists()
 
     async def test_search_jobs_default_mode_returns_content(self, mock_context):

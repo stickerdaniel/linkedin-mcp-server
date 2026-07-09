@@ -141,5 +141,5 @@ def apply_output_mode(
         confirmation["url"] = result["url"]
     if "job_ids" in result:
         confirmation["job_ids"] = result["job_ids"]
-    confirmation["sections"] = sorted((result.get("sections") or {}).keys())
+    confirmation["section_names"] = sorted((result.get("sections") or {}).keys())
     return confirmation
