@@ -3848,7 +3848,8 @@ class LinkedInExtractor:
         ``limit`` controls how many inviter ``references`` are returned and
         how many scroll passes pre-load the list. The ``sections`` text is
         trimmed at the first omitted invitation's profile label when possible,
-        keeping the readable text aligned with the returned references.
+        with a blank-line card-boundary fallback for visible cards that do not
+        produce distinct usable profile references.
         """
         url = f"https://www.linkedin.com/mynetwork/invitation-manager/{kind}/"
         await self._navigate_to_page(url)
@@ -3898,12 +3899,14 @@ class LinkedInExtractor:
 
         LinkedIn lazy-loads invitations in screenfuls, so even ``limit=1`` can
         render several cards before extraction. The profile references preserve
-        DOM order, and each invitation card includes the inviter/invitee profile
-        label in its readable text. Cutting before the first omitted reference
-        keeps ``sections["invitations"]`` aligned with the sliced references
-        without relying on LinkedIn layout class names.
+        DOM order, and each invitation card usually includes the inviter/invitee
+        profile label in its readable text. Cutting before the first omitted
+        reference keeps ``sections["invitations"]`` aligned with the sliced
+        references when that signal is available. If later visible cards do not
+        produce usable references, fall back to the blank line separation that
+        LinkedIn's readable text emits between invitation cards.
         """
-        if limit < 1 or len(references) <= limit or not text:
+        if limit < 1 or not text:
             return text
 
         search_from = 0
@@ -3915,14 +3918,49 @@ class LinkedInExtractor:
             if index >= 0:
                 search_from = index + len(label)
 
-        next_label = references[limit].get("text")
-        if not next_label:
+        if len(references) > limit:
+            next_label = references[limit].get("text")
+            if next_label:
+                next_index = text.find(next_label, search_from)
+                if next_index > 0:
+                    return text[:next_index].rstrip()
+
+        return LinkedInExtractor._trim_invitation_text_to_block_limit(
+            text,
+            references,
+            limit,
+        )
+
+    @staticmethod
+    def _trim_invitation_text_to_block_limit(
+        text: str,
+        references: list[Reference],
+        limit: int,
+    ) -> str:
+        """Fallback trim using blank-line card boundaries after first reference."""
+        first_label = next(
+            (
+                reference.get("text")
+                for reference in references
+                if reference.get("text")
+            ),
+            None,
+        )
+        if not first_label:
             return text
 
-        next_index = text.find(next_label, search_from)
-        if next_index <= 0:
+        first_index = text.find(first_label)
+        if first_index < 0:
             return text
-        return text[:next_index].rstrip()
+
+        prefix = text[:first_index]
+        card_text = text[first_index:].strip()
+        blocks = [
+            block.strip() for block in re.split(r"\n\s*\n", card_text) if block.strip()
+        ]
+        if len(blocks) <= limit:
+            return text
+        return (prefix + "\n\n".join(blocks[:limit])).rstrip()
 
     async def _received_invitation_count_is_zero(self) -> bool:
         """Return True when the received invitation counter is explicitly zero.

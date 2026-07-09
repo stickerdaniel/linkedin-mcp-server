@@ -5316,6 +5316,32 @@ class TestGetPendingInvitations:
         assert result["sections"]["invitations"] == "User 0\nInvited you to connect"
         assert len(result["references"]["invitations"]) == 1
 
+    async def test_text_trimmed_to_limit_when_next_card_has_no_reference(
+        self, mock_page
+    ):
+        """The text limit must still hold when later visible cards do not
+        produce distinct usable profile references."""
+        raw_references = [
+            {"href": "https://www.linkedin.com/in/user-0/", "text": "User 0"}
+        ]
+        raw_text = (
+            "User 0\nInvited you to connect\n\n"
+            "Someone without a usable profile link\nInvited you to connect"
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        with ExitStack() as stack:
+            for ctx in self._patch_invitation_helpers(
+                extractor,
+                raw_references,
+                raw_text=raw_text,
+            ):
+                stack.enter_context(ctx)
+            result = await extractor.get_pending_invitations(limit=1)
+
+        assert result["sections"]["invitations"] == "User 0\nInvited you to connect"
+        assert len(result["references"]["invitations"]) == 1
+
     async def test_sent_kind_navigates_to_sent_page(self, mock_page):
         """kind='sent' targets the sent invitation-manager surface."""
         extractor = LinkedInExtractor(mock_page)
