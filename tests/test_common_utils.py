@@ -119,3 +119,16 @@ class TestApplyOutputMode:
             apply_output_mode(_sample_result(), "escape/job.json", "file")
 
         assert not (outside / "job.json").exists()
+
+    def test_rejects_symlinked_export_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        linkedin_dir = tmp_path / ".linkedin-mcp"
+        outside = tmp_path / "outside"
+        linkedin_dir.mkdir()
+        outside.mkdir()
+        (linkedin_dir / "exports").symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="export directory must not be a symlink"):
+            apply_output_mode(_sample_result(), "job.json", "file")
+
+        assert not (outside / "job.json").exists()

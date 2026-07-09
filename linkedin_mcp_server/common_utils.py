@@ -96,7 +96,11 @@ def _render_result_text(result: dict[str, Any]) -> str:
 
 def _resolve_export_path(output_path: str) -> Path:
     """Resolve *output_path* inside the dedicated LinkedIn MCP export directory."""
-    export_root = (Path.home() / ".linkedin-mcp" / "exports").resolve()
+    export_root_path = Path.home().resolve() / ".linkedin-mcp" / "exports"
+    export_root = export_root_path.resolve()
+    if export_root != export_root_path:
+        raise ValueError("LinkedIn MCP export directory must not be a symlink")
+
     requested = Path(output_path).expanduser()
     path = (requested if requested.is_absolute() else export_root / requested).resolve()
     if not path.is_relative_to(export_root):
