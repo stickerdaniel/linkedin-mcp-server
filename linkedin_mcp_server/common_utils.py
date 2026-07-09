@@ -94,6 +94,19 @@ def _render_result_text(result: dict[str, Any]) -> str:
     return "\n".join(parts) + "\n"
 
 
+def _resolve_export_path(output_path: str) -> Path:
+    """Resolve *output_path* inside the dedicated LinkedIn MCP export directory."""
+    export_root = (Path.home() / ".linkedin-mcp" / "exports").resolve()
+    requested = Path(output_path).expanduser()
+    path = (requested if requested.is_absolute() else export_root / requested).resolve()
+    if not path.is_relative_to(export_root):
+        raise ValueError(
+            "output_path must be inside the LinkedIn MCP export directory "
+            f"({export_root})"
+        )
+    return path
+
+
 def apply_output_mode(
     result: dict[str, Any],
     output_path: str | None,
@@ -103,24 +116,26 @@ def apply_output_mode(
 
     - ``display`` (default): return the full result, write nothing.
     - ``file``: write to *output_path*, return a compact confirmation only.
-    - ``both``: write to *output_path* and return the full result.
+    - ``both``: write to *output_path* and return the full result plus saved path.
 
-    File format follows the extension: ``.json`` dumps the full dict, anything
-    else writes a readable text rendering of url/sections/job_ids.
+    Relative paths resolve under ``~/.linkedin-mcp/exports``. Absolute paths
+    must also stay inside that directory. File format follows the extension:
+    ``.json`` dumps the full dict; anything else writes a readable text rendering
+    of url/sections/job_ids.
     """
     if output_mode == "display":
         return result
     if not output_path:
         raise ValueError("output_path is required when output_mode is 'file' or 'both'")
 
-    path = Path(output_path).expanduser()
+    path = _resolve_export_path(output_path)
     if path.suffix == ".json":
         secure_write_text(path, json.dumps(result, ensure_ascii=False, indent=2))
     else:
         secure_write_text(path, _render_result_text(result))
 
     if output_mode == "both":
-        return result
+        return {**result, "saved_path": str(path)}
     confirmation: dict[str, Any] = {"saved_path": str(path)}
     if "url" in result:
         confirmation["url"] = result["url"]

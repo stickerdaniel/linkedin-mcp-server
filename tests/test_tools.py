@@ -605,6 +605,18 @@ class TestCompanyTools:
 
 
 class TestJobTools:
+    async def test_file_capable_job_tools_are_not_annotated_read_only(self):
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        for tool_name in ("get_job_details", "search_jobs"):
+            tool = await mcp.get_tool(tool_name)
+            assert tool is not None
+            assert tool.annotations is not None
+            assert tool.annotations.readOnlyHint is False
+
     async def test_get_job_details(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/jobs/view/12345/",
@@ -641,8 +653,11 @@ class TestJobTools:
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
 
-    async def test_get_job_details_writes_file(self, mock_context, tmp_path):
+    async def test_get_job_details_writes_file(
+        self, mock_context, tmp_path, monkeypatch
+    ):
         """output_mode='file' persists the result and returns a confirmation."""
+        monkeypatch.setenv("HOME", str(tmp_path))
         expected = {
             "url": "https://www.linkedin.com/jobs/view/12345/",
             "sections": {"job_posting": "Software Engineer"},
@@ -654,12 +669,12 @@ class TestJobTools:
         mcp = FastMCP("test")
         register_job_tools(mcp)
 
-        target = tmp_path / "job.json"
+        target = tmp_path / ".linkedin-mcp" / "exports" / "job.json"
         tool_fn = await get_tool_fn(mcp, "get_job_details")
         result = await tool_fn(
             "12345",
             mock_context,
-            output_path=str(target),
+            output_path="job.json",
             output_mode="file",
             extractor=mock_extractor,
         )

@@ -27,7 +27,12 @@ def register_job_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Job Details",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
         tags={"job", "scraping"},
         exclude_args=["extractor"],
     )
@@ -44,12 +49,13 @@ def register_job_tools(
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
             ctx: FastMCP context for progress reporting
-            output_path: Where to save the result when output_mode is file/both.
-                Extension drives format: .json dumps the full dict, anything
-                else writes a readable text rendering.
+            output_path: Export path for file/both mode. Relative paths resolve
+                under ~/.linkedin-mcp/exports; absolute paths must remain inside
+                that directory. Extension drives format: .json dumps the full
+                dict; anything else writes a readable text rendering.
             output_mode: 'display' (default) returns content and writes nothing;
                 'file' writes to output_path and returns a compact confirmation;
-                'both' writes to output_path and returns the full content.
+                'both' writes and returns the full content plus saved_path.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -82,7 +88,12 @@ def register_job_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Search Jobs",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
         tags={"job", "search"},
         exclude_args=["extractor"],
     )
@@ -117,12 +128,13 @@ def register_job_tools(
             work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
             easy_apply: Only show Easy Apply jobs (default false)
             sort_by: Sort results (date, relevance)
-            output_path: Where to save the result when output_mode is file/both.
-                Extension drives format: .json dumps the full dict, anything
-                else writes a readable text rendering.
+            output_path: Export path for file/both mode. Relative paths resolve
+                under ~/.linkedin-mcp/exports; absolute paths must remain inside
+                that directory. Extension drives format: .json dumps the full
+                dict; anything else writes a readable text rendering.
             output_mode: 'display' (default) returns content and writes nothing;
-                'file' writes to output_path and returns a compact confirmation
-                (url + job_ids + section names); 'both' writes and returns full.
+                'file' writes and returns a compact confirmation (url + job_ids
+                + section names); 'both' returns full content plus saved_path.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of

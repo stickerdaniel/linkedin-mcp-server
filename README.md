@@ -49,9 +49,9 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
 | `search_companies` | Search for companies on LinkedIn by keywords | working |
 | `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter | working |
-| `search_jobs` | Search for jobs with keywords and location filters; optional `output_mode`/`output_path` to save results to a file instead of (or alongside) returning them | working |
+| `search_jobs` | Search for jobs with keywords and location filters; optional `output_mode`/`output_path` saves under `~/.linkedin-mcp/exports` instead of (or alongside) returning results | working |
 | `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | working |
-| `get_job_details` | Get detailed information about a specific job posting; optional `output_mode`/`output_path` to save the posting to a file instead of (or alongside) returning it | working |
+| `get_job_details` | Get detailed job posting information; optional `output_mode`/`output_path` saves under `~/.linkedin-mcp/exports` instead of (or alongside) returning it | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `close_session` | Close browser session and clean up resources | working |
 
