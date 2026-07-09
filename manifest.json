@@ -77,11 +77,11 @@
     },
     {
       "name": "get_job_details",
-      "description": "Retrieve specific job posting details using LinkedIn job IDs"
+      "description": "Retrieve job details by LinkedIn job ID, with optional output_mode/output_path exports restricted to ~/.linkedin-mcp/exports"
     },
     {
       "name": "search_jobs",
-      "description": "Search for jobs with filters like keywords and location"
+      "description": "Search jobs by keywords and location, with optional output_mode/output_path exports restricted to ~/.linkedin-mcp/exports"
     },
     {
       "name": "search_people",
