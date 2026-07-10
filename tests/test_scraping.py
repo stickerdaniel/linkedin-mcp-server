@@ -16,8 +16,10 @@ from linkedin_mcp_server.scraping.connection import (
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
+    _MESSAGING_CHROME_STRINGS,
     _RATE_LIMITED_MSG,
     _build_feed_references,
+    _messaging_chrome_table,
     _truncate_linkedin_noise,
     strip_conversation_chrome,
     strip_linkedin_noise,
@@ -4113,6 +4115,83 @@ class TestGetInbox:
 
 
 class TestGetConversation:
+    async def test_wait_for_conversation_body_uses_thread_turn_marker(self, mock_page):
+        """Block extraction until a message turn marker appears in main."""
+        mock_page.evaluate = AsyncMock(return_value="en")
+        extractor = LinkedInExtractor(mock_page)
+
+        await extractor._wait_for_conversation_body()
+
+        mock_page.evaluate.assert_awaited_once()
+        mock_page.wait_for_function.assert_awaited_once()
+        wait_arg = mock_page.wait_for_function.call_args.kwargs["arg"]
+        assert wait_arg["marker"] == "sent the following message"
+        assert wait_arg["composerStart"] == "Maximize compose field"
+        assert mock_page.wait_for_function.call_args.kwargs["timeout"] == 10000
+
+    async def test_wait_for_conversation_body_resolves_locale_from_page(
+        self, mock_page
+    ):
+        """Use the messaging chrome table for the detected page locale."""
+        mock_page.evaluate = AsyncMock(return_value="en")
+        extractor = LinkedInExtractor(mock_page)
+
+        await extractor._wait_for_conversation_body()
+
+        mock_page.evaluate.assert_awaited_once()
+        assert (
+            mock_page.wait_for_function.call_args.kwargs["arg"]["marker"]
+            == _MESSAGING_CHROME_STRINGS["en"].thread_turn_marker
+        )
+
+    async def test_wait_for_conversation_body_falls_back_to_en_for_unknown_locale(
+        self, mock_page
+    ):
+        """Unknown page locales still use the en thread-turn marker."""
+        mock_page.evaluate = AsyncMock(return_value="de")
+        extractor = LinkedInExtractor(mock_page)
+
+        await extractor._wait_for_conversation_body()
+
+        assert (
+            mock_page.wait_for_function.call_args.kwargs["arg"]["marker"]
+            == _MESSAGING_CHROME_STRINGS["en"].thread_turn_marker
+        )
+
+    async def test_wait_for_conversation_body_empty_thread_waits_for_composer(
+        self, mock_page
+    ):
+        """Empty threads unblock when the composer mounts instead of timing out."""
+        mock_page.evaluate = AsyncMock(return_value="en")
+        extractor = LinkedInExtractor(mock_page)
+
+        await extractor._wait_for_conversation_body()
+
+        js = mock_page.wait_for_function.call_args.args[0]
+        assert "composerStart" in js
+        assert "text.includes(composerStart)" in js
+
+    async def test_messaging_chrome_tables_define_thread_turn_marker(self):
+        """Every supported locale table carries a non-empty turn marker."""
+        for locale, table in _MESSAGING_CHROME_STRINGS.items():
+            assert table.thread_turn_marker, locale
+
+    def test_messaging_chrome_table_falls_back_to_en(self):
+        assert _messaging_chrome_table("de") is _MESSAGING_CHROME_STRINGS["en"]
+        assert _messaging_chrome_table("en") is _MESSAGING_CHROME_STRINGS["en"]
+
+    async def test_wait_for_conversation_body_timeout_is_non_fatal(self, mock_page):
+        """Hydration timeout falls through so extraction can still proceed."""
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        mock_page.evaluate = AsyncMock(return_value="en")
+        mock_page.wait_for_function = AsyncMock(
+            side_effect=PlaywrightTimeoutError("timeout")
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        await extractor._wait_for_conversation_body()
+
     async def test_returns_conversation_by_thread_id(self, mock_page):
         """get_conversation with thread_id navigates directly to thread URL."""
         extractor = LinkedInExtractor(mock_page)

@@ -583,6 +583,12 @@ class _MessagingChromeTable:
     # excluded: they would need prefix matching, and any prefix match lets
     # quoted control text with a suffix confirm a false boundary.
     composer_companions: tuple[str, ...]
+    # Substring present on every rendered message turn ("<name> sent the
+    # following message(s) at <time>"). Absence means the thread pane has not
+    # hydrated yet: the sidebar alone satisfies a generic length check, so
+    # get_conversation waits on this marker before extracting to avoid racing
+    # an empty or partial thread body.
+    thread_turn_marker: str
 
 
 # How far below a composer-label candidate a companion control may sit and
@@ -600,8 +606,14 @@ _MESSAGING_CHROME_STRINGS: dict[str, _MessagingChromeTable] = {
             "Open Emoji Keyboard",
             "Open send options",
         ),
+        thread_turn_marker="sent the following message",
     ),
 }
+
+
+def _messaging_chrome_table(locale: str) -> _MessagingChromeTable | None:
+    """Return messaging chrome strings for *locale*, falling back to ``en``."""
+    return _MESSAGING_CHROME_STRINGS.get(locale) or _MESSAGING_CHROME_STRINGS.get("en")
 
 
 def strip_conversation_chrome(text: str, locale: str = "en") -> str:
@@ -1135,6 +1147,57 @@ class LinkedInExtractor:
             )
         except PlaywrightTimeoutError:
             logger.debug("%s content did not appear", log_context)
+
+    async def _page_messaging_locale(self) -> str:
+        """Best-effort page locale prefix for messaging chrome tables."""
+        try:
+            raw = await self._page.evaluate(
+                "() => (document.documentElement.lang || 'en').split('-')[0].toLowerCase()"
+            )
+            if isinstance(raw, str) and raw in _MESSAGING_CHROME_STRINGS:
+                return raw
+        except Exception:
+            logger.debug("Could not read page locale for messaging chrome", exc_info=True)
+        return "en"
+
+    async def _wait_for_conversation_body(self, *, timeout: int = 10000) -> None:
+        """Wait for the opened thread's message body to hydrate.
+
+        A thread page's ``main`` renders the inbox sidebar first; the sidebar
+        alone clears the generic length check in ``_wait_for_main_text`` well
+        before the thread pane fetches and mounts its messages. Extracting in
+        that window yields an empty (``sections: {}``) or partially-loaded
+        transcript. Block until either a rendered turn's ``thread_turn_marker``
+        appears ("... sent the following message ...") or the trailing composer
+        mounts (``composer_start``) — the latter signals an empty thread is
+        ready and avoids a full timeout waiting for turns that will never
+        appear. Locale is read from ``document.documentElement.lang`` with an
+        ``en`` table fallback. On timeout, fall through — the caller still
+        extracts whatever is present, preserving prior behavior rather than
+        raising.
+        """
+        locale = await self._page_messaging_locale()
+        table = _messaging_chrome_table(locale)
+        if table is None:
+            return
+        try:
+            await self._page.wait_for_function(
+                """({ marker, composerStart }) => {
+                    const main = document.querySelector('main');
+                    if (!main) return false;
+                    const text = main.innerText;
+                    if (text.includes(marker)) return true;
+                    if (text.includes(composerStart)) return true;
+                    return false;
+                }""",
+                arg={
+                    "marker": table.thread_turn_marker,
+                    "composerStart": table.composer_start,
+                },
+                timeout=timeout,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Conversation body did not hydrate before timeout")
 
     async def _scroll_main_scrollable_region(
         self,
@@ -3548,6 +3611,10 @@ class LinkedInExtractor:
 
         await detect_rate_limit(self._page)
         await self._wait_for_main_text(log_context="Conversation")
+        # The sidebar alone satisfies _wait_for_main_text; block on an actual
+        # message turn so extraction does not race the thread pane's hydration
+        # (empty or partial transcript otherwise). See _wait_for_conversation_body.
+        await self._wait_for_conversation_body()
         await handle_modal_close(self._page)
         await self._scroll_main_scrollable_region(
             position="top", attempts=3, pause_time=0.5
