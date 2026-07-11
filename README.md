@@ -37,6 +37,8 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 
 | Tool | Description | Status |
 |------|-------------|--------|
+| `linkedin_health` | Server version, Patchright profile paths, browser/session readiness | working |
+| `linkedin_ping` | Capability discovery — lists all registered tools (legacy + `linkedin_*` aliases) | working |
 | `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) | working |
 | `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) | working |
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#407](https://github.com/stickerdaniel/linkedin-mcp-server/issues/407) [#432](https://github.com/stickerdaniel/linkedin-mcp-server/issues/432) [#454](https://github.com/stickerdaniel/linkedin-mcp-server/issues/454) |
@@ -54,6 +56,30 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `close_session` | Close browser session and clean up resources | working |
+
+Each scraper tool is also registered under a `linkedin_*` alias (for example `linkedin_get_person_profile`) so agent clients can use a consistent prefix without breaking existing integrations.
+
+### Browser profile & session lifecycle
+
+Patchright (Playwright-compatible) persists LinkedIn auth on disk under `~/.linkedin-mcp/`:
+
+| Path | Purpose |
+|------|---------|
+| `~/.linkedin-mcp/profile/` | Source Chromium user-data directory created by `--login` |
+| `~/.linkedin-mcp/cookies.json` | Portable cookie export used for Docker / foreign-runtime bridging |
+| `~/.linkedin-mcp/source-state.json` | Login generation metadata for the source profile |
+| `~/.linkedin-mcp/runtime-profiles/<runtime-id>/` | Derived profiles for non-host runtimes (e.g. Linux containers) |
+| `~/.linkedin-mcp/patchright-browsers/` | Shared Patchright Chromium browser cache (`PLAYWRIGHT_BROWSERS_PATH`) |
+
+**Lifecycle**
+
+1. **First auth** — run `uvx mcp-server-linkedin@latest --login` (or let the first scraper tool open a login window). This writes the source profile plus `cookies.json` and `source-state.json`.
+2. **Normal use** — MCP tools reuse the in-process browser session. Concurrent tool calls queue on a scraper lock.
+3. **Close session** — `close_session` / `linkedin_close_session` closes the live browser but keeps on-disk auth.
+4. **Reset auth** — `--logout` clears source and derived profiles.
+5. **Docker** — mount `~/.linkedin-mcp` into the container; each startup derives a fresh Linux profile from exported cookies (see Docker setup below).
+
+Use `linkedin_health` to inspect readiness and paths without scraping. Override the profile location with `--user-data-dir` / `USER_DATA_DIR`.
 
 <br/>
 <br/>

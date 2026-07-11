@@ -20,6 +20,7 @@ from linkedin_mcp_server.bootstrap import (
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.exceptions import LinkedInMCPError
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -28,6 +29,7 @@ from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.messaging import register_messaging_tools
+from linkedin_mcp_server.tools.meta import register_meta_tools, register_tool_aliases
 from linkedin_mcp_server.tools.person import register_person_tools
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,7 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
     register_job_tools(mcp, tool_timeout=tool_timeout)
     register_messaging_tools(mcp, tool_timeout=tool_timeout)
     register_feed_tools(mcp, tool_timeout=tool_timeout)
+    register_meta_tools(mcp, tool_timeout=tool_timeout)
 
     # Register session management tool
     @mcp.tool(
@@ -83,6 +86,17 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
                 "message": "Successfully closed the browser session and cleaned up resources",
             }
         except Exception as e:
-            raise_tool_error(e, "close_session")  # NoReturn
+            if isinstance(e, LinkedInMCPError):
+                raise_tool_error(e, "close_session")  # NoReturn
+            raise_tool_error(
+                LinkedInMCPError(
+                    "Failed to close the browser session. It may already be closed; "
+                    "restart the MCP server if problems persist."
+                ),
+                "close_session",
+            )
+
+    # Aliases must be registered after every legacy tool (including close_session).
+    register_tool_aliases(mcp)
 
     return mcp

@@ -1165,6 +1165,8 @@ class TestToolTimeouts:
             "search_people",
             "get_company_profile",
             "get_company_posts",
+            "search_companies",
+            "get_company_employees",
             "get_job_details",
             "search_jobs",
             "get_inbox",
@@ -1180,9 +1182,18 @@ class TestToolTimeouts:
             assert tool is not None
             assert tool.timeout == custom_timeout
 
+        health_tool = await mcp.get_tool("linkedin_health")
+        ping_tool = await mcp.get_tool("linkedin_ping")
+        assert health_tool is not None
+        assert ping_tool is not None
+
     async def test_all_tools_have_default_timeout(self):
         from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
         from linkedin_mcp_server.server import create_mcp_server
+        from linkedin_mcp_server.tools.meta import (
+            META_HEALTH_TIMEOUT_SECONDS,
+            META_PING_TIMEOUT_SECONDS,
+        )
 
         mcp = create_mcp_server()
 
@@ -1210,3 +1221,10 @@ class TestToolTimeouts:
             tool = await mcp.get_tool(name)
             assert tool is not None
             assert tool.timeout == DEFAULT_TOOL_TIMEOUT_SECONDS
+
+        health_tool = await mcp.get_tool("linkedin_health")
+        ping_tool = await mcp.get_tool("linkedin_ping")
+        assert health_tool is not None
+        assert ping_tool is not None
+        assert health_tool.timeout == META_HEALTH_TIMEOUT_SECONDS
+        assert ping_tool.timeout == META_PING_TIMEOUT_SECONDS

@@ -56,6 +56,26 @@ class TestBrowserConfig:
         config.validate()  # Clamps, does not raise
         assert config.login_inline_wait_seconds == MAX_LOGIN_INLINE_WAIT_SECONDS
 
+    def test_validate_negative_viewport(self):
+        with pytest.raises(ConfigurationError, match="viewport dimensions"):
+            BrowserConfig(viewport_width=0).validate()
+
+    def test_validate_chrome_path_missing(self, tmp_path):
+        missing = tmp_path / "no-chrome"
+        with pytest.raises(ConfigurationError, match="does not exist"):
+            BrowserConfig(chrome_path=str(missing)).validate()
+
+    def test_validate_chrome_path_not_a_file(self, tmp_path):
+        directory = tmp_path / "chrome-dir"
+        directory.mkdir()
+        with pytest.raises(ConfigurationError, match="is not a file"):
+            BrowserConfig(chrome_path=str(directory)).validate()
+
+    def test_validate_chrome_path_existing_file(self, tmp_path):
+        chrome = tmp_path / "chrome"
+        chrome.write_text("binary")
+        BrowserConfig(chrome_path=str(chrome)).validate()  # No error
+
 
 class TestServerConfig:
     def test_defaults(self):
@@ -80,6 +100,41 @@ class TestAppConfig:
         config = AppConfig()
         config.server.port = 99999
         with pytest.raises(ConfigurationError):
+            config.validate()
+
+    def test_validate_http_path_must_start_with_slash(self):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.path = "mcp"
+        with pytest.raises(ConfigurationError, match="must start with '/'"):
+            config.validate()
+
+    def test_validate_http_path_min_length(self):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.path = "/"
+        with pytest.raises(ConfigurationError, match="at least 2 characters"):
+            config.validate()
+
+    def test_validate_warns_when_binding_all_interfaces(self, caplog):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.host = "0.0.0.0"
+        config.validate()
+        assert any("0.0.0.0" in record.message for record in caplog.records)
+
+    def test_validate_http_transport_requires_host(self):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.host = ""
+        with pytest.raises(ConfigurationError, match="valid host"):
+            config.validate()
+
+    def test_validate_http_transport_requires_port(self):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.port = 0
+        with pytest.raises(ConfigurationError, match="valid port"):
             config.validate()
 
 

@@ -2,6 +2,12 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def mock_cli_argv(monkeypatch):
+    """Prevent argparse from consuming pytest's sys.argv during get_config()."""
+    monkeypatch.setattr("sys.argv", ["mcp-server-linkedin"])
+
+
+@pytest.fixture(autouse=True)
 def reset_singletons():
     """Reset global state for test isolation."""
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing

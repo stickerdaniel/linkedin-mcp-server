@@ -108,8 +108,84 @@
       "description": "Get recent posts from the authenticated user's LinkedIn home feed"
     },
     {
+      "name": "linkedin_health",
+      "description": "Return server version, storage paths, and browser/session readiness"
+    },
+    {
+      "name": "linkedin_ping",
+      "description": "Return server metadata, registered tools, and capabilities"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
+    },
+    {
+      "name": "linkedin_close_session",
+      "description": "Alias for close_session. Properly close browser session and clean up resources"
+    },
+    {
+      "name": "linkedin_connect_with_person",
+      "description": "Alias for connect_with_person. Send a connection request or accept an incoming one, with optional note"
+    },
+    {
+      "name": "linkedin_get_company_employees",
+      "description": "Alias for get_company_employees. List employees at a company from the LinkedIn /people/ page, with optional keyword filter by name, title, or skill"
+    },
+    {
+      "name": "linkedin_get_company_posts",
+      "description": "Alias for get_company_posts. Get recent posts from a company's LinkedIn feed"
+    },
+    {
+      "name": "linkedin_get_company_profile",
+      "description": "Alias for get_company_profile. Extract comprehensive company information and details. About-section references may include a company_urn entry carrying the numeric id LinkedIn's people-search uses in its currentCompany URL facet."
+    },
+    {
+      "name": "linkedin_get_conversation",
+      "description": "Alias for get_conversation. Read a specific messaging conversation by thread ID or LinkedIn username"
+    },
+    {
+      "name": "linkedin_get_feed",
+      "description": "Alias for get_feed. Get recent posts from the authenticated user's LinkedIn home feed"
+    },
+    {
+      "name": "linkedin_get_inbox",
+      "description": "Alias for get_inbox. List recent conversations from the LinkedIn messaging inbox"
+    },
+    {
+      "name": "linkedin_get_job_details",
+      "description": "Alias for get_job_details. Retrieve specific job posting details using LinkedIn job IDs"
+    },
+    {
+      "name": "linkedin_get_my_profile",
+      "description": "Alias for get_my_profile. Get the authenticated user's own LinkedIn profile with optional section selection (experience, education, skills, etc.)"
+    },
+    {
+      "name": "linkedin_get_person_profile",
+      "description": "Alias for get_person_profile. Get detailed information from a LinkedIn profile including work history, education, certifications, skills, projects, connections, and recent posts"
+    },
+    {
+      "name": "linkedin_get_sidebar_profiles",
+      "description": "Alias for get_sidebar_profiles. Extract profile URLs from LinkedIn sidebar recommendation sections on a profile page"
+    },
+    {
+      "name": "linkedin_search_companies",
+      "description": "Alias for search_companies. Search for companies on LinkedIn by keywords"
+    },
+    {
+      "name": "linkedin_search_conversations",
+      "description": "Alias for search_conversations. Search LinkedIn messages by keyword"
+    },
+    {
+      "name": "linkedin_search_jobs",
+      "description": "Alias for search_jobs. Search for jobs with filters like keywords and location"
+    },
+    {
+      "name": "linkedin_search_people",
+      "description": "Alias for search_people. Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company"
+    },
+    {
+      "name": "linkedin_send_message",
+      "description": "Alias for send_message. Send a message to a LinkedIn user with explicit confirmation and optional profile URN support"
     }
   ],
   "user_config": {},

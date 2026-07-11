@@ -9,7 +9,9 @@ import time
 import mcp.types as mt
 
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.tools import ToolResult
+from fastmcp.tools.base import ToolResult
+
+from linkedin_mcp_server.tools.meta import META_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,9 @@ class SequentialToolExecutionMiddleware(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         tool_name = context.message.name
+        if tool_name in META_TOOL_NAMES:
+            return await call_next(context)
+
         wait_started = time.perf_counter()
         logger.debug("Waiting for scraper lock for tool '%s'", tool_name)
         await self._report_progress(

@@ -4192,6 +4192,25 @@ class TestGetConversation:
 
         await extractor._wait_for_conversation_body()
 
+    async def test_page_messaging_locale_returns_supported_locale(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value="en")
+        extractor = LinkedInExtractor(mock_page)
+
+        assert await extractor._page_messaging_locale() == "en"
+        mock_page.evaluate.assert_awaited_once()
+
+    async def test_page_messaging_locale_falls_back_for_unknown_locale(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value="de")
+        extractor = LinkedInExtractor(mock_page)
+
+        assert await extractor._page_messaging_locale() == "en"
+
+    async def test_page_messaging_locale_falls_back_on_evaluate_error(self, mock_page):
+        mock_page.evaluate = AsyncMock(side_effect=RuntimeError("no dom"))
+        extractor = LinkedInExtractor(mock_page)
+
+        assert await extractor._page_messaging_locale() == "en"
+
     async def test_returns_conversation_by_thread_id(self, mock_page):
         """get_conversation with thread_id navigates directly to thread URL."""
         extractor = LinkedInExtractor(mock_page)
