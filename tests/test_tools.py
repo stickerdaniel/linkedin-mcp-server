@@ -263,6 +263,7 @@ class TestPersonTool:
             "New York",
             network=None,
             current_company=None,
+            max_pages=1,
         )
 
     async def test_search_people_with_network_and_company_filters(self, mock_context):
@@ -297,6 +298,29 @@ class TestPersonTool:
             None,
             network=["F"],
             current_company="1115",
+            max_pages=1,
+        )
+
+    async def test_search_people_forwards_max_pages(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/search/results/people/?keywords=engineer",
+            "sections": {"search_results": "Jane Doe\n---\nJohn Roe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_people")
+        await tool_fn("engineer", mock_context, max_pages=3, extractor=mock_extractor)
+        mock_extractor.search_people.assert_awaited_once_with(
+            "engineer",
+            None,
+            network=None,
+            current_company=None,
+            max_pages=3,
         )
 
     async def test_search_people_validation_error_surfaced_as_tool_error(
