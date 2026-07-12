@@ -3244,6 +3244,7 @@ class LinkedInExtractor:
         keywords: str,
         location: str | None = None,
         network: list[str] | None = None,
+        geo_urn: list[str] | None = None,
         current_company: str | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results page.
@@ -3255,6 +3256,11 @@ class LinkedInExtractor:
                 ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
                 and beyond). Example: ``["F"]`` to only return 1st-degree
                 connections. Invalid tokens raise ``ValueError``.
+            geo_urn: Optional location facet filter — numeric LinkedIn geo
+                URN ids (e.g. ``["101728296"]`` for Russia). This is the
+                facet LinkedIn's own UI uses and it filters reliably, unlike
+                the free-text ``location`` parameter. Non-numeric values
+                raise ``FilterValidationError``.
             current_company: Optional current-employer filter. LinkedIn's
                 ``currentCompany`` facet only filters on the numeric company
                 URN id (e.g. ``"1115"`` for SAP); plain company names are
@@ -3282,11 +3288,23 @@ class LinkedInExtractor:
                 f'URN via get_company_profile -> references["about"].'
             )
 
+        if geo_urn:
+            invalid = [g for g in geo_urn if not re.fullmatch(r"[0-9]+", g)]
+            if invalid:
+                raise FilterValidationError(
+                    f"geo_urn values must be numeric LinkedIn geo URN ids "
+                    f"(e.g. '101728296'); got {invalid!r}. Find the id by "
+                    f"applying the Locations filter in a linkedin.com people "
+                    f"search and copying geoUrn from the result URL."
+                )
+
         params = f"keywords={quote_plus(keywords)}"
         if location:
             params += f"&location={quote_plus(location)}"
         if network:
             params += f"&network={_encode_list_facet(network)}"
+        if geo_urn:
+            params += f"&geoUrn={_encode_list_facet(geo_urn)}"
         if current_company:
             params += f"&currentCompany={_encode_list_facet([current_company])}"
 

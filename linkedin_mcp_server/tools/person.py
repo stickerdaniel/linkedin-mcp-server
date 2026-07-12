@@ -5,6 +5,7 @@ Uses innerText extraction for resilient profile data capture
 with configurable section selection.
 """
 
+import json
 import logging
 from typing import Annotated, Any
 
@@ -21,6 +22,28 @@ from linkedin_mcp_server.scraping import parse_person_sections
 from linkedin_mcp_server.scraping.extractor import FilterValidationError
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_str_list(value: list[str] | str | None) -> list[str] | None:
+    """Coerce a list-valued tool argument that a client sent as a string.
+
+    Some MCP clients flatten ``list[str] | None`` parameters to plain
+    strings (e.g. '["F"]' or "F" or "F,S"). Accept JSON-array strings,
+    comma-separated strings, and bare tokens; pass lists through unchanged.
+    """
+    if value is None or isinstance(value, list):
+        return value
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("["):
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed]
+    return [token.strip() for token in stripped.split(",") if token.strip()]
 
 
 def register_person_tools(
@@ -112,7 +135,8 @@ def register_person_tools(
         keywords: str,
         ctx: Context,
         location: str | None = None,
-        network: list[str] | None = None,
+        network: list[str] | str | None = None,
+        geo_urn: list[str] | str | None = None,
         current_company: str | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
@@ -122,10 +146,24 @@ def register_person_tools(
         Args:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
             ctx: FastMCP context for progress reporting
-            location: Optional location filter (e.g., "New York", "Remote")
+            location: Optional free-text location filter. WARNING: LinkedIn
+                frequently ignores this plain URL parameter and returns
+                unfiltered results. For reliable location filtering use
+                geo_urn instead.
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
                 Example: ["F"] to only return 1st-degree connections.
+                Also accepts a JSON-array string ('["F"]') or comma-separated
+                string ("F,S") for clients that flatten list parameters.
+            geo_urn: Optional location facet filter — a list of numeric
+                LinkedIn geo URN ids (e.g. ["101728296"] for Russia,
+                ["101705918"] for Belarus). This is the facet LinkedIn's own
+                UI uses and it filters reliably, unlike the location text
+                parameter. To find an id: run a people search on
+                linkedin.com, apply the Locations filter in the UI, and copy
+                the geoUrn value from the result URL. Also accepts a
+                JSON-array or comma-separated string. Verify the first page
+                of results looks right before acting on them.
             current_company: Optional current-employer filter. LinkedIn's
                 currentCompany facet only filters on the numeric company URN id
                 (e.g. "1115" for SAP); plain company names are accepted by the
@@ -143,11 +181,15 @@ def register_person_tools(
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_people"
             )
+            network = _coerce_str_list(network)
+            geo_urn = _coerce_str_list(geo_urn)
             logger.info(
-                "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
+                "Searching people: keywords='%s', location='%s', network=%s, "
+                "geo_urn=%s, current_company='%s'",
                 keywords,
                 location,
                 network,
+                geo_urn,
                 current_company,
             )
 
@@ -160,6 +202,7 @@ def register_person_tools(
                     keywords,
                     location,
                     network=network,
+                    geo_urn=geo_urn,
                     current_company=current_company,
                 )
             except FilterValidationError as e:

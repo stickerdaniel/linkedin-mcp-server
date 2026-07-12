@@ -43,6 +43,35 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     return mock
 
 
+class TestCoerceStrList:
+    """Unit coverage for every branch of ``tools.person._coerce_str_list``."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (None, None),
+            (["F", "S"], ["F", "S"]),
+            ("", None),
+            ("   ", None),
+            ('["F"]', ["F"]),
+            ('["F", "S"]', ["F", "S"]),
+            ("[101728296]", ["101728296"]),
+            ("F,S", ["F", "S"]),
+            ("F, S", ["F", "S"]),
+            ("101728296", ["101728296"]),
+            ("[not json", ["[not json"]),
+        ],
+    )
+    def test_coerces_all_input_shapes(
+        self,
+        value: list[str] | str | None,
+        expected: list[str] | None,
+    ):
+        from linkedin_mcp_server.tools.person import _coerce_str_list
+
+        assert _coerce_str_list(value) == expected
+
+
 class TestPersonTool:
     async def test_get_person_profile_success(self, mock_context):
         expected = {
@@ -262,6 +291,7 @@ class TestPersonTool:
             "AI engineer",
             "New York",
             network=None,
+            geo_urn=None,
             current_company=None,
         )
 
@@ -296,7 +326,41 @@ class TestPersonTool:
             "engineer",
             None,
             network=["F"],
+            geo_urn=None,
             current_company="1115",
+        )
+
+    async def test_search_people_coerces_stringified_list_filters(self, mock_context):
+        """MCP clients that flatten list params send network / geo_urn as
+        strings; the tool must coerce them before calling the extractor."""
+        expected = {
+            "url": (
+                "https://www.linkedin.com/search/results/people/"
+                "?keywords=&network=%5B%22F%22%5D&geoUrn=%5B%22101728296%22%5D"
+            ),
+            "sections": {"search_results": "Someone\n1st"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_people")
+        await tool_fn(
+            "",
+            mock_context,
+            network='["F"]',
+            geo_urn="101728296",
+            extractor=mock_extractor,
+        )
+        mock_extractor.search_people.assert_awaited_once_with(
+            "",
+            None,
+            network=["F"],
+            geo_urn=["101728296"],
+            current_company=None,
         )
 
     async def test_search_people_validation_error_surfaced_as_tool_error(
