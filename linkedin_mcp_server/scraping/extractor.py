@@ -3972,7 +3972,7 @@ class LinkedInExtractor:
     async def _open_messages_inbox(self) -> None:
         """Open the authenticated messaging inbox and wait for the list view."""
         url = "https://www.linkedin.com/messaging/"
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await self._goto_with_auth_checks(url, wait_until="domcontentloaded")
         await detect_rate_limit(self._page)
         try:
             await self._page.wait_for_selector("main", timeout=10000)
