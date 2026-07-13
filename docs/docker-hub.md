@@ -1,6 +1,6 @@
 # MCP Server for LinkedIn
 
-A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. Access profiles, companies, and job postings through a Docker container.
+A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. Access profiles, companies, job postings, and your LinkedIn inbox through a Docker container.
 
 > **Disclaimer:** This is an independent, community project. It is not affiliated with, authorized by, endorsed by, or sponsored by LinkedIn Corporation or Microsoft. "LinkedIn" is a registered trademark of LinkedIn Corporation and is used here only descriptively to identify the third-party service this software interoperates with.
 
@@ -15,6 +15,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Job Details**: Retrieve job posting information
 - **Job Search**: Search for jobs with keywords and location filters
 - **People Search**: Search for people by keywords and location
+- **Inbox Reading**: Read inbox summaries and active conversation threads from the authenticated account
 - **Person Posts**: Get recent activity/posts from a person's profile
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed

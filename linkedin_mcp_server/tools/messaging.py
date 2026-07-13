@@ -5,7 +5,7 @@ Provides inbox listing, conversation reading, message search, and sending.
 """
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
@@ -19,6 +19,8 @@ from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_er
 from linkedin_mcp_server.error_handler import raise_tool_error
 
 logger = logging.getLogger(__name__)
+
+MessageFilter = Literal["all", "jobs", "unread", "connections", "inmail", "starred"]
 
 
 def register_messaging_tools(
@@ -71,6 +73,75 @@ def register_messaging_tools(
                 raise_tool_error(relogin_exc, "get_inbox")
         except Exception as e:
             raise_tool_error(e, "get_inbox")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get My Messages",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"messaging", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_my_messages(
+        ctx: Context,
+        filter_name: MessageFilter = "all",
+        conversation_name: str | None = None,
+        conversation_index: Annotated[int | None, Field(ge=1)] = None,
+        conversation_limit: Annotated[int, Field(ge=1, le=50)] = 10,
+        message_limit: Annotated[int, Field(ge=1, le=100)] = 20,
+        load_more: Annotated[int, Field(ge=0, le=10)] = 0,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Read the authenticated user's messaging inbox and active conversation.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            filter_name: Inbox filter to apply (all, jobs, unread, connections, inmail, starred)
+            conversation_name: Optional partial participant name to activate before extraction
+            conversation_index: Optional 1-based visible conversation index to activate
+            conversation_limit: Maximum number of visible conversation summaries to return (1-50)
+            message_limit: Maximum number of messages to return from the active thread (1-100)
+            load_more: Number of times to click "Load more conversations" before extracting (0-10)
+
+        Returns:
+            Dict with raw sections for the inbox list and active conversation,
+            plus structured conversation summaries and messages for the active thread.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_my_messages"
+            )
+            logger.info(
+                "Reading messages: filter=%s, conversation_name=%r, conversation_index=%r",
+                filter_name,
+                conversation_name,
+                conversation_index,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Opening LinkedIn messaging inbox"
+            )
+
+            result = await extractor.scrape_messages(
+                filter_name=filter_name,
+                conversation_name=conversation_name,
+                conversation_index=conversation_index,
+                conversation_limit=conversation_limit,
+                message_limit=message_limit,
+                load_more=load_more,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_my_messages")
+        except Exception as e:
+            raise_tool_error(e, "get_my_messages")  # NoReturn
 
     @mcp.tool(
         timeout=tool_timeout,

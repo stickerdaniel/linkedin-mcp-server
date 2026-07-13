@@ -16,6 +16,8 @@ from linkedin_mcp_server.scraping.connection import (
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
+    _parse_message_conversation,
+    _parse_message_event,
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
@@ -119,6 +121,125 @@ class TestBuildJobSearchUrl:
         assert "f_WT=2" in url
         assert "f_EA=true" in url
         assert "sortBy=DD" in url
+
+
+class TestMessageParsing:
+    def test_parse_message_conversation_summary(self):
+        raw = """
+        Status is reachable
+        Jane Doe
+        4:54 PM
+        4:54 PM
+        Jane: Hello there
+        . Active conversation
+        . Press return to go to conversation details
+        Open the options list in your conversation with Jane Doe
+        """
+
+        parsed = _parse_message_conversation(raw)
+
+        assert parsed["participant"] == "Jane Doe"
+        assert parsed["timestamp"] == "4:54 PM"
+        assert parsed["snippet"] == "Jane: Hello there"
+        assert parsed["active"] is True
+
+    def test_parse_message_event(self):
+        raw = """
+        View Jane's profile
+        Jane Doe
+        (She/Her)
+        4:54 PM
+        Hello there
+        Click or press enter to display in the image preview
+        """
+
+        parsed = _parse_message_event(raw)
+
+        assert parsed["sender"] == "Jane Doe (She/Her)"
+        assert parsed["timestamp"] == "4:54 PM"
+        assert parsed["message"] == (
+            "Hello there Click or press enter to display in the image preview"
+        )
+
+    def test_parse_message_event_with_inline_timestamp(self):
+        raw = """
+        View Ruslan's profile
+        Ruslan Strazhnyk 5:36 PM
+        Hello there
+        """
+
+        parsed = _parse_message_event(raw)
+
+        assert parsed["sender"] == "Ruslan Strazhnyk"
+        assert parsed["timestamp"] == "5:36 PM"
+        assert parsed["message"] == "Hello there"
+
+    async def test_scrape_messages_structures_inbox_and_active_thread(self):
+        extractor = LinkedInExtractor(MagicMock())
+        with (
+            patch.object(extractor, "_open_messages_inbox", new=AsyncMock()),
+            patch.object(extractor, "_apply_messages_filter", new=AsyncMock()),
+            patch.object(
+                extractor, "_load_more_message_conversations", new=AsyncMock()
+            ),
+            patch.object(extractor, "_select_message_conversation", new=AsyncMock()),
+            patch.object(
+                extractor,
+                "_extract_messages_page_data",
+                new=AsyncMock(
+                    return_value={
+                        "page_url": "https://www.linkedin.com/messaging/thread/2-test/",
+                        "conversation_list_text": "Jane Doe\n4:54 PM\nJane: Hello there",
+                        "conversations": [
+                            {
+                                "raw_text": "Jane Doe\n4:54 PM\n4:54 PM\nJane: Hello there\n. Active conversation"
+                            },
+                            {"raw_text": "John Doe\n3:12 PM\nYou: Following up"},
+                        ],
+                        "active_thread_text": "Jane Doe\nFounder\n4:54 PM\nHello there",
+                        "active_thread_header_text": "Jane Doe\nFounder\nStar conversation",
+                        "active_thread_profile_url": "https://www.linkedin.com/in/jane-doe/",
+                        "messages": [
+                            {
+                                "raw_text": "View Jane's profile\nJane Doe\n4:54 PM\nHello there"
+                            },
+                            {
+                                "raw_text": "View Me\nRuslan Strazhnyk\n4:55 PM\nFollowing up"
+                            },
+                        ],
+                    }
+                ),
+            ),
+        ):
+            result = await extractor.scrape_messages(
+                filter_name="unread",
+                conversation_name="Jane",
+                conversation_limit=1,
+                message_limit=1,
+                load_more=1,
+            )
+
+            assert result["applied_filter"] == "unread"
+            assert result["sections"]["conversation_list"].startswith("Jane Doe")
+            assert result["conversations"] == [
+                {
+                    "participant": "Jane Doe",
+                    "timestamp": "4:54 PM",
+                    "snippet": "Jane: Hello there",
+                    "active": True,
+                    "raw_text": "Jane Doe\n4:54 PM\n4:54 PM\nJane: Hello there\n. Active conversation",
+                }
+            ]
+            assert result["active_conversation"]["participant"] == "Jane Doe"
+            assert result["active_conversation"]["subtitle"] == "Founder"
+            assert result["active_conversation"]["messages"] == [
+                {
+                    "sender": "Ruslan Strazhnyk",
+                    "timestamp": "4:55 PM",
+                    "message": "Following up",
+                    "raw_text": "View Me\nRuslan Strazhnyk\n4:55 PM\nFollowing up",
+                }
+            ]
 
 
 @pytest.fixture
