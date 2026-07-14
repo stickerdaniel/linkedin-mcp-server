@@ -89,6 +89,15 @@ _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
+_MESSAGE_FILTER_MAP = {
+    "all": None,
+    "jobs": "JOB",
+    "unread": "UNREAD",
+    "connections": "CONNECTIONS",
+    "inmail": "INMAIL",
+    "starred": "STARRED",
+}
+
 # Valid tokens for the people-search ``network`` facet.
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
 _NETWORK_TOKENS = ("F", "S", "O")
@@ -666,6 +675,140 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
                 break
 
     return "\n".join(lines[start:end]).strip()
+
+
+def _nonempty_message_lines(text: str) -> list[str]:
+    """Normalize a block of messaging text into trimmed, non-empty lines."""
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _is_message_timestamp(value: str) -> bool:
+    """Return whether a line looks like LinkedIn messaging time/date text."""
+    normalized = value.strip()
+    if not normalized:
+        return False
+    if normalized in {"Yesterday", "Today"}:
+        return True
+    if re.match(r"^\d{1,2}:\d{2}\s*[AP]M$", normalized):
+        return True
+    if re.match(r"^[A-Z][a-z]{2}\s+\d{1,2}$", normalized):
+        return True
+    if normalized in {
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    }:
+        return True
+    return False
+
+
+def _parse_message_conversation(raw_text: str) -> dict[str, Any]:
+    """Parse a messaging conversation preview into a structured summary."""
+    lines = [
+        line
+        for line in _nonempty_message_lines(raw_text)
+        if not line.startswith("Status is ")
+    ]
+    active = any("Active conversation" in line for line in lines)
+    lines = [
+        line
+        for line in lines
+        if "Active conversation" not in line
+        and "Press return to go to conversation details" not in line
+        and not line.startswith("Open the options list in your conversation")
+    ]
+    if not lines:
+        return {
+            "participant": "",
+            "timestamp": None,
+            "snippet": "",
+            "active": active,
+            "raw_text": raw_text,
+        }
+
+    participant = lines[0]
+    remainder = lines[1:]
+    timestamp = None
+    if remainder and _is_message_timestamp(remainder[0]):
+        timestamp = remainder[0]
+        remainder = remainder[1:]
+        if remainder and remainder[0] == timestamp:
+            remainder = remainder[1:]
+
+    snippet = " ".join(remainder).strip()
+    return {
+        "participant": participant,
+        "timestamp": timestamp,
+        "snippet": snippet,
+        "active": active,
+        "raw_text": raw_text,
+    }
+
+
+def _parse_message_event(raw_text: str) -> dict[str, str | None]:
+    """Parse a single LinkedIn message event from thread detail text."""
+    lines = [
+        line
+        for line in _nonempty_message_lines(raw_text)
+        if not line.startswith("View ") and "sent the following message at" not in line
+    ]
+    if not lines:
+        return {
+            "sender": None,
+            "timestamp": None,
+            "message": None,
+            "raw_text": raw_text,
+        }
+
+    sender = lines[0]
+    remainder = lines[1:]
+    timestamp = None
+
+    inline_timestamp = re.match(
+        r"^(?P<sender>.+?)\s+(?P<timestamp>\d{1,2}:\d{2}\s*[AP]M)$",
+        sender,
+    )
+    if inline_timestamp:
+        sender = inline_timestamp.group("sender").strip()
+        timestamp = inline_timestamp.group("timestamp")
+
+    if remainder and re.match(r"^\([^)]*\)$", remainder[0]):
+        sender = f"{sender} {remainder[0]}"
+        remainder = remainder[1:]
+
+    if timestamp is None and remainder and _is_message_timestamp(remainder[0]):
+        timestamp = remainder[0]
+        remainder = remainder[1:]
+
+    message = " ".join(remainder).strip() or None
+    return {
+        "sender": sender,
+        "timestamp": timestamp,
+        "message": message,
+        "raw_text": raw_text,
+    }
+
+
+def _parse_active_message_header(header_text: str) -> tuple[str | None, str | None]:
+    """Extract participant name and subtitle from the active thread header."""
+    lines = [
+        line
+        for line in _nonempty_message_lines(header_text)
+        if not line.startswith("Open the options list in your conversation")
+        and line != "Star conversation"
+    ]
+    if not lines:
+        return None, None
+
+    participant = lines[0]
+    subtitle = (
+        lines[1] if len(lines) > 1 and not _is_message_timestamp(lines[1]) else None
+    )
+    return participant, subtitle
 
 
 class LinkedInExtractor:
@@ -3825,6 +3968,214 @@ class LinkedInExtractor:
             recipient_selected=recipient_selected,
             sent=True,
         )
+
+    async def _open_messages_inbox(self) -> None:
+        """Open the authenticated messaging inbox and wait for the list view."""
+        url = "https://www.linkedin.com/messaging/"
+        await self._goto_with_auth_checks(url, wait_until="domcontentloaded")
+        await detect_rate_limit(self._page)
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element on messaging page")
+        await handle_modal_close(self._page)
+        await self._page.wait_for_selector(
+            'ul[aria-label="Conversation List"]',
+            timeout=10000,
+        )
+
+    async def _apply_messages_filter(self, filter_name: str) -> None:
+        """Apply an inbox filter pill such as unread, connections, or InMail."""
+        normalized = filter_name.strip().lower()
+        if normalized not in _MESSAGE_FILTER_MAP:
+            allowed = ", ".join(_MESSAGE_FILTER_MAP)
+            raise ValueError(
+                f"Unknown message filter '{filter_name}'. Expected one of: {allowed}"
+            )
+
+        filter_code = _MESSAGE_FILTER_MAP[normalized]
+        if filter_code is None:
+            return
+
+        locator = self._page.locator(
+            f'[data-test-messaging-inbox-filters__filter-pill="{filter_code}"]'
+        )
+        if await locator.count() == 0:
+            raise ValueError(f"Messaging filter '{filter_name}' is not available.")
+
+        await locator.first.click()
+        await self._page.wait_for_timeout(1200)
+
+    async def _load_more_message_conversations(self, clicks: int) -> None:
+        """Expand the visible inbox list by clicking the load-more button."""
+        for _ in range(clicks):
+            button = self._page.get_by_role("button", name="Load more conversations")
+            if await button.count() == 0:
+                break
+            await button.first.click()
+            await self._page.wait_for_timeout(1200)
+
+    async def _select_message_conversation(
+        self,
+        *,
+        conversation_name: str | None = None,
+        conversation_index: int | None = None,
+    ) -> None:
+        """Activate a visible conversation by partial name or 1-based index."""
+        matched = await self._page.evaluate(
+            """({ conversationName, conversationIndex }) => {
+                const normalize = value =>
+                    (value || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                const list = document.querySelector('ul[aria-label="Conversation List"]');
+                if (!list) return false;
+
+                const items = Array.from(list.children)
+                    .map(item => item.querySelector('[tabindex="0"]') || item)
+                    .filter(item => normalize(item.innerText));
+
+                let target = null;
+                if (conversationName) {
+                    const needle = normalize(conversationName);
+                    target = items.find(item => normalize(item.innerText).includes(needle)) || null;
+                } else if (conversationIndex && conversationIndex > 0) {
+                    target = items[conversationIndex - 1] || null;
+                }
+
+                if (!target) return false;
+                target.click();
+                return true;
+            }""",
+            {
+                "conversationName": conversation_name or "",
+                "conversationIndex": conversation_index or 0,
+            },
+        )
+        if not matched:
+            if conversation_name:
+                raise ValueError(
+                    f"No visible LinkedIn conversation matched '{conversation_name}'."
+                )
+            raise ValueError(
+                f"No visible LinkedIn conversation at index {conversation_index}."
+            )
+
+        await self._page.wait_for_timeout(1500)
+
+    async def _extract_messages_page_data(self) -> dict[str, Any]:
+        """Extract raw inbox list and active-thread content from messaging."""
+        return await self._page.evaluate(
+            """() => {
+                const toLines = value =>
+                    (value || '')
+                        .split('\\n')
+                        .map(line => line.replace(/\\s+/g, ' ').trim())
+                        .filter(Boolean);
+                const blockText = node => toLines(node?.innerText || '').join('\\n');
+
+                const conversationList = document.querySelector(
+                    'ul[aria-label="Conversation List"]'
+                );
+                const conversations = Array.from(conversationList?.children || [])
+                    .map(item => {
+                        const target = item.querySelector('[tabindex="0"]') || item;
+                        const rawText = blockText(target);
+                        if (!rawText) return null;
+                        return { raw_text: rawText };
+                    })
+                    .filter(Boolean);
+
+                const threadRoot = document.querySelector('[id^="message-thread-"]');
+                const titleBar = document.querySelector('#thread-detail-jump-target');
+                const profileLink =
+                    titleBar?.querySelector('a[href*="/in/"]')?.href || '';
+                const messages = Array.from(
+                    threadRoot?.querySelectorAll('[data-view-name="message-list-item"]') ||
+                        []
+                )
+                    .map(item => ({
+                        raw_text: blockText(item),
+                        event_urn: item.getAttribute('data-event-urn') || '',
+                    }))
+                    .filter(item => item.raw_text);
+
+                return {
+                    page_url: window.location.href,
+                    conversation_list_text: blockText(conversationList),
+                    conversations,
+                    active_thread_text: blockText(threadRoot),
+                    active_thread_header_text: blockText(titleBar),
+                    active_thread_profile_url: profileLink,
+                    messages,
+                };
+            }"""
+        )
+
+    async def scrape_messages(
+        self,
+        *,
+        filter_name: str = "all",
+        conversation_name: str | None = None,
+        conversation_index: int | None = None,
+        conversation_limit: int = 10,
+        message_limit: int = 20,
+        load_more: int = 0,
+    ) -> dict[str, Any]:
+        """Scrape the authenticated user's messaging inbox and active thread."""
+        if conversation_limit <= 0:
+            raise ValueError(
+                f"conversation_limit must be a positive integer, got {conversation_limit}"
+            )
+        if message_limit <= 0:
+            raise ValueError(
+                f"message_limit must be a positive integer, got {message_limit}"
+            )
+        if load_more < 0:
+            raise ValueError(f"load_more must be >= 0, got {load_more}")
+
+        await self._open_messages_inbox()
+        await self._apply_messages_filter(filter_name)
+        if load_more:
+            await self._load_more_message_conversations(load_more)
+        if conversation_name or conversation_index:
+            await self._select_message_conversation(
+                conversation_name=conversation_name,
+                conversation_index=conversation_index,
+            )
+
+        payload = await self._extract_messages_page_data()
+        conversation_summaries = [
+            _parse_message_conversation(item["raw_text"])
+            for item in payload.get("conversations", [])
+        ][:conversation_limit]
+
+        active_thread_text = payload.get("active_thread_text", "")
+        active_thread_header = payload.get("active_thread_header_text", "")
+        participant, subtitle = _parse_active_message_header(active_thread_header)
+        message_items = [
+            _parse_message_event(item["raw_text"])
+            for item in payload.get("messages", [])
+        ]
+        if len(message_items) > message_limit:
+            message_items = message_items[-message_limit:]
+
+        result: dict[str, Any] = {
+            "url": payload.get("page_url", "https://www.linkedin.com/messaging/"),
+            "sections": {},
+            "conversations": conversation_summaries,
+        }
+        if payload.get("conversation_list_text"):
+            result["sections"]["conversation_list"] = payload["conversation_list_text"]
+        if active_thread_text:
+            result["sections"]["active_conversation"] = active_thread_text
+            result["active_conversation"] = {
+                "participant": participant,
+                "subtitle": subtitle,
+                "profile_url": payload.get("active_thread_profile_url") or None,
+                "messages": message_items,
+            }
+        if filter_name != "all":
+            result["applied_filter"] = filter_name
+        return result
 
     async def _extract_root_content(
         self,

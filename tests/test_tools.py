@@ -36,6 +36,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
+    mock.scrape_messages = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -720,6 +721,65 @@ class TestMessagingTools:
         assert result["sections"]["inbox"] == "Conversation 1\nConversation 2"
         mock_extractor.get_inbox.assert_awaited_once_with(limit=20)
 
+    async def test_get_my_messages(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-test/",
+            "sections": {
+                "conversation_list": "Jane Doe\n4:54 PM\nJane: Hello there",
+                "active_conversation": "Jane Doe\nFounder\n4:54 PM\nHello there",
+            },
+            "conversations": [
+                {
+                    "participant": "Jane Doe",
+                    "timestamp": "4:54 PM",
+                    "snippet": "Jane: Hello there",
+                    "active": True,
+                    "raw_text": "Jane Doe\n4:54 PM\nJane: Hello there",
+                }
+            ],
+            "active_conversation": {
+                "participant": "Jane Doe",
+                "subtitle": "Founder",
+                "profile_url": "https://www.linkedin.com/in/jane-doe/",
+                "messages": [
+                    {
+                        "sender": "Jane Doe",
+                        "timestamp": "4:54 PM",
+                        "message": "Hello there",
+                        "raw_text": "Jane Doe\n4:54 PM\nHello there",
+                    }
+                ],
+            },
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_my_messages")
+        result = await tool_fn(
+            mock_context,
+            filter_name="unread",
+            conversation_name="Jane",
+            conversation_limit=5,
+            message_limit=10,
+            load_more=1,
+            extractor=mock_extractor,
+        )
+
+        assert result["sections"]["conversation_list"].startswith("Jane Doe")
+        assert result["active_conversation"]["participant"] == "Jane Doe"
+        mock_extractor.scrape_messages.assert_awaited_once_with(
+            filter_name="unread",
+            conversation_name="Jane",
+            conversation_index=None,
+            conversation_limit=5,
+            message_limit=10,
+            load_more=1,
+        )
+
     async def test_get_conversation_success(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/messaging/thread/abc123/",
@@ -1168,6 +1228,7 @@ class TestToolTimeouts:
             "get_job_details",
             "search_jobs",
             "get_inbox",
+            "get_my_messages",
             "get_conversation",
             "search_conversations",
             "send_message",
@@ -1199,6 +1260,7 @@ class TestToolTimeouts:
             "get_job_details",
             "search_jobs",
             "get_inbox",
+            "get_my_messages",
             "get_conversation",
             "search_conversations",
             "send_message",
