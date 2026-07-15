@@ -160,6 +160,43 @@ def mock_page():
     return page
 
 
+@pytest.fixture(autouse=True)
+def _no_page_interaction_simulation(monkeypatch):
+    """simulate_page_interaction runs real asyncio.sleep() calls (mouse
+    jitter + scroll pauses) at every stealth level above NONE, and
+    LinkedInExtractor defaults to MINIMAL_STEALTH (simulation=BASIC) when
+    no profile is passed -- exactly the case for every mock_page-based test
+    in this file. Neutralized by default here, same as scroll_to_bottom/
+    detect_rate_limit/handle_modal_close are neutralized per-test, so the
+    suite doesn't silently pick up seconds of real sleep per test. Tests
+    that specifically want to verify simulation behavior undo this locally
+    via their own patch of the same target.
+    """
+    monkeypatch.setattr(
+        "linkedin_mcp_server.scraping.extractor.simulate_page_interaction",
+        AsyncMock(),
+    )
+
+
+class TestLinkedInExtractorStealthProfile:
+    def test_defaults_to_minimal_stealth_when_unset(self, mock_page):
+        from linkedin_mcp_server.core.stealth_profile import get_stealth_profile
+
+        extractor = LinkedInExtractor(mock_page)
+
+        assert extractor._stealth_profile.name == "MINIMAL_STEALTH"
+        assert extractor._stealth_profile.name == get_stealth_profile().name
+
+    def test_uses_explicitly_passed_profile(self, mock_page):
+        from linkedin_mcp_server.core.stealth_profile import get_stealth_profile
+
+        extractor = LinkedInExtractor(
+            mock_page, stealth_profile=get_stealth_profile("MAXIMUM_STEALTH")
+        )
+
+        assert extractor._stealth_profile.name == "MAXIMUM_STEALTH"
+
+
 class TestExtractPage:
     async def test_extract_page_returns_text(self, mock_page):
         mock_page.evaluate = AsyncMock(

@@ -95,6 +95,7 @@ class TestGetReadyExtractor:
 
             assert isinstance(extractor, LinkedInExtractor)
             assert extractor._engine == "patchright"
+            assert extractor._stealth_profile.name == "MINIMAL_STEALTH"
             mock_get_browser.assert_awaited_once()
             mock_ensure_auth.assert_awaited_once()
 

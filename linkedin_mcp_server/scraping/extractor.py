@@ -29,6 +29,8 @@ from linkedin_mcp_server.core.humanize import (
     human_scroll,
     human_type,
 )
+from linkedin_mcp_server.core.interaction_simulation import simulate_page_interaction
+from linkedin_mcp_server.core.stealth_profile import StealthProfile, get_stealth_profile
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
@@ -819,12 +821,22 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
 class LinkedInExtractor:
     """Extracts LinkedIn page content via navigate-scroll-innerText pattern."""
 
-    def __init__(self, page: Page, *, engine: str = "patchright"):
+    def __init__(
+        self,
+        page: Page,
+        *,
+        engine: str = "patchright",
+        stealth_profile: StealthProfile | None = None,
+    ):
         self._page = page
         # Drives whether write-path clicks/scrolls go through core.humanize's
         # Bezier-curve mouse simulation (Patchright) or a direct passthrough
         # (Camoufox, which already humanizes cursor movement natively).
         self._engine = engine
+        # Defaults to MINIMAL_STEALTH (same default as BrowserConfig) so
+        # every existing LinkedInExtractor(page) call site/test -- which
+        # never passed this before it existed -- keeps working unchanged.
+        self._stealth_profile = stealth_profile or get_stealth_profile()
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -1737,6 +1749,15 @@ class LinkedInExtractor:
                 "This may be a transient soft-block -- retry, or wait before "
                 "requesting this profile again."
             )
+
+        # Idle-time page behavior (mouse jitter, paced scroll-and-pause)
+        # between real content finishing load and extraction reading it --
+        # a no-op at SimulationLevel.NONE. Best-effort: a stealth nicety
+        # must never block a real extraction that already has its content.
+        try:
+            await simulate_page_interaction(self._page, self._stealth_profile)
+        except Exception as e:
+            logger.debug("Page interaction simulation failed (ignored): %s", e)
 
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])

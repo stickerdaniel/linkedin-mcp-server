@@ -142,7 +142,9 @@ async def get_ready_extractor(
         await ensure_authenticated()
         await _maybe_check_ip_drift(browser.page)
         return LinkedInExtractor(
-            browser.page, engine=get_config().browser.browser_engine
+            browser.page,
+            engine=get_config().browser.browser_engine,
+            stealth_profile=get_config().browser.resolve_stealth_profile(),
         )
     except AuthenticationError as e:
         await handle_auth_error(e, ctx)  # always raises
