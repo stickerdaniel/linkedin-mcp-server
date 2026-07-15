@@ -9,10 +9,12 @@ from linkedin_mcp_server.core.auth import (
     AuthBarrierKind,
     detect_auth_barrier,
     detect_auth_barrier_quick,
+    detect_empty_profile_barrier,
     is_logged_in,
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
+from linkedin_mcp_server.core.utils import TIMEOUT_ERRORS
 
 
 @pytest.mark.asyncio
@@ -346,3 +348,67 @@ class TestAuthBarrierKind:
         assert isinstance(barrier, str)
         assert barrier == "auth blocker URL: https://www.linkedin.com/login"
         assert "auth blocker" in barrier
+
+
+def _main_page(*, main_text: str | Exception) -> MagicMock:
+    """A page whose ``main`` locator's inner_text either returns text or
+    raises (simulating <main> never appearing)."""
+    page = MagicMock()
+    main_locator = MagicMock()
+    if isinstance(main_text, Exception):
+        main_locator.inner_text = AsyncMock(side_effect=main_text)
+    else:
+        main_locator.inner_text = AsyncMock(return_value=main_text)
+    page.locator = MagicMock(return_value=main_locator)
+    return page
+
+
+class TestDetectEmptyProfileBarrier:
+    """detect_empty_profile_barrier keys off the caller's own url param, not
+    page.url -- see the function docstring for why (redirects, test doubles)."""
+
+    @pytest.mark.asyncio
+    async def test_non_profile_url_is_never_flagged(self):
+        page = _main_page(main_text="")
+        result = await detect_empty_profile_barrier(
+            page, "https://www.linkedin.com/search/results/people/"
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_thin_main_text_on_profile_url_is_a_challenge(self):
+        page = _main_page(main_text="Sign in")
+        result = await detect_empty_profile_barrier(
+            page, "https://www.linkedin.com/in/testuser/"
+        )
+        assert result is not None
+        assert result.kind == AuthBarrierKind.CHALLENGE
+        assert "testuser" in result
+
+    @pytest.mark.asyncio
+    async def test_realistic_main_text_on_profile_url_is_not_flagged(self):
+        page = _main_page(
+            main_text="Jane Doe\n\nSoftware Engineer at Acme\n\nSan Francisco, CA\n\n"
+            "500+ connections\n\nAbout\n\nBuilding developer tools for 10 years."
+        )
+        result = await detect_empty_profile_barrier(
+            page, "https://www.linkedin.com/in/janedoe/"
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_main_never_appearing_is_inconclusive_not_flagged(self):
+        page = _main_page(main_text=TIMEOUT_ERRORS[0]("timed out"))
+        result = await detect_empty_profile_barrier(
+            page, "https://www.linkedin.com/in/testuser/"
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_details_subpage_is_also_covered_by_the_in_marker(self):
+        page = _main_page(main_text="x")
+        result = await detect_empty_profile_barrier(
+            page, "https://www.linkedin.com/in/testuser/details/certifications/"
+        )
+        assert result is not None
+        assert result.kind == AuthBarrierKind.CHALLENGE

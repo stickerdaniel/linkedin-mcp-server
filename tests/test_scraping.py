@@ -5,6 +5,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 
 from linkedin_mcp_server.callbacks import ProgressCallback
+from linkedin_mcp_server.core.auth import AuthBarrier, AuthBarrierKind
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
@@ -142,7 +143,15 @@ def mock_page():
     mock_locator.count = AsyncMock(return_value=0)
     mock_locator.is_visible = AsyncMock(return_value=False)
     mock_locator.first = mock_locator
-    mock_locator.inner_text = AsyncMock(return_value="normal page content")
+    # Long enough to clear detect_empty_profile_barrier's floor (100 chars) --
+    # a generic short string here would make every /in/ URL test in this
+    # file look like an empty-profile soft-block by accident. Tests that
+    # specifically want a short/thin response override this explicitly.
+    mock_locator.inner_text = AsyncMock(
+        return_value="Sample LinkedIn Profile\n\nJohn Doe\n\nSoftware Engineer "
+        "at Example Corp\n\nSan Francisco Bay Area\n\n500+ connections\n\n"
+        "About\n\nExperienced software engineer with a background in..."
+    )
     mock_locator.filter = MagicMock(return_value=mock_locator)
     page.locator.return_value = mock_locator
     page.main_frame = object()
@@ -307,8 +316,13 @@ class TestExtractPage:
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
                 new_callable=AsyncMock,
-                return_value="auth barrier text: welcome back + sign in using another account",
+                return_value=AuthBarrier(
+                    "auth barrier text: welcome back + sign in using another account",
+                    AuthBarrierKind.CHALLENGE,
+                ),
             ),
+            # ChallengeError/BlockError are AuthenticationError subclasses --
+            # isinstance-based pytest.raises still matches either.
             pytest.raises(AuthenticationError, match="--login"),
         ):
             await extractor.extract_page(
@@ -327,6 +341,26 @@ class TestExtractPage:
                 side_effect=RateLimitError("Rate limited", suggested_wait_time=3600),
             ),
             pytest.raises(RateLimitError),
+        ):
+            await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
+            )
+
+    async def test_empty_profile_page_raises_challenge_error(self, mock_page):
+        """A /in/ URL whose <main> rendered with no real content raises
+        ChallengeError -- the soft-block signal distinct from a genuine
+        rate limit or auth wall (see core.auth.detect_empty_profile_barrier)."""
+        from linkedin_mcp_server.core.exceptions import ChallengeError
+
+        mock_page.locator.return_value.inner_text = AsyncMock(return_value="Sign in")
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(ChallengeError, match="empty profile"),
         ):
             await extractor.extract_page(
                 "https://www.linkedin.com/in/testuser/",

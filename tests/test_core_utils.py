@@ -4,7 +4,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from linkedin_mcp_server.core.exceptions import RateLimitError
+from linkedin_mcp_server.core.exceptions import (
+    BlockError,
+    ChallengeError,
+    RateLimitError,
+)
 from linkedin_mcp_server.core.utils import detect_rate_limit
 
 
@@ -23,13 +27,19 @@ def mock_page():
 
 class TestDetectRateLimit:
     async def test_checkpoint_url_raises(self, mock_page):
+        # /checkpoint is classified CHALLENGE (recoverable) by
+        # core.auth's AuthBarrierKind -- detect_rate_limit now delegates
+        # its URL-based check there instead of raising a flat RateLimitError,
+        # so the two disconnected detectors agree on exactly one taxonomy.
         mock_page.url = "https://www.linkedin.com/checkpoint/challenge/123"
-        with pytest.raises(RateLimitError, match="security checkpoint"):
+        with pytest.raises(ChallengeError, match="challenge"):
             await detect_rate_limit(mock_page)
 
     async def test_authwall_url_raises(self, mock_page):
+        # /authwall is classified BLOCK (hard login wall) by the same
+        # detector -- a real re-login is needed, not just a retry.
         mock_page.url = "https://www.linkedin.com/authwall?trk=login"
-        with pytest.raises(RateLimitError, match="security checkpoint"):
+        with pytest.raises(BlockError, match="block"):
             await detect_rate_limit(mock_page)
 
     async def test_normal_page_with_main_skips_body_heuristic(self, mock_page):

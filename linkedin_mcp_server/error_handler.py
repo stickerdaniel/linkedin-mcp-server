@@ -13,6 +13,8 @@ from fastmcp.exceptions import ToolError
 
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
+    BlockError,
+    ChallengeError,
     ElementNotFoundError,
     LinkedInScraperException,
     NetworkError,
@@ -125,6 +127,26 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             "Session expired. Run with --login to create a new browser profile.",
             context=context,
         )
+
+    elif isinstance(exception, ChallengeError):
+        # Checked before the generic AuthenticationError branch below --
+        # ChallengeError is a subclass, so isinstance would match that
+        # broader branch first otherwise.
+        logger.warning("Recoverable auth challenge%s: %s", ctx, exception)
+        raise ToolError(
+            "LinkedIn showed a recoverable interactive barrier (security "
+            "checkpoint, saved-account chooser, or an empty profile render "
+            "that may be a transient soft-block). Wait a moment and retry; "
+            "if it persists, run with --login to re-authenticate."
+        ) from exception
+
+    elif isinstance(exception, BlockError):
+        logger.warning("Hard auth block%s: %s", ctx, exception)
+        raise ToolError(
+            "LinkedIn requires a full re-login -- the session is not "
+            "authenticated (redirected to a login/authwall page). Run with "
+            "--login to re-authenticate; retrying without re-login will not help."
+        ) from exception
 
     elif isinstance(exception, AuthenticationError):
         logger.warning("Authentication failed%s: %s", ctx, exception)

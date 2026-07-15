@@ -13,12 +13,15 @@ from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 from patchright.async_api import Page
 
 from linkedin_mcp_server.core import (
+    AuthBarrierKind,
     detect_auth_barrier,
     detect_auth_barrier_quick,
+    detect_empty_profile_barrier,
     resolve_remember_me_prompt,
 )
 from linkedin_mcp_server.core.exceptions import (
-    AuthenticationError,
+    BlockError,
+    ChallengeError,
     LinkedInScraperException,
 )
 from linkedin_mcp_server.core.humanize import (
@@ -921,13 +924,16 @@ class LinkedInExtractor:
             return
 
         logger.warning("Authentication barrier detected on %s: %s", url, barrier)
+        error_cls = (
+            BlockError if barrier.kind == AuthBarrierKind.BLOCK else ChallengeError
+        )
         message = (
             "LinkedIn requires interactive re-authentication. "
             "Run with --login and complete the account selection/sign-in flow."
         )
         if navigation_error is not None:
-            raise AuthenticationError(message) from navigation_error
-        raise AuthenticationError(message)
+            raise error_cls(message) from navigation_error
+        raise error_cls(message)
 
     async def _goto_with_auth_checks(
         self,
@@ -1039,7 +1045,10 @@ class LinkedInExtractor:
                 extra={"target_url": url, "barrier": barrier},
             )
             logger.warning("Authentication barrier detected on %s: %s", url, barrier)
-            raise AuthenticationError(
+            error_cls = (
+                BlockError if barrier.kind == AuthBarrierKind.BLOCK else ChallengeError
+            )
+            raise error_cls(
                 "LinkedIn requires interactive re-authentication. "
                 "Run with --login and complete the account selection/sign-in flow."
             )
@@ -1709,6 +1718,25 @@ class LinkedInExtractor:
         else:
             scrolls = max_scrolls if max_scrolls is not None else 5
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
+
+        # A profile page (main or /details/) that's had its full chance to
+        # settle -- all waits, Show-more clicks, and lazy-load scrolling
+        # above already ran -- but still rendered no real content is a
+        # silent soft-block signal distinct from the logged-out-preview case
+        # (that page has plenty of boilerplate text; see normalizer.py's
+        # degraded-snapshot detection in the lynk-os-data pipeline). Checked
+        # here, not at navigation time, specifically so it's not a false
+        # positive against a page still mid-render.
+        empty_barrier = await detect_empty_profile_barrier(self._page, url)
+        if empty_barrier is not None:
+            logger.warning(
+                "Empty-profile barrier detected on %s: %s", url, empty_barrier
+            )
+            raise ChallengeError(
+                f"LinkedIn returned an empty profile page for {url}. "
+                "This may be a transient soft-block -- retry, or wait before "
+                "requesting this profile again."
+            )
 
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])

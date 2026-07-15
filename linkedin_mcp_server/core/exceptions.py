@@ -13,6 +13,25 @@ class AuthenticationError(LinkedInScraperException):
     pass
 
 
+class ChallengeError(AuthenticationError):
+    """Raised when LinkedIn shows a recoverable interactive barrier -- a
+    security checkpoint, email verification, the saved-account chooser, or
+    a profile page that rendered with no real content (a common signal of
+    a silent soft-block). Distinct from BlockError: plausibly clearable by
+    a retry or a fresh interactive login, not necessarily a dead session.
+    """
+
+    pass
+
+
+class BlockError(AuthenticationError):
+    """Raised when the session is simply not authenticated -- a hard login
+    wall (e.g. redirected to /login or /authwall). Needs a full re-login
+    (--login), not a retry."""
+
+    pass
+
+
 class RateLimitError(LinkedInScraperException):
     """Raised when rate limiting is detected."""
 

@@ -26,7 +26,7 @@ async def detect_rate_limit(page: Page) -> None:
     """Detect if LinkedIn has rate-limited or security-challenged the session.
 
     Checks (in order):
-    1. URL contains /checkpoint or /authwall (security challenge)
+    1. URL-based auth barrier (security checkpoint / login wall)
     2. Body text contains rate-limit phrases on error-shaped pages (throttling)
 
     The body-text heuristic only runs on pages without a ``<main>`` element
@@ -35,18 +35,28 @@ async def detect_rate_limit(page: Page) -> None:
     that happens to contain phrases like "slow down" or "try again later".
 
     Raises:
-        RateLimitError: If any rate-limiting or security challenge is detected
+        ChallengeError: A recoverable interactive barrier was detected
+            (security checkpoint, saved-account chooser, ...).
+        BlockError: A hard login wall was detected (not authenticated).
+        RateLimitError: Genuine server-side throttling was detected.
     """
-    # Check URL for security challenges
-    current_url = page.url
-    if "linkedin.com/checkpoint" in current_url or "authwall" in current_url:
-        raise RateLimitError(
-            "LinkedIn security checkpoint detected. "
-            "You may need to verify your identity or wait before continuing.",
-            suggested_wait_time=30,
-        )
+    # Check 1: URL-based auth barrier. Delegates to core.auth's kind-aware
+    # detector -- checkpoint/authwall URLs are exactly what that module's
+    # _URL_PATTERN_KIND already classifies, so this used to duplicate that
+    # logic here with a flat RateLimitError that discarded the recoverable
+    # CHALLENGE vs. hard BLOCK distinction. Deferred import: core.auth
+    # imports TIMEOUT_ERRORS from this module at its own module level, so a
+    # top-level import here would be circular.
+    from .auth import AuthBarrierKind, detect_auth_barrier_quick
+    from .exceptions import BlockError, ChallengeError
 
-    # Check for rate limit messages — only on error-shaped pages.
+    barrier = await detect_auth_barrier_quick(page)
+    if barrier is not None:
+        if barrier.kind == AuthBarrierKind.BLOCK:
+            raise BlockError(f"LinkedIn auth block detected: {barrier}")
+        raise ChallengeError(f"LinkedIn challenge detected: {barrier}")
+
+    # Check 2: rate limit messages — only on error-shaped pages.
     # Real rate-limit pages have no <main> element and short body text.
     # Normal LinkedIn pages (profiles, jobs) have <main> and long content
     # that may incidentally contain phrases like "slow down".

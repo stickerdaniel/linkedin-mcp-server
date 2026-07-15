@@ -70,6 +70,15 @@ _AUTH_BARRIER_TEXT_MARKERS = (
 _REMEMBER_ME_CONTAINER_SELECTOR = "#rememberme-div"
 _REMEMBER_ME_BUTTON_SELECTOR = "#rememberme-div button"
 
+# A profile page that rendered with essentially no text is a soft-block
+# signal distinct from any URL/title-based barrier -- scoped to /in/ URLs
+# specifically (the only page family this was confirmed against), so a
+# legitimately thin non-profile page doesn't false-positive. Real profiles
+# always carry at least a name/headline/location plus UI chrome, well over
+# this floor; a genuinely blocked render typically has none of it.
+_EMPTY_PROFILE_URL_MARKER = "/in/"
+_MIN_PROFILE_MAIN_TEXT_LENGTH = 100
+
 
 async def is_logged_in(page: Page) -> bool:
     """Check if currently logged in to LinkedIn.
@@ -193,6 +202,56 @@ async def detect_auth_barrier_quick(page: Page) -> AuthBarrier | None:
     Uses URL and title only, avoiding a full body-text fetch on healthy pages.
     """
     return await _detect_auth_barrier(page, include_body_text=False)
+
+
+async def detect_empty_profile_barrier(page: Page, url: str) -> AuthBarrier | None:
+    """Detect a profile page that rendered with no real content.
+
+    LinkedIn can silently soft-block a request without any URL redirect or
+    login-wall marker at all: the navigation succeeds, ``<main>`` exists,
+    but it holds essentially no text -- nothing extractable. Confirmed live
+    this doesn't overlap with the "logged-out preview" case (that page has
+    *plenty* of boilerplate text, just untrustworthy content -- see
+    ``normalizer.py``'s degraded-snapshot detection in the lynk-os-data
+    pipeline); this catches the genuinely blank-render case instead.
+
+    Deliberately NOT folded into ``detect_auth_barrier_quick`` (URL/title
+    only, called on every navigation) since this needs a body-text read --
+    call it from a scraping call site after the page has had its normal
+    chance to settle, not from the cheap fail-fast check.
+
+    ``url`` is the caller's own requested/target URL, NOT re-read from
+    ``page.url`` -- matches every other page-type check in
+    ``_extract_loaded_section`` (``is_activity``/``is_search``/``is_details``,
+    all keyed off the same parameter), and avoids trusting mutable browser
+    state that a redirect (or a test double) could leave out of sync with
+    what's actually being extracted.
+    """
+    try:
+        if _EMPTY_PROFILE_URL_MARKER not in url:
+            return None
+
+        try:
+            main_text = await page.locator("main").inner_text(timeout=1000)
+        except TIMEOUT_ERRORS:
+            # <main> never appeared -- inconclusive, not necessarily a
+            # block (see _extract_loaded_section's own tolerant wait for
+            # the same element). Don't false-positive on a timing issue
+            # already tolerated elsewhere.
+            return None
+
+        if len(main_text.strip()) >= _MIN_PROFILE_MAIN_TEXT_LENGTH:
+            return None
+
+        return AuthBarrier(
+            f"empty profile page (main text length={len(main_text.strip())}): {url}",
+            AuthBarrierKind.CHALLENGE,
+        )
+    except TIMEOUT_ERRORS:
+        return None
+    except Exception:
+        logger.error("Unexpected error checking empty-profile barrier", exc_info=True)
+        return None
 
 
 async def resolve_remember_me_prompt(page: Page) -> bool:
