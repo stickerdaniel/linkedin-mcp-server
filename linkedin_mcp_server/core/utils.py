@@ -87,25 +87,81 @@ async def detect_rate_limit(page: Page) -> None:
         pass
 
 
+_SCROLL_STEP_FRACTIONS = (0.25, 0.5, 0.75, 1.0)
+_SCROLL_BACKOFF_MULTIPLIER = 1.5
+_MAX_SCROLL_DELAY = 2.0
+
+
 async def scroll_to_bottom(
-    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
+    page: Page,
+    pause_time: float = 1.0,
+    max_scrolls: int = 10,
+    *,
+    max_wait_seconds: float = 15.0,
 ) -> None:
     """Scroll to the bottom of the page to trigger lazy loading.
 
+    Smarter than a single jump-and-fixed-wait cycle in four ways:
+
+    1. Skip-if-already-there: if the page is already scrolled to (near) the
+       bottom before this even starts, there's nothing to trigger -- return
+       immediately instead of paying at least one pause_time for nothing.
+    2. Each pass scrolls through 25/50/75/100% of the current scrollHeight
+       instead of one leap to the bottom -- some LinkedIn lazy-load
+       triggers are viewport-intersection-based (fire as an element
+       scrolls into view), not only "did you reach the very bottom".
+    3. scrollHeight is re-measured after *every* step within a pass, not
+       just once per full pass, so newly-inserted content is detected as
+       soon as it appears rather than only at the next pass boundary.
+    4. The wait between passes backs off (starting at pause_time, capped
+       at 2.0s) instead of staying fixed, and is bounded by
+       max_wait_seconds wall-clock in addition to max_scrolls -- a
+       slow-loading page gets more patience without a fast-loading one
+       paying a fixed tax on every single pass.
+
     Args:
         page: Patchright page object
-        pause_time: Time to pause between scrolls (seconds)
-        max_scrolls: Maximum number of scroll attempts
+        pause_time: Starting delay between passes (seconds); grows via
+            backoff up to max_wait_seconds/_MAX_SCROLL_DELAY.
+        max_scrolls: Maximum number of passes.
+        max_wait_seconds: Wall-clock ceiling across all passes, independent
+            of max_scrolls -- whichever bound is hit first stops the loop.
     """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max_wait_seconds
+
+    previous_height = await page.evaluate("document.body.scrollHeight")
+    already_at_bottom = await page.evaluate(
+        "(window.scrollY + window.innerHeight) >= (document.body.scrollHeight - 10)"
+    )
+    if already_at_bottom:
+        logger.debug("scroll_to_bottom: already at the bottom, nothing to do")
+        return
+
+    delay = pause_time
     for i in range(max_scrolls):
-        previous_height = await page.evaluate("document.body.scrollHeight")
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(pause_time)
+        if loop.time() >= deadline:
+            logger.debug(
+                "scroll_to_bottom: max_wait_seconds reached after %d passes", i
+            )
+            break
+
+        for fraction in _SCROLL_STEP_FRACTIONS:
+            await page.evaluate(
+                f"window.scrollTo(0, document.body.scrollHeight * {fraction})"
+            )
+            step_height = await page.evaluate("document.body.scrollHeight")
+            if step_height != previous_height:
+                previous_height = step_height
+
+        await asyncio.sleep(delay)
 
         new_height = await page.evaluate("document.body.scrollHeight")
         if new_height == previous_height:
-            logger.debug("Reached bottom after %d scrolls", i + 1)
+            logger.debug("Reached bottom after %d passes", i + 1)
             break
+        previous_height = new_height
+        delay = min(delay * _SCROLL_BACKOFF_MULTIPLIER, _MAX_SCROLL_DELAY)
 
 
 async def scroll_job_sidebar(
