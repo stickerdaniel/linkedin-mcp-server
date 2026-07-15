@@ -10,7 +10,7 @@ import re
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
-from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+from patchright.async_api import Page
 
 from linkedin_mcp_server.core import (
     detect_auth_barrier,
@@ -21,10 +21,16 @@ from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
 )
+from linkedin_mcp_server.core.humanize import (
+    human_move_and_click,
+    human_scroll,
+    human_type,
+)
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
+    TIMEOUT_ERRORS,
     detect_rate_limit,
     handle_modal_close,
     scroll_job_sidebar,
@@ -55,8 +61,18 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 # Returned as section text when LinkedIn rate-limits the page
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
-# LinkedIn shows 25 results per page
+# LinkedIn shows 25 results per page (jobs search only -- confirmed live
+# via search_jobs's existing pagination).
 _PAGE_SIZE = 25
+
+# Classic LinkedIn people-search results show 10 profiles per page --
+# LinkedIn's long-standing convention for this UI, distinct from jobs
+# search's 25/page above. NOT YET CONFIRMED LIVE for this account/layout
+# (a session issue blocked live pagination testing at implementation
+# time) -- if the real page size differs, `start=` offsets will produce
+# gapped or overlapping pages until this is corrected against a real
+# multi-page capture.
+_PEOPLE_PAGE_SIZE = 10
 
 # Normalization maps for job search filters
 _DATE_POSTED_MAP = {
@@ -346,6 +362,115 @@ _CLICK_INCOMING_ACCEPT_JS = (
 """
 )
 
+# Entry-boundary extraction for /details/experience/ -- ADDITIVE to the
+# innerText-based `sections["experience"]` (never replaces it). Returns
+# `null` (-> Python None) whenever the selector doesn't match anything, so
+# a LinkedIn layout change degrades to "no structure this time", never an
+# error -- callers must keep working off `sections["experience"]` text as
+# the source of truth when this is absent, exactly as before this change.
+#
+# `componentkey` is LinkedIn's own internal SDUI component-registry
+# attribute (e.g. "com.linkedin.sdui.pagers.profile.card.refXExperience
+# TopLevelSection"), not a CSS class -- selected via substring/prefix match
+# per CONTRIBUTING.md's "tag + attribute patterns over class names" rule,
+# the same convention already used by `_extract_root_content`'s
+# `a[href]` reference scan and `_extract_job_ids`'s
+# `a[href*="/jobs/view/"]`. Still a DOM dependency (the one thing this
+# project's scraping philosophy tries to minimize), so this is intentionally
+# scoped to just entry BOUNDARIES -- field-level parsing (dates, employment
+# type, location) stays in the text consumer, unchanged.
+#
+# Grouped-vs-flat detection (any <li> inside the item => grouped, company
+# name = the item's first direct <p>) mirrors the sibling Rust
+# "seeker-capture" engine's `experience.rs`, verified against live
+# LinkedIn as of 2026-07-02 -- that codebase confirmed a flat single-role
+# item never contains a bare <li> (bulleted description text renders as
+# plain "-"/"•"-prefixed lines, not real <li> elements), so this
+# check doesn't misfire on a flat entry whose description happens to be a
+# bullet list.
+_EXPERIENCE_ENTRIES_JS = r"""
+(() => {
+  const MAX_ITEMS = 100;
+  const textOf = el => (el && (el.innerText || '')).trim();
+  const main = document.querySelector('main');
+  if (!main) return null;
+  const section =
+    main.querySelector("section[componentkey*='ExperienceTopLevelSection']") ||
+    main;
+  const items = Array.from(
+    section.querySelectorAll("div[componentkey^='entity-collection-item']")
+  ).slice(0, MAX_ITEMS);
+  if (items.length === 0) return null;
+
+  const entries = items.map(item => {
+    const roleLis = Array.from(item.querySelectorAll('li'));
+    if (roleLis.length === 0) {
+      return { company_header: null, roles: [textOf(item)] };
+    }
+    const directPs = Array.from(item.querySelectorAll(':scope > p'));
+    const headerP = directPs[0] || item.querySelector('p');
+    return {
+      company_header: textOf(headerP) || null,
+      roles: roleLis.map(textOf).filter(Boolean),
+    };
+  }).filter(entry => entry.roles.length > 0);
+
+  return entries.length > 0 ? entries : null;
+})
+"""
+
+# Entry-boundary extraction for /details/education/ -- same additive,
+# graceful-fallback contract as _EXPERIENCE_ENTRIES_JS above. Education has
+# no grouping concept (confirmed against the Rust engine): each entry
+# renders exactly one <figure> (school logo) followed by its own <p> field
+# stack, so entries are delimited by walking the section in document order
+# and starting a new group at each <figure> -- a fully DOM-structural
+# pattern with no componentkey dependency at the per-item level (education
+# componentkeys are unprefixed UUIDs with nothing stable to match on).
+_EDUCATION_ENTRIES_JS = r"""
+(() => {
+  const MAX_ITEMS = 100;
+  // offsetParent === null excludes display:none (and display:none
+  // ancestor) elements -- confirmed live necessary: on a real
+  // /details/education/ page the EducationTopLevelSection componentkey
+  // didn't match (falls back to `main`, the whole details page), and a
+  // hidden ad-feedback panel ("Por que estou vendo este anúncio?", a
+  // LinkedIn ads dropdown that's present in the DOM but not rendered)
+  // has real <p> text that a plain node.innerText walk picks up even
+  // though container.innerText (used for the flat text field) correctly
+  // skips it. Without this check the LAST group (no closing <figure> to
+  // stop it) silently absorbed that hidden panel plus the page footer.
+  const isRendered = el => el.offsetParent !== null;
+  const main = document.querySelector('main');
+  if (!main) return null;
+  const section =
+    main.querySelector("section[componentkey*='EducationTopLevelSection']") ||
+    main;
+  if (section.querySelectorAll('figure').length === 0) return null;
+
+  const walker = document.createTreeWalker(section, NodeFilter.SHOW_ELEMENT);
+  const groups = [];
+  let current = null;
+  let node = walker.nextNode();
+  while (node) {
+    if (node.tagName === 'FIGURE' && isRendered(node)) {
+      current = [];
+      groups.push(current);
+    } else if (node.tagName === 'P' && current && isRendered(node)) {
+      const text = (node.innerText || '').trim();
+      if (text) current.push(text);
+    }
+    node = walker.nextNode();
+  }
+
+  const entries = groups
+    .map(lines => lines.join('\n\n'))
+    .filter(Boolean)
+    .slice(0, MAX_ITEMS);
+  return entries.length > 0 ? entries : null;
+})
+"""
+
 
 def _connection_result(
     url: str,
@@ -385,6 +510,13 @@ def _encode_list_facet(values: list[str]) -> str:
 
 # Patterns that mark the start of LinkedIn page chrome (sidebar/footer).
 # Everything from the earliest match onwards is stripped.
+#
+# LinkedIn renders page chrome in the LOGGED-IN ACCOUNT's own display-language
+# setting (a server-side LinkedIn preference, e.g. "Idioma do perfil:
+# Português"), independent of the browser context's locale/Accept-Language.
+# An account set to a non-English display language leaks its footer/sidebar
+# chrome straight through markers that only match English strings -- add a
+# per-language block below rather than assuming "en" covers every session.
 _NOISE_MARKERS: list[re.Pattern[str]] = [
     # Footer nav links: "About" immediately followed by "Accessibility" or "Talent Solutions"
     re.compile(r"^About\n+(?:Accessibility|Talent Solutions)", re.MULTILINE),
@@ -401,6 +533,13 @@ _NOISE_MARKERS: list[re.Pattern[str]] = [
         r"[A-Za-z]+ \([A-Za-z]+\))",
         re.MULTILINE,
     ),
+    # pt-BR: footer nav links: "Sobre" immediately followed by "Acessibilidade"
+    # or "Soluções de Talentos" (mirrors the "en" pattern above)
+    re.compile(r"^Sobre\n+(?:Acessibilidade|Soluções de Talentos)", re.MULTILINE),
+    # pt-BR: sidebar profile recommendations
+    re.compile(r"^Mais perfis para você$", re.MULTILINE),
+    # pt-BR: sidebar premium upsell
+    re.compile(r"^Conheça perfis Premium$", re.MULTILINE),
 ]
 
 _NOISE_LINES: list[re.Pattern[str]] = [
@@ -417,6 +556,12 @@ class ExtractedSection:
     text: str
     references: list[Reference]
     error: dict[str, Any] | None = None
+    # Additive, optional DOM entry-boundary structure -- only populated for
+    # "experience"/"education" (see _EXPERIENCE_ENTRIES_JS/_EDUCATION_ENTRIES_JS).
+    # None whenever the DOM selector didn't match anything (layout change,
+    # empty section, or any other section name) -- `text` above remains the
+    # authoritative fallback in every case, unchanged by this field's presence.
+    entries: list[Any] | None = None
 
 
 _FEED_RSC_MARKER = "sduiid=com.linkedin.sdui.pagers.feed.mainFeed"
@@ -671,8 +816,12 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
 class LinkedInExtractor:
     """Extracts LinkedIn page content via navigate-scroll-innerText pattern."""
 
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, *, engine: str = "patchright"):
         self._page = page
+        # Drives whether write-path clicks/scrolls go through core.humanize's
+        # Bezier-curve mouse simulation (Patchright) or a direct passthrough
+        # (Camoufox, which already humanizes cursor movement natively).
+        self._engine = engine
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -937,7 +1086,9 @@ class LinkedInExtractor:
         except Exception:
             logger.debug("Scroll failed for button '%s'", text, exc_info=True)
         try:
-            await target.click(timeout=timeout)
+            await human_move_and_click(
+                self._page, target, engine=self._engine, timeout=timeout
+            )
             return True
         except Exception:
             logger.debug("Click failed for button '%s'", text, exc_info=True)
@@ -968,19 +1119,42 @@ class LinkedInExtractor:
         if count == 0:
             return False
         try:
-            await buttons.nth(count - 1).click(timeout=timeout)
+            await human_move_and_click(
+                self._page,
+                buttons.nth(count - 1),
+                engine=self._engine,
+                timeout=timeout,
+            )
             return True
         except Exception:
             logger.debug("Primary dialog button click failed", exc_info=True)
             return False
 
-    async def _fill_dialog_textarea(self, value: str, *, timeout: int = 5000) -> bool:
-        """Fill the first textarea inside the open dialog (structural)."""
-        locator = self._page.locator(_DIALOG_TEXTAREA_SELECTOR).first
+    async def _fill_dialog_textarea(self, value: str) -> bool:
+        """Fill the first textarea inside the open dialog (structural).
+
+        Focuses via page.evaluate() rather than Locator.focus()/.fill() --
+        same Patchright actionability-timeout quirk documented in
+        send_message() below applies here. Types via human_type() (per-char
+        variable delay) instead of an instant .fill(), since a personalized
+        connection note is exactly the kind of write-path text LinkedIn's
+        behavioral scoring is most likely to look at.
+        """
         try:
             if await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count() == 0:
                 return False
-            await locator.fill(value, timeout=timeout)
+            focused = await self._page.evaluate(
+                """(selector) => {
+                    const el = document.querySelector(selector);
+                    if (!el) return false;
+                    el.focus();
+                    return true;
+                }""",
+                _DIALOG_TEXTAREA_SELECTOR,
+            )
+            if not focused:
+                return False
+            await human_type(self._page, value)
             return True
         except Exception:
             return False
@@ -992,7 +1166,7 @@ class LinkedInExtractor:
             await self._page.wait_for_selector(
                 _DIALOG_SELECTOR, state="hidden", timeout=3000
             )
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             pass
 
     async def _get_premium_upsell_message(self, *, timeout: int = 2500) -> str | None:
@@ -1007,7 +1181,7 @@ class LinkedInExtractor:
         locator = self._page.locator(_DIALOG_PREMIUM_LINK_SELECTOR).first
         try:
             await locator.wait_for(state="visible", timeout=timeout)
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             return None
         except Exception:
             try:
@@ -1064,7 +1238,7 @@ class LinkedInExtractor:
         try:
             await self._page.wait_for_selector("[role='menu']", timeout=3000)
             return True
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("More menu did not appear after click")
             return False
 
@@ -1098,7 +1272,7 @@ class LinkedInExtractor:
         try:
             await first.wait_for(state="visible", timeout=timeout)
             return True
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             return False
         except Exception:
             try:
@@ -1113,7 +1287,9 @@ class LinkedInExtractor:
             await target.scroll_into_view_if_needed(timeout=timeout)
         except Exception:
             logger.debug("Could not scroll %s into view", selector, exc_info=True)
-        await target.click(timeout=timeout)
+        await human_move_and_click(
+            self._page, target, engine=self._engine, timeout=timeout
+        )
 
     async def _wait_for_main_text(
         self,
@@ -1133,7 +1309,7 @@ class LinkedInExtractor:
                 arg={"minimumLength": minimum_length},
                 timeout=timeout,
             )
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("%s content did not appear", log_context)
 
     async def _scroll_main_scrollable_region(
@@ -1247,7 +1423,7 @@ class LinkedInExtractor:
 
         try:
             await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("No <main> element found on %s", url)
 
         await handle_modal_close(self._page)
@@ -1261,7 +1437,7 @@ class LinkedInExtractor:
                 }""",
                 timeout=10000,
             )
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("Feed content did not appear on %s", url)
 
         # The feed has its own scroll container — window.scrollTo is a no-op.
@@ -1283,7 +1459,7 @@ class LinkedInExtractor:
             if count >= num_posts:
                 break
 
-            await self._page.mouse.wheel(0, _WHEEL_DELTA)
+            await human_scroll(self._page, _WHEEL_DELTA, engine=self._engine)
 
             new_count = count
             for _ in range(int(_BATCH_WAIT)):
@@ -1420,7 +1596,7 @@ class LinkedInExtractor:
         # Wait for main content to render
         try:
             await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("No <main> element found on %s", url)
 
         # Dismiss any modals blocking content
@@ -1438,7 +1614,7 @@ class LinkedInExtractor:
                     }""",
                     timeout=10000,
                 )
-            except PlaywrightTimeoutError:
+            except TIMEOUT_ERRORS:
                 logger.debug("Activity feed content did not appear on %s", url)
 
         # Search results pages load a placeholder first then fill in results
@@ -1454,7 +1630,7 @@ class LinkedInExtractor:
                     }""",
                     timeout=10000,
                 )
-            except PlaywrightTimeoutError:
+            except TIMEOUT_ERRORS:
                 logger.debug("Search results content did not appear on %s", url)
 
         # Company people pages (/company/<slug>/people/) initially render only
@@ -1475,7 +1651,7 @@ class LinkedInExtractor:
                     }""",
                     timeout=5000,
                 )
-            except PlaywrightTimeoutError:
+            except TIMEOUT_ERRORS:
                 logger.debug("Company people listing did not appear on %s", url)
 
         # Profile detail pages (/details/experience/, /details/education/, etc.)
@@ -1496,7 +1672,7 @@ class LinkedInExtractor:
                     }""",
                     timeout=10000,
                 )
-            except PlaywrightTimeoutError:
+            except TIMEOUT_ERRORS:
                 logger.debug("Detail section content did not appear on %s", url)
 
         # Detail pages paginate with a "Show more" button inside <main>, not scroll.
@@ -1515,9 +1691,11 @@ class LinkedInExtractor:
                     if not await target.is_visible():
                         break
                     await target.scroll_into_view_if_needed(timeout=2000)
-                    await target.click(timeout=2000)
+                    await human_move_and_click(
+                        self._page, target, engine=self._engine, timeout=2000
+                    )
                     await asyncio.sleep(1.0)
-                except PlaywrightTimeoutError:
+                except TIMEOUT_ERRORS:
                     logger.debug("Show more click timed out after %d clicks", i)
                     break
                 except Exception as e:
@@ -1548,7 +1726,65 @@ class LinkedInExtractor:
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name),
+            entries=await self._extract_entry_boundaries(section_name),
         )
+
+    async def _extract_entry_boundaries(self, section_name: str) -> list[Any] | None:
+        """DOM entry-boundary structure for "experience"/"education", `None`
+        for every other section. Additive-only -- see _EXPERIENCE_ENTRIES_JS
+        / _EDUCATION_ENTRIES_JS for the graceful-fallback contract. Must be
+        called after the "Show more" click loop and scroll_to_bottom above
+        have both finished, so every lazily-loaded entry is present in the
+        DOM before boundaries are captured.
+        """
+        if section_name == "experience":
+            js = _EXPERIENCE_ENTRIES_JS
+        elif section_name == "education":
+            js = _EDUCATION_ENTRIES_JS
+        else:
+            return None
+
+        # The whole body (not just the evaluate() call) is guarded -- a
+        # wrong-shaped result (a future LinkedIn markup change the JS
+        # doesn't anticipate, or -- as caught by this project's own test
+        # suite -- a test double returning an unrelated shape for a
+        # generically-mocked page.evaluate) must degrade to None exactly
+        # like a selector that matched nothing, never raise and take the
+        # whole section extraction down with it.
+        try:
+            result = await self._page.evaluate(js)
+            if not result:
+                return None
+
+            # Defensive second layer, mirroring the flat text field's own
+            # two-layer noise defense (upstream JS visibility filter above
+            # + this Python fallback) -- confirmed live necessary once
+            # already (a hidden ad-feedback panel leaked into the last
+            # education group before the offsetParent check existed).
+            if section_name == "education":
+                cleaned = [strip_linkedin_noise(entry) for entry in result]
+                cleaned = [entry for entry in cleaned if entry]
+                return cleaned or None
+
+            cleaned_roles_entries: list[dict[str, Any]] = []
+            for item in result:
+                header = item.get("company_header")
+                roles = [strip_linkedin_noise(r) for r in item.get("roles") or []]
+                roles = [r for r in roles if r]
+                if not roles:
+                    continue
+                cleaned_roles_entries.append(
+                    {
+                        "company_header": strip_linkedin_noise(header)
+                        if header
+                        else None,
+                        "roles": roles,
+                    }
+                )
+            return cleaned_roles_entries or None
+        except Exception as e:
+            logger.debug("Entry-boundary extraction failed for %s: %s", section_name, e)
+            return None
 
     async def _extract_overlay(
         self,
@@ -1603,7 +1839,7 @@ class LinkedInExtractor:
         # Wait for the dialog/modal to render (LinkedIn uses native <dialog>)
         try:
             await self._page.wait_for_selector("dialog[open], .artdeco-modal__content")
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("No modal overlay found on %s, falling back to main", url)
 
         # NOTE: Do NOT call handle_modal_close() here — the contact-info
@@ -1649,12 +1885,23 @@ class LinkedInExtractor:
         ``extract_page``).
 
         Returns:
-            {url, sections: {name: text}, profile_urn?: str}
+            {url, sections: {name: text}, profile_urn?: str,
+             structure?: {"experience"|"education": [...]}}
+
+            ``structure`` is additive and optional -- present only for
+            "experience"/"education", and only when a DOM entry-boundary
+            selector matched (see _EXPERIENCE_ENTRIES_JS /
+            _EDUCATION_ENTRIES_JS). Absent whenever LinkedIn's layout
+            doesn't match (a layout change, or any profile where the
+            section renders differently) -- callers must always be able to
+            fall back to parsing ``sections[name]`` text alone, since that
+            remains the only guaranteed field.
         """
         requested = requested | {"main_profile"}
         base_url = f"https://www.linkedin.com/in/{username}"
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
+        structure: dict[str, list[Any]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
         profile_urn: str | None = None
 
@@ -1712,6 +1959,8 @@ class LinkedInExtractor:
                         sections[section_name] = extracted.text
                         if extracted.references:
                             references[section_name] = extracted.references
+                        if extracted.entries:
+                            structure[section_name] = extracted.entries
                     elif extracted.error:
                         section_errors[section_name] = extracted.error
 
@@ -1748,6 +1997,8 @@ class LinkedInExtractor:
             result["profile_urn"] = profile_urn
         if references:
             result["references"] = references
+        if structure:
+            result["structure"] = structure
         if section_errors:
             result["section_errors"] = section_errors
 
@@ -1769,7 +2020,8 @@ class LinkedInExtractor:
         URL rather than /in/me/.
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {name: text}, structure?: {...}} -- see
+            ``scrape_person`` for the ``structure`` field's contract.
         """
         await self._navigate_to_page("https://www.linkedin.com/in/me/")
         real_url = self._page.url  # post-redirect, e.g. /in/johndoe/
@@ -1862,14 +2114,16 @@ class LinkedInExtractor:
                 )
                 btn_count = await buttons.count()
                 if btn_count >= 2:
-                    await buttons.nth(btn_count - 2).click()
+                    await human_move_and_click(
+                        self._page, buttons.nth(btn_count - 2), engine=self._engine
+                    )
                     try:
                         await self._page.wait_for_selector(
                             _DIALOG_TEXTAREA_SELECTOR,
                             state="visible",
                             timeout=3000,
                         )
-                    except PlaywrightTimeoutError:
+                    except TIMEOUT_ERRORS:
                         logger.debug("Note textarea did not appear")
                     note_limit_message = await self._get_premium_upsell_message()
                     if note_limit_message is not None:
@@ -1936,7 +2190,7 @@ class LinkedInExtractor:
             await self._page.wait_for_selector(
                 _DIALOG_SELECTOR, state="hidden", timeout=5000
             )
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("Invite dialog did not close after submit")
 
         return True, note_filled, None
@@ -1976,7 +2230,9 @@ class LinkedInExtractor:
             btn_count = 0
         if btn_count >= 3:
             try:
-                await buttons.nth(btn_count - 2).click()
+                await human_move_and_click(
+                    self._page, buttons.nth(btn_count - 2), engine=self._engine
+                )
             except Exception:
                 logger.debug("Could not open invite note editor", exc_info=True)
             try:
@@ -1985,7 +2241,7 @@ class LinkedInExtractor:
                     state="visible",
                     timeout=3000,
                 )
-            except PlaywrightTimeoutError:
+            except TIMEOUT_ERRORS:
                 logger.debug("Note textarea did not appear during quota probe")
 
         note_limit_message = await self._get_premium_upsell_message()
@@ -2235,7 +2491,7 @@ class LinkedInExtractor:
 
         try:
             await self._page.wait_for_selector("main", timeout=5000)
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("No <main> element found on %s", url)
 
         await handle_modal_close(self._page)
@@ -2345,7 +2601,7 @@ class LinkedInExtractor:
 
             try:
                 await self._page.wait_for_selector("main")
-            except PlaywrightTimeoutError:
+            except TIMEOUT_ERRORS:
                 logger.debug("No <main> on Show all page for section %s", section_key)
 
             await handle_modal_close(self._page)
@@ -2571,7 +2827,7 @@ class LinkedInExtractor:
             try:
                 await candidate.wait_for(state="visible")
                 return candidate
-            except PlaywrightTimeoutError:
+            except TIMEOUT_ERRORS:
                 continue
 
         return None
@@ -2636,7 +2892,7 @@ class LinkedInExtractor:
                 arg={"expected": message},
             )
             return True
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             return False
 
     async def _dismiss_message_ui(self) -> None:
@@ -2745,7 +3001,7 @@ class LinkedInExtractor:
 
         try:
             await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("Profile page did not load for %s", linkedin_username)
 
         await handle_modal_close(self._page)
@@ -2768,7 +3024,7 @@ class LinkedInExtractor:
                 )
 
             await self._navigate_to_page(thread_urls[index])
-        except PlaywrightTimeoutError as exc:
+        except TIMEOUT_ERRORS as exc:
             raise LinkedInScraperException(
                 "Messaging search results did not load in time."
             ) from exc
@@ -2999,7 +3255,7 @@ class LinkedInExtractor:
         main_found = True
         try:
             await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("No <main> element found on %s", url)
             main_found = False
 
@@ -3245,8 +3501,15 @@ class LinkedInExtractor:
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        max_pages: int = 3,
     ) -> dict[str, Any]:
-        """Search for people and extract the results page.
+        """Search for people, paginating through up to max_pages result pages.
+
+        Mirrors search_jobs's pagination pattern (extractor.py::search_jobs):
+        walks pages via `start={page * _PEOPLE_PAGE_SIZE}`, stops early when
+        a page yields no NEW person results (dedup by profile URL across
+        all fetched pages), and never raises on a mid-run failure -- it
+        just stops and reports what it has via section_errors.
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
@@ -3262,9 +3525,18 @@ class LinkedInExtractor:
                 unfiltered result set. Look up a company's URN via
                 ``get_company_profile`` -- it is exposed under
                 ``references["about"]``.
+            max_pages: Maximum number of result pages to load (1-10, default 3).
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {search_results: text}, person_urls: [str],
+             references?: {search_results: [...]}, section_errors?: {...}}
+
+            person_urls is the deduplicated, DOM-order list of "/in/<slug>/"
+            paths across ALL fetched pages -- meant for fan-out into
+            get_person_profile per result, mirroring search_jobs's job_ids.
+            Unlike job_ids, this is NOT the same list as references[] --
+            references[] stays capped at 15 total (see _REFERENCE_CAPS),
+            person_urls is not.
         """
         if network is not None:
             invalid = [t for t in network if t not in _NETWORK_TOKENS]
@@ -3290,25 +3562,73 @@ class LinkedInExtractor:
         if current_company:
             params += f"&currentCompany={_encode_list_facet([current_company])}"
 
-        url = f"https://www.linkedin.com/search/results/people/?{params}"
-        extracted = await self.extract_page(url, section_name="search_results")
+        base_url = f"https://www.linkedin.com/search/results/people/?{params}"
 
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
+        all_person_urls: list[str] = []
+        seen_urls: set[str] = set()
+        page_texts: list[str] = []
+        page_references: list[Reference] = []
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-            sections["search_results"] = extracted.text
+
+        for page_num in range(max_pages):
+            if page_num > 0:
+                await asyncio.sleep(_NAV_DELAY)
+
+            url = (
+                base_url
+                if page_num == 0
+                else f"{base_url}&start={page_num * _PEOPLE_PAGE_SIZE}"
+            )
+
+            try:
+                extracted = await self.extract_page(url, section_name="search_results")
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Error on people search page %d: %s", page_num + 1, e)
+                section_errors["search_results"] = build_issue_diagnostics(
+                    e,
+                    context="search_people",
+                    target_url=url,
+                    section_name="search_results",
+                )
+                break
+
+            if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                if extracted.error:
+                    section_errors["search_results"] = extracted.error
+                break
+
+            page_texts.append(extracted.text)
             if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
+                page_references.extend(extracted.references)
+
+            new_urls = [
+                r["url"]
+                for r in (extracted.references or [])
+                if r.get("kind") == "person"
+                and r.get("url")
+                and r["url"] not in seen_urls
+            ]
+            if not new_urls:
+                logger.debug("No new person results on page %d, stopping", page_num + 1)
+                break
+
+            for person_url in new_urls:
+                seen_urls.add(person_url)
+                all_person_urls.append(person_url)
 
         result: dict[str, Any] = {
-            "url": url,
-            "sections": sections,
+            "url": base_url,
+            "sections": {"search_results": "\n---\n".join(page_texts)}
+            if page_texts
+            else {},
+            "person_urls": all_person_urls,
         }
-        if references:
-            result["references"] = references
+        if page_references:
+            result["references"] = {
+                "search_results": dedupe_references(page_references, cap=15)
+            }
         if section_errors:
             result["section_errors"] = section_errors
         return result
@@ -3424,7 +3744,7 @@ class LinkedInExtractor:
                 state="attached",
                 timeout=10000,
             )
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug(
                 "conversation labels did not appear within 10s (context=%s)",
                 context,
@@ -3644,7 +3964,7 @@ class LinkedInExtractor:
 
         try:
             await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("Profile page did not load for %s", linkedin_username)
 
         await handle_modal_close(self._page)
@@ -3677,7 +3997,7 @@ class LinkedInExtractor:
 
         try:
             await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("Compose page did not fully load for %s", linkedin_username)
 
         await handle_modal_close(self._page)
@@ -3784,7 +4104,7 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         await asyncio.sleep(0.1)
-        await self._page.keyboard.type(message, delay=15)
+        await human_type(self._page, message)
         await asyncio.sleep(0.3)
 
         # patchright actionability also blocks send_button.click(). Use JS click

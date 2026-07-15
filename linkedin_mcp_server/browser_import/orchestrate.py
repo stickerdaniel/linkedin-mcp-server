@@ -38,6 +38,7 @@ from linkedin_mcp_server.browser_import.extract import (
 )
 from linkedin_mcp_server.browser_import.user_agent import synthesize_user_agent
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_write_text
+from linkedin_mcp_server.core.exceptions import NetworkError
 
 from linkedin_mcp_server.exceptions import (
     CookieDecryptionError,
@@ -226,9 +227,27 @@ async def import_session_from_browser(
         # runtime session replay the cookie under the fingerprint it was minted
         # with (None keeps the runtime default; file I/O, so off the loop).
         user_agent = await asyncio.to_thread(synthesize_user_agent, profile)
-        if await validate_imported_cookies(
-            cookie_path, user_data_dir, user_agent=user_agent
-        ):
+        try:
+            validated = await validate_imported_cookies(
+                cookie_path, user_data_dir, user_agent=user_agent
+            )
+        except NetworkError as exc:
+            # The browser/driver connection died mid-validation -- this says
+            # nothing about whether the cookie itself is good, so it must NOT
+            # be treated as "LinkedIn rejected it". Try the next candidate
+            # without touching the staged cookie or the profile directory;
+            # a real rejection (validated is False, below) is what triggers
+            # cleanup, not an inconclusive check.
+            logger.warning(
+                "%s/%s: infra error validating session, trying next candidate "
+                "(profile NOT reset): %s",
+                profile.browser,
+                profile.profile_dir_name,
+                exc,
+            )
+            continue
+
+        if validated:
             write_source_state(user_data_dir, user_agent=user_agent)
             logger.info(
                 "Imported LinkedIn session from %s/%s",
@@ -262,7 +281,24 @@ async def import_session_from_browser(
 
 
 def _reset_profile_dir(user_data_dir: Path) -> None:
-    """Clear the seeded profile between failed attempts so cookies don't mix."""
-    import shutil
+    """Move the current engine's profile subdirectory aside between failed
+    import attempts, so a stale/rejected cookie set never leaks into the
+    next candidate browser's validation run.
 
-    shutil.rmtree(user_data_dir, ignore_errors=True)
+    Scoped to ONLY the configured engine's own on-disk profile via
+    ``ENGINES[engine].profile_dir()`` (``core.engines``) -- the single
+    source of truth for that mapping -- never the shared ``user_data_dir``
+    root a sibling engine's profile also lives under. Moved into a
+    timestamped backup (mirroring ``bootstrap.py``'s auth-state backup
+    convention) rather than deleted: a validation failure here can be a
+    real rejection, but it can also be a driver/transport error the caller
+    failed to classify, so destroying real session state on a guess would
+    be unsafe.
+    """
+    from linkedin_mcp_server.config import get_config
+    from linkedin_mcp_server.core.engines import ENGINES
+    from linkedin_mcp_server.session_state import move_artifacts_aside
+
+    engine = get_config().browser.browser_engine
+    target = ENGINES[engine].profile_dir(user_data_dir)
+    move_artifacts_aside([target], user_data_dir)

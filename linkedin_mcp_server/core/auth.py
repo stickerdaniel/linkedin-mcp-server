@@ -3,22 +3,60 @@
 import asyncio
 import logging
 import re
+from enum import Enum
 from urllib.parse import urlparse
 
-from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+from patchright.async_api import Page
 
 from .exceptions import AuthenticationError
+from .utils import TIMEOUT_ERRORS
 
 logger = logging.getLogger(__name__)
 
-_AUTH_BLOCKER_URL_PATTERNS = (
-    "/login",
-    "/authwall",
-    "/checkpoint",
-    "/challenge",
-    "/uas/login",
-    "/uas/consumer-email-challenge",
-)
+
+class AuthBarrierKind(str, Enum):
+    """Recoverability of a detected auth barrier.
+
+    CHALLENGE: an interactive prompt that automation (or the user, on the
+    next manual login) could plausibly click/verify through -- a security
+    checkpoint, email verification, or the saved-account chooser.
+    BLOCK: the session is simply not authenticated -- a login wall. Needs a
+    full re-login, not a retry.
+    """
+
+    CHALLENGE = "challenge"
+    BLOCK = "block"
+
+
+class AuthBarrier(str):
+    """A detected auth barrier's diagnostic reason, tagged with a kind.
+
+    Subclasses str so every existing caller that treats the barrier as a
+    plain string (logging, page-trace JSON payloads, ``barrier is not
+    None`` checks, string formatting) keeps working unchanged. New code can
+    additionally read ``.kind`` to distinguish a recoverable challenge from
+    a hard block.
+    """
+
+    kind: AuthBarrierKind
+
+    def __new__(cls, reason: str, kind: AuthBarrierKind) -> "AuthBarrier":
+        obj = super().__new__(cls, reason)
+        obj.kind = kind
+        return obj
+
+
+# URL-pattern -> kind. Patterns not listed here (shouldn't happen -- every
+# entry in _AUTH_BLOCKER_URL_PATTERNS must have a mapping) default to BLOCK.
+_URL_PATTERN_KIND = {
+    "/login": AuthBarrierKind.BLOCK,
+    "/authwall": AuthBarrierKind.BLOCK,
+    "/uas/login": AuthBarrierKind.BLOCK,
+    "/checkpoint": AuthBarrierKind.CHALLENGE,
+    "/challenge": AuthBarrierKind.CHALLENGE,
+    "/uas/consumer-email-challenge": AuthBarrierKind.CHALLENGE,
+}
+_AUTH_BLOCKER_URL_PATTERNS = tuple(_URL_PATTERN_KIND)
 _LOGIN_TITLE_PATTERNS = (
     "linkedin login",
     "sign in | linkedin",
@@ -81,7 +119,7 @@ async def is_logged_in(page: Page) -> bool:
             return False
 
         return bool(body_text.strip())
-    except PlaywrightTimeoutError:
+    except TIMEOUT_ERRORS:
         logger.warning(
             "Timeout checking login status on %s — treating as not logged in",
             page.url,
@@ -92,7 +130,7 @@ async def is_logged_in(page: Page) -> bool:
         raise
 
 
-async def detect_auth_barrier(page: Page) -> str | None:
+async def detect_auth_barrier(page: Page) -> AuthBarrier | None:
     """Detect LinkedIn auth/account-picker barriers on the current page."""
     return await _detect_auth_barrier(page, include_body_text=True)
 
@@ -101,19 +139,23 @@ async def _detect_auth_barrier(
     page: Page,
     *,
     include_body_text: bool,
-) -> str | None:
+) -> AuthBarrier | None:
     """Detect LinkedIn auth/account-picker barriers on the current page."""
     try:
         current_url = page.url
-        if _is_auth_blocker_url(current_url):
-            return f"auth blocker URL: {current_url}"
+        matched_pattern = _matched_auth_blocker_pattern(current_url)
+        if matched_pattern is not None:
+            return AuthBarrier(
+                f"auth blocker URL: {current_url}",
+                _URL_PATTERN_KIND.get(matched_pattern, AuthBarrierKind.BLOCK),
+            )
 
         try:
             title = (await page.title()).strip().lower()
         except Exception:
             title = ""
         if any(pattern in title for pattern in _LOGIN_TITLE_PATTERNS):
-            return f"login title: {title}"
+            return AuthBarrier(f"login title: {title}", AuthBarrierKind.BLOCK)
 
         if not include_body_text:
             return None
@@ -128,10 +170,13 @@ async def _detect_auth_barrier(
         normalized = re.sub(r"\s+", " ", body_text).strip().lower()
         for marker_group in _AUTH_BARRIER_TEXT_MARKERS:
             if all(marker in normalized for marker in marker_group):
-                return f"auth barrier text: {' + '.join(marker_group)}"
+                return AuthBarrier(
+                    f"auth barrier text: {' + '.join(marker_group)}",
+                    AuthBarrierKind.CHALLENGE,
+                )
 
         return None
-    except PlaywrightTimeoutError:
+    except TIMEOUT_ERRORS:
         logger.warning(
             "Timeout checking auth barrier on %s — continuing without barrier detection",
             page.url,
@@ -142,7 +187,7 @@ async def _detect_auth_barrier(
         return None
 
 
-async def detect_auth_barrier_quick(page: Page) -> str | None:
+async def detect_auth_barrier_quick(page: Page) -> AuthBarrier | None:
     """Cheap auth-barrier check for normal navigations.
 
     Uses URL and title only, avoiding a full body-text fetch on healthy pages.
@@ -157,7 +202,7 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
         try:
             await page.wait_for_selector(_REMEMBER_ME_CONTAINER_SELECTOR, timeout=3000)
             logger.debug("Remember-me container appeared")
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("Remember-me container did not appear in time")
             return False
 
@@ -184,7 +229,7 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
         try:
             await target.wait_for(state="visible", timeout=3000)
             logger.debug("Remember-me button became visible")
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug(
                 "Remember-me prompt container appeared without a visible login button"
             )
@@ -193,23 +238,23 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
         logger.info("Clicking LinkedIn saved-account chooser to resume session")
         try:
             await target.scroll_into_view_if_needed(timeout=3000)
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("Remember-me button did not scroll into view in time")
 
         try:
             await target.click(timeout=5000)
             logger.debug("Remember-me button click succeeded")
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("Retrying remember-me prompt click with force=True")
             await target.click(timeout=5000, force=True)
             logger.debug("Remember-me button force-click succeeded")
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
-        except PlaywrightTimeoutError:
+        except TIMEOUT_ERRORS:
             logger.debug("Remember-me prompt click did not finish loading in time")
         await asyncio.sleep(1)
         return True
-    except PlaywrightTimeoutError:
+    except TIMEOUT_ERRORS:
         logger.debug("Remember-me prompt was present but not clickable in time")
         return False
     except Exception:
@@ -217,17 +262,25 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
         return False
 
 
-def _is_auth_blocker_url(url: str) -> bool:
-    """Return True only for real auth routes, not arbitrary slug substrings."""
+def _matched_auth_blocker_pattern(url: str) -> str | None:
+    """Return the matched auth-blocker URL pattern, or None.
+
+    Matches real auth routes only, not arbitrary slug substrings.
+    """
     path = urlparse(url).path or "/"
 
     if path in _AUTH_BLOCKER_URL_PATTERNS:
-        return True
+        return path
 
-    return any(
-        path == f"{pattern}/" or path.startswith(f"{pattern}/")
-        for pattern in _AUTH_BLOCKER_URL_PATTERNS
-    )
+    for pattern in _AUTH_BLOCKER_URL_PATTERNS:
+        if path == f"{pattern}/" or path.startswith(f"{pattern}/"):
+            return pattern
+    return None
+
+
+def _is_auth_blocker_url(url: str) -> bool:
+    """Return True only for real auth routes, not arbitrary slug substrings."""
+    return _matched_auth_blocker_pattern(url) is not None
 
 
 async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:

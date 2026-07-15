@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.core.exceptions import NetworkError
 from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
+    _launch_options,
     get_or_create_browser,
     reset_browser_for_testing,
     validate_imported_cookies,
@@ -36,6 +38,38 @@ def _mock_config(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "linkedin_mcp_server.drivers.browser.get_config", lambda: config
     )
+    return config
+
+
+def test_launch_options_includes_proxy_when_configured(_mock_config):
+    _mock_config.browser.proxy_server = "http://proxy.example:8080"
+    _mock_config.browser.proxy_username = "user"
+    _mock_config.browser.proxy_password = "secret"
+
+    launch_options, _viewport = _launch_options()
+
+    assert launch_options["proxy"] == {
+        "server": "http://proxy.example:8080",
+        "username": "user",
+        "password": "secret",
+    }
+
+
+def test_launch_options_omits_proxy_when_unconfigured(_mock_config):
+    launch_options, _viewport = _launch_options()
+
+    assert "proxy" not in launch_options
+
+
+def test_launch_options_never_logs_proxy_password(_mock_config, caplog):
+    _mock_config.browser.proxy_server = "http://proxy.example:8080"
+    _mock_config.browser.proxy_password = "super-secret-password"
+
+    with caplog.at_level("INFO"):
+        _launch_options()
+
+    assert "super-secret-password" not in caplog.text
+    assert "proxy.example:8080" in caplog.text
 
 
 def _make_mock_browser() -> MagicMock:
@@ -235,6 +269,48 @@ async def test_feed_auth_records_single_post_recovery_trace():
     steps = [call.args[1] for call in record_page_trace.await_args_list]
     assert "feed-after-remember-me-error-recovery" in steps
     assert "feed-navigation-error-before-remember-me-retry" not in steps
+
+
+@pytest.mark.asyncio
+async def test_feed_auth_raises_network_error_on_transport_failure():
+    """Regression test for the profile-wipe incident: a dead browser/driver
+    connection (e.g. the playwright==1.60.0 Firefox driver crash under
+    Camoufox) must be reported as NetworkError, never coerced to a plain
+    `False` -- callers treat `False` as "LinkedIn rejected the cookie" and
+    destructively reset the profile, which is wrong for an inconclusive
+    infra failure."""
+    browser = _make_mock_browser()
+    browser.page.goto = AsyncMock(
+        side_effect=Exception("Connection closed while reading from the driver")
+    )
+
+    with patch(
+        "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as remember_me:
+        with pytest.raises(NetworkError):
+            await _feed_auth_succeeds(browser)
+
+    # A dead connection can't be recovered by clicking a remember-me prompt --
+    # classification must short-circuit straight to raising, not waste a
+    # round-trip attempting recovery on an already-dead page.
+    remember_me.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_feed_auth_still_returns_false_on_real_auth_barrier():
+    """A genuine auth barrier (LinkedIn showing a login page) is a real,
+    actionable "not logged in" signal and must keep returning False --
+    only transport failures (above) change behavior."""
+    browser = _make_mock_browser()
+
+    with patch(
+        "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+        new_callable=AsyncMock,
+        return_value="login title: sign in | linkedin",
+    ):
+        assert await _feed_auth_succeeds(browser) is False
 
 
 @pytest.mark.asyncio
@@ -738,6 +814,50 @@ async def test_experimental_bridge_validation_failure_before_commit_clears_runti
     assert not runtime_profile_dir(
         "linux-amd64-container", tmp_path / "profile"
     ).exists()
+
+
+@pytest.mark.asyncio
+async def test_experimental_bridge_network_error_propagates_as_network_error(
+    tmp_path, monkeypatch
+):
+    """A transport failure (dead connection) during bridge validation must
+    surface as NetworkError, not a generic Exception -- so a caller one
+    layer up (e.g. bootstrap.py's auto-import whitelist) can tell an
+    inconclusive infra failure apart from a real AuthenticationError.
+
+    Note: _bridge_foreign_runtime unconditionally clears the runtime dir at
+    the START of every attempt (by design -- each bridge always starts
+    fresh), so unlike orchestrate.py's _reset_profile_dir there's no
+    pre-existing state left to protect by the time this exception fires;
+    this test only pins the exception type, not a "nothing was deleted"
+    guarantee."""
+    _write_source_state(
+        tmp_path, runtime_id="macos-arm64-host", login_generation="gen-2"
+    )
+    first_browser = _make_mock_browser()
+    first_browser.import_cookies = AsyncMock(return_value=True)
+    # First goto (pre-import feed nav) succeeds; the second (inside
+    # _feed_auth_succeeds, post cookie-injection) hits a dead connection.
+    first_browser.page.goto = AsyncMock(
+        side_effect=[
+            None,
+            Exception("Connection closed while reading from the driver"),
+        ]
+    )
+    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="linux-amd64-container",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=first_browser,
+        ),
+        pytest.raises(NetworkError),
+    ):
+        await get_or_create_browser()
 
 
 @pytest.mark.asyncio

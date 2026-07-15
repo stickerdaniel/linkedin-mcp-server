@@ -6,15 +6,44 @@ def reset_singletons():
     """Reset global state for test isolation."""
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
+    from linkedin_mcp_server.core.ip_monitor import reset_ip_drift_monitor_for_testing
+    from linkedin_mcp_server.core.opsec import reset_opsec_gate_for_testing
+    from linkedin_mcp_server.core.rate_limit import reset_rate_limiter_for_testing
+    from linkedin_mcp_server.dependencies import (
+        _reset_ip_drift_call_counter_for_testing,
+    )
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
 
     reset_bootstrap_for_testing()
     reset_browser_for_testing()
     reset_config()
+    reset_rate_limiter_for_testing()
+    reset_opsec_gate_for_testing()
+    reset_ip_drift_monitor_for_testing()
+    _reset_ip_drift_call_counter_for_testing()
     yield
     reset_bootstrap_for_testing()
     reset_browser_for_testing()
     reset_config()
+    reset_rate_limiter_for_testing()
+    reset_opsec_gate_for_testing()
+    reset_ip_drift_monitor_for_testing()
+    _reset_ip_drift_call_counter_for_testing()
+
+
+@pytest.fixture(autouse=True)
+def isolate_opsec_db(tmp_path, monkeypatch):
+    """Redirect the opsec gate's default SQLite path to tmp_path.
+
+    Without this, any test that exercises get_opsec_gate() for real (e.g.
+    a tool-level send_message/connect_with_person test) would create and
+    write to the real ~/.linkedin-mcp/opsec.db on the machine running the
+    suite.
+    """
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.opsec._DEFAULT_DB_PATH",
+        tmp_path / "opsec.db",
+    )
 
 
 @pytest.fixture(autouse=True)

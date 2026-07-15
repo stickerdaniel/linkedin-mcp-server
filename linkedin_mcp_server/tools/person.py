@@ -15,6 +15,12 @@ from pydantic import Field
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.opsec import DailyCapExceededError, get_opsec_gate
+from linkedin_mcp_server.core.rate_limit import (
+    CircuitOpenError,
+    RateLimitExceededError,
+    get_rate_limiter,
+)
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import parse_person_sections
@@ -67,12 +73,36 @@ def register_person_tools(
             Sections may be absent if extraction yielded no content for that page.
             Includes unknown_sections list when unrecognised names are passed.
             The LLM should parse the raw text in each section.
+
+            Optional structure field (structure["experience"|"education"]):
+            DOM-derived entry boundaries, present only when LinkedIn's
+            current layout matched the extractor's selectors. When present,
+            prefer it over re-splitting sections["experience"|"education"]
+            text yourself -- it removes the guesswork of where one entry
+            ends and the next begins. experience entries are
+            {"company_header": str | None, "roles": [str, ...]}
+            (company_header is set only for a company-grouped block with
+            multiple roles; a flat single-role entry has company_header=None
+            and one string in roles). education entries are a flat list of
+            strings, one per school. Always absent for every other section,
+            and may be absent for experience/education too (layout drift,
+            or a section shape the selectors don't cover) -- when absent,
+            fall back to parsing sections["experience"|"education"] as
+            before; that field remains authoritative regardless.
         """
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_person_profile"
             )
             requested, unknown = parse_person_sections(sections)
+
+            try:
+                get_opsec_gate().check_daily_cap("view_person_profile")
+            except DailyCapExceededError as e:
+                # Carry the specific reason to the client -- otherwise
+                # mask_error_details reduces it to a generic
+                # "Error calling tool 'get_person_profile'".
+                raise ToolError(str(e)) from e
 
             logger.info(
                 "Scraping profile: %s (sections=%s)",
@@ -88,11 +118,21 @@ def register_person_tools(
                 max_scrolls=max_scrolls,
             )
 
+            # Only a genuine content fetch counts against the daily budget
+            # -- a soft/rate-limited result with no sections must not
+            # consume cap the same way a real profile view does.
+            if result.get("sections"):
+                get_opsec_gate().record("view_person_profile", linkedin_username)
+
             if unknown:
                 result["unknown_sections"] = unknown
 
             return result
 
+        except ToolError:
+            # Already a properly formatted client-facing error; do not
+            # log it as "Unexpected error" via raise_tool_error.
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)
@@ -114,10 +154,14 @@ def register_person_tools(
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
+
+        Returns person_urls that can be passed to get_person_profile for
+        full info on each result (mirrors search_jobs's job_ids pattern).
 
         Args:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
@@ -134,9 +178,14 @@ def register_person_tools(
                 exposed under references["about"]. For company-wide employee
                 demographics (location/education/function breakdown) plus a
                 slug-based lookup, use get_company_employees instead.
+            max_pages: Maximum number of result pages to load (1-10, default 3).
+                Stops early once a page yields no new person results, so a
+                small result set still returns promptly even at max_pages=10.
 
         Returns:
-            Dict with url, sections (name -> raw text), and optional references.
+            Dict with url, sections (name -> raw text), person_urls (list of
+            "/in/<slug>/" paths, deduplicated across all fetched pages), and
+            optional references (capped at 15 total, unlike person_urls).
             The LLM should parse the raw text to extract individual people and their profiles.
         """
         try:
@@ -144,11 +193,13 @@ def register_person_tools(
                 ctx, tool_name="search_people"
             )
             logger.info(
-                "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
+                "Searching people: keywords='%s', location='%s', network=%s, "
+                "current_company='%s', max_pages=%d",
                 keywords,
                 location,
                 network,
                 current_company,
+                max_pages,
             )
 
             await ctx.report_progress(
@@ -161,6 +212,7 @@ def register_person_tools(
                     location,
                     network=network,
                     current_company=current_company,
+                    max_pages=max_pages,
                 )
             except FilterValidationError as e:
                 # Validation messages carry actionable detail; surface
@@ -236,15 +288,46 @@ def register_person_tools(
                 message="Starting LinkedIn connection flow",
             )
 
+            try:
+                get_rate_limiter().check("connect_with_person")
+                # Daily cap only -- no dedup here. connect_with_person is
+                # also how a caller checks current connection status, so a
+                # past success against the same recipient must not block a
+                # re-call.
+                get_opsec_gate().check_daily_cap("connect_with_person")
+            except (
+                RateLimitExceededError,
+                CircuitOpenError,
+                DailyCapExceededError,
+            ) as e:
+                # Carry the specific reason to the client -- otherwise
+                # mask_error_details reduces it to a generic
+                # "Error calling tool 'connect_with_person'".
+                raise ToolError(str(e)) from e
+
             result = await extractor.connect_with_person(
                 linkedin_username,
                 note=note,
             )
 
+            # Only decisive write outcomes feed the circuit breaker/opsec
+            # log -- non-actionable results (already connected, pending,
+            # follow only, etc.) aren't evidence the action itself ran.
+            status = result.get("status")
+            if status in ("connected", "accepted"):
+                get_rate_limiter().record_result("connect_with_person", success=True)
+                get_opsec_gate().record("connect_with_person", linkedin_username)
+            elif status == "send_failed":
+                get_rate_limiter().record_result("connect_with_person", success=False)
+
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
             return result
 
+        except ToolError:
+            # Already a properly formatted client-facing error; do not
+            # log it as "Unexpected error" via raise_tool_error.
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)
@@ -338,12 +421,18 @@ def register_person_tools(
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
             The url field reflects the resolved profile URL, revealing the real username.
+            See get_person_profile's docstring for the optional structure field.
         """
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="get_my_profile"
             )
             requested, unknown = parse_person_sections(sections)
+
+            try:
+                get_opsec_gate().check_daily_cap("view_person_profile")
+            except DailyCapExceededError as e:
+                raise ToolError(str(e)) from e
 
             logger.info("Scraping own profile (sections=%s)", sections)
 
@@ -354,11 +443,19 @@ def register_person_tools(
                 max_scrolls=max_scrolls,
             )
 
+            if result.get("sections"):
+                # Shares the same daily budget as get_person_profile --
+                # "__self__" is a fixed sentinel, not a real recipient
+                # (there's only ever one "own profile" per account).
+                get_opsec_gate().record("view_person_profile", "__self__")
+
             if unknown:
                 result["unknown_sections"] = unknown
 
             return result
 
+        except ToolError:
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)

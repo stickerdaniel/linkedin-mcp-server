@@ -1,11 +1,13 @@
 from typing import Any, Callable, Coroutine, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.tools import FunctionTool
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
+from linkedin_mcp_server.core.rate_limit import RateLimitExceededError
 from linkedin_mcp_server.scraping.extractor import ExtractedSection, _RATE_LIMITED_MSG
 
 
@@ -203,6 +205,7 @@ class TestPersonTool:
 
         mock_browser = MagicMock()
         mock_browser.page = MagicMock()
+        mock_browser.page.evaluate = AsyncMock(return_value="1")
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
             AsyncMock(return_value=None),
@@ -263,6 +266,7 @@ class TestPersonTool:
             "New York",
             network=None,
             current_company=None,
+            max_pages=3,
         )
 
     async def test_search_people_with_network_and_company_filters(self, mock_context):
@@ -297,6 +301,7 @@ class TestPersonTool:
             None,
             network=["F"],
             current_company="1115",
+            max_pages=3,
         )
 
     async def test_search_people_validation_error_surfaced_as_tool_error(
@@ -383,6 +388,39 @@ class TestPersonTool:
             note=None,
         )
 
+    async def test_connect_with_person_rate_limited_surfaces_specific_message(
+        self, mock_context
+    ):
+        """A rate-limit rejection must reach the client with its specific
+        reason, not get reduced to a generic mask_error_details message."""
+        mock_extractor = _make_mock_extractor({"status": "connected"})
+        mock_limiter = MagicMock()
+        mock_limiter.check = MagicMock(
+            side_effect=RateLimitExceededError(
+                "Rate limit exceeded for 'connect_with_person'; wait for the "
+                "bucket to refill."
+            )
+        )
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "connect_with_person")
+        with patch(
+            "linkedin_mcp_server.tools.person.get_rate_limiter",
+            return_value=mock_limiter,
+        ):
+            with pytest.raises(ToolError, match="Rate limit exceeded"):
+                await tool_fn(
+                    "test-user",
+                    mock_context,
+                    extractor=mock_extractor,
+                )
+
+        mock_extractor.connect_with_person.assert_not_called()
+
     async def test_connect_with_person_custom_note_limit_reached(self, mock_context):
         """The custom_note_limit_reached status returns LinkedIn's message."""
         expected = {
@@ -426,6 +464,7 @@ class TestPersonTool:
 
         mock_browser = MagicMock()
         mock_browser.page = MagicMock()
+        mock_browser.page.evaluate = AsyncMock(return_value="1")
         monkeypatch.setattr(
             "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
             AsyncMock(return_value=None),
@@ -789,6 +828,72 @@ class TestMessagingTools:
         mock_extractor.send_message.assert_awaited_once_with(
             "testuser", "Hello!", confirm_send=True, profile_urn=None
         )
+
+    async def test_send_message_rate_limited_surfaces_specific_message(
+        self, mock_context
+    ):
+        """A rate-limit rejection must reach the client with its specific
+        reason, not get reduced to a generic mask_error_details message."""
+        mock_extractor = _make_mock_extractor({"status": "sent"})
+        mock_limiter = MagicMock()
+        mock_limiter.check = MagicMock(
+            side_effect=RateLimitExceededError(
+                "Rate limit exceeded for 'send_message'; wait for the bucket to refill."
+            )
+        )
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        with patch(
+            "linkedin_mcp_server.tools.messaging.get_rate_limiter",
+            return_value=mock_limiter,
+        ):
+            with pytest.raises(ToolError, match="Rate limit exceeded"):
+                await tool_fn(
+                    "testuser",
+                    "Hello!",
+                    True,
+                    mock_context,
+                    extractor=mock_extractor,
+                )
+
+        mock_extractor.send_message.assert_not_called()
+
+    async def test_send_message_dry_run_skips_rate_limit_check(self, mock_context):
+        """confirm_send=False never touches the rate limiter/opsec gate --
+        a dry-run must not be blockable by either."""
+        mock_extractor = _make_mock_extractor(
+            {"status": "composer_ready", "sent": False}
+        )
+        mock_limiter = MagicMock()
+        mock_limiter.check = MagicMock(
+            side_effect=RateLimitExceededError("should never be called")
+        )
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        with patch(
+            "linkedin_mcp_server.tools.messaging.get_rate_limiter",
+            return_value=mock_limiter,
+        ):
+            result = await tool_fn(
+                "testuser",
+                "Hello!",
+                False,
+                mock_context,
+                extractor=mock_extractor,
+            )
+
+        assert result["status"] == "composer_ready"
+        mock_limiter.check.assert_not_called()
 
     async def test_send_message_with_profile_urn(self, mock_context):
         expected = {

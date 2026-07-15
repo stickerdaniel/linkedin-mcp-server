@@ -11,7 +11,7 @@ import shutil
 from typing import Any
 from uuid import uuid4
 
-from linkedin_mcp_server.common_utils import secure_write_text, utcnow_iso
+from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
 from linkedin_mcp_server.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _SOURCE_STATE_FILE = "source-state.json"
 _RUNTIME_STATE_FILE = "runtime-state.json"
 _RUNTIME_PROFILES_DIR = "runtime-profiles"
+_INVALID_STATE_PREFIX = "invalid-state-"
 
 
 @dataclass
@@ -320,6 +321,61 @@ def clear_auth_state(source_profile_dir: Path | None = None) -> bool:
             logger.warning("Could not clear auth artifact %s: %s", target, exc)
             success = False
     return success
+
+
+_MAX_INVALID_STATE_BACKUPS = 5
+
+
+def move_artifacts_aside(
+    targets: list[Path], source_profile_dir: Path | None = None
+) -> Path | None:
+    """Move existing *targets* into one fresh timestamped backup directory.
+
+    Skips targets that don't exist. Returns the backup directory, or
+    ``None`` when none of the targets existed (nothing to back up).
+
+    Used wherever a "this profile might be invalid" heuristic used to call
+    ``shutil.rmtree``/``unlink`` directly: backing up instead of destroying
+    means a misclassified failure (e.g. a transport error mistaken for a
+    real session rejection) never permanently loses real session state. The
+    caller is responsible for any additional guard (e.g. bootstrap.py checks
+    ``_auth_ready()`` first) -- this function unconditionally backs up
+    whatever it's given.
+
+    Keeps only the most recent ``_MAX_INVALID_STATE_BACKUPS`` backup
+    directories (pruning older ones on each call) so a host that hits this
+    path repeatedly doesn't accumulate backups without bound.
+    """
+    existing = [target for target in targets if target.exists()]
+    if not existing:
+        return None
+
+    root = auth_root_dir(source_profile_dir)
+    backup_dir = root / f"{_INVALID_STATE_PREFIX}{utcnow_iso().replace(':', '-')}"
+    secure_mkdir(backup_dir)
+    for target in existing:
+        shutil.move(str(target), str(backup_dir / target.name))
+
+    _prune_old_backups(root)
+    return backup_dir
+
+
+def _prune_old_backups(root: Path) -> None:
+    """Delete all but the most recent _MAX_INVALID_STATE_BACKUPS backup dirs.
+
+    ISO-8601 timestamps in the directory name sort lexicographically in
+    chronological order, so a plain name sort is enough -- no need to stat
+    each directory's mtime.
+    """
+    backups = sorted(
+        (p for p in root.glob(f"{_INVALID_STATE_PREFIX}*") if p.is_dir()),
+        reverse=True,
+    )
+    for stale in backups[_MAX_INVALID_STATE_BACKUPS:]:
+        try:
+            shutil.rmtree(stale)
+        except OSError as exc:
+            logger.warning("Could not prune old backup %s: %s", stale, exc)
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:

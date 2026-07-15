@@ -5,12 +5,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastmcp.exceptions import ToolError
 
+from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     NetworkError,
     RateLimitError,
 )
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
+from linkedin_mcp_server.dependencies import (
+    _ensure_browser_alive,
+    _maybe_check_ip_drift,
+    _reset_ip_drift_call_counter_for_testing,
+    get_ready_extractor,
+    handle_auth_error,
+)
 from linkedin_mcp_server.exceptions import (
     AuthenticationStartedError,
     DockerHostLoginRequiredError,
@@ -62,6 +69,7 @@ class TestGetReadyExtractor:
         """
         browser = MagicMock()
         browser.page = MagicMock()
+        browser.page.evaluate = AsyncMock(return_value="1")
         with (
             patch(
                 "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
@@ -76,12 +84,17 @@ class TestGetReadyExtractor:
                 "linkedin_mcp_server.dependencies.ensure_authenticated",
                 new_callable=AsyncMock,
             ) as mock_ensure_auth,
+            patch(
+                "linkedin_mcp_server.dependencies.get_config",
+                return_value=AppConfig(),
+            ),
         ):
             from linkedin_mcp_server.scraping import LinkedInExtractor
 
             extractor = await get_ready_extractor(ctx=None, tool_name="test_tool")
 
             assert isinstance(extractor, LinkedInExtractor)
+            assert extractor._engine == "patchright"
             mock_get_browser.assert_awaited_once()
             mock_ensure_auth.assert_awaited_once()
 
@@ -225,3 +238,121 @@ class TestGetReadyExtractor:
             mock_handle.assert_awaited_once()
             # First arg should be the AuthenticationError
             assert isinstance(mock_handle.call_args[0][0], AuthenticationError)
+
+
+class TestMaybeCheckIpDrift:
+    @pytest.fixture(autouse=True)
+    def _reset_counter(self):
+        _reset_ip_drift_call_counter_for_testing()
+        yield
+        _reset_ip_drift_call_counter_for_testing()
+
+    async def test_skips_entirely_without_a_proxy_configured(self):
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_config",
+                return_value=AppConfig(),
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.get_ip_drift_monitor"
+            ) as mock_get_monitor,
+        ):
+            for _ in range(50):
+                await _maybe_check_ip_drift(MagicMock())
+            mock_get_monitor.assert_not_called()
+
+    async def test_checks_only_every_nth_call_when_proxy_configured(self):
+        config = AppConfig()
+        config.browser.proxy_server = "http://proxy.example.com:8080"
+        mock_monitor = MagicMock()
+        mock_monitor.check = AsyncMock()
+
+        with (
+            patch("linkedin_mcp_server.dependencies.get_config", return_value=config),
+            patch(
+                "linkedin_mcp_server.dependencies.get_ip_drift_monitor",
+                return_value=mock_monitor,
+            ),
+        ):
+            page = MagicMock()
+            for _ in range(19):
+                await _maybe_check_ip_drift(page)
+            mock_monitor.check.assert_not_called()
+
+            await _maybe_check_ip_drift(page)  # 20th call
+            mock_monitor.check.assert_awaited_once_with(page)
+
+    async def test_a_failed_check_does_not_raise(self):
+        config = AppConfig()
+        config.browser.proxy_server = "http://proxy.example.com:8080"
+        mock_monitor = MagicMock()
+        mock_monitor.check = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch("linkedin_mcp_server.dependencies.get_config", return_value=config),
+            patch(
+                "linkedin_mcp_server.dependencies.get_ip_drift_monitor",
+                return_value=mock_monitor,
+            ),
+        ):
+            for _ in range(20):
+                await _maybe_check_ip_drift(MagicMock())  # does not raise
+
+
+class TestEnsureBrowserAlive:
+    async def test_alive_browser_is_returned_unchanged(self):
+        browser = MagicMock()
+        browser.page.evaluate = AsyncMock(return_value="1")
+
+        with patch(
+            "linkedin_mcp_server.dependencies.get_or_create_browser",
+            new_callable=AsyncMock,
+        ) as mock_get_browser:
+            result = await _ensure_browser_alive(browser)
+
+        assert result is browser
+        mock_get_browser.assert_not_called()
+
+    async def test_transport_failure_triggers_one_relaunch(self):
+        dead_browser = MagicMock()
+        dead_browser.page.evaluate = AsyncMock(
+            side_effect=RuntimeError("Target page, context or browser has been closed")
+        )
+        fresh_browser = MagicMock()
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                new_callable=AsyncMock,
+            ) as mock_close,
+            patch(
+                "linkedin_mcp_server.dependencies.get_or_create_browser",
+                new_callable=AsyncMock,
+                return_value=fresh_browser,
+            ) as mock_get_browser,
+        ):
+            result = await _ensure_browser_alive(dead_browser)
+
+        assert result is fresh_browser
+        mock_close.assert_awaited_once()
+        mock_get_browser.assert_awaited_once()
+
+    async def test_semantic_failure_propagates_without_relaunch(self):
+        browser = MagicMock()
+        browser.page.evaluate = AsyncMock(side_effect=RuntimeError("some other error"))
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                new_callable=AsyncMock,
+            ) as mock_close,
+            patch(
+                "linkedin_mcp_server.dependencies.get_or_create_browser",
+                new_callable=AsyncMock,
+            ) as mock_get_browser,
+        ):
+            with pytest.raises(RuntimeError, match="some other error"):
+                await _ensure_browser_alive(browser)
+
+        mock_close.assert_not_called()
+        mock_get_browser.assert_not_called()

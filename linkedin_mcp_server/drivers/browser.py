@@ -9,11 +9,13 @@ automatic profile persistence.
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    NetworkError,
     detect_auth_barrier_quick,
     detect_rate_limit,
     is_logged_in,
@@ -125,12 +127,44 @@ async def _log_feed_failure_context(
     )
 
 
+_TRANSPORT_FAILURE_MARKERS = (
+    "connection closed",
+    "target closed",
+    "target page, context or browser has been closed",
+    "browser has been closed",
+    "pipe closed",
+)
+
+
+def _is_transport_failure(exc: Exception) -> bool:
+    """Return whether *exc* signals a dead browser/driver connection.
+
+    Distinct from a semantic "not logged in" result (a real auth barrier,
+    or a benign timeout waiting for a selector): this fires only when the
+    underlying browser process or driver connection itself died mid-call
+    (e.g. a driver crash, a killed process, a severed pipe). Message-marker
+    style, matching the existing classifiers in ``dependencies.py``
+    (``_is_linux_browser_dependency_error``, ``_is_browser_binary_missing_error``).
+
+    Callers must NOT treat this signal as "the session/cookies are invalid" —
+    it says nothing about auth validity, only that the check was inconclusive.
+    """
+    message = str(exc).lower()
+    return any(marker in message for marker in _TRANSPORT_FAILURE_MARKERS)
+
+
 async def _feed_auth_succeeds(
     browser: BrowserManager,
     *,
     allow_remember_me: bool = True,
 ) -> bool:
-    """Validate that /feed/ loads without an auth barrier."""
+    """Validate that /feed/ loads without an auth barrier.
+
+    Raises :class:`NetworkError` instead of returning ``False`` when the
+    failure is a dead browser/driver connection rather than a real auth
+    signal -- callers must not treat that as "cookies rejected" (see
+    :func:`_is_transport_failure`).
+    """
     try:
         await browser.page.goto(
             "https://www.linkedin.com/feed/",
@@ -162,6 +196,17 @@ async def _feed_auth_succeeds(
             return False
         return True
     except Exception as exc:
+        if _is_transport_failure(exc):
+            # The connection itself died -- recovery attempts (remember-me
+            # click, page.title() etc.) would just hang/fail again. Skip
+            # straight to raising so the caller treats this as inconclusive,
+            # never as "LinkedIn rejected the session."
+            logger.warning(
+                "Feed auth check hit a transport failure on %s: %s",
+                browser.page.url,
+                exc,
+            )
+            raise NetworkError(f"Feed validation could not complete: {exc}") from exc
         if allow_remember_me and await resolve_remember_me_prompt(browser.page):
             await stabilize_navigation(
                 "remember-me resolution after feed failure", logger
@@ -181,23 +226,31 @@ async def _feed_auth_succeeds(
         return False
 
 
-def _launch_options() -> tuple[dict[str, str], dict[str, int]]:
+def _launch_options() -> tuple[dict[str, Any], dict[str, int]]:
     config = get_config()
     viewport = {
         "width": config.browser.viewport_width,
         "height": config.browser.viewport_height,
     }
-    launch_options: dict[str, str] = {}
-    if config.browser.chrome_path:
+    launch_options: dict[str, Any] = {}
+    # chrome_path is Chromium-specific; only apply it on the Patchright engine
+    # so a stale value doesn't leak into Camoufox's own binary resolution.
+    if config.browser.chrome_path and config.browser.browser_engine == "patchright":
         launch_options["executable_path"] = config.browser.chrome_path
         logger.info("Using custom Chrome path: %s", config.browser.chrome_path)
+    # Proxy applies identically to either engine (unlike chrome_path).
+    if proxy := config.browser.proxy_settings():
+        launch_options["proxy"] = proxy
+        logger.info(
+            "Using proxy: %s", proxy["server"]
+        )  # credential-free by construction
     return launch_options, viewport
 
 
 def _make_browser(
     profile_dir: Path,
     *,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     user_agent: str | None = None,
 ) -> BrowserManager:
@@ -211,6 +264,7 @@ def _make_browser(
         slow_mo=config.browser.slow_mo,
         user_agent=config.browser.user_agent or user_agent,
         viewport=viewport,
+        engine=config.browser.browser_engine,
         **launch_options,
     )
 
@@ -218,7 +272,7 @@ def _make_browser(
 async def _authenticate_existing_profile(
     profile_dir: Path,
     *,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     user_agent: str | None = None,
 ) -> BrowserManager:
@@ -289,7 +343,7 @@ async def _bridge_runtime_profile(
     cookie_path: Path,
     source_state: SourceState,
     runtime_id: str,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     persist_runtime: bool,
 ) -> BrowserManager:
@@ -391,6 +445,12 @@ async def _bridge_runtime_profile(
         except Exception:
             await reopened.close()
             raise
+    except NetworkError:
+        # A dead browser/driver connection says nothing about whether this
+        # derived profile is actually invalid -- don't destroy it over a
+        # transport hiccup. Same rationale as orchestrate.py:_reset_profile_dir.
+        await browser.close()
+        raise
     except Exception:
         await browser.close()
         clear_runtime_profile(runtime_id, source_profile_dir)

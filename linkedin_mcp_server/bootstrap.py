@@ -11,7 +11,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import shutil
 import sys
 from typing import NoReturn
 
@@ -37,6 +36,7 @@ from linkedin_mcp_server.exceptions import (
 from linkedin_mcp_server.session_state import (
     auth_root_dir,
     get_runtime_id,
+    move_artifacts_aside,
     portable_cookie_path,
     profile_exists,
     runtime_profiles_root,
@@ -48,7 +48,6 @@ logger = logging.getLogger(__name__)
 
 _BROWSER_DIR = "patchright-browsers"
 _BROWSER_INSTALL_METADATA = "browser-install.json"
-_INVALID_STATE_PREFIX = "invalid-state-"
 _INSTALL_METADATA_SCHEMA = 3
 
 # Registry browser names mapped to on-disk dir prefixes for the binaries this
@@ -218,6 +217,33 @@ def _uses_custom_chrome() -> bool:
     return bool(get_config().browser.chrome_path)
 
 
+def _engine_self_manages_binary() -> bool:
+    """Return whether the configured engine provisions its own browser binary.
+
+    Delegates to the engine's own adapter (``core.engines.ENGINES``) rather
+    than naming a specific engine here, so a future third engine that
+    self-manages its binary (like Camoufox does via ``uv run camoufox
+    fetch``, cached under ``~/.cache/camoufox``) is automatically respected
+    just by declaring ``needs_managed_install() == False`` on its adapter --
+    no edit to this module required.
+    """
+    from linkedin_mcp_server.core.engines import ENGINES
+
+    # getattr guards test doubles/fakes that predate this field and don't set it.
+    engine = getattr(get_config().browser, "browser_engine", "patchright")
+    return not ENGINES[engine].needs_managed_install(None)
+
+
+def _skips_managed_binary() -> bool:
+    """Return whether the Patchright managed-binary install should be skipped.
+
+    True for either a custom Chrome/Chromium executable or an engine that
+    self-manages its own binary -- both provision their own browser outside
+    this module's install/version-tracking state machine.
+    """
+    return _uses_custom_chrome() or _engine_self_manages_binary()
+
+
 def initialize_bootstrap(runtime_policy: RuntimePolicy | str | None = None) -> None:
     """Initialize bootstrap state and configure the shared browser cache."""
     if _state.initialized:
@@ -237,8 +263,8 @@ async def start_background_browser_setup_if_needed() -> None:
     initialize_bootstrap()
     if get_runtime_policy() != RuntimePolicy.MANAGED:
         return
-    if _uses_custom_chrome():
-        # A custom executable skips the managed binary; nothing to install.
+    if _skips_managed_binary():
+        # A custom executable or Camoufox skips the managed binary; nothing to install.
         _state.setup_state = SetupState.READY
         _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
         return
@@ -560,9 +586,9 @@ async def ensure_tool_ready_or_raise(
         _raise_if_docker_auth_missing()
         return
 
-    if _uses_custom_chrome():
-        # A custom executable bypasses the managed binary entirely, so the
-        # background install is irrelevant; jump straight to the auth gate.
+    if _skips_managed_binary():
+        # A custom executable or Camoufox bypasses the managed binary entirely,
+        # so the background install is irrelevant; jump straight to the auth gate.
         _state.setup_state = SetupState.READY
         _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
         if _auth_ready():
@@ -958,25 +984,17 @@ def _move_auth_state_aside(*, force: bool = False) -> None:
             knows the session is stale.
     """
     profile_dir = get_profile_dir()
-    targets = [
-        profile_dir,
-        portable_cookie_path(profile_dir),
-        source_state_path(profile_dir),
-        runtime_profiles_root(profile_dir),
-    ]
-    existing = [target for target in targets if target.exists()]
-    if not existing:
-        return
     if not force and _auth_ready():
         return
-
-    backup_dir = (
-        auth_root_dir(profile_dir)
-        / f"{_INVALID_STATE_PREFIX}{utcnow_iso().replace(':', '-')}"
+    move_artifacts_aside(
+        [
+            profile_dir,
+            portable_cookie_path(profile_dir),
+            source_state_path(profile_dir),
+            runtime_profiles_root(profile_dir),
+        ],
+        profile_dir,
     )
-    secure_mkdir(backup_dir)
-    for target in existing:
-        shutil.move(str(target), str(backup_dir / target.name))
 
 
 def _force_move_auth_state_aside() -> None:
@@ -993,9 +1011,9 @@ async def _run_login_flow() -> None:
     # The manual-login fallback launches headed, which needs full chromium.
     # In the default headless flow only the shell is installed eagerly, so
     # install full chromium here before the headed launch. A no-op once present
-    # and skipped entirely for a custom executable. The dependencies.py
-    # binary-missing backstop remains as a recovery path.
-    if not _uses_custom_chrome():
+    # and skipped entirely for a custom executable or Camoufox. The
+    # dependencies.py binary-missing backstop remains as a recovery path.
+    if not _skips_managed_binary():
         await _ensure_full_chromium_installed()
     success = await interactive_login(get_profile_dir())
     if not success:

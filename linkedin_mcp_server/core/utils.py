@@ -3,11 +3,23 @@
 import asyncio
 import logging
 
-from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+from patchright.async_api import Page
 
+from .engines import ENGINES
 from .exceptions import RateLimitError
 
 logger = logging.getLogger(__name__)
+
+# A timeout raised by a Camoufox-driven page (vanilla Playwright) is a
+# different class from one raised by a Patchright-driven page, even though
+# both engines are launched by this server. Catch both everywhere a scraping
+# timeout is expected to degrade gracefully instead of propagating uncaught.
+# Union of every registered engine's timeout class(es) -- auto-extends when
+# a new engine adapter is registered in core.engines, instead of needing a
+# manual edit here too.
+TIMEOUT_ERRORS = tuple(
+    {cls for adapter in ENGINES.values() for cls in adapter.timeout_error_classes}
+)
 
 
 async def detect_rate_limit(page: Page) -> None:
@@ -61,7 +73,7 @@ async def detect_rate_limit(page: Page) -> None:
                 )
     except RateLimitError:
         raise
-    except PlaywrightTimeoutError:
+    except TIMEOUT_ERRORS:
         pass
 
 
@@ -104,7 +116,7 @@ async def scroll_job_sidebar(
     # Wait for at least one job card link to render before scrolling
     try:
         await page.wait_for_selector('a[href*="/jobs/view/"]', timeout=5000)
-    except PlaywrightTimeoutError:
+    except TIMEOUT_ERRORS:
         logger.debug("No job card links found, skipping sidebar scroll")
         return
 
@@ -168,7 +180,7 @@ async def handle_modal_close(page: Page) -> bool:
             await asyncio.sleep(0.5)
             logger.debug("Closed modal")
             return True
-    except PlaywrightTimeoutError:
+    except TIMEOUT_ERRORS:
         pass
     except Exception as e:
         logger.debug("Error closing modal: %s", e)

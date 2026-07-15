@@ -8,12 +8,23 @@ import logging
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+)
+from linkedin_mcp_server.core.opsec import (
+    DailyCapExceededError,
+    DuplicateRecipientError,
+    get_opsec_gate,
+)
+from linkedin_mcp_server.core.rate_limit import (
+    CircuitOpenError,
+    RateLimitExceededError,
+    get_rate_limiter,
 )
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
@@ -251,6 +262,24 @@ def register_messaging_tools(
 
             await ctx.report_progress(progress=0, total=100, message="Sending message")
 
+            # Only gate real sends -- confirm_send=False is an explicit
+            # dry-run (no write happens), so it shouldn't consume budget,
+            # cap, or dedup, or be blocked by an open circuit.
+            if confirm_send:
+                try:
+                    get_rate_limiter().check("send_message")
+                    get_opsec_gate().check("send_message", linkedin_username)
+                except (
+                    RateLimitExceededError,
+                    CircuitOpenError,
+                    DailyCapExceededError,
+                    DuplicateRecipientError,
+                ) as e:
+                    # Carry the specific reason to the client -- otherwise
+                    # mask_error_details reduces it to a generic
+                    # "Error calling tool 'send_message'".
+                    raise ToolError(str(e)) from e
+
             result = await extractor.send_message(
                 linkedin_username,
                 message,
@@ -258,10 +287,20 @@ def register_messaging_tools(
                 profile_urn=profile_urn,
             )
 
+            if confirm_send:
+                sent = result.get("status") == "sent"
+                get_rate_limiter().record_result("send_message", success=sent)
+                if sent:
+                    get_opsec_gate().record("send_message", linkedin_username)
+
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
             return result
 
+        except ToolError:
+            # Already a properly formatted client-facing error; do not
+            # log it as "Unexpected error" via raise_tool_error.
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)

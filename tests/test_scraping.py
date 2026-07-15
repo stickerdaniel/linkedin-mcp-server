@@ -29,9 +29,12 @@ def extracted(
     text: str,
     references: list[Reference] | None = None,
     error: dict | None = None,
+    entries: list | None = None,
 ) -> ExtractedSection:
     """Create an ExtractedSection for tests."""
-    return ExtractedSection(text=text, references=references or [], error=error)
+    return ExtractedSection(
+        text=text, references=references or [], error=error, entries=entries
+    )
 
 
 class TestBuildJobSearchUrl:
@@ -182,6 +185,79 @@ class TestExtractPage:
         assert result.text == "Sample profile text"
         assert result.references == []
         mock_page.goto.assert_awaited_once()
+
+    async def test_experience_entries_flow_into_extracted_section(self, mock_page):
+        """_extract_loaded_section must call _extract_entry_boundaries (only)
+        after scroll_to_bottom/the "Show more" click loop, and thread its
+        result onto ExtractedSection.entries -- the wiring this whole
+        feature depends on."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Experience\n\nFounder\n\nAcme\n\n2020 - o momento",
+                "references": [],
+            }
+        )
+        extractor = LinkedInExtractor(mock_page)
+        sample_entries = [{"company_header": None, "roles": ["Founder\n\nAcme"]}]
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor,
+                "_extract_entry_boundaries",
+                new_callable=AsyncMock,
+                return_value=sample_entries,
+            ) as mock_boundaries,
+        ):
+            result = await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/details/experience/",
+                section_name="experience",
+            )
+
+        assert result.entries == sample_entries
+        mock_boundaries.assert_awaited_once_with("experience")
+
+    async def test_main_profile_entries_stay_none(self, mock_page):
+        """Non-experience/education sections must never populate `entries`
+        -- exercised end to end (not just the _extract_entry_boundaries
+        unit test) to prove the real call site respects this too."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "Some Name", "references": []}
+        )
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.extract_page(
+                "https://www.linkedin.com/in/testuser/",
+                section_name="main_profile",
+            )
+
+        assert result.entries is None
 
     async def test_root_content_filters_empty_href_before_resolution(self, mock_page):
         mock_page.evaluate = AsyncMock(
@@ -394,6 +470,87 @@ class TestExtractPage:
                 "https://www.linkedin.com/jobs/search/?keywords=test",
                 section_name="search_results",
             )
+
+
+class TestExtractEntryBoundaries:
+    """Tests for _extract_entry_boundaries: the additive, optional DOM
+    entry-boundary structure for experience/education. Must never affect
+    any other section, and must degrade to None (not raise) when the
+    selector doesn't match -- see extractor.py's _EXPERIENCE_ENTRIES_JS /
+    _EDUCATION_ENTRIES_JS module docstrings for the full contract."""
+
+    async def test_other_sections_return_none_without_evaluating(self, mock_page):
+        mock_page.evaluate = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+
+        result = await extractor._extract_entry_boundaries("main_profile")
+
+        assert result is None
+        mock_page.evaluate.assert_not_awaited()
+
+    async def test_experience_calls_evaluate_with_experience_js(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value=[{"company_header": None, "roles": ["Founder\n\nAcme"]}]
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        result = await extractor._extract_entry_boundaries("experience")
+
+        assert result == [{"company_header": None, "roles": ["Founder\n\nAcme"]}]
+        assert mock_page.evaluate.await_args is not None  # awaited above
+        script = mock_page.evaluate.await_args.args[0]
+        assert "ExperienceTopLevelSection" in script
+        assert "entity-collection-item" in script
+
+    async def test_education_calls_evaluate_with_education_js(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value=["DHBW Mannheim\n\n2023 – 2026"])
+        extractor = LinkedInExtractor(mock_page)
+
+        result = await extractor._extract_entry_boundaries("education")
+
+        assert result == ["DHBW Mannheim\n\n2023 – 2026"]
+        assert mock_page.evaluate.await_args is not None  # awaited above
+        script = mock_page.evaluate.await_args.args[0]
+        assert "EducationTopLevelSection" in script
+        assert "createTreeWalker" in script
+
+    async def test_empty_or_null_result_degrades_to_none(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value=None)
+        extractor = LinkedInExtractor(mock_page)
+
+        assert await extractor._extract_entry_boundaries("experience") is None
+
+    async def test_evaluate_exception_degrades_to_none_not_raise(self, mock_page):
+        """A layout LinkedIn renders that breaks the selector JS itself
+        (not just an empty match) must still degrade gracefully -- this is
+        the one DOM dependency in an otherwise innerText-only project, so
+        it must never be able to fail a whole section extraction."""
+        mock_page.evaluate = AsyncMock(side_effect=Exception("boom"))
+        extractor = LinkedInExtractor(mock_page)
+
+        assert await extractor._extract_entry_boundaries("experience") is None
+
+    async def test_wrong_shaped_result_degrades_to_none_not_raise(self, mock_page):
+        """Caught live by this suite: a wrong-shaped page.evaluate() return
+        (e.g. the generic {"source", "text", "references"} dict several
+        other call sites' mocks reuse -- iterating it yields its string
+        KEYS, and calling .get() on a plain string raises AttributeError)
+        must not crash the shape-processing step below the evaluate() call
+        itself -- the whole function body, not just the await, needs the
+        try/except."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "unrelated", "references": []}
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        assert await extractor._extract_entry_boundaries("experience") is None
+
+    async def test_non_iterable_result_degrades_to_none_not_raise(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value=42)
+        extractor = LinkedInExtractor(mock_page)
+
+        assert await extractor._extract_entry_boundaries("experience") is None
+        assert await extractor._extract_entry_boundaries("education") is None
 
 
 class TestNavigationDiagnostics:
@@ -653,6 +810,78 @@ class TestScrapePersonUrls:
         assert any(u.endswith("/in/testuser/") for u in urls)
         assert any("/details/experience/" in u for u in urls)
         assert any("/details/education/" in u for u in urls)
+        assert set(result["sections"]) == {"main_profile", "experience", "education"}
+
+    async def test_structure_field_populated_when_entries_present(self, mock_page):
+        """result["structure"] mirrors result["references"]'s additive,
+        per-section, only-if-non-empty shape (extractor.py ~1946)."""
+        extractor = LinkedInExtractor(mock_page)
+        experience_entries = [
+            {"company_header": "XP Inc.", "roles": ["Partner\n\n2022 - 2024"]}
+        ]
+        education_entries = ["DHBW Mannheim\n\n2023 – 2026"]
+
+        async def fake_extract_page(url, section_name, **kwargs):
+            if section_name == "experience":
+                return extracted("exp text", entries=experience_entries)
+            if section_name == "education":
+                return extracted("edu text", entries=education_entries)
+            return extracted("text")
+
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=fake_extract_page,
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person(
+                "testuser", {"main_profile", "experience", "education"}
+            )
+
+        assert result["structure"]["experience"] == experience_entries
+        assert result["structure"]["education"] == education_entries
+        assert "main_profile" not in result["structure"]
+
+    async def test_structure_field_absent_when_no_entries(self, mock_page):
+        """The layout-drift/fallback case: every extracted.entries is None
+        (selector didn't match), so `structure` must not appear in the
+        result at all -- sections[...] text remains the only guarantee."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text", entries=None),
+            ),
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person(
+                "testuser", {"main_profile", "experience", "education"}
+            )
+
+        assert "structure" not in result
         assert set(result["sections"]) == {"main_profile", "experience", "education"}
 
     async def test_all_sections_visit_all_urls(self, mock_page):
@@ -1760,6 +1989,9 @@ class TestConnectWithPerson:
         mock_page.wait_for_selector = AsyncMock()
         mock_page.keyboard = MagicMock()
         mock_page.keyboard.press = AsyncMock()
+        # Note filling now focuses via evaluate() + types via human_type(),
+        # which dispatches through page.keyboard.type() per character.
+        mock_page.keyboard.type = AsyncMock()
 
         with (
             patch.object(
@@ -1770,6 +2002,10 @@ class TestConnectWithPerson:
                 "_get_premium_upsell_message",
                 new_callable=AsyncMock,
                 return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.core.humanize.asyncio.sleep",
+                new_callable=AsyncMock,
             ),
         ):
             (
@@ -1784,7 +2020,9 @@ class TestConnectWithPerson:
         # Clicked "Add a note" (index 0) to reveal the textarea, then the
         # primary button (index 1) to send.
         assert clicks == [0, 1]
-        textarea_locator.fill.assert_awaited_once()
+        # Note text is now typed via human_type() (page.keyboard.type per
+        # character), not textarea_locator.fill() -- see core/humanize.py.
+        assert mock_page.keyboard.type.await_count == len("Hi from a test")
 
     async def test_references_are_grouped_by_section(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -2706,6 +2944,147 @@ class TestSearchJobs:
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
 
+    async def test_search_people_pagination_uses_people_page_size(self, mock_page):
+        """Pages use &start= with the 10-per-page people-search offset --
+        distinct from search_jobs's 25/page (_PAGE_SIZE)."""
+        extractor = LinkedInExtractor(mock_page)
+        pages = iter(
+            [
+                extracted(
+                    "Page 1",
+                    [
+                        {"kind": "person", "url": "/in/alice/", "text": "Alice"},
+                        {"kind": "person", "url": "/in/bob/", "text": "Bob"},
+                    ],
+                ),
+                extracted(
+                    "Page 2",
+                    [{"kind": "person", "url": "/in/carol/", "text": "Carol"}],
+                ),
+            ]
+        )
+        urls_visited: list[str] = []
+
+        async def mock_extract(url, *args, **kwargs):
+            urls_visited.append(url)
+            return next(pages)
+
+        with (
+            patch.object(extractor, "extract_page", side_effect=mock_extract),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_people("python", max_pages=2)
+
+        assert result["person_urls"] == ["/in/alice/", "/in/bob/", "/in/carol/"]
+        assert len(urls_visited) == 2
+        assert "&start=" not in urls_visited[0]
+        assert "&start=10" in urls_visited[1]
+
+    async def test_search_people_deduplication_across_pages(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        pages = iter(
+            [
+                extracted(
+                    "Page 1",
+                    [
+                        {"kind": "person", "url": "/in/alice/", "text": "Alice"},
+                        {"kind": "person", "url": "/in/bob/", "text": "Bob"},
+                    ],
+                ),
+                extracted(
+                    "Page 2",
+                    [
+                        {"kind": "person", "url": "/in/bob/", "text": "Bob"},
+                        {"kind": "person", "url": "/in/carol/", "text": "Carol"},
+                    ],
+                ),
+            ]
+        )
+
+        with (
+            patch.object(
+                extractor, "extract_page", side_effect=lambda *a, **k: next(pages)
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_people("python", max_pages=2)
+
+        assert result["person_urls"] == ["/in/alice/", "/in/bob/", "/in/carol/"]
+
+    async def test_search_people_stops_early_on_no_new_results(self, mock_page):
+        """A page with zero NEW person refs stops the loop before max_pages,
+        mirroring search_jobs's early-exit behavior."""
+        extractor = LinkedInExtractor(mock_page)
+        pages = iter(
+            [
+                extracted(
+                    "Page 1",
+                    [{"kind": "person", "url": "/in/alice/", "text": "Alice"}],
+                ),
+                extracted("Page 2", []),  # no new person refs -- must stop here
+                extracted(
+                    "Page 3",
+                    [{"kind": "person", "url": "/in/never-reached/", "text": "X"}],
+                ),
+            ]
+        )
+        urls_visited: list[str] = []
+
+        async def mock_extract(url, *args, **kwargs):
+            urls_visited.append(url)
+            return next(pages)
+
+        with (
+            patch.object(extractor, "extract_page", side_effect=mock_extract),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_people("python", max_pages=5)
+
+        assert result["person_urls"] == ["/in/alice/"]
+        assert len(urls_visited) == 2, "must not fetch page 3 after a dry page"
+
+    async def test_search_people_person_urls_not_capped_like_references(
+        self, mock_page
+    ):
+        """references[] stays capped at 15 total (_REFERENCE_CAPS), but
+        person_urls -- the field meant for fan-out -- accumulates across
+        pages uncapped, mirroring search_jobs's job_ids vs references[]."""
+        extractor = LinkedInExtractor(mock_page)
+
+        def make_page(n: int) -> ExtractedSection:
+            return extracted(
+                f"Page with {n}",
+                [
+                    {"kind": "person", "url": f"/in/user{n}-{i}/", "text": f"U{i}"}
+                    for i in range(10)
+                ],
+            )
+
+        pages = iter([make_page(1), make_page(2)])
+
+        with (
+            patch.object(
+                extractor, "extract_page", side_effect=lambda *a, **k: next(pages)
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_people("python", max_pages=2)
+
+        assert len(result["person_urls"]) == 20
+        assert len(result["references"]["search_results"]) <= 15
+
 
 class TestStripLinkedInNoise:
     def test_strips_footer(self):
@@ -2776,6 +3155,31 @@ class TestStripLinkedInNoise:
             "Close modal window"
         )
         assert strip_linkedin_noise(text) == "Feed post number 1\nActual post content"
+
+    def test_strips_footer_pt_br(self):
+        text = "Bill Gates\nChair, Gates Foundation\n\nSobre\nAcessibilidade\nSoluções de Talentos\nCarreiras"
+        assert strip_linkedin_noise(text) == "Bill Gates\nChair, Gates Foundation"
+
+    def test_strips_footer_pt_br_talent_solutions_variant(self):
+        text = "Conteúdo do perfil\n\nSobre\nSoluções de Talentos\nMais rodapé"
+        assert strip_linkedin_noise(text) == "Conteúdo do perfil"
+
+    def test_strips_sidebar_recommendations_pt_br(self):
+        text = "Experiência\nCo-chair\nGates Foundation\n\nMais perfis para você\nSundar Pichai\nCEO at Google"
+        assert strip_linkedin_noise(text) == "Experiência\nCo-chair\nGates Foundation"
+
+    def test_strips_premium_upsell_pt_br(self):
+        text = "Formação acadêmica\nHarvard University\n\nConheça perfis Premium\nPessoa Qualquer\nEngenheira"
+        assert strip_linkedin_noise(text) == "Formação acadêmica\nHarvard University"
+
+    def test_sobre_in_profile_content_not_stripped_pt_br(self):
+        """'Sobre' followed by actual content (not 'Acessibilidade'/'Soluções de
+        Talentos') should be preserved -- same guard as the 'en' About test."""
+        text = "Sobre\nChair of the Gates Foundation.\n\nEm destaque\nPublicar"
+        assert (
+            strip_linkedin_noise(text)
+            == "Sobre\nChair of the Gates Foundation.\n\nEm destaque\nPublicar"
+        )
 
 
 class TestStripConversationChrome:
@@ -5008,7 +5412,12 @@ class TestSendMessageComposerInteraction:
         )
 
     async def test_focus_and_type_via_evaluate_and_keyboard(self, mock_page):
-        """send_message uses page.evaluate to focus and page.keyboard.type to type."""
+        """send_message uses page.evaluate to focus and page.keyboard.type to type.
+
+        Typing goes through human_type() (per-character calls with sampled
+        delay), not a single fixed-delay keyboard.type(text) call -- see
+        core/humanize.py.
+        """
         extractor = LinkedInExtractor(mock_page)
         mock_keyboard = MagicMock()
         mock_keyboard.type = AsyncMock()
@@ -5035,6 +5444,10 @@ class TestSendMessageComposerInteraction:
                 new_callable=AsyncMock,
                 return_value=True,
             ),
+            patch(
+                "linkedin_mcp_server.core.humanize.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
             result = await extractor.send_message(
                 "testuser", "Hello!", confirm_send=True
@@ -5042,8 +5455,11 @@ class TestSendMessageComposerInteraction:
 
         assert result["status"] == "sent"
         assert result["sent"] is True
-        # Verify keyboard.type was used (not press_sequentially)
-        mock_keyboard.type.assert_awaited_once_with("Hello!", delay=15)
+        # Verify keyboard.type was used (not press_sequentially), one
+        # character at a time via human_type().
+        assert mock_keyboard.type.await_count == len("Hello!")
+        mock_keyboard.type.assert_any_await("H")
+        mock_keyboard.type.assert_any_await("!")
 
     async def test_compose_interact_failed_when_focus_fails(self, mock_page):
         """send_message returns compose_interact_failed when JS focus fails."""

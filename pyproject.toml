@@ -30,11 +30,21 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "camoufox[geoip]>=0.4.11",
     "cryptography>=48.0.1",
     "fastmcp>=3.0.0",
     "inquirer>=3.4.0",
     "packaging>=26.2",
     "patchright>=1.40.0",
+    # PINNED, not the newest version camoufox's own "<1.61" constraint would
+    # allow: playwright==1.60.0's Firefox glue crashes the whole Node driver
+    # process on an uncaught in-page JS error with no `.location` (upstream
+    # bug, reproduced against a real authenticated LinkedIn /feed/
+    # navigation under Camoufox). 1.59.0 does not reproduce this. Before
+    # bumping past 1.59.0, run `pytest -m camoufox_smoke` (skipped by
+    # default -- needs a fetched Camoufox binary) to confirm the crash
+    # doesn't resurface; see tests/test_camoufox_smoke.py.
+    "playwright==1.59.0",
     "python-dotenv>=1.1.1",
 ]
 

@@ -12,8 +12,12 @@ from linkedin_mcp_server.bootstrap import (
     invalidate_auth_and_trigger_relogin,
     invalidate_browser_setup,
 )
+from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core.exceptions import AuthenticationError, NetworkError
+from linkedin_mcp_server.core.ip_monitor import get_ip_drift_monitor
 from linkedin_mcp_server.drivers.browser import (
+    BrowserManager,
+    _is_transport_failure,
     close_browser,
     ensure_authenticated,
     get_or_create_browser,
@@ -27,6 +31,57 @@ from linkedin_mcp_server.exceptions import (
 from linkedin_mcp_server.scraping import LinkedInExtractor
 
 logger = logging.getLogger(__name__)
+
+# How often (in tool calls) to re-check outbound IP drift when a proxy is
+# configured. A cheap fetch(), but no reason to pay it on every single call.
+_IP_DRIFT_CHECK_EVERY_N_CALLS = 20
+_tool_call_count = 0
+
+
+def _reset_ip_drift_call_counter_for_testing() -> None:
+    global _tool_call_count
+    _tool_call_count = 0
+
+
+async def _maybe_check_ip_drift(page: object) -> None:
+    """Sample outbound-IP drift every N calls, only when a proxy is set."""
+    global _tool_call_count
+    if not get_config().browser.proxy_settings():
+        return
+    _tool_call_count += 1
+    if _tool_call_count % _IP_DRIFT_CHECK_EVERY_N_CALLS != 0:
+        return
+    try:
+        await get_ip_drift_monitor().check(page)
+    except Exception:
+        logger.debug("IP drift check failed (ignored)", exc_info=True)
+
+
+async def _ensure_browser_alive(browser: BrowserManager) -> BrowserManager:
+    """Probe the reused browser singleton's liveness; relaunch once on
+    transport death.
+
+    A cheap page.evaluate("1") proves the driver connection is actually
+    alive before other code trusts the singleton. If it fails with a
+    transport-failure signature (dead driver/process -- see
+    drivers.browser._is_transport_failure), close and relaunch the
+    singleton once before propagating. A semantic failure (real
+    auth/timeout error) is NOT transport death and must not trigger a
+    relaunch -- it's re-raised as-is for the normal auth-handling path.
+    """
+    try:
+        await browser.page.evaluate("1")
+        return browser
+    except Exception as exc:
+        if not _is_transport_failure(exc):
+            raise
+        logger.warning(
+            "Browser liveness probe failed with a transport error; "
+            "relaunching once: %s",
+            exc,
+        )
+        await close_browser()
+        return await get_or_create_browser()
 
 
 def _is_linux_browser_dependency_error(error: Exception) -> bool:
@@ -83,8 +138,12 @@ async def get_ready_extractor(
     try:
         await ensure_tool_ready_or_raise(tool_name, ctx)
         browser = await get_or_create_browser()
+        browser = await _ensure_browser_alive(browser)
         await ensure_authenticated()
-        return LinkedInExtractor(browser.page)
+        await _maybe_check_ip_drift(browser.page)
+        return LinkedInExtractor(
+            browser.page, engine=get_config().browser.browser_engine
+        )
     except AuthenticationError as e:
         await handle_auth_error(e, ctx)  # always raises
     except Exception as e:

@@ -6,6 +6,7 @@ import pytest
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.auth import (
+    AuthBarrierKind,
     detect_auth_barrier,
     detect_auth_barrier_quick,
     is_logged_in,
@@ -275,3 +276,73 @@ async def test_wait_for_manual_login_unlimited_when_timeout_zero(monkeypatch):
     # fake clock is enormous, so it returns once is_logged_in becomes True.
     await wait_for_manual_login(page, timeout=0)
     assert calls["value"] == 2
+
+
+def _barrier_page(*, url: str, title: str = "LinkedIn", body: str = "") -> MagicMock:
+    page = MagicMock()
+    page.url = url
+    page.title = AsyncMock(return_value=title)
+    page.evaluate = AsyncMock(return_value=body)
+    return page
+
+
+class TestAuthBarrierKind:
+    """AuthBarrier subclasses str (backward compat) and tags .kind."""
+
+    @pytest.mark.asyncio
+    async def test_login_url_is_a_block(self):
+        page = _barrier_page(url="https://www.linkedin.com/login")
+        barrier = await detect_auth_barrier(page)
+        assert barrier is not None
+        assert barrier.kind == AuthBarrierKind.BLOCK
+
+    @pytest.mark.asyncio
+    async def test_authwall_url_is_a_block(self):
+        page = _barrier_page(url="https://www.linkedin.com/authwall")
+        barrier = await detect_auth_barrier(page)
+        assert barrier is not None
+        assert barrier.kind == AuthBarrierKind.BLOCK
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_url_is_a_challenge(self):
+        page = _barrier_page(url="https://www.linkedin.com/checkpoint/challenge/abc123")
+        barrier = await detect_auth_barrier(page)
+        assert barrier is not None
+        assert barrier.kind == AuthBarrierKind.CHALLENGE
+
+    @pytest.mark.asyncio
+    async def test_email_challenge_url_is_a_challenge(self):
+        page = _barrier_page(
+            url="https://www.linkedin.com/uas/consumer-email-challenge"
+        )
+        barrier = await detect_auth_barrier(page)
+        assert barrier is not None
+        assert barrier.kind == AuthBarrierKind.CHALLENGE
+
+    @pytest.mark.asyncio
+    async def test_login_title_is_a_block(self):
+        page = _barrier_page(
+            url="https://www.linkedin.com/feed/",
+            title="Sign In | LinkedIn",
+        )
+        barrier = await detect_auth_barrier(page)
+        assert barrier is not None
+        assert barrier.kind == AuthBarrierKind.BLOCK
+
+    @pytest.mark.asyncio
+    async def test_account_picker_text_is_a_challenge(self):
+        page = _barrier_page(
+            url="https://www.linkedin.com/feed/",
+            body="Welcome Back\nSign in using another account\nJoin now",
+        )
+        barrier = await detect_auth_barrier(page)
+        assert barrier is not None
+        assert barrier.kind == AuthBarrierKind.CHALLENGE
+
+    @pytest.mark.asyncio
+    async def test_barrier_still_behaves_as_a_plain_string(self):
+        page = _barrier_page(url="https://www.linkedin.com/login")
+        barrier = await detect_auth_barrier(page)
+        assert isinstance(barrier, str)
+        assert barrier == "auth blocker URL: https://www.linkedin.com/login"
+        assert "auth blocker" in barrier

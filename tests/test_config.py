@@ -56,6 +56,46 @@ class TestBrowserConfig:
         config.validate()  # Clamps, does not raise
         assert config.login_inline_wait_seconds == MAX_LOGIN_INLINE_WAIT_SECONDS
 
+    def test_proxy_settings_none_when_unset(self):
+        assert BrowserConfig().proxy_settings() is None
+
+    def test_proxy_settings_server_only(self):
+        config = BrowserConfig(proxy_server="http://proxy.example:8080")
+        assert config.proxy_settings() == {"server": "http://proxy.example:8080"}
+
+    def test_proxy_settings_full(self):
+        config = BrowserConfig(
+            proxy_server="http://proxy.example:8080",
+            proxy_username="user",
+            proxy_password="secret",
+            proxy_bypass="localhost",
+        )
+        assert config.proxy_settings() == {
+            "server": "http://proxy.example:8080",
+            "username": "user",
+            "password": "secret",
+            "bypass": "localhost",
+        }
+
+    def test_validate_passes_with_proxy_server_only(self):
+        BrowserConfig(proxy_server="http://proxy.example:8080").validate()
+
+    def test_validate_rejects_proxy_credentials_without_server(self):
+        with pytest.raises(ConfigurationError):
+            BrowserConfig(proxy_username="user").validate()
+
+    def test_validate_rejects_proxy_password_without_server(self):
+        with pytest.raises(ConfigurationError):
+            BrowserConfig(proxy_password="secret").validate()
+
+    def test_validate_rejects_proxy_bypass_without_server(self):
+        with pytest.raises(ConfigurationError):
+            BrowserConfig(proxy_bypass="localhost").validate()
+
+    def test_validate_rejects_proxy_server_without_scheme(self):
+        with pytest.raises(ConfigurationError):
+            BrowserConfig(proxy_server="proxy.example:8080").validate()
+
 
 class TestServerConfig:
     def test_defaults(self):
@@ -523,6 +563,56 @@ class TestLoaders:
 
         config = load_from_args(AppConfig())
         assert config.server.import_from_browser == "auto"
+
+    def test_load_from_env_proxy_server(self, monkeypatch):
+        monkeypatch.setenv("PROXY_SERVER", "http://proxy.example:8080")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.proxy_server == "http://proxy.example:8080"
+
+    def test_load_from_env_proxy_username_password_bypass(self, monkeypatch):
+        monkeypatch.setenv("PROXY_USERNAME", "user")
+        monkeypatch.setenv("PROXY_PASSWORD", "secret")
+        monkeypatch.setenv("PROXY_BYPASS", "localhost")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.proxy_username == "user"
+        assert config.browser.proxy_password == "secret"
+        assert config.browser.proxy_bypass == "localhost"
+
+    def test_load_from_args_proxy_server_and_username(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "linkedin-mcp-server",
+                "--proxy-server",
+                "http://proxy.example:8080",
+                "--proxy-username",
+                "user",
+                "--proxy-bypass",
+                "localhost",
+            ],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.browser.proxy_server == "http://proxy.example:8080"
+        assert config.browser.proxy_username == "user"
+        assert config.browser.proxy_bypass == "localhost"
+
+    def test_proxy_password_has_no_cli_flag(self, monkeypatch):
+        """PROXY_PASSWORD is env-var-only by design (a CLI flag would leak
+        into shell history / `ps aux`) -- --proxy-password must not parse."""
+        monkeypatch.setattr(
+            "sys.argv",
+            ["linkedin-mcp-server", "--proxy-password", "secret"],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(SystemExit):
+            load_from_args(AppConfig())
 
 
 class TestImportFromBrowserValidation:

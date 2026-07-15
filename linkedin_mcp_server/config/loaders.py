@@ -72,6 +72,11 @@ class EnvironmentKeys:
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
+    BROWSER_ENGINE = "BROWSER_ENGINE"
+    PROXY_SERVER = "PROXY_SERVER"
+    PROXY_USERNAME = "PROXY_USERNAME"
+    PROXY_PASSWORD = "PROXY_PASSWORD"
+    PROXY_BYPASS = "PROXY_BYPASS"
     USER_DATA_DIR = "USER_DATA_DIR"
     TOOL_TIMEOUT = "TOOL_TIMEOUT"
     LOGIN_TIMEOUT = "LOGIN_TIMEOUT"
@@ -228,6 +233,29 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
 
+    # Browser engine (patchright or camoufox)
+    if browser_engine_env := os.environ.get(EnvironmentKeys.BROWSER_ENGINE):
+        browser_engine_value = _normalize_env(browser_engine_env)
+        if browser_engine_value not in ("patchright", "camoufox"):
+            raise ConfigurationError(
+                f"Invalid BROWSER_ENGINE: '{browser_engine_env}'. Must be 'patchright' or 'camoufox'."
+            )
+        config.browser.browser_engine = cast(
+            Literal["patchright", "camoufox"], browser_engine_value
+        )
+
+    # Proxy for the browser's network traffic (validated in BrowserConfig.validate()).
+    # PROXY_PASSWORD is env-var-only by design -- no --proxy-password CLI flag,
+    # since a CLI flag would leak the credential into shell history / `ps aux`.
+    if proxy_server_env := os.environ.get(EnvironmentKeys.PROXY_SERVER):
+        config.browser.proxy_server = proxy_server_env
+    if proxy_username_env := os.environ.get(EnvironmentKeys.PROXY_USERNAME):
+        config.browser.proxy_username = proxy_username_env
+    if proxy_password_env := os.environ.get(EnvironmentKeys.PROXY_PASSWORD):
+        config.browser.proxy_password = proxy_password_env
+    if proxy_bypass_env := os.environ.get(EnvironmentKeys.PROXY_BYPASS):
+        config.browser.proxy_bypass = proxy_bypass_env
+
     # Import a LinkedIn session from a locally logged-in browser (validated in
     # ServerConfig.validate())
     if import_browser_env := os.environ.get(EnvironmentKeys.IMPORT_FROM_BROWSER):
@@ -365,6 +393,39 @@ def load_from_args(config: AppConfig) -> AppConfig:
         default=None,
         metavar="PATH",
         help="Path to Chrome/Chromium executable (for custom browser installations)",
+    )
+
+    parser.add_argument(
+        "--browser",
+        choices=["patchright", "camoufox"],
+        default=None,
+        help="Browser engine to drive LinkedIn with (default: patchright)",
+    )
+
+    parser.add_argument(
+        "--proxy-server",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="Proxy server for browser traffic, e.g. 'http://host:port' or "
+        "'socks5://host:port' (applies to either engine)",
+    )
+
+    parser.add_argument(
+        "--proxy-username",
+        type=str,
+        default=None,
+        metavar="USER",
+        help="Proxy username. The password has no CLI flag by design (it would "
+        "leak into shell history / `ps aux`) -- set it via PROXY_PASSWORD instead",
+    )
+
+    parser.add_argument(
+        "--proxy-bypass",
+        type=str,
+        default=None,
+        metavar="HOSTS",
+        help="Comma-separated hosts to bypass the proxy for",
     )
 
     # Session management
@@ -509,6 +570,18 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path
+
+    if args.browser:
+        config.browser.browser_engine = args.browser
+
+    if args.proxy_server:
+        config.browser.proxy_server = args.proxy_server
+
+    if args.proxy_username:
+        config.browser.proxy_username = args.proxy_username
+
+    if args.proxy_bypass:
+        config.browser.proxy_bypass = args.proxy_bypass
 
     # Session management
     if args.login:

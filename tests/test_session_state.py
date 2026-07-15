@@ -1,9 +1,12 @@
 import json
 
 from linkedin_mcp_server.session_state import (
+    _INVALID_STATE_PREFIX,
+    _MAX_INVALID_STATE_BACKUPS,
     get_runtime_id,
     load_runtime_state,
     load_source_state,
+    move_artifacts_aside,
     runtime_profile_dir,
     runtime_state_path,
     runtime_storage_state_path,
@@ -176,6 +179,56 @@ def test_runtime_storage_state_path_uses_runtime_dir(isolate_profile_dir):
         / "linux-amd64-container"
         / "storage-state.json"
     )
+
+
+def test_move_artifacts_aside_backs_up_instead_of_deleting(isolate_profile_dir):
+    target = isolate_profile_dir / "marker.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("real session data")
+
+    backup_dir = move_artifacts_aside([target], isolate_profile_dir)
+
+    assert backup_dir is not None
+    assert not target.exists()
+    assert (backup_dir / "marker.txt").read_text() == "real session data"
+
+
+def test_move_artifacts_aside_returns_none_when_nothing_exists(isolate_profile_dir):
+    missing = isolate_profile_dir / "does-not-exist.txt"
+
+    assert move_artifacts_aside([missing], isolate_profile_dir) is None
+
+
+def test_move_artifacts_aside_prunes_old_backups(monkeypatch, isolate_profile_dir):
+    """Regression test for unbounded backup growth: only the most recent
+    _MAX_INVALID_STATE_BACKUPS survive."""
+    timestamps = iter(
+        f"2026-01-01T00-00-{i:02d}Z" for i in range(_MAX_INVALID_STATE_BACKUPS + 3)
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.utcnow_iso", lambda: next(timestamps)
+    )
+
+    total_backups = _MAX_INVALID_STATE_BACKUPS + 3
+    for i in range(total_backups):
+        target = isolate_profile_dir / f"marker-{i}.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(str(i))
+        move_artifacts_aside([target], isolate_profile_dir)
+
+    backups = sorted(
+        p
+        for p in isolate_profile_dir.parent.glob(f"{_INVALID_STATE_PREFIX}*")
+        if p.is_dir()
+    )
+    assert len(backups) == _MAX_INVALID_STATE_BACKUPS
+    # The survivors are the most recent ones (highest-numbered markers).
+    surviving_markers = sorted(
+        p.stem.split("-")[1] for backup in backups for p in backup.iterdir()
+    )
+    assert surviving_markers == [
+        str(i) for i in range(total_backups - _MAX_INVALID_STATE_BACKUPS, total_backups)
+    ]
 
 
 def test_get_runtime_id_marks_container(monkeypatch):

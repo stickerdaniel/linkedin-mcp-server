@@ -1,4 +1,10 @@
-"""Browser lifecycle management using Patchright with persistent context."""
+"""Browser lifecycle management with a persistent context.
+
+Launch/profile-path logic per engine (Patchright, Camoufox) lives in
+``core.engines``; this module owns the shared lifecycle (start/close,
+cookie export, storage-state export) on top of whichever engine is
+configured.
+"""
 
 import asyncio
 import json
@@ -7,20 +13,15 @@ import os
 from pathlib import Path
 from typing import Any
 
-from patchright.async_api import (
-    BrowserContext,
-    Page,
-    Playwright,
-    async_playwright,
-)
-
 from linkedin_mcp_server.common_utils import (
     harden_linkedin_tree,
     secure_mkdir,
     secure_write_text,
 )
 
+from .engines import ENGINES
 from .exceptions import NetworkError
+from .ip_monitor import get_ip_drift_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +31,14 @@ _CLEANUP_TIMEOUT_SECONDS = 10
 
 
 class BrowserManager:
-    """Async context manager for Patchright browser with persistent profile.
+    """Async context manager for a browser with a persistent profile.
 
     Session persistence is handled automatically by the persistent browser
     context -- all cookies, localStorage, and session state are retained in
-    the ``user_data_dir`` between runs.
+    the ``user_data_dir`` between runs. ``engine`` selects the adapter (see
+    ``core.engines.ENGINES``) that actually launches the browser; each
+    engine resolves its own on-disk profile subdirectory via
+    ``ENGINES[engine].profile_dir()``.
     """
 
     def __init__(
@@ -44,6 +48,7 @@ class BrowserManager:
         slow_mo: int = 0,
         viewport: dict[str, int] | None = None,
         user_agent: str | None = None,
+        engine: str = "patchright",
         **launch_options: Any,
     ):
         self.user_data_dir = str(Path(user_data_dir).expanduser())
@@ -51,11 +56,15 @@ class BrowserManager:
         self.slow_mo = slow_mo
         self.viewport = viewport or {"width": 1280, "height": 720}
         self.user_agent = user_agent
+        self.engine = engine
         self.launch_options = launch_options
 
-        self._playwright: Playwright | None = None
-        self._context: BrowserContext | None = None
-        self._page: Page | None = None
+        # Patchright (Chromium) and Camoufox (vanilla-Playwright-driven Firefox)
+        # are two different packages with structurally-identical but distinct
+        # classes, so these stay loosely typed rather than pinned to one of them.
+        self._playwright: Any | None = None
+        self._context: Any | None = None
+        self._page: Any | None = None
         self._is_authenticated = False
 
     async def __aenter__(self) -> "BrowserManager":
@@ -68,33 +77,26 @@ class BrowserManager:
         await self.close()
 
     async def start(self) -> None:
-        """Start Patchright and launch persistent browser context."""
+        """Start the configured engine and launch a persistent browser context."""
         if self._context is not None:
             raise RuntimeError("Browser already started. Call close() first.")
         try:
-            self._playwright = await async_playwright().start()
-
             secure_mkdir(Path(self.user_data_dir))
             harden_linkedin_tree(Path(self.user_data_dir))
 
-            context_options: dict[str, Any] = {
-                "headless": self.headless,
-                "slow_mo": self.slow_mo,
-                "viewport": self.viewport,
-                **self.launch_options,
-                "locale": "en-US",
-            }
-
-            if self.user_agent:
-                context_options["user_agent"] = self.user_agent
-
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                self.user_data_dir,
-                **context_options,
+            adapter = ENGINES[self.engine]
+            self._playwright, self._context = await adapter.launch(
+                user_data_dir=self.user_data_dir,
+                headless=self.headless,
+                slow_mo=self.slow_mo,
+                viewport=self.viewport,
+                user_agent=self.user_agent,
+                launch_options=self.launch_options,
             )
 
             logger.info(
-                "Persistent browser launched (headless=%s, user_data_dir=%s)",
+                "Persistent browser launched (engine=%s, headless=%s, user_data_dir=%s)",
+                self.engine,
                 self.headless,
                 self.user_data_dir,
             )
@@ -105,6 +107,11 @@ class BrowserManager:
                 self._page = await self._context.new_page()
 
             logger.info("Browser context and page ready")
+
+            # Only meaningful with a proxy configured -- without one there's
+            # no independent egress path for the IP to "drift" from.
+            if self.launch_options.get("proxy"):
+                await get_ip_drift_monitor().establish_baseline(self._page)
 
         except Exception as e:
             await self.close()
@@ -155,7 +162,7 @@ class BrowserManager:
         logger.info("Browser closed")
 
     @property
-    def page(self) -> Page:
+    def page(self) -> Any:
         if not self._page:
             raise RuntimeError(
                 "Browser not started. Use async context manager or call start()."
@@ -163,7 +170,7 @@ class BrowserManager:
         return self._page
 
     @property
-    def context(self) -> BrowserContext:
+    def context(self) -> Any:
         if not self._context:
             raise RuntimeError("Browser context not initialized.")
         return self._context
@@ -239,10 +246,14 @@ class BrowserManager:
         secure_mkdir(storage_path.parent)
         harden_linkedin_tree(storage_path.parent)
         try:
-            await self._context.storage_state(
-                path=storage_path,
-                indexed_db=indexed_db,
-            )
+            # indexed_db was originally a Patchright-only storage_state()
+            # extension; only pass it when the configured engine's adapter
+            # declares support, rather than assuming every engine/version
+            # combination behaves the same way.
+            storage_state_kwargs: dict[str, Any] = {"path": storage_path}
+            if ENGINES[self.engine].supports_indexed_db:
+                storage_state_kwargs["indexed_db"] = indexed_db
+            await self._context.storage_state(**storage_state_kwargs)
             # Playwright writes the file with default umask; tighten it.
             if os.name != "nt" and storage_path.exists():
                 storage_path.chmod(_PRIVATE_FILE_MODE)
@@ -348,9 +359,7 @@ class BrowserManager:
                 logger.warning("No li_at cookie found in %s", path)
                 return False
 
-            await self._context.add_cookies(
-                cookies  # ty: ignore[invalid-argument-type]
-            )
+            await self._context.add_cookies(cookies)
             logger.info(
                 "Imported %d LinkedIn bridge cookies from %s (preset=%s, li_at=%s): %s",
                 len(cookies),

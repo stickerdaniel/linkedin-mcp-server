@@ -37,6 +37,16 @@ class BrowserConfig:
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
+    browser_engine: Literal["patchright", "camoufox"] = "patchright"
+    # Proxy for the browser's network traffic. Applies to both engines
+    # identically (unlike chrome_path, which is Chromium-only) -- passed
+    # straight through as Playwright's ProxySettings shape. Kept as separate
+    # fields (not a combined "http://user:pass@host:port" string) so logging
+    # proxy_server alone is credential-free by construction.
+    proxy_server: str | None = None
+    proxy_username: str | None = None
+    proxy_password: str | None = None
+    proxy_bypass: str | None = None
     user_data_dir: str = "~/.linkedin-mcp/profile"  # Persistent browser profile
     # Manual-login wait timeout in seconds; 0 = unlimited
     login_timeout_seconds: float = DEFAULT_LOGIN_TIMEOUT_SECONDS
@@ -113,6 +123,37 @@ class BrowserConfig:
                 raise ConfigurationError(
                     f"chrome_path '{self.chrome_path}' is not a file"
                 )
+        if not self.proxy_server and (
+            self.proxy_username or self.proxy_password or self.proxy_bypass
+        ):
+            raise ConfigurationError(
+                "proxy_username/proxy_password/proxy_bypass are set but "
+                "proxy_server is not; a proxy server is required for "
+                "credentials to apply to anything."
+            )
+        if self.proxy_server and "://" not in self.proxy_server:
+            raise ConfigurationError(
+                f"proxy_server '{self.proxy_server}' must include a scheme, "
+                "e.g. 'http://host:port' or 'socks5://host:port'."
+            )
+
+    def proxy_settings(self) -> dict[str, str] | None:
+        """Return the Playwright/Camoufox ProxySettings dict, or None if unset.
+
+        Both engines accept this exact shape. Built from separate fields
+        (not a combined URL) so callers can safely log ``proxy_server``
+        alone without ever risking a credential leak.
+        """
+        if not self.proxy_server:
+            return None
+        settings = {"server": self.proxy_server}
+        if self.proxy_username:
+            settings["username"] = self.proxy_username
+        if self.proxy_password:
+            settings["password"] = self.proxy_password
+        if self.proxy_bypass:
+            settings["bypass"] = self.proxy_bypass
+        return settings
 
 
 @dataclass

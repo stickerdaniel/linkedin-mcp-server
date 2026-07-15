@@ -53,8 +53,11 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
     print("   (This handles 2FA, captcha, and any security challenges)")
 
     launch_options: dict[str, Any] = {}
-    if config.browser.chrome_path:
+    if config.browser.chrome_path and config.browser.browser_engine == "patchright":
         launch_options["executable_path"] = config.browser.chrome_path
+    if proxy := config.browser.proxy_settings():
+        launch_options["proxy"] = proxy
+        print(f"   Using proxy: {proxy['server']}")  # credential-free by construction
 
     viewport = {
         "width": config.browser.viewport_width,
@@ -67,6 +70,7 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
         slow_mo=config.browser.slow_mo,
         user_agent=config.browser.user_agent,
         viewport=viewport,
+        engine=config.browser.browser_engine,
         **launch_options,
     ) as browser:
         # Navigate to LinkedIn login

@@ -1,6 +1,8 @@
 """Core browser management, authentication, and scraping utilities."""
 
 from .auth import (
+    AuthBarrier,
+    AuthBarrierKind,
     detect_auth_barrier,
     detect_auth_barrier_quick,
     is_logged_in,
@@ -20,6 +22,8 @@ from .exceptions import (
 from .utils import detect_rate_limit, handle_modal_close, scroll_to_bottom
 
 __all__ = [
+    "AuthBarrier",
+    "AuthBarrierKind",
     "AuthenticationError",
     "BrowserManager",
     "detect_auth_barrier",

@@ -134,6 +134,22 @@ async def test_export_storage_state_calls_context_storage_state(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_export_storage_state_skips_indexed_db_for_camoufox(tmp_path):
+    """CamoufoxAdapter.supports_indexed_db is False -- export_storage_state
+    must not pass indexed_db for that engine (see core.engines)."""
+    browser = BrowserManager(user_data_dir=tmp_path / "profile", engine="camoufox")
+    context = MagicMock()
+    context.storage_state = AsyncMock()
+    browser._context = context
+    storage_state_path = tmp_path / "storage-state.json"
+
+    exported = await browser.export_storage_state(storage_state_path, indexed_db=True)
+
+    assert exported is True
+    context.storage_state.assert_awaited_once_with(path=storage_state_path)
+
+
+@pytest.mark.asyncio
 async def test_export_storage_state_requires_context(tmp_path):
     browser = BrowserManager(user_data_dir=tmp_path / "profile")
 

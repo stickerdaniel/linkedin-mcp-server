@@ -867,6 +867,9 @@ class TestLazyFullChromiumTrigger:
             "linkedin_mcp_server.bootstrap._uses_custom_chrome", lambda: custom_chrome
         )
         monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._engine_self_manages_binary", lambda: False
+        )
+        monkeypatch.setattr(
             "linkedin_mcp_server.bootstrap._ensure_full_chromium_installed", fake_full
         )
         monkeypatch.setattr(

@@ -6,6 +6,7 @@ import os
 import stat
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -17,6 +18,7 @@ from linkedin_mcp_server.browser_import.orchestrate import (
     import_session_from_browser,
     rank_live_profiles,
 )
+from linkedin_mcp_server.core.exceptions import NetworkError
 from linkedin_mcp_server.exceptions import (
     CookieDecryptionError,
     NoLinkedInSessionFoundError,
@@ -69,6 +71,16 @@ def _patch_meta(monkeypatch, mapping):
     """Patch read_li_at_meta to return mapping[profile] (None when absent)."""
     monkeypatch.setattr(
         orchestrate, "read_li_at_meta", lambda profile: mapping.get(profile)
+    )
+
+
+def _patch_config_engine(monkeypatch, engine="patchright"):
+    """Patch get_config() at its source so _reset_profile_dir's lazy import
+    (and anything else reached via a real code path) resolves a usable
+    fake instead of hitting real argv-based argparse under pytest."""
+    monkeypatch.setattr(
+        "linkedin_mcp_server.config.get_config",
+        lambda: SimpleNamespace(browser=SimpleNamespace(browser_engine=engine)),
     )
 
 
@@ -194,6 +206,7 @@ async def test_import_tries_next_browser_when_first_rejected(
     fresh = _profile("chrome", "Fresh")  # most recently used, but rejected
     older = _profile("brave", "Older")  # accepted
 
+    _patch_config_engine(monkeypatch)
     monkeypatch.setattr(
         orchestrate, "discover_profiles", lambda browser=None: [older, fresh]
     )
@@ -266,6 +279,7 @@ async def test_import_validation_failure_removes_cookies(
     user_data_dir = isolate_profile_dir
     profile = _profile("chrome")
 
+    _patch_config_engine(monkeypatch)
     monkeypatch.setattr(
         orchestrate, "discover_profiles", lambda browser=None: [profile]
     )
@@ -283,6 +297,89 @@ async def test_import_validation_failure_removes_cookies(
     assert ok is False
     assert not portable_cookie_path(user_data_dir).exists()
     assert not source_state_path(user_data_dir).exists()
+
+
+@pytest.mark.asyncio
+async def test_import_network_error_does_not_reset_or_unlink(
+    isolate_profile_dir, monkeypatch
+):
+    """A NetworkError (dead browser/driver connection) during validation says
+    nothing about whether the cookie is actually good -- it must NOT be
+    treated like a real rejection: no unlink, no profile reset."""
+    user_data_dir = isolate_profile_dir
+    profile = _profile("chrome")
+
+    _patch_config_engine(monkeypatch)
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(
+            side_effect=NetworkError("Connection closed while reading from the driver")
+        ),
+    )
+
+    ok = await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+
+    assert ok is False
+    # Unlike a real rejection (test above), the staged cookie survives --
+    # the check was inconclusive, not a confirmed rejection.
+    assert portable_cookie_path(user_data_dir).exists()
+
+
+@pytest.mark.asyncio
+async def test_import_failure_never_touches_sibling_engine_profile(
+    isolate_profile_dir, monkeypatch
+):
+    """Direct regression test for the incident: a failed validation for the
+    configured engine (camoufox) must reset ONLY that engine's own
+    subdirectory, never a sibling engine's (patchright's) profile that
+    happens to live under the same shared user_data_dir."""
+    user_data_dir = isolate_profile_dir
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Patchright's profile lives directly under user_data_dir (e.g. its
+    # Default/ subdir); Camoufox's lives namespaced in user_data_dir/camoufox.
+    patchright_marker = user_data_dir / "Default" / "Cookies"
+    patchright_marker.parent.mkdir(parents=True, exist_ok=True)
+    patchright_marker.write_text("patchright profile data")
+
+    camoufox_marker = user_data_dir / "camoufox" / "cookies.sqlite"
+    camoufox_marker.parent.mkdir(parents=True, exist_ok=True)
+    camoufox_marker.write_text("camoufox profile data")
+
+    profile = _profile("chrome")
+    _patch_config_engine(monkeypatch, engine="camoufox")
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(return_value=False),  # a real, confirmed rejection
+    )
+
+    await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+
+    # The sibling engine's profile is completely untouched.
+    assert patchright_marker.exists()
+    assert patchright_marker.read_text() == "patchright profile data"
+    # The failing engine's own profile was moved aside, not left in place --
+    # but backed up (findable), not destroyed.
+    assert not camoufox_marker.exists()
+    backups = list(user_data_dir.parent.glob("invalid-state-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "camoufox" / "cookies.sqlite").read_text() == (
+        "camoufox profile data"
+    )
 
 
 @pytest.mark.asyncio

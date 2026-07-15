@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# run.sh's cached, host-specific nixpkgs LD_LIBRARY_PATH resolution
+.run-cache/
+
 # C extensions
 *.so
 
@@ -206,6 +209,7 @@ cookies.json
 
 # Local snapshot dumps (contain scraped LinkedIn data)
 scripts/snapshot_dumps/
+scripts/fingerprint_benchmark_results/
 
 # Debug artifacts
 .debug/
