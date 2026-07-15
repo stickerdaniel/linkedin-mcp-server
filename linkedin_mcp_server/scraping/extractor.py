@@ -8,6 +8,7 @@ import json
 import logging
 import random
 import re
+import time
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
@@ -36,6 +37,7 @@ from linkedin_mcp_server.core.stealth_profile import (
     StealthProfile,
     get_stealth_profile,
 )
+from linkedin_mcp_server.core.telemetry import get_telemetry
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
@@ -2054,6 +2056,32 @@ class LinkedInExtractor:
             references=build_references(raw_result["references"], section_name),
         )
 
+    def _record_scrape_telemetry(
+        self,
+        *,
+        action: str,
+        profile_name: str,
+        start_time: float,
+        success: bool,
+        error: str | None = None,
+    ) -> None:
+        """Buffer one scrape outcome, gated by stealth_profile.telemetry.
+        Best-effort: never lets a telemetry failure affect a real scrape's
+        result -- this is purely observational.
+        """
+        if not self._stealth_profile.telemetry:
+            return
+        try:
+            get_telemetry().record(
+                action=action,
+                profile_name=profile_name,
+                duration_seconds=time.monotonic() - start_time,
+                success=success,
+                error=error,
+            )
+        except Exception:
+            logger.debug("Telemetry recording failed (ignored)", exc_info=True)
+
     async def scrape_person(
         self,
         username: str,
@@ -2085,6 +2113,7 @@ class LinkedInExtractor:
             fall back to parsing ``sections[name]`` text alone, since that
             remains the only guaranteed field.
         """
+        scrape_start = time.monotonic()
         requested = requested | {"main_profile"}
         base_url = f"https://www.linkedin.com/in/{username}"
         sections: dict[str, str] = {}
@@ -2175,7 +2204,21 @@ class LinkedInExtractor:
         except LinkedInScraperException as e:
             if callbacks:
                 await callbacks.on_error(e)
+            self._record_scrape_telemetry(
+                action="scrape_person",
+                profile_name=username,
+                start_time=scrape_start,
+                success=False,
+                error=f"{type(e).__name__}: {e}",
+            )
             raise
+
+        self._record_scrape_telemetry(
+            action="scrape_person",
+            profile_name=username,
+            start_time=scrape_start,
+            success=True,
+        )
 
         result: dict[str, Any] = {
             "url": f"{base_url}/",

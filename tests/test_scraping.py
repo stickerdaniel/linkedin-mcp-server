@@ -326,6 +326,114 @@ class TestNavigateToPageSearchFirst:
         mock_direct.assert_awaited_once()
 
 
+class TestRecordScrapeTelemetry:
+    """LinkedInExtractor._record_scrape_telemetry -- the gate + best-effort
+    wrapper around core.telemetry.get_telemetry(), called from
+    scrape_person on both the success and failure paths."""
+
+    def test_records_when_telemetry_enabled(self, mock_page, monkeypatch):
+        from linkedin_mcp_server.core.stealth_profile import get_stealth_profile
+
+        extractor = LinkedInExtractor(
+            mock_page, stealth_profile=get_stealth_profile("MINIMAL_STEALTH")
+        )
+        mock_telemetry = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.get_telemetry",
+            lambda: mock_telemetry,
+        )
+
+        extractor._record_scrape_telemetry(
+            action="scrape_person",
+            profile_name="janedoe",
+            start_time=0.0,
+            success=True,
+        )
+
+        mock_telemetry.record.assert_called_once()
+        _, kwargs = mock_telemetry.record.call_args
+        assert kwargs["action"] == "scrape_person"
+        assert kwargs["profile_name"] == "janedoe"
+        assert kwargs["success"] is True
+
+    def test_skips_entirely_when_telemetry_disabled(self, mock_page, monkeypatch):
+        from linkedin_mcp_server.core.stealth_profile import (
+            DelayConfig,
+            NavigationMode,
+            SimulationLevel,
+            StealthProfile,
+        )
+
+        profile = StealthProfile(
+            name="no-telemetry",
+            navigation=NavigationMode.DIRECT,
+            delays=DelayConfig(),
+            simulation=SimulationLevel.NONE,
+            telemetry=False,
+        )
+        extractor = LinkedInExtractor(mock_page, stealth_profile=profile)
+        mock_telemetry = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.get_telemetry",
+            lambda: mock_telemetry,
+        )
+
+        extractor._record_scrape_telemetry(
+            action="scrape_person", profile_name="janedoe", start_time=0.0, success=True
+        )
+
+        mock_telemetry.record.assert_not_called()
+
+    def test_telemetry_failure_is_swallowed_not_raised(self, mock_page, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.get_telemetry",
+            lambda: (_ for _ in ()).throw(RuntimeError("disk full")),
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        extractor._record_scrape_telemetry(  # must not raise
+            action="scrape_person", profile_name="janedoe", start_time=0.0, success=True
+        )
+
+    async def test_scrape_person_records_success(self, mock_page, monkeypatch):
+        mock_telemetry = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.get_telemetry",
+            lambda: mock_telemetry,
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        await extractor.scrape_person("testuser", {"main_profile"})
+
+        mock_telemetry.record.assert_called_once()
+        _, kwargs = mock_telemetry.record.call_args
+        assert kwargs["success"] is True
+        assert kwargs["profile_name"] == "testuser"
+        assert kwargs["duration_seconds"] >= 0
+
+    async def test_scrape_person_records_failure(self, mock_page, monkeypatch):
+        from linkedin_mcp_server.core.exceptions import ChallengeError
+
+        mock_telemetry = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.get_telemetry",
+            lambda: mock_telemetry,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            AsyncMock(side_effect=ChallengeError("blocked")),
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        with pytest.raises(ChallengeError):
+            await extractor.scrape_person("testuser", {"main_profile"})
+
+        mock_telemetry.record.assert_called_once()
+        _, kwargs = mock_telemetry.record.call_args
+        assert kwargs["success"] is False
+        assert "ChallengeError" in kwargs["error"]
+
+
 class TestNavigateViaSearch:
     """_navigate_via_search's own fallback chain, isolated from
     _navigate_to_page's branch logic above."""

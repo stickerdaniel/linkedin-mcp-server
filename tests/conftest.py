@@ -9,6 +9,7 @@ def reset_singletons():
     from linkedin_mcp_server.core.ip_monitor import reset_ip_drift_monitor_for_testing
     from linkedin_mcp_server.core.opsec import reset_opsec_gate_for_testing
     from linkedin_mcp_server.core.rate_limit import reset_rate_limiter_for_testing
+    from linkedin_mcp_server.core.telemetry import reset_telemetry_for_testing
     from linkedin_mcp_server.dependencies import (
         _reset_ip_drift_call_counter_for_testing,
     )
@@ -20,6 +21,7 @@ def reset_singletons():
     reset_rate_limiter_for_testing()
     reset_opsec_gate_for_testing()
     reset_ip_drift_monitor_for_testing()
+    reset_telemetry_for_testing()
     _reset_ip_drift_call_counter_for_testing()
     yield
     reset_bootstrap_for_testing()
@@ -28,6 +30,7 @@ def reset_singletons():
     reset_rate_limiter_for_testing()
     reset_opsec_gate_for_testing()
     reset_ip_drift_monitor_for_testing()
+    reset_telemetry_for_testing()
     _reset_ip_drift_call_counter_for_testing()
 
 
@@ -43,6 +46,25 @@ def isolate_opsec_db(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "linkedin_mcp_server.core.opsec._DEFAULT_DB_PATH",
         tmp_path / "opsec.db",
+    )
+
+
+@pytest.fixture(autouse=True)
+def isolate_telemetry_path(tmp_path, monkeypatch):
+    """Redirect the telemetry buffer's default flush path to tmp_path.
+
+    Without this, any test that exercises the real scrape_person() (most
+    of test_scraping.py) records into the process-wide ScrapeTelemetry
+    singleton -- reset_telemetry_for_testing() (see reset_singletons above)
+    gives each test a fresh singleton, but a fresh singleton still reads
+    DEFAULT_TELEMETRY_PATH at construction time, and every stealth profile
+    defaults telemetry=True. Left unpatched, once 20 records accumulate
+    across a test file's run the batch flush would write to the real
+    ~/.linkedin-mcp/telemetry.jsonl on the machine running the suite.
+    """
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.telemetry.DEFAULT_TELEMETRY_PATH",
+        tmp_path / "telemetry.jsonl",
     )
 
 
