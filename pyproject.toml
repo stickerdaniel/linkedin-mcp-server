@@ -32,6 +32,7 @@ classifiers = [
 dependencies = [
     "camoufox[geoip]>=0.4.11",
     "cryptography>=48.0.1",
+    "fake-useragent>=2.2.0",
     "fastmcp>=3.0.0",
     "inquirer>=3.4.0",
     "packaging>=26.2",

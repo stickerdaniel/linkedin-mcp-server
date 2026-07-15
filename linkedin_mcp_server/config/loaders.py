@@ -13,6 +13,11 @@ from typing import Literal, cast
 
 from dotenv import load_dotenv
 
+from linkedin_mcp_server.core.stealth_profile import (
+    DEFAULT_STEALTH_PROFILE_NAME,
+    STEALTH_PROFILE_NAMES,
+)
+
 from .schema import AppConfig, ConfigurationError
 
 # Load .env file if present
@@ -73,6 +78,7 @@ class EnvironmentKeys:
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
     BROWSER_ENGINE = "BROWSER_ENGINE"
+    STEALTH_PROFILE = "STEALTH_PROFILE"
     PROXY_SERVER = "PROXY_SERVER"
     PROXY_USERNAME = "PROXY_USERNAME"
     PROXY_PASSWORD = "PROXY_PASSWORD"
@@ -244,6 +250,10 @@ def load_from_env(config: AppConfig) -> AppConfig:
             Literal["patchright", "camoufox"], browser_engine_value
         )
 
+    # Stealth-posture preset (validated in BrowserConfig.validate())
+    if stealth_profile_env := os.environ.get(EnvironmentKeys.STEALTH_PROFILE):
+        config.browser.stealth_profile = stealth_profile_env.strip().upper()
+
     # Proxy for the browser's network traffic (validated in BrowserConfig.validate()).
     # PROXY_PASSWORD is env-var-only by design -- no --proxy-password CLI flag,
     # since a CLI flag would leak the credential into shell history / `ps aux`.
@@ -400,6 +410,16 @@ def load_from_args(config: AppConfig) -> AppConfig:
         choices=["patchright", "camoufox"],
         default=None,
         help="Browser engine to drive LinkedIn with (default: patchright)",
+    )
+
+    parser.add_argument(
+        "--stealth-profile",
+        choices=list(STEALTH_PROFILE_NAMES),
+        default=None,
+        help=(
+            "Stealth posture preset controlling humanization delays, "
+            f"navigation mode, and rate limiting (default: {DEFAULT_STEALTH_PROFILE_NAME})"
+        ),
     )
 
     parser.add_argument(
@@ -573,6 +593,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.browser:
         config.browser.browser_engine = args.browser
+
+    if args.stealth_profile:
+        config.browser.stealth_profile = args.stealth_profile
 
     if args.proxy_server:
         config.browser.proxy_server = args.proxy_server

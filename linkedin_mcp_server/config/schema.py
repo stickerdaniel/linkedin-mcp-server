@@ -11,6 +11,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from linkedin_mcp_server.core.stealth_profile import (
+    DEFAULT_STEALTH_PROFILE_NAME,
+    StealthProfile,
+    get_stealth_profile,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOOL_TIMEOUT_SECONDS: float = 180.0
@@ -69,6 +75,15 @@ class BrowserConfig:
     # never downloads the larger full-chromium binary unless interactive login is
     # actually triggered. Set True to pre-warm the headed login fallback.
     eager_full_chromium: bool = False
+    # Named stealth-posture preset (see core/stealth_profile.py) -- stored as
+    # a name string here, same pattern as browser_engine, and resolved into
+    # a StealthProfile object lazily wherever it's consumed (resolve_stealth_
+    # profile() below), not eagerly at config-load time.
+    stealth_profile: str = DEFAULT_STEALTH_PROFILE_NAME
+
+    def resolve_stealth_profile(self) -> StealthProfile:
+        """Resolve ``stealth_profile`` (a name string) into a StealthProfile."""
+        return get_stealth_profile(self.stealth_profile)
 
     def validate(self) -> None:
         """Validate browser configuration values."""
@@ -136,6 +151,10 @@ class BrowserConfig:
                 f"proxy_server '{self.proxy_server}' must include a scheme, "
                 "e.g. 'http://host:port' or 'socks5://host:port'."
             )
+        try:
+            get_stealth_profile(self.stealth_profile)
+        except ValueError as exc:
+            raise ConfigurationError(str(exc)) from exc
 
     def proxy_settings(self) -> dict[str, str] | None:
         """Return the Playwright/Camoufox ProxySettings dict, or None if unset.

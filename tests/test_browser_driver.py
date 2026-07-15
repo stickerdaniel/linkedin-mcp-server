@@ -72,6 +72,157 @@ def test_launch_options_never_logs_proxy_password(_mock_config, caplog):
     assert "proxy.example:8080" in caplog.text
 
 
+def test_launch_options_disables_camoufox_humanize_for_no_stealth(_mock_config):
+    _mock_config.browser.browser_engine = "camoufox"
+    _mock_config.browser.stealth_profile = "NO_STEALTH"
+
+    launch_options, _viewport = _launch_options()
+
+    assert launch_options["humanize"] is False
+
+
+def test_launch_options_omits_humanize_key_for_stealthy_camoufox_profiles(
+    _mock_config,
+):
+    """CamoufoxAdapter.launch() already defaults humanize=True before
+    spreading launch_options -- omitting the key (not setting it True) lets
+    that default keep working unchanged for every non-NO_STEALTH profile."""
+    _mock_config.browser.browser_engine = "camoufox"
+    _mock_config.browser.stealth_profile = "MAXIMUM_STEALTH"
+
+    launch_options, _viewport = _launch_options()
+
+    assert "humanize" not in launch_options
+
+
+def test_launch_options_never_sets_humanize_key_on_patchright(_mock_config):
+    """ "humanize" isn't a recognized launch_persistent_context() kwarg --
+    setting it for Patchright would break browser launch outright, not just
+    be a no-op (see PatchrightAdapter.launch(), which spreads
+    **launch_options directly into that call)."""
+    _mock_config.browser.browser_engine = "patchright"
+    _mock_config.browser.stealth_profile = "NO_STEALTH"
+
+    launch_options, _viewport = _launch_options()
+
+    assert "humanize" not in launch_options
+
+
+class TestMakeBrowserUserAgent:
+    """_make_browser()'s three-tier user_agent precedence: explicit config
+    > imported-session UA > dynamic fake-useragent fallback (masking-gated)."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_browser_manager(self, monkeypatch):
+        captured = {}
+
+        def fake_browser_manager(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            fake_browser_manager,
+        )
+        return captured
+
+    def test_explicit_config_user_agent_wins_over_everything(
+        self, _mock_config, _mock_browser_manager, tmp_path
+    ):
+        _mock_config.browser.user_agent = "explicit-ua"
+        from linkedin_mcp_server.drivers.browser import _make_browser
+
+        _make_browser(tmp_path, launch_options={}, viewport={"width": 1, "height": 1})
+
+        assert _mock_browser_manager["user_agent"] == "explicit-ua"
+
+    def test_imported_session_user_agent_wins_over_dynamic(
+        self, _mock_config, _mock_browser_manager, tmp_path
+    ):
+        from linkedin_mcp_server.drivers.browser import _make_browser
+
+        _make_browser(
+            tmp_path,
+            launch_options={},
+            viewport={"width": 1, "height": 1},
+            user_agent="source-browser-ua",
+        )
+
+        assert _mock_browser_manager["user_agent"] == "source-browser-ua"
+
+    def test_dynamic_ua_used_when_masking_enabled_and_nothing_else_set(
+        self, _mock_config, _mock_browser_manager, tmp_path, monkeypatch
+    ):
+        _mock_config.browser.stealth_profile = "MINIMAL_STEALTH"  # masking on
+        monkeypatch.setattr(
+            "linkedin_mcp_server.drivers.browser._dynamic_user_agent",
+            lambda: "generated-ua",
+        )
+        from linkedin_mcp_server.drivers.browser import _make_browser
+
+        _make_browser(tmp_path, launch_options={}, viewport={"width": 1, "height": 1})
+
+        assert _mock_browser_manager["user_agent"] == "generated-ua"
+
+    def test_no_dynamic_ua_when_masking_disabled(
+        self, _mock_config, _mock_browser_manager, tmp_path, monkeypatch
+    ):
+        _mock_config.browser.stealth_profile = "NO_STEALTH"  # masking off
+        monkeypatch.setattr(
+            "linkedin_mcp_server.drivers.browser._dynamic_user_agent",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("must not be called when masking is disabled")
+            ),
+        )
+        from linkedin_mcp_server.drivers.browser import _make_browser
+
+        _make_browser(tmp_path, launch_options={}, viewport={"width": 1, "height": 1})
+
+        assert _mock_browser_manager["user_agent"] is None
+
+    def test_dynamic_ua_generator_failure_degrades_to_none(
+        self, _mock_config, _mock_browser_manager, tmp_path, monkeypatch
+    ):
+        """Best-effort: a broken/missing fake-useragent install must not
+        block browser launch."""
+        _mock_config.browser.stealth_profile = "MINIMAL_STEALTH"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.drivers.browser._dynamic_user_agent",
+            lambda: None,
+        )
+        from linkedin_mcp_server.drivers.browser import _make_browser
+
+        _make_browser(tmp_path, launch_options={}, viewport={"width": 1, "height": 1})
+
+        assert _mock_browser_manager["user_agent"] is None
+
+
+def test_dynamic_user_agent_returns_a_desktop_chrome_string():
+    from linkedin_mcp_server.drivers.browser import _dynamic_user_agent
+
+    ua = _dynamic_user_agent()
+    assert ua is not None
+    assert "Chrome" in ua
+    assert "Mobile" not in ua and "Android" not in ua and "iPhone" not in ua
+
+
+def test_dynamic_user_agent_survives_import_failure(monkeypatch):
+    """fake-useragent missing/broken must degrade to None, not raise."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blow_up_on_fake_useragent(name, *args, **kwargs):
+        if name == "fake_useragent":
+            raise ImportError("simulated missing dependency")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blow_up_on_fake_useragent)
+    from linkedin_mcp_server.drivers.browser import _dynamic_user_agent
+
+    assert _dynamic_user_agent() is None
+
+
 def _make_mock_browser() -> MagicMock:
     browser = MagicMock()
     browser.start = AsyncMock()

@@ -244,7 +244,38 @@ def _launch_options() -> tuple[dict[str, Any], dict[str, int]]:
         logger.info(
             "Using proxy: %s", proxy["server"]
         )  # credential-free by construction
+    # Camoufox-only, same reason as chrome_path above: "humanize" isn't a
+    # recognized Playwright launch_persistent_context() kwarg, so setting it
+    # unconditionally would break Patchright. CamoufoxAdapter.launch()
+    # already builds camoufox_options["humanize"]=True before spreading
+    # **launch_options, so this only needs to act when the profile disables
+    # it (NO_STEALTH) -- everything else matches Camoufox's own default.
+    if config.browser.browser_engine == "camoufox":
+        stealth_profile = config.browser.resolve_stealth_profile()
+        if not stealth_profile.enable_fingerprint_masking:
+            launch_options["humanize"] = False
     return launch_options, viewport
+
+
+def _dynamic_user_agent() -> str | None:
+    """Generate a randomized, desktop-only, real-world Chrome UA string via
+    fake-useragent's bundled data (no network fetch -- confirmed the package
+    ships its data locally, see pyproject.toml). Best-effort: any failure
+    (missing/corrupt bundled data, a library API change) degrades to None
+    rather than blocking browser launch, matching this module's established
+    philosophy for stealth niceties (see warm_session, core.ip_monitor).
+    """
+    try:
+        from fake_useragent import UserAgent
+
+        return UserAgent(
+            os=["Windows", "Mac OS X", "Linux"],
+            platforms=["desktop"],
+            browsers=["Chrome"],
+        ).random
+    except Exception:
+        logger.debug("Dynamic user-agent generation failed", exc_info=True)
+        return None
 
 
 def _make_browser(
@@ -254,15 +285,24 @@ def _make_browser(
     viewport: dict[str, int],
     user_agent: str | None = None,
 ) -> BrowserManager:
-    """Build a BrowserManager. An explicit USER_AGENT (env/CLI) always wins;
-    *user_agent* is the session's own UA (the source browser's, recorded at
-    import time) and applies only when no override is configured."""
+    """Build a BrowserManager. Precedence: an explicit USER_AGENT (env/CLI)
+    always wins; *user_agent* is the session's own UA (the source browser's,
+    recorded at import time) and applies next; a freshly generated dynamic
+    UA (gated on the resolved stealth profile's enable_fingerprint_masking)
+    is the last-resort fallback so a masking-enabled profile never launches
+    with the raw engine-default UA string."""
     config = get_config()
+    resolved_user_agent = config.browser.user_agent or user_agent
+    if (
+        not resolved_user_agent
+        and config.browser.resolve_stealth_profile().enable_fingerprint_masking
+    ):
+        resolved_user_agent = _dynamic_user_agent()
     return BrowserManager(
         user_data_dir=profile_dir,
         headless=_headless,
         slow_mo=config.browser.slow_mo,
-        user_agent=config.browser.user_agent or user_agent,
+        user_agent=resolved_user_agent,
         viewport=viewport,
         engine=config.browser.browser_engine,
         **launch_options,

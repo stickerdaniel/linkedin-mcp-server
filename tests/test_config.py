@@ -96,6 +96,25 @@ class TestBrowserConfig:
         with pytest.raises(ConfigurationError):
             BrowserConfig(proxy_server="proxy.example:8080").validate()
 
+    def test_stealth_profile_defaults_to_minimal(self):
+        from linkedin_mcp_server.core.stealth_profile import (
+            DEFAULT_STEALTH_PROFILE_NAME,
+        )
+
+        assert BrowserConfig().stealth_profile == DEFAULT_STEALTH_PROFILE_NAME
+
+    def test_validate_passes_with_known_stealth_profile(self):
+        BrowserConfig(stealth_profile="MAXIMUM_STEALTH").validate()
+
+    def test_validate_rejects_unknown_stealth_profile(self):
+        with pytest.raises(ConfigurationError, match="stealth profile"):
+            BrowserConfig(stealth_profile="not_a_real_profile").validate()
+
+    def test_resolve_stealth_profile_returns_matching_preset(self):
+        config = BrowserConfig(stealth_profile="no_stealth")
+        resolved = config.resolve_stealth_profile()
+        assert resolved.name == "NO_STEALTH"
+
 
 class TestServerConfig:
     def test_defaults(self):
@@ -608,6 +627,40 @@ class TestLoaders:
         monkeypatch.setattr(
             "sys.argv",
             ["linkedin-mcp-server", "--proxy-password", "secret"],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(SystemExit):
+            load_from_args(AppConfig())
+
+    def test_load_from_env_stealth_profile(self, monkeypatch):
+        monkeypatch.setenv("STEALTH_PROFILE", "maximum_stealth")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.stealth_profile == "MAXIMUM_STEALTH"
+
+    def test_load_from_env_stealth_profile_unset_keeps_default(self, monkeypatch):
+        monkeypatch.delenv("STEALTH_PROFILE", raising=False)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.stealth_profile == "MINIMAL_STEALTH"
+
+    def test_load_from_args_stealth_profile(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv",
+            ["linkedin-mcp-server", "--stealth-profile", "NO_STEALTH"],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.browser.stealth_profile == "NO_STEALTH"
+
+    def test_load_from_args_rejects_unknown_stealth_profile(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv",
+            ["linkedin-mcp-server", "--stealth-profile", "bogus"],
         )
         from linkedin_mcp_server.config.loaders import load_from_args
 
