@@ -198,9 +198,18 @@ class TestGetReadyExtractor:
 
             mock_invalidate.assert_not_called()
 
-    async def test_mid_scrape_auth_error_triggers_relogin(self):
+    async def test_mid_scrape_auth_error_triggers_relogin(self, monkeypatch):
         """AuthenticationError caught in tool wrapper invokes handle_auth_error."""
+        from linkedin_mcp_server.config.schema import AppConfig
         from linkedin_mcp_server.tools.person import register_person_tools
+
+        # get_person_profile resolves a StealthProfile via get_config() for
+        # rate-limit pacing before it ever reaches scrape_person() -- without
+        # this, the REAL get_config() parses pytest's own sys.argv and
+        # SystemExits. Same pattern as test_browser_driver.py's _mock_config.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.person.get_config", lambda: AppConfig()
+        )
 
         mock_mcp = MagicMock()
         tools = {}

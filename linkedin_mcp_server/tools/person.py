@@ -13,6 +13,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
+from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.opsec import DailyCapExceededError, get_opsec_gate
@@ -97,8 +98,23 @@ def register_person_tools(
             requested, unknown = parse_person_sections(sections)
 
             try:
+                # Per-minute burst pacing (stealth-profile-derived) plus the
+                # coarser daily-volume cap -- different time horizons, both
+                # apply. The rate-limit ceiling is read-path-specific (not
+                # write-path's fixed default): only takes effect the first
+                # time "view_person_profile" is seen this process, per
+                # ActionRateLimiter._bucket_for.
+                stealth_profile = get_config().browser.resolve_stealth_profile()
+                get_rate_limiter().check(
+                    "view_person_profile",
+                    refill_rate_per_second=stealth_profile.rate_limit_per_minute / 60.0,
+                )
                 get_opsec_gate().check_daily_cap("view_person_profile")
-            except DailyCapExceededError as e:
+            except (
+                RateLimitExceededError,
+                CircuitOpenError,
+                DailyCapExceededError,
+            ) as e:
                 # Carry the specific reason to the client -- otherwise
                 # mask_error_details reduces it to a generic
                 # "Error calling tool 'get_person_profile'".
@@ -123,6 +139,7 @@ def register_person_tools(
             # consume cap the same way a real profile view does.
             if result.get("sections"):
                 get_opsec_gate().record("view_person_profile", linkedin_username)
+                get_rate_limiter().record_result("view_person_profile", success=True)
 
             if unknown:
                 result["unknown_sections"] = unknown
@@ -207,6 +224,19 @@ def register_person_tools(
             )
 
             try:
+                # Per-minute burst pacing, same stealth-profile-derived
+                # ceiling as get_person_profile -- no opsec daily cap here
+                # (search_people has never had one; a search hit is cheaper
+                # than a full profile view and isn't gated the same way).
+                stealth_profile = get_config().browser.resolve_stealth_profile()
+                get_rate_limiter().check(
+                    "search_people",
+                    refill_rate_per_second=stealth_profile.rate_limit_per_minute / 60.0,
+                )
+            except (RateLimitExceededError, CircuitOpenError) as e:
+                raise ToolError(str(e)) from e
+
+            try:
                 result = await extractor.search_people(
                     keywords,
                     location,
@@ -219,6 +249,8 @@ def register_person_tools(
                 # them as ToolError so mask_error_details doesn't reduce
                 # them to "Error calling tool 'search_people'".
                 raise ToolError(str(e)) from e
+
+            get_rate_limiter().record_result("search_people", success=True)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

@@ -46,6 +46,21 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
 
 
 class TestPersonTool:
+    @pytest.fixture(autouse=True)
+    def _mock_config(self, monkeypatch):
+        """get_person_profile/search_people resolve a StealthProfile via
+        get_config() for rate-limit pacing -- without this, the REAL
+        get_config() runs load_from_args() against pytest's own sys.argv
+        (e.g. "tests/ -q") and SystemExits. Same pattern as
+        test_browser_driver.py's _mock_config fixture."""
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.person.get_config", lambda: config
+        )
+        return config
+
     async def test_get_person_profile_success(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/in/test-user/",
@@ -196,6 +211,66 @@ class TestPersonTool:
         with pytest.raises(ToolError, match="Session expired"):
             await tool_fn("test-user", mock_context, extractor=mock_extractor)
 
+    async def test_get_person_profile_rate_limited_after_capacity_exhausted(
+        self, mock_context
+    ):
+        """The token-bucket check (stealth-profile-derived refill rate,
+        default capacity=3) rejects a call once the bucket is empty --
+        independent of the opsec daily cap."""
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "sections": {"main_profile": "John Doe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_person_profile")
+        for _ in range(3):  # default bucket capacity
+            await tool_fn("test-user", mock_context, extractor=mock_extractor)
+
+        with pytest.raises(ToolError, match="Rate limit exceeded"):
+            await tool_fn("test-user", mock_context, extractor=mock_extractor)
+
+    async def test_get_person_profile_rate_limit_ceiling_from_stealth_profile(
+        self, mock_context, monkeypatch
+    ):
+        """A stricter profile (lower rate_limit_per_minute) doesn't change
+        default capacity, but confirms the refill rate is actually read
+        from the resolved StealthProfile, not a hardcoded constant."""
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        config.browser.stealth_profile = "MAXIMUM_STEALTH"  # rate_limit_per_minute=1
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.person.get_config", lambda: config
+        )
+
+        captured_kwargs = {}
+        from linkedin_mcp_server.core.rate_limit import get_rate_limiter
+
+        real_check = get_rate_limiter().check
+
+        def spy_check(action, **kwargs):
+            captured_kwargs.update(kwargs)
+            return real_check(action, **kwargs)
+
+        monkeypatch.setattr(get_rate_limiter(), "check", spy_check)
+
+        expected = {"url": "https://www.linkedin.com/in/test-user/", "sections": {}}
+        mock_extractor = _make_mock_extractor(expected)
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_person_profile")
+        await tool_fn("test-user", mock_context, extractor=mock_extractor)
+
+        assert captured_kwargs["refill_rate_per_second"] == pytest.approx(1 / 60.0)
+
     async def test_get_person_profile_auth_error(self, monkeypatch):
         """Auth failures in the DI layer trigger auto-relogin and report the login browser."""
         from fastmcp.exceptions import ToolError
@@ -331,6 +406,30 @@ class TestPersonTool:
                 current_company="SAP",
                 extractor=mock_extractor,
             )
+
+    async def test_search_people_rate_limited_after_capacity_exhausted(
+        self, mock_context
+    ):
+        """search_people shares the token-bucket mechanism with
+        get_person_profile but has its own independent bucket (no opsec
+        daily cap either -- see tools/person.py)."""
+        expected = {
+            "url": "https://www.linkedin.com/search/results/people/",
+            "sections": {"search_results": "Jane Doe"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_people")
+        for _ in range(3):  # default bucket capacity
+            await tool_fn("engineer", mock_context, extractor=mock_extractor)
+
+        with pytest.raises(ToolError, match="Rate limit exceeded"):
+            await tool_fn("engineer", mock_context, extractor=mock_extractor)
 
     async def test_connect_with_person(self, mock_context):
         expected = {

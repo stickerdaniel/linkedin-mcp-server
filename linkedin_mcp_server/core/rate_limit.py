@@ -129,10 +129,27 @@ class ActionRateLimiter:
         self._buckets: dict[str, TokenBucket] = {}
         self._breakers: dict[str, CircuitBreaker] = {}
 
-    def _bucket_for(self, action: str) -> TokenBucket:
+    def _bucket_for(
+        self,
+        action: str,
+        *,
+        capacity: float | None = None,
+        refill_rate_per_second: float | None = None,
+    ) -> TokenBucket:
         bucket = self._buckets.get(action)
         if bucket is None:
-            bucket = TokenBucket(self._capacity, self._refill_rate_per_second)
+            # Per-action override only applies at first creation -- an
+            # action's bucket, once created, keeps its own capacity/refill
+            # rate for the life of the process. This lets a caller (e.g. a
+            # stealth-profile-derived rate for read-path actions) diverge
+            # from the shared instance defaults without needing a second
+            # ActionRateLimiter instance/singleton.
+            bucket = TokenBucket(
+                capacity if capacity is not None else self._capacity,
+                refill_rate_per_second
+                if refill_rate_per_second is not None
+                else self._refill_rate_per_second,
+            )
             self._buckets[action] = bucket
         return bucket
 
@@ -143,15 +160,27 @@ class ActionRateLimiter:
             self._breakers[action] = breaker
         return breaker
 
-    def check(self, action: str) -> None:
+    def check(
+        self,
+        action: str,
+        *,
+        capacity: float | None = None,
+        refill_rate_per_second: float | None = None,
+    ) -> None:
         """Raise if *action* cannot proceed right now.
 
         Raises :class:`CircuitOpenError` if the breaker is open, or
         :class:`RateLimitExceededError` if the bucket has no tokens.
         Call once immediately before attempting the real write.
+
+        ``capacity``/``refill_rate_per_second`` override this limiter's
+        instance defaults for *action*'s bucket, but only take effect the
+        first time this action is seen -- see ``_bucket_for``.
         """
         self._breaker_for(action).before_call()
-        if not self._bucket_for(action).try_consume():
+        if not self._bucket_for(
+            action, capacity=capacity, refill_rate_per_second=refill_rate_per_second
+        ).try_consume():
             raise RateLimitExceededError(
                 f"Rate limit exceeded for '{action}'; wait for the bucket to refill."
             )

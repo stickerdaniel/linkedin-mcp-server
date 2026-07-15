@@ -111,6 +111,34 @@ class TestActionRateLimiter:
         limiter.record_result("send_message", success=True)
         limiter.check("send_message")  # still closed
 
+    def test_per_action_capacity_override_applies_on_first_use(self):
+        """Read-path actions (e.g. view_person_profile) pass a
+        stealth-profile-derived capacity/rate differing from the shared
+        instance defaults -- must apply to that action's own bucket."""
+        limiter = ActionRateLimiter(capacity=1, refill_rate_per_second=0)
+        # Instance default is capacity=1; this action gets capacity=5 instead.
+        limiter.check("view_person_profile", capacity=5, refill_rate_per_second=0)
+        for _ in range(4):
+            limiter.check("view_person_profile")  # 4 more, still within 5
+        with pytest.raises(RateLimitExceededError):
+            limiter.check("view_person_profile")
+
+    def test_per_action_override_ignored_after_bucket_already_created(self):
+        """An override only takes effect the first time an action is seen --
+        matches the existing per-action-bucket lazy-creation pattern."""
+        limiter = ActionRateLimiter(capacity=1, refill_rate_per_second=0)
+        limiter.check("view_person_profile")  # creates the bucket at capacity=1
+        with pytest.raises(RateLimitExceededError):
+            # Passing capacity=100 now must NOT resurrect/enlarge the
+            # already-exhausted bucket.
+            limiter.check("view_person_profile", capacity=100, refill_rate_per_second=0)
+
+    def test_actions_without_override_use_instance_defaults(self):
+        limiter = ActionRateLimiter(capacity=1, refill_rate_per_second=0)
+        limiter.check("connect_with_person")  # no override kwargs at all
+        with pytest.raises(RateLimitExceededError):
+            limiter.check("connect_with_person")
+
 
 class TestSingleton:
     def test_get_rate_limiter_returns_same_instance(self):
