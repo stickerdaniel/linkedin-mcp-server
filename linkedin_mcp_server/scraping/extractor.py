@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 import logging
+import random
 import re
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
@@ -30,7 +31,11 @@ from linkedin_mcp_server.core.humanize import (
     human_type,
 )
 from linkedin_mcp_server.core.interaction_simulation import simulate_page_interaction
-from linkedin_mcp_server.core.stealth_profile import StealthProfile, get_stealth_profile
+from linkedin_mcp_server.core.stealth_profile import (
+    NavigationMode,
+    StealthProfile,
+    get_stealth_profile,
+)
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
@@ -65,6 +70,17 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 
 # Returned as section text when LinkedIn rate-limits the page
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
+
+# Matches ONLY a bare profile root (https://www.linkedin.com/in/<username>[/]),
+# not a /details/ subpage or any other path -- SEARCH_FIRST navigation only
+# applies to the one-time "land on this profile" hop, see _navigate_to_page.
+_PROFILE_ROOT_RE = re.compile(r"^https://www\.linkedin\.com/in/([^/?#]+)/?$")
+
+
+def _match_profile_root_username(url: str) -> str | None:
+    match = _PROFILE_ROOT_RE.match(url)
+    return match.group(1) if match else None
+
 
 # LinkedIn shows 25 results per page (jobs search only -- confirmed live
 # via search_jobs's existing pagination).
@@ -1068,9 +1084,132 @@ class LinkedInExtractor:
             unregister_navigation_listener()
 
     async def _navigate_to_page(self, url: str) -> None:
-        """Navigate to a LinkedIn page and fail fast on auth barriers."""
+        """Navigate to a LinkedIn page and fail fast on auth barriers.
+
+        Routes through search-first navigation instead of a direct
+        page.goto(profile_url) when the resolved stealth profile calls for
+        it (only reachable via MAXIMUM_STEALTH) and the target is a bare
+        profile root URL (not a /details/ subpage -- search-first gets the
+        browser onto the profile once; subsequent same-profile subpage
+        fetches go direct, matching this codebase's per-section-is-a-
+        navigation granularity without repeating the ~9x-slower search
+        dance on every single section). Falls back to direct navigation on
+        any failure so a broken search path never blocks a scrape outright.
+        """
         logger.debug("_navigate_to_page: target=%s", url)
+        username = (
+            _match_profile_root_username(url)
+            if self._stealth_profile.navigation == NavigationMode.SEARCH_FIRST
+            else None
+        )
+        if username is not None:
+            if await self._navigate_via_search(username, url):
+                return
+            logger.debug(
+                "_navigate_to_page: search-first navigation to %s failed, "
+                "falling back to direct navigation",
+                url,
+            )
         await self._goto_with_auth_checks(url)
+
+    _SEARCH_PEOPLE_URL = "https://www.linkedin.com/search/results/people/"
+    _SEARCH_BOX_SELECTORS = (
+        'input[placeholder*="Search"]',
+        'input[aria-label*="Search"]',
+        ".search-global-typeahead__input",
+    )
+
+    async def _navigate_via_search(self, username: str, target_url: str) -> bool:
+        """Reach a profile via LinkedIn's own people-search UI instead of a
+        direct page.goto(profile_url) -- MAXIMUM_STEALTH's navigation mode.
+
+        Returns True only once the page has actually landed on the target
+        profile with no auth barrier; False on any failure point (search
+        page didn't load, no search box found, typing/submit failed, no
+        matching result link, or landed somewhere unexpected) -- mirrors
+        the fork's own multi-point fallback-to-direct chain. A genuine
+        auth barrier detected after landing still raises (ChallengeError/
+        BlockError), same as every other navigation path in this class --
+        that's a real signal, not a reason to silently fall back.
+        """
+        try:
+            await self._goto_with_auth_checks(self._SEARCH_PEOPLE_URL)
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.debug("_navigate_via_search: search page nav failed: %s", e)
+            return False
+
+        delays = self._stealth_profile.delays
+        await asyncio.sleep(random.uniform(*delays.base))
+
+        search_box = None
+        for selector in self._SEARCH_BOX_SELECTORS:
+            locator = self._page.locator(selector)
+            try:
+                if await locator.count() > 0:
+                    search_box = locator.first
+                    break
+            except Exception:
+                continue
+        if search_box is None:
+            logger.debug("_navigate_via_search: no search box found")
+            return False
+
+        try:
+            await search_box.click(timeout=3000)
+            await search_box.fill("")
+            await human_type(self._page, username)
+            await asyncio.sleep(random.uniform(1.0, 2.0))
+            await self._page.keyboard.press("Enter")
+            await self._page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception as e:
+            logger.debug("_navigate_via_search: typing/submit failed: %s", e)
+            return False
+
+        result_selectors = (
+            f'a[href*="{username}"][href*="/in/"]',
+            f'a[href*="/in/{username}"]',
+            ".entity-result__title-text a",
+        )
+        clicked = False
+        for selector in result_selectors:
+            locator = self._page.locator(selector).first
+            try:
+                if await locator.count() == 0:
+                    continue
+                await asyncio.sleep(random.uniform(*delays.base))
+                await human_move_and_click(
+                    self._page, locator, engine=self._engine, timeout=3000
+                )
+                await self._page.wait_for_load_state("domcontentloaded", timeout=10000)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            logger.debug("_navigate_via_search: no matching result link found")
+            return False
+
+        current_url = self._page.url or ""
+        if username.lower() not in current_url.lower():
+            logger.debug(
+                "_navigate_via_search: landed on unexpected URL %s (wanted %s)",
+                current_url,
+                username,
+            )
+            return False
+
+        barrier = await detect_auth_barrier_quick(self._page)
+        if barrier is not None:
+            error_cls = (
+                BlockError if barrier.kind == AuthBarrierKind.BLOCK else ChallengeError
+            )
+            raise error_cls(
+                f"Auth barrier detected after search-first navigation to {target_url}"
+            )
+
+        return True
 
     # ------------------------------------------------------------------
     # Generic browser helpers for LLM-driven connection flow

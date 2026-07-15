@@ -197,6 +197,295 @@ class TestLinkedInExtractorStealthProfile:
         assert extractor._stealth_profile.name == "MAXIMUM_STEALTH"
 
 
+class TestMatchProfileRootUsername:
+    """SEARCH_FIRST navigation only applies to a bare profile root -- never
+    a /details/ subpage or any other LinkedIn page, see _navigate_to_page."""
+
+    def test_matches_bare_profile_root(self):
+        from linkedin_mcp_server.scraping.extractor import _match_profile_root_username
+
+        assert (
+            _match_profile_root_username("https://www.linkedin.com/in/janedoe")
+            == "janedoe"
+        )
+
+    def test_matches_with_trailing_slash(self):
+        from linkedin_mcp_server.scraping.extractor import _match_profile_root_username
+
+        assert (
+            _match_profile_root_username("https://www.linkedin.com/in/janedoe/")
+            == "janedoe"
+        )
+
+    def test_rejects_details_subpage(self):
+        from linkedin_mcp_server.scraping.extractor import _match_profile_root_username
+
+        assert (
+            _match_profile_root_username(
+                "https://www.linkedin.com/in/janedoe/details/experience/"
+            )
+            is None
+        )
+
+    def test_rejects_non_profile_url(self):
+        from linkedin_mcp_server.scraping.extractor import _match_profile_root_username
+
+        assert (
+            _match_profile_root_username(
+                "https://www.linkedin.com/search/results/people/"
+            )
+            is None
+        )
+
+    def test_rejects_query_string_after_username(self):
+        from linkedin_mcp_server.scraping.extractor import _match_profile_root_username
+
+        assert (
+            _match_profile_root_username("https://www.linkedin.com/in/janedoe?trk=x")
+            is None
+        )
+
+
+class TestNavigateToPageSearchFirst:
+    """_navigate_to_page's branch point: SEARCH_FIRST only applies for
+    MAXIMUM_STEALTH profiles navigating to a bare profile root; every other
+    combination goes straight to the existing direct-navigation path."""
+
+    async def test_direct_navigation_profile_never_attempts_search(
+        self, mock_page, monkeypatch
+    ):
+        extractor = LinkedInExtractor(mock_page)  # MINIMAL_STEALTH = DIRECT
+        mock_search = AsyncMock()
+        mock_direct = AsyncMock()
+        monkeypatch.setattr(extractor, "_navigate_via_search", mock_search)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", mock_direct)
+
+        await extractor._navigate_to_page("https://www.linkedin.com/in/janedoe")
+
+        mock_search.assert_not_awaited()
+        mock_direct.assert_awaited_once()
+
+    async def test_search_first_profile_attempts_search_first(
+        self, mock_page, monkeypatch
+    ):
+        from linkedin_mcp_server.core.stealth_profile import get_stealth_profile
+
+        extractor = LinkedInExtractor(
+            mock_page, stealth_profile=get_stealth_profile("MAXIMUM_STEALTH")
+        )
+        mock_search = AsyncMock(return_value=True)
+        mock_direct = AsyncMock()
+        monkeypatch.setattr(extractor, "_navigate_via_search", mock_search)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", mock_direct)
+
+        await extractor._navigate_to_page("https://www.linkedin.com/in/janedoe")
+
+        mock_search.assert_awaited_once_with(
+            "janedoe", "https://www.linkedin.com/in/janedoe"
+        )
+        mock_direct.assert_not_awaited()
+
+    async def test_search_first_falls_back_to_direct_on_failure(
+        self, mock_page, monkeypatch
+    ):
+        from linkedin_mcp_server.core.stealth_profile import get_stealth_profile
+
+        extractor = LinkedInExtractor(
+            mock_page, stealth_profile=get_stealth_profile("MAXIMUM_STEALTH")
+        )
+        mock_search = AsyncMock(return_value=False)
+        mock_direct = AsyncMock()
+        monkeypatch.setattr(extractor, "_navigate_via_search", mock_search)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", mock_direct)
+
+        await extractor._navigate_to_page("https://www.linkedin.com/in/janedoe")
+
+        mock_search.assert_awaited_once()
+        mock_direct.assert_awaited_once_with("https://www.linkedin.com/in/janedoe")
+
+    async def test_search_first_skips_search_for_details_subpage(
+        self, mock_page, monkeypatch
+    ):
+        """Even under MAXIMUM_STEALTH, a /details/ URL goes direct -- the
+        search dance only happens once, for the profile root."""
+        from linkedin_mcp_server.core.stealth_profile import get_stealth_profile
+
+        extractor = LinkedInExtractor(
+            mock_page, stealth_profile=get_stealth_profile("MAXIMUM_STEALTH")
+        )
+        mock_search = AsyncMock()
+        mock_direct = AsyncMock()
+        monkeypatch.setattr(extractor, "_navigate_via_search", mock_search)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", mock_direct)
+
+        await extractor._navigate_to_page(
+            "https://www.linkedin.com/in/janedoe/details/experience/"
+        )
+
+        mock_search.assert_not_awaited()
+        mock_direct.assert_awaited_once()
+
+
+class TestNavigateViaSearch:
+    """_navigate_via_search's own fallback chain, isolated from
+    _navigate_to_page's branch logic above."""
+
+    def _search_page(self, *, search_box_present=True, result_present=True):
+        page = MagicMock()
+        page.goto = AsyncMock()
+        page.title = AsyncMock(return_value="LinkedIn")
+        page.evaluate = AsyncMock(return_value="")
+        page.keyboard = MagicMock()
+        page.keyboard.type = AsyncMock()
+        page.keyboard.press = AsyncMock()
+        page.wait_for_load_state = AsyncMock()
+        page.main_frame = object()
+        page.on = MagicMock()
+        page.remove_listener = MagicMock()
+        page.url = "https://www.linkedin.com/in/janedoe/"
+        page.viewport_size = {"width": 1280, "height": 720}
+        page.mouse = MagicMock()
+        page.mouse.move = AsyncMock()
+        page.mouse.click = AsyncMock()
+
+        search_locator = MagicMock()
+        search_locator.count = AsyncMock(return_value=1 if search_box_present else 0)
+        search_locator.first = search_locator
+        search_locator.click = AsyncMock()
+        search_locator.fill = AsyncMock()
+        search_locator.is_visible = AsyncMock(return_value=True)
+        search_locator.bounding_box = AsyncMock(
+            return_value={"x": 0, "y": 0, "width": 10, "height": 10}
+        )
+        search_locator.scroll_into_view_if_needed = AsyncMock()
+
+        result_locator = MagicMock()
+        result_locator.count = AsyncMock(return_value=1 if result_present else 0)
+        result_locator.first = result_locator
+        result_locator.is_visible = AsyncMock(return_value=True)
+        result_locator.bounding_box = AsyncMock(
+            return_value={"x": 0, "y": 0, "width": 10, "height": 10}
+        )
+        result_locator.scroll_into_view_if_needed = AsyncMock()
+        result_locator.click = AsyncMock()
+
+        empty_locator = MagicMock()
+        empty_locator.count = AsyncMock(return_value=0)
+
+        def locator_side_effect(selector):
+            if "janedoe" in selector or "entity-result" in selector:
+                return result_locator
+            if "Search" in selector or "search-global" in selector:
+                return search_locator
+            return empty_locator
+
+        page.locator = MagicMock(side_effect=locator_side_effect)
+        return page
+
+    async def test_happy_path_returns_true_and_lands_on_target(self, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
+        )
+        page = self._search_page()
+        extractor = LinkedInExtractor(page)
+        mock_direct = AsyncMock()
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", mock_direct)
+
+        result = await extractor._navigate_via_search(
+            "janedoe", "https://www.linkedin.com/in/janedoe"
+        )
+
+        assert result is True
+        mock_direct.assert_awaited_once_with(
+            "https://www.linkedin.com/search/results/people/"
+        )
+
+    async def test_search_page_navigation_failure_returns_false(self, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
+        )
+        page = self._search_page()
+        extractor = LinkedInExtractor(page)
+        monkeypatch.setattr(
+            extractor,
+            "_goto_with_auth_checks",
+            AsyncMock(side_effect=Exception("nav failed")),
+        )
+
+        result = await extractor._navigate_via_search(
+            "janedoe", "https://www.linkedin.com/in/janedoe"
+        )
+
+        assert result is False
+
+    async def test_no_search_box_found_returns_false(self, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
+        )
+        page = self._search_page(search_box_present=False)
+        extractor = LinkedInExtractor(page)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", AsyncMock())
+
+        result = await extractor._navigate_via_search(
+            "janedoe", "https://www.linkedin.com/in/janedoe"
+        )
+
+        assert result is False
+
+    async def test_no_matching_result_link_returns_false(self, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
+        )
+        page = self._search_page(result_present=False)
+        extractor = LinkedInExtractor(page)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", AsyncMock())
+
+        result = await extractor._navigate_via_search(
+            "janedoe", "https://www.linkedin.com/in/janedoe"
+        )
+
+        assert result is False
+
+    async def test_landing_on_unexpected_url_returns_false(self, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
+        )
+        page = self._search_page()
+        page.url = "https://www.linkedin.com/in/someone-else/"
+        extractor = LinkedInExtractor(page)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", AsyncMock())
+
+        result = await extractor._navigate_via_search(
+            "janedoe", "https://www.linkedin.com/in/janedoe"
+        )
+
+        assert result is False
+
+    async def test_auth_barrier_after_landing_raises_not_returns_false(
+        self, monkeypatch
+    ):
+        """A real detected barrier is a signal worth surfacing, not a
+        reason to silently fall back to direct navigation. A login-title
+        match is classified BLOCK by core.auth's AuthBarrierKind (a hard
+        wall, not a recoverable challenge) -- see test_core_auth.py's
+        TestAuthBarrierKind for the CHALLENGE-vs-BLOCK classification
+        itself; this test only cares that SOME barrier subtype raises."""
+        from linkedin_mcp_server.core.exceptions import BlockError
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
+        )
+        page = self._search_page()
+        page.title = AsyncMock(return_value="Sign In | LinkedIn")
+        extractor = LinkedInExtractor(page)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", AsyncMock())
+
+        with pytest.raises(BlockError):
+            await extractor._navigate_via_search(
+                "janedoe", "https://www.linkedin.com/in/janedoe"
+            )
+
+
 class TestExtractPage:
     async def test_extract_page_returns_text(self, mock_page):
         mock_page.evaluate = AsyncMock(
