@@ -1319,3 +1319,44 @@ async def test_validate_uses_local_manager_not_singleton(tmp_path):
 
     # The singleton globals must remain untouched by the import validator.
     assert browser_module._browser is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_get_or_create_creates_single_browser(tmp_path):
+    """Two concurrent callers (a tool call and a background caller resuming at
+    startup) must not both launch a browser against the same profile."""
+    _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+    calls = {"n": 0}
+    bridge_started = asyncio.Event()
+    release_bridge = asyncio.Event()
+    sentinel = _make_mock_browser()
+
+    async def fake_bridge(*_args, **_kwargs):
+        calls["n"] += 1
+        bridge_started.set()
+        await release_bridge.wait()
+        return sentinel
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="macos-arm64-host",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser._bridge_runtime_profile",
+            side_effect=fake_bridge,
+        ),
+    ):
+        first_task = asyncio.create_task(get_or_create_browser())
+        await asyncio.wait_for(bridge_started.wait(), timeout=1)
+        second_task = asyncio.create_task(get_or_create_browser())
+        await asyncio.sleep(0)
+
+        assert calls["n"] == 1
+        assert not second_task.done()
+
+        release_bridge.set()
+        first, second = await asyncio.gather(first_task, second_task)
+
+    assert first is sentinel and second is sentinel
+    assert calls["n"] == 1
