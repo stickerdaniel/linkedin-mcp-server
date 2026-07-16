@@ -99,6 +99,28 @@ _DIALOG_PREMIUM_LINK_SELECTOR = (
 )
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
+# Structural fingerprint for the custom-invite dialog. Locale-independent per
+# the Scraping Rules: it reads only structural markers, never button or label
+# text. The generic dialog selector above also matches the message composer
+# and other portal dialogs, so before submitting an invite we confirm the open
+# dialog looks like the invite dialog:
+#   * no [contenteditable="true"] and no a[href*="/messaging/"] — the invite
+#     note is a plain <textarea>, so either marks a stale message-compose
+#     overlay (issue #432 collision class), not the invite dialog;
+#   * at least two button/[role="button"] elements — the invite dialog always
+#     renders a dismiss control plus one or more action buttons, so a lower
+#     count marks some other single-purpose dialog we must not submit.
+_INVITE_DIALOG_FINGERPRINT_JS = r"""
+(() => {
+  const dialog = document.querySelector('dialog[open], [role="dialog"]');
+  if (!dialog) return false;
+  if (dialog.querySelector('[contenteditable="true"]')) return false;
+  if (dialog.querySelector('a[href*="/messaging/"]')) return false;
+  const buttons = dialog.querySelectorAll('button, [role="button"]');
+  return buttons.length >= 2;
+})
+"""
+
 _MESSAGING_COMPOSE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]'
 _MESSAGING_COMPOSE_SELECTOR = (
     'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"]'
@@ -130,8 +152,8 @@ _MESSAGING_CLOSE_SELECTOR = (
 # action-root predicate (>=2 interactive children, >=1 button). This is
 # the top-card action row regardless of LinkedIn's class names.
 #
-# Inlined into both _ACTION_SIGNALS_JS and _OPEN_MORE_BUTTON_JS so a
-# single change to the heuristic propagates to both call sites.
+# Inlined into _ACTION_SIGNALS_JS so a single change to the heuristic
+# propagates to every call site.
 _FIND_ACTION_ROOT_FN_JS = r"""
 function findActionRoot(main) {
   const composeAnchors = main.querySelectorAll('a[href*="/messaging/compose/"]');
@@ -296,30 +318,6 @@ _ACTION_SIGNALS_JS = (
     hasLabeledActionAnchor,
     hasIncomingActionRow: !!findIncomingActionRow(main),
   };
-})
-"""
-)
-
-# Open the profile's More button, located inside the action root via the
-# aria-expanded attribute. The aria-expanded attribute uniquely identifies
-# the menu opener without text labels (the More button has no aria-label,
-# while Follow/Connect/Pending buttons do — the inverse pattern). Returns
-# true iff the click landed; the caller waits for [role='menu'] visibility
-# before re-scanning signals.
-_OPEN_MORE_BUTTON_JS = (
-    r"""
-(() => {
-"""
-    + _FIND_ACTION_ROOT_FN_JS
-    + r"""
-  const main = document.querySelector('main');
-  if (!main) return false;
-  const actionRoot = findActionRoot(main);
-  if (!actionRoot) return false;
-  const moreBtn = actionRoot.querySelector('button[aria-expanded]');
-  if (!moreBtn) return false;
-  moreBtn.click();
-  return true;
 })
 """
 )
@@ -954,6 +952,24 @@ class LinkedInExtractor:
         except Exception:
             return False
 
+    async def _invite_dialog_fingerprint_ok(self) -> bool:
+        """Return whether the open dialog is plausibly the invite dialog.
+
+        Locale-independent structural guard (see
+        ``_INVITE_DIALOG_FINGERPRINT_JS``): the generic dialog selector can
+        also match a stale message-compose overlay or another portal dialog
+        after the deeplink navigation, so this rejects any open dialog that
+        carries a contenteditable composer or a ``/messaging/`` link, or that
+        has fewer than two buttons. Fails closed — any evaluate error is
+        treated as a failed fingerprint so a check that cannot run never
+        authorizes a click.
+        """
+        try:
+            return bool(await self._page.evaluate(_INVITE_DIALOG_FINGERPRINT_JS))
+        except Exception:
+            logger.debug("Invite-dialog fingerprint check failed", exc_info=True)
+            return False
+
     async def _click_dialog_primary_button(self, *, timeout: int = 5000) -> bool:
         """Click the last (primary/Send) button in the open dialog.
 
@@ -1038,35 +1054,6 @@ class LinkedInExtractor:
         except Exception:
             pass
         return "LinkedIn Premium upsell modal detected."
-
-    async def _open_more_menu(self) -> bool:
-        """Open the profile's More (three-dot) menu in a locale-independent way.
-
-        Locates the More button structurally as ``actionRoot
-        button[aria-expanded]`` — the action-root walk discriminates the
-        profile More button from any other More-labelled buttons elsewhere
-        on the page (notably the video-player More on profiles with
-        background videos), and ``aria-expanded`` distinguishes the menu
-        opener from primary action buttons (which carry ``aria-label``
-        instead). Returns True iff the click landed and a ``[role='menu']``
-        became visible. The caller is expected to follow up with
-        ``_read_action_signals`` to scan the now-rendered menu items for
-        the vanityName invite anchor; this helper does not classify menu
-        contents itself.
-        """
-        try:
-            clicked = await self._page.evaluate(_OPEN_MORE_BUTTON_JS)
-        except Exception:
-            logger.debug("More button click via JS failed", exc_info=True)
-            return False
-        if not clicked:
-            return False
-        try:
-            await self._page.wait_for_selector("[role='menu']", timeout=3000)
-            return True
-        except PlaywrightTimeoutError:
-            logger.debug("More menu did not appear after click")
-            return False
 
     async def _click_incoming_accept(self) -> bool:
         """Click Accept on an incoming-request profile, locale-independently.
@@ -1839,6 +1826,14 @@ class LinkedInExtractor:
         if not await self._dialog_is_open(timeout=5000):
             return False, False, None
 
+        # Structural write-gate: confirm the open dialog is the invite dialog
+        # before any click, so a stale message-compose overlay (issue #432) or
+        # a mis-classified profile's unrelated dialog cannot be submitted.
+        if not await self._invite_dialog_fingerprint_ok():
+            logger.info("Open dialog failed the invite-dialog fingerprint; not sending")
+            await self._dismiss_dialog()
+            return False, False, None
+
         note_filled = False
         if note:
             textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
@@ -1941,57 +1936,6 @@ class LinkedInExtractor:
 
         return True, note_filled, None
 
-    async def _probe_invite_note_limit(self) -> str | None:
-        """Open the note editor only to read a Premium note-quota message.
-
-        This is used when the profile did not expose the normal invite anchor.
-        Navigating to the custom-invite deeplink and opening the note editor is
-        non-destructive, but submitting would weaken the write gate for
-        follow-only/unavailable profiles. Therefore this helper never clicks
-        the primary Send button: it returns the raw LinkedIn Premium dialog
-        text if LinkedIn shows it while opening the note editor, then
-        dismisses the dialog.
-        """
-        if not await self._dialog_is_open(timeout=5000):
-            return None
-        note_limit_message = await self._get_premium_upsell_message(timeout=500)
-        if note_limit_message is not None:
-            await self._dismiss_dialog()
-            return note_limit_message
-
-        try:
-            textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
-        except Exception:
-            textarea_count = 0
-        if textarea_count > 0:
-            await self._dismiss_dialog()
-            return None
-
-        buttons = self._page.locator(
-            f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-        )
-        try:
-            btn_count = await buttons.count()
-        except Exception:
-            btn_count = 0
-        if btn_count >= 3:
-            try:
-                await buttons.nth(btn_count - 2).click()
-            except Exception:
-                logger.debug("Could not open invite note editor", exc_info=True)
-            try:
-                await self._page.wait_for_selector(
-                    _DIALOG_TEXTAREA_SELECTOR,
-                    state="visible",
-                    timeout=3000,
-                )
-            except PlaywrightTimeoutError:
-                logger.debug("Note textarea did not appear during quota probe")
-
-        note_limit_message = await self._get_premium_upsell_message()
-        await self._dismiss_dialog()
-        return note_limit_message
-
     async def connect_with_person(
         self,
         username: str,
@@ -2002,16 +1946,17 @@ class LinkedInExtractor:
 
         Detection is locale-independent: classification uses URL patterns
         (vanityName invite anchor, edit-intro anchor) and ARIA-attribute
-        presence on top-card buttons (`aria-label` for primary actions,
-        `aria-expanded` for the More-menu opener). The deeplink-submit
-        path is gated strictly on `has_invite_anchor=True` *after* the
-        optional More-menu retry, so Pending and follow-only profiles
-        cannot trigger a write. If a note was requested but no invite
-        anchor is visible, the custom-invite deeplink may still be opened
-        only as a non-submitting note-quota probe. Sending itself uses the
-        ``/preload/custom-invite/?vanityName=`` deeplink, which works
-        whether the user-visible Connect button is in the action bar
-        or buried under the More menu.
+        presence on top-card buttons (`aria-label` for primary actions).
+        Self, already-connected, pending and incoming-request states are
+        resolved from those signals and return before any write. Every
+        other state (connectable and follow-only) routes through the
+        ``/preload/custom-invite/?vanityName=`` deeplink, which opens the
+        invite dialog whether the user-visible Connect control is a
+        top-card anchor or a button buried under the More menu.
+        ``_submit_invite_dialog`` is the sole write-gate: it fingerprints
+        the open dialog structurally and returns without sending when no
+        invite dialog opens, so follow-only and mis-classified profiles
+        cannot trigger a stray request.
         """
         from linkedin_mcp_server.scraping.connection import detect_connection_state
 
@@ -2097,59 +2042,23 @@ class LinkedInExtractor:
                 profile=verified_text,
             )
 
-        # Follow-only profiles may have Connect hidden under the More menu
-        # (high-follower / creator-mode profiles). Try opening it and
-        # re-reading signals; if the vanityName invite anchor surfaces in
-        # the menu, we can proceed with the deeplink. (The
-        # has_invite_anchor=False guard is implicit: detect_connection_state
-        # only returns "follow_only" after the has_invite_anchor branch
-        # has already failed, so reaching this branch already implies it.)
-        if state == "follow_only":
-            opened = await self._open_more_menu()
-            if opened:
-                signals = await self._read_action_signals(username)
-                # Close the menu before any subsequent navigation so it
-                # doesn't intercept the upcoming page transition.
-                try:
-                    await self._page.keyboard.press("Escape")
-                except Exception:
-                    logger.debug("Escape after More-menu reread failed", exc_info=True)
-                logger.info("Post-More signals for %s: signals=%s", username, signals)
-
+        # Connectable and follow-only states both route through the
+        # custom-invite deeplink. Follow-only profiles (high-follower /
+        # creator-mode) commonly keep Connect inside the More menu as a button
+        # rather than a top-card invite anchor, so has_invite_anchor stays
+        # False; the deeplink opens the invite dialog regardless of button
+        # placement. _submit_invite_dialog is the write-gate: it fingerprints
+        # the dialog and returns without sending when no invite dialog opens,
+        # so a genuinely follow-only or mis-classified profile cannot send.
         invite_url = (
             "https://www.linkedin.com/preload/custom-invite/"
             f"?vanityName={quote_plus(username)}"
         )
 
-        # Write-gate: submit only when LinkedIn exposed the vanityName invite
-        # anchor. When a note is requested without that anchor, open the
-        # deeplink only as a non-submitting probe so we can report the Premium
-        # note-quota block without accidentally sending from a follow-only or
-        # otherwise unavailable profile.
-        if not signals.has_invite_anchor:
-            if note:
-                logger.info(
-                    "No visible invite anchor for %s; probing custom-invite deeplink "
-                    "because a personalized note was requested",
-                    username,
-                )
-                await self._navigate_to_page(invite_url)
-                note_limit_message = await self._probe_invite_note_limit()
-                if note_limit_message is not None:
-                    return _connection_result(
-                        url,
-                        "custom_note_limit_reached",
-                        note_limit_message,
-                        note_sent=False,
-                        profile=page_text,
-                    )
-            return _connection_result(
-                url,
-                "connect_unavailable",
-                "LinkedIn did not expose a usable Connect action for this profile.",
-                profile=page_text,
-            )
-
+        # Clear any lingering message-compose overlay before the deeplink
+        # navigation so a stale composer cannot satisfy the generic dialog
+        # selector inside _submit_invite_dialog (issue #432 collision class).
+        await self._dismiss_message_ui()
         await self._navigate_to_page(invite_url)
 
         submitted, note_sent, note_limit_message = await self._submit_invite_dialog(

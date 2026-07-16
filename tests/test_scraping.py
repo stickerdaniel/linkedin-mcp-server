@@ -1032,6 +1032,12 @@ class TestConnectWithPerson:
             ),
             patch.object(
                 extractor,
+                "_invite_dialog_fingerprint_ok",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
                 "_click_dialog_primary_button",
                 new_callable=AsyncMock,
                 return_value=True,
@@ -1063,6 +1069,12 @@ class TestConnectWithPerson:
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
                 extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor,
+                "_invite_dialog_fingerprint_ok",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor,
@@ -1123,6 +1135,12 @@ class TestConnectWithPerson:
         with (
             patch.object(
                 extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor,
+                "_invite_dialog_fingerprint_ok",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor,
@@ -1189,6 +1207,12 @@ class TestConnectWithPerson:
                 # First call: dialog open at entry. Second call: still open
                 # after the keyboard fallback, so sent remains False.
                 side_effect=[True, True],
+            ),
+            patch.object(
+                extractor,
+                "_invite_dialog_fingerprint_ok",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor,
@@ -1278,12 +1302,13 @@ class TestConnectWithPerson:
         assert result["status"] == "connect_unavailable"
         assert "own profile" in result["message"]
 
-    async def test_connect_via_more_menu(self, mock_page):
-        """Follow-primary profile with Connect under More: detection sees
-        no invite anchor initially, _open_more_menu surfaces it, deeplink
-        fires."""
+    async def test_connect_via_deeplink_on_follow_only_profile(self, mock_page):
+        """Issue #454 regression: a follow-primary / creator-mode profile
+        classifies as follow_only (Connect sits in the More menu as a button,
+        no top-card invite anchor), yet the custom-invite deeplink still opens
+        the invite dialog and the request sends. Verification then shows the
+        pending-shape top card, so the result is 'connected'."""
         extractor = LinkedInExtractor(mock_page)
-        # Pre-More: Follow primary, Connect hidden under the More dropdown.
         pre = "Christian\n\n· 2nd\n\nFounder\n\nFollow\nMessage\nMore\n"
         post = "Christian\n\n· 2nd\n\nFounder\n\nMessage\nPending\nMore\n"
 
@@ -1297,27 +1322,22 @@ class TestConnectWithPerson:
                 extractor,
                 "_read_action_signals",
                 new_callable=AsyncMock,
-                # 1st: follow_only (compose+labeled, no invite).
-                # 2nd: post-More reread reveals invite anchor.
-                # 3rd: post-deeplink verification — invite anchor gone.
+                # 1st: follow_only (compose + labeled button, no invite anchor).
+                # 2nd: post-send verification — Pending <a>, invite anchor gone.
                 side_effect=[
                     self._signals(compose=True, labeled_action=True),
-                    self._signals(invite=True, compose=True, labeled_action=True),
-                    self._signals(),
+                    self._signals(compose=True, labeled_anchor=True),
                 ],
             ),
-            patch.object(
-                extractor,
-                "_open_more_menu",
-                new_callable=AsyncMock,
-                return_value=True,
-            ) as mock_open_more,
             patch.object(
                 extractor, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
             patch.object(
+                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
                 extractor,
-                "_dialog_is_open",
+                "_invite_dialog_fingerprint_ok",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -1331,108 +1351,19 @@ class TestConnectWithPerson:
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "connected"
-        mock_open_more.assert_awaited_once()
-        # Deeplink fired exactly once.
+        # Deeplink fired exactly once, straight to the custom-invite URL.
         assert mock_nav.await_count == 1
         await_args = mock_nav.await_args
         assert await_args is not None
         assert "preload/custom-invite" in await_args.args[0]
 
-    async def test_follow_only_after_more_does_not_send(self, mock_page):
-        """Pending or genuinely follow-only profile: invite anchor never
-        appears even after More-menu open. Critical write-gate guardrail —
-        no deeplink fires, no connection request goes out."""
+    async def test_follow_only_no_dialog_returns_connect_unavailable(self, mock_page):
+        """Genuinely follow-only profile: the deeplink opens no invite dialog,
+        so _submit_invite_dialog's write-gate returns without sending and the
+        result is connect_unavailable. The deeplink navigation now happens
+        (the pre-gate is gone), but nothing is submitted."""
         extractor = LinkedInExtractor(mock_page)
         text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
-
-        with (
-            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
-            patch.object(
-                extractor,
-                "_read_action_signals",
-                new_callable=AsyncMock,
-                # Both reads (initial + post-More) show no invite anchor.
-                side_effect=[
-                    self._signals(compose=True, labeled_action=True),
-                    self._signals(compose=True, labeled_action=True),
-                ],
-            ),
-            patch.object(
-                extractor,
-                "_open_more_menu",
-                new_callable=AsyncMock,
-                return_value=True,
-            ) as mock_open_more,
-            patch.object(
-                extractor, "_navigate_to_page", new_callable=AsyncMock
-            ) as mock_nav,
-            patch.object(
-                extractor, "_submit_invite_dialog", new_callable=AsyncMock
-            ) as mock_submit,
-        ):
-            result = await extractor.connect_with_person("testuser")
-
-        assert result["status"] == "connect_unavailable"
-        assert result.get("note_sent") is False or "note_sent" not in result
-        mock_open_more.assert_awaited_once()
-        # Critical: deeplink must NOT fire and dialog must NOT be submitted.
-        mock_nav.assert_not_awaited()
-        mock_submit.assert_not_awaited()
-
-    async def test_follow_only_with_note_reports_note_limit_from_deeplink_probe(
-        self, mock_page
-    ):
-        """A requested note may reveal Premium quota without submitting."""
-        extractor = LinkedInExtractor(mock_page)
-        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
-
-        with (
-            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
-            patch.object(
-                extractor,
-                "_read_action_signals",
-                new_callable=AsyncMock,
-                side_effect=[
-                    self._signals(compose=True, labeled_action=True),
-                    self._signals(compose=True, labeled_action=True),
-                ],
-            ),
-            patch.object(
-                extractor,
-                "_open_more_menu",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
-            patch.object(
-                extractor, "_navigate_to_page", new_callable=AsyncMock
-            ) as mock_nav,
-            patch.object(
-                extractor,
-                "_probe_invite_note_limit",
-                new_callable=AsyncMock,
-                return_value="Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
-            ) as mock_probe,
-            patch.object(
-                extractor, "_submit_invite_dialog", new_callable=AsyncMock
-            ) as mock_submit,
-        ):
-            result = await extractor.connect_with_person("testuser", note="Hello")
-
-        assert result["status"] == "custom_note_limit_reached"
-        assert (
-            result["message"]
-            == "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
-        )
-        assert result["note_sent"] is False
-        mock_nav.assert_awaited_once()
-        mock_probe.assert_awaited_once()
-        mock_submit.assert_not_awaited()
-
-    async def test_more_menu_unavailable_does_not_send(self, mock_page):
-        """Action root present but no More button (unusual but possible):
-        _open_more_menu returns False, no retry, no deeplink fires."""
-        extractor = LinkedInExtractor(mock_page)
-        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\n"
 
         with (
             patch.object(extractor, "scrape_person", self._mock_scrape(text)),
@@ -1443,23 +1374,145 @@ class TestConnectWithPerson:
                 return_value=self._signals(compose=True, labeled_action=True),
             ),
             patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=False
+            ),
+            patch.object(
+                extractor, "_click_dialog_primary_button", new_callable=AsyncMock
+            ) as mock_click,
+            patch.object(extractor, "_dismiss_dialog", new_callable=AsyncMock),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connect_unavailable"
+        assert result.get("note_sent") is False or "note_sent" not in result
+        # The deeplink is attempted now, but no request is submitted.
+        mock_nav.assert_awaited_once()
+        mock_click.assert_not_awaited()
+
+    async def test_follow_only_with_note_reports_note_limit(self, mock_page):
+        """Follow-only profile with a requested note: the deeplink opens the
+        invite dialog, but LinkedIn's Premium note-quota upsell blocks it.
+        _submit_invite_dialog surfaces that as (False, False, <upsell>), so the
+        result is custom_note_limit_reached with note_sent False and nothing
+        sent."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
+        upsell = (
+            "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
+        )
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
                 extractor,
-                "_open_more_menu",
+                "_read_action_signals",
                 new_callable=AsyncMock,
-                return_value=False,
+                return_value=self._signals(compose=True, labeled_action=True),
             ),
             patch.object(
                 extractor, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
             patch.object(
-                extractor, "_submit_invite_dialog", new_callable=AsyncMock
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(False, False, upsell),
             ) as mock_submit,
+        ):
+            result = await extractor.connect_with_person("testuser", note="Hello")
+
+        assert result["status"] == "custom_note_limit_reached"
+        assert result["message"] == upsell
+        assert result["note_sent"] is False
+        mock_nav.assert_awaited_once()
+        mock_submit.assert_awaited_once_with("Hello")
+
+    async def test_submit_invite_dialog_rejects_non_invite_dialog(self, mock_page):
+        """Fingerprint guard: a dialog is open but fails the invite-dialog
+        fingerprint (e.g. a stale message-compose overlay carrying a
+        contenteditable box). _submit_invite_dialog must dismiss it and return
+        without clicking any button, so no stray request is sent."""
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch.object(
+                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor,
+                "_invite_dialog_fingerprint_ok",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_click_dialog_primary_button", new_callable=AsyncMock
+            ) as mock_click,
+            patch.object(
+                extractor, "_dismiss_dialog", new_callable=AsyncMock
+            ) as mock_dismiss,
+        ):
+            result = await extractor._submit_invite_dialog(None)
+
+        assert result == (False, False, None)
+        mock_dismiss.assert_awaited_once()
+        mock_click.assert_not_awaited()
+
+    async def test_connect_dismisses_and_reports_unavailable_on_wrong_dialog(
+        self, mock_page
+    ):
+        """A mis-classified profile whose deeplink lands on some non-invite
+        dialog: the fingerprint fails, the dialog is dismissed, and the tool
+        reports connect_unavailable without submitting anything."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(invite=True),
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor,
+                "_invite_dialog_fingerprint_ok",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_click_dialog_primary_button", new_callable=AsyncMock
+            ) as mock_click,
+            patch.object(
+                extractor, "_dismiss_dialog", new_callable=AsyncMock
+            ) as mock_dismiss,
         ):
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "connect_unavailable"
-        mock_nav.assert_not_awaited()
-        mock_submit.assert_not_awaited()
+        mock_dismiss.assert_awaited_once()
+        mock_click.assert_not_awaited()
+
+    async def test_invite_dialog_fingerprint_reads_evaluate_result(self, mock_page):
+        """_invite_dialog_fingerprint_ok returns the boolean of the structural
+        JS check and fails closed when evaluate raises."""
+        extractor = LinkedInExtractor(mock_page)
+
+        mock_page.evaluate = AsyncMock(return_value=True)
+        assert await extractor._invite_dialog_fingerprint_ok() is True
+
+        mock_page.evaluate = AsyncMock(return_value=False)
+        assert await extractor._invite_dialog_fingerprint_ok() is False
+
+        mock_page.evaluate = AsyncMock(side_effect=RuntimeError("boom"))
+        assert await extractor._invite_dialog_fingerprint_ok() is False
 
     async def test_returns_pending(self, mock_page):
         """Profile with a pending invitation: detected via labeled <a> in
@@ -1764,6 +1817,12 @@ class TestConnectWithPerson:
         with (
             patch.object(
                 extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor,
+                "_invite_dialog_fingerprint_ok",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor,
