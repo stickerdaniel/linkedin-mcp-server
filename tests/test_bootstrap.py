@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import multiprocessing
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,12 +12,21 @@ import pytest
 from linkedin_mcp_server.bootstrap import (
     AuthState,
     _auto_import_allowed,
+    _camoufox_assets_ready,
+    _camoufox_binary_path,
+    _camoufox_install_lock,
     _force_move_auth_state_aside,
     _has_install_for,
     _patchright_install_targets,
+    _refresh_background_task_state,
+    _remove_incomplete_camoufox_assets,
+    _run_camoufox_fetch,
+    _write_camoufox_ready_marker,
     _start_login_if_needed,
+    _try_auto_import_session,
     browser_setup_ready,
     browsers_path,
+    camoufox_ready,
     configure_browser_environment,
     ensure_browser_installed,
     ensure_tool_ready_or_raise,
@@ -38,6 +48,7 @@ from linkedin_mcp_server.core.exceptions import NetworkError
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
     AuthenticationStartedError,
+    BrowserSetupFailedError,
     BrowserSetupInProgressError,
     CookieDecryptionError,
     DockerHostLoginRequiredError,
@@ -48,6 +59,57 @@ from linkedin_mcp_server.session_state import (
     portable_cookie_path,
     source_state_path,
 )
+
+
+def _isolate_fetch_assets(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    install_dir: Path | None = None,
+) -> tuple[Path, Path]:
+    """Keep failed-fetch cleanup away from the developer's real Camoufox cache."""
+    import camoufox.pkgman as pkgman
+
+    monkeypatch.setattr(
+        pkgman, "INSTALL_DIR", install_dir or tmp_path / "camoufox-cache"
+    )
+    mmdb_path = tmp_path / "GeoLite2-City.mmdb"
+    mmdb_path.write_bytes(b"valid-looking preexisting database")
+    addon_dir = tmp_path / "fetch-assets" / "addons" / "UBO"
+    addon_dir.mkdir(parents=True)
+    (addon_dir / "manifest.json").write_text(
+        json.dumps({"manifest_version": 2, "name": "uBlock Origin", "version": "1"})
+    )
+    (addon_dir / "possibly-truncated.js").write_text("partial")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.bootstrap._camoufox_browser_dir", lambda: None
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.bootstrap._camoufox_mmdb_path", lambda: mmdb_path
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.bootstrap._camoufox_mmdb_ready", lambda _path: True
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.bootstrap._camoufox_addon_dirs",
+        lambda _browser_dir: [addon_dir],
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.bootstrap._camoufox_components_ready", lambda: True
+    )
+    return mmdb_path, addon_dir
+
+
+def _camoufox_install_lock_probe(lock_path: Path, connection, release_event) -> None:
+    async def hold_lock() -> None:
+        async with _camoufox_install_lock(lock_path):
+            connection.send("acquired")
+            release_event.wait(timeout=10)
+
+    try:
+        asyncio.run(hold_lock())
+    finally:
+        connection.close()
 
 
 def _patch_inline_wait(monkeypatch, seconds: float, *, auto_import=False) -> None:
@@ -156,6 +218,7 @@ class TestBootstrap:
             login_task.cancel()
 
     async def test_docker_requires_host_login(self, monkeypatch):
+        _set_headless(monkeypatch, True)
         monkeypatch.setattr("linkedin_mcp_server.bootstrap._auth_ready", lambda: False)
         initialize_bootstrap("docker")
         with pytest.raises(DockerHostLoginRequiredError):
@@ -212,7 +275,17 @@ def _make_auth_ready(profile_dir):
     (profile_dir / "Default" / "Cookies").write_text("placeholder")
     cookie_path = portable_cookie_path(profile_dir)
     cookie_path.parent.mkdir(parents=True, exist_ok=True)
-    cookie_path.write_text(json.dumps([{"name": "li_at", "domain": ".linkedin.com"}]))
+    cookie_path.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "li_at",
+                    "domain": ".linkedin.com",
+                    "value": "session",
+                }
+            ]
+        )
+    )
     source_state_path(profile_dir).write_text(
         json.dumps(
             {
@@ -231,28 +304,35 @@ class TestInvalidateAuthAndTriggerRelogin:
     async def test_force_moves_files_and_starts_login(
         self, isolate_profile_dir, monkeypatch
     ):
-        """Stale-but-present profile files are moved aside and login starts."""
+        """Force-move happens inside the cross-process-locked login task."""
         _make_auth_ready(isolate_profile_dir)
 
-        async def fake_login_flow():
-            return None
+        async def fake_login(_profile_dir):
+            assert not isolate_profile_dir.exists()
+            assert not portable_cookie_path(isolate_profile_dir).exists()
+            assert not source_state_path(isolate_profile_dir).exists()
+            return True
 
         monkeypatch.setattr(
-            "linkedin_mcp_server.bootstrap._run_login_flow", fake_login_flow
+            "linkedin_mcp_server.bootstrap.interactive_login", fake_login
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._skips_managed_binary", lambda: True
         )
         initialize_bootstrap("managed")
 
         with pytest.raises(AuthenticationStartedError, match="Session expired"):
             await invalidate_auth_and_trigger_relogin()
 
-        # Profile files should have been moved aside.
-        assert not isolate_profile_dir.exists()
-        assert not portable_cookie_path(isolate_profile_dir).exists()
-        assert not source_state_path(isolate_profile_dir).exists()
-
         state = get_bootstrap_state()
         assert state.auth_state is AuthState.STARTING
         assert state.login_task is not None
+        await state.login_task
+
+        # Files were moved only after the task acquired the source lock.
+        assert not isolate_profile_dir.exists()
+        assert not portable_cookie_path(isolate_profile_dir).exists()
+        assert not source_state_path(isolate_profile_dir).exists()
 
     async def test_login_in_progress_does_not_move_files(
         self, isolate_profile_dir, monkeypatch
@@ -326,6 +406,23 @@ def _set_headless(monkeypatch, headless: bool) -> None:
     """Point bootstrap.get_config() at a config with the given headless mode."""
     config = SimpleNamespace(
         browser=SimpleNamespace(headless=headless, chrome_path=None),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+
+
+def _set_camoufox(monkeypatch, *, chrome_path: str | None = None) -> None:
+    """Point bootstrap at a complete Camoufox config test double."""
+    config = SimpleNamespace(
+        browser=SimpleNamespace(
+            browser_engine="camoufox",
+            chrome_path=chrome_path,
+            headless=True,
+            eager_full_chromium=False,
+            login_inline_wait_seconds=0,
+            auto_import_from_browser=False,
+        ),
+        server=SimpleNamespace(transport="stdio", host="127.0.0.1"),
+        is_interactive=False,
     )
     monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
 
@@ -523,6 +620,1059 @@ class TestShellAndFullReady:
         _write_metadata(install_metadata_path(), bdir, version=2)
         assert shell_ready() is False
         assert full_chromium_ready() is False
+
+
+class TestCamoufoxProvisioning:
+    """Camoufox has its own readiness gate and fetch path, never Patchright's."""
+
+    def test_binary_path_uses_read_only_version_probe(self, monkeypatch, tmp_path):
+        import camoufox.pkgman as pkgman
+
+        calls: list[Path] = []
+
+        class SupportedVersion:
+            @staticmethod
+            def from_path(path):
+                calls.append(path)
+                return SimpleNamespace(is_supported=lambda: True)
+
+        monkeypatch.setattr(pkgman, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(pkgman, "Version", SupportedVersion)
+        monkeypatch.setattr(pkgman, "OS_NAME", "lin")
+        monkeypatch.setattr(pkgman, "LAUNCH_FILE", {"lin": "camoufox-bin"})
+
+        assert _camoufox_binary_path() == tmp_path / "camoufox-bin"
+        assert calls == [tmp_path]
+
+    def test_ready_requires_executable_file(self, monkeypatch, tmp_path):
+        executable = tmp_path / "camoufox-bin"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_binary_path",
+            lambda: executable,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_assets_ready", lambda: True
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_ready_marker_valid", lambda: True
+        )
+
+        assert camoufox_ready() is False
+        executable.write_text("browser")
+        if os.name != "nt":
+            executable.chmod(0o600)
+            assert camoufox_ready() is False
+            executable.chmod(0o700)
+        assert camoufox_ready() is True
+
+        executable.write_bytes(b"")
+        assert camoufox_ready() is False
+
+    def test_ready_requires_atomic_completion_marker(self, monkeypatch, tmp_path):
+        executable = tmp_path / "camoufox-bin"
+        executable.write_text("browser")
+        if os.name != "nt":
+            executable.chmod(0o700)
+        marker_valid = False
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_binary_path",
+            lambda: executable,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_assets_ready", lambda: True
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_ready_marker_valid",
+            lambda: marker_valid,
+        )
+
+        assert camoufox_ready() is False
+        marker_valid = True
+        assert camoufox_ready() is True
+
+    def test_assets_require_valid_mmdb_and_complete_default_addon(
+        self, monkeypatch, tmp_path
+    ):
+        browser_dir = tmp_path / "browser"
+        addon_dir = browser_dir / "addons" / "UBO"
+        addon_dir.mkdir(parents=True)
+        mmdb_path = tmp_path / "GeoLite2-City.mmdb"
+        mmdb_path.write_bytes(b"validated by stub")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_browser_dir",
+            lambda: browser_dir,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_mmdb_path", lambda: mmdb_path
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_mmdb_ready", lambda path: True
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_addon_dirs",
+            lambda _browser_dir: [addon_dir],
+        )
+
+        assert _camoufox_assets_ready() is False
+        (addon_dir / "manifest.json").write_text(
+            json.dumps({"manifest_version": 2, "name": "uBlock Origin", "version": "1"})
+        )
+        assert _camoufox_assets_ready() is True
+
+    def test_incomplete_assets_are_removed_before_fetch(self, monkeypatch, tmp_path):
+        browser_dir = tmp_path / "browser"
+        addon_dir = browser_dir / "addons" / "UBO"
+        addon_dir.mkdir(parents=True)
+        (addon_dir / "partial.xpi").write_bytes(b"partial")
+        mmdb_path = tmp_path / "GeoLite2-City.mmdb"
+        mmdb_path.write_bytes(b"partial")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_browser_dir",
+            lambda: browser_dir,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_mmdb_path", lambda: mmdb_path
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_mmdb_ready", lambda path: False
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_addon_dirs",
+            lambda _browser_dir: [addon_dir],
+        )
+
+        _remove_incomplete_camoufox_assets()
+
+        assert not mmdb_path.exists()
+        assert not addon_dir.exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX execute bits only")
+    async def test_fetch_repairs_supported_non_executable_cache(
+        self, monkeypatch, tmp_path
+    ):
+        import camoufox.pkgman as pkgman
+
+        executable = tmp_path / "camoufox-bin"
+        executable.write_text("browser")
+        executable.chmod(0o600)
+        metadata = tmp_path / "version.json"
+        metadata.write_text("supported")
+        metadata.chmod(0o600)
+        monkeypatch.setattr(pkgman, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_browser_dir", lambda: tmp_path
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_binary_path",
+            lambda: executable,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_assets_ready", lambda: True
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_ready_marker_valid", lambda: True
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._remove_incomplete_camoufox_assets",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path.parent / "camoufox-install.lock",
+        )
+
+        async def unexpected_subprocess(*_args, **_kwargs):
+            raise AssertionError("permission repair must avoid a no-op fetch")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_subprocess)
+
+        await _run_camoufox_fetch()
+
+        assert os.access(executable, os.X_OK)
+        assert os.access(metadata, os.X_OK)
+
+    async def test_fetch_invalidates_supported_cache_with_missing_binary(
+        self, monkeypatch, tmp_path
+    ):
+        import camoufox.pkgman as pkgman
+
+        browser_dir = tmp_path / "browser"
+        browser_dir.mkdir()
+        _isolate_fetch_assets(monkeypatch, tmp_path, install_dir=browser_dir)
+        (browser_dir / "version.json").write_text("claims-supported")
+        missing_executable = browser_dir / "camoufox-bin"
+        ready = False
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                nonlocal ready
+                assert not browser_dir.exists()
+                ready = True
+                return b"installed", b""
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return FakeProcess()
+
+        monkeypatch.setattr(pkgman, "INSTALL_DIR", browser_dir)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_browser_dir",
+            lambda: browser_dir,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_binary_path",
+            lambda: missing_executable,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._remove_incomplete_camoufox_assets",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: ready
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_components_ready",
+            lambda: ready,
+        )
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+
+        await _run_camoufox_fetch()
+
+        assert ready is True
+
+    async def test_fetch_invalidates_supported_cache_with_empty_binary(
+        self, monkeypatch, tmp_path
+    ):
+        import camoufox.pkgman as pkgman
+
+        browser_dir = tmp_path / "browser"
+        browser_dir.mkdir()
+        _isolate_fetch_assets(monkeypatch, tmp_path, install_dir=browser_dir)
+        (browser_dir / "version.json").write_text("claims-supported")
+        executable = browser_dir / "camoufox-bin"
+        executable.write_bytes(b"")
+        if os.name != "nt":
+            executable.chmod(0o700)
+        ready = False
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                nonlocal ready
+                assert not browser_dir.exists()
+                ready = True
+                return b"installed", b""
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return FakeProcess()
+
+        monkeypatch.setattr(pkgman, "INSTALL_DIR", browser_dir)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_browser_dir",
+            lambda: browser_dir,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_binary_path",
+            lambda: executable,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._remove_incomplete_camoufox_assets",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: ready
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_components_ready",
+            lambda: ready,
+        )
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+
+        await _run_camoufox_fetch()
+
+        assert ready is True
+
+    def test_marker_is_safe_when_directory_fsync_is_unsupported(
+        self, monkeypatch, tmp_path
+    ):
+        import camoufox.pkgman as pkgman
+
+        monkeypatch.setattr(pkgman, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._fsync_directory",
+            MagicMock(side_effect=OSError("directory fsync unsupported")),
+        )
+
+        _write_camoufox_ready_marker()
+
+        marker = tmp_path / ".linkedin-mcp-ready.json"
+        assert marker.is_file()
+        assert json.loads(marker.read_text())["schema"] == 1
+
+    async def test_fetch_invalidates_cache_with_corrupt_version_metadata(
+        self, monkeypatch, tmp_path
+    ):
+        import camoufox.pkgman as pkgman
+
+        browser_dir = tmp_path / "browser"
+        browser_dir.mkdir()
+        _isolate_fetch_assets(monkeypatch, tmp_path, install_dir=browser_dir)
+        (browser_dir / "version.json").write_text("{truncated")
+        ready = False
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                nonlocal ready
+                assert not browser_dir.exists()
+                ready = True
+                return b"installed", b""
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return FakeProcess()
+
+        monkeypatch.setattr(pkgman, "INSTALL_DIR", browser_dir)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._remove_incomplete_camoufox_assets",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: ready
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_components_ready",
+            lambda: ready,
+        )
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+
+        await _run_camoufox_fetch()
+
+        assert ready is True
+
+    @pytest.mark.parametrize("full", [False, True])
+    def test_cli_install_fetches_camoufox_only(
+        self, isolate_profile_dir, monkeypatch, full
+    ):
+        _set_camoufox(monkeypatch, chrome_path="/usr/bin/chromium")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+        calls: list[str] = []
+
+        async def fake_fetch() -> None:
+            calls.append("camoufox")
+
+        async def fail_patchright() -> None:
+            raise AssertionError("Patchright installer must not run for Camoufox")
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_camoufox_fetch", fake_fetch
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_install_shell_only", fail_patchright
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._ensure_full_chromium_installed",
+            fail_patchright,
+        )
+
+        ensure_browser_installed(full=full)
+
+        assert calls == ["camoufox"]
+
+    def test_cli_install_noops_when_camoufox_is_ready(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        _set_camoufox(monkeypatch)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: True
+        )
+        fetch = MagicMock()
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._run_camoufox_fetch", fetch)
+
+        ensure_browser_installed(full=True)
+
+        fetch.assert_not_called()
+
+    async def test_fetch_exit_zero_without_binary_fails(self, monkeypatch, tmp_path):
+        mmdb_path, addon_dir = _isolate_fetch_assets(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_components_ready", lambda: False
+        )
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return b"download failed", b""
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return FakeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+
+        with pytest.raises(BrowserSetupFailedError, match="without installing"):
+            await _run_camoufox_fetch()
+
+        assert not mmdb_path.exists()
+        assert not addon_dir.exists()
+
+    async def test_fetch_timeout_terminates_child_and_clears_assets(
+        self, monkeypatch, tmp_path
+    ):
+        mmdb_path, addon_dir = _isolate_fetch_assets(monkeypatch, tmp_path)
+        release_child = asyncio.Event()
+
+        class FakeProcess:
+            returncode = None
+            terminate_calls = 0
+
+            async def communicate(self):
+                await release_child.wait()
+                return b"", b""
+
+            async def wait(self):
+                await release_child.wait()
+                return self.returncode
+
+            def terminate(self):
+                self.terminate_calls += 1
+                self.returncode = -15
+                release_child.set()
+
+            def kill(self):
+                raise AssertionError("terminated process should already be reaped")
+
+        process = FakeProcess()
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._CAMOUFOX_FETCH_TIMEOUT_SECONDS", 0.01
+        )
+
+        with pytest.raises(BrowserSetupFailedError, match="timed out after 0.01"):
+            await _run_camoufox_fetch()
+
+        assert process.terminate_calls == 1
+        assert not mmdb_path.exists()
+        assert not addon_dir.exists()
+
+    async def test_fetch_rejects_upstream_soft_addon_failure_and_keeps_dirty(
+        self, monkeypatch, tmp_path
+    ):
+        mmdb_path, addon_dir = _isolate_fetch_assets(monkeypatch, tmp_path)
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return b"Failed to download and extract UBO: truncated xpi", b""
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return FakeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+
+        with pytest.raises(BrowserSetupFailedError, match="truncated xpi"):
+            await _run_camoufox_fetch()
+
+        assert not mmdb_path.exists()
+        assert not addon_dir.exists()
+
+    async def test_fetch_invalidates_completion_marker_before_subprocess(
+        self, monkeypatch, tmp_path
+    ):
+        import camoufox.pkgman as pkgman
+
+        _isolate_fetch_assets(monkeypatch, tmp_path)
+        install_dir = Path(pkgman.INSTALL_DIR)
+        install_dir.mkdir(parents=True)
+        executable = install_dir / "camoufox-bin"
+        executable.write_text("browser")
+        if os.name != "nt":
+            executable.chmod(0o700)
+        marker_path = install_dir / ".linkedin-mcp-ready.json"
+        marker_path.write_text("old completion proof")
+
+        class FakeProcess:
+            returncode = 1
+
+            async def communicate(self):
+                assert not marker_path.exists()
+                return b"", b"expected stop"
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return FakeProcess()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_browser_dir",
+            lambda: install_dir,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_binary_path",
+            lambda: executable,
+        )
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+
+        with pytest.raises(BrowserSetupFailedError, match="expected stop"):
+            await _run_camoufox_fetch()
+
+        assert not marker_path.exists()
+
+    async def test_fetch_fails_closed_when_dirty_assets_cannot_be_removed(
+        self, monkeypatch, tmp_path
+    ):
+        import camoufox.pkgman as pkgman
+
+        _isolate_fetch_assets(monkeypatch, tmp_path)
+        install_dir = Path(pkgman.INSTALL_DIR)
+        install_dir.mkdir(parents=True, exist_ok=True)
+        marker_path = install_dir / ".linkedin-mcp-ready.json"
+        marker_path.write_text("old completion proof")
+        subprocess = AsyncMock()
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._remove_camoufox_fetch_assets",
+            lambda: False,
+        )
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", subprocess)
+
+        with pytest.raises(BrowserSetupFailedError, match="Could not clear"):
+            await _run_camoufox_fetch()
+
+        assert not marker_path.exists()
+        subprocess.assert_not_awaited()
+
+    async def test_failed_fetch_discards_even_valid_looking_partial_assets(
+        self, monkeypatch, tmp_path
+    ):
+        mmdb_path, addon_dir = _isolate_fetch_assets(monkeypatch, tmp_path)
+
+        class FakeProcess:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", b"addon download failed"
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return FakeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+
+        with pytest.raises(BrowserSetupFailedError, match="addon download failed"):
+            await _run_camoufox_fetch()
+
+        assert not mmdb_path.exists()
+        assert not addon_dir.exists()
+
+    async def test_communicate_error_reaps_child_and_discards_partial_assets(
+        self, monkeypatch, tmp_path
+    ):
+        mmdb_path, addon_dir = _isolate_fetch_assets(monkeypatch, tmp_path)
+
+        class FakeProcess:
+            returncode = None
+            terminate_calls = 0
+
+            async def communicate(self):
+                raise OSError("pipe read failed")
+
+            def terminate(self):
+                self.terminate_calls += 1
+                self.returncode = -15
+
+            def kill(self):
+                raise AssertionError("terminate already reaped the child")
+
+        process = FakeProcess()
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+
+        with pytest.raises(OSError, match="pipe read failed"):
+            await _run_camoufox_fetch()
+
+        assert process.terminate_calls == 1
+        assert not mmdb_path.exists()
+        assert not addon_dir.exists()
+
+    async def test_communicate_error_retains_lock_on_separate_process_wait(
+        self, monkeypatch, tmp_path
+    ):
+        mmdb_path, addon_dir = _isolate_fetch_assets(monkeypatch, tmp_path)
+        wait_started = asyncio.Event()
+        release_wait = asyncio.Event()
+        lock_path = tmp_path / "camoufox-install.lock"
+
+        class FakeProcess:
+            returncode = None
+
+            async def communicate(self):
+                mmdb_path.write_bytes(b"partial download")
+                addon_dir.mkdir(parents=True)
+                (addon_dir / "partial").write_bytes(b"incomplete")
+                raise OSError("pipe failed before child exit")
+
+            async def wait(self):
+                wait_started.set()
+                await release_wait.wait()
+                self.returncode = -9
+                return self.returncode
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        process = FakeProcess()
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: lock_path,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._SUBPROCESS_TERMINATE_TIMEOUT_SECONDS",
+            0.01,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._CAMOUFOX_INSTALL_LOCK_POLL_SECONDS",
+            0.001,
+        )
+
+        try:
+            with pytest.raises(OSError, match="pipe failed"):
+                await _run_camoufox_fetch()
+            assert wait_started.is_set()
+            assert mmdb_path.exists()
+            assert addon_dir.exists()
+
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.02):
+                    async with _camoufox_install_lock(lock_path):
+                        pass
+        finally:
+            release_wait.set()
+
+        async with asyncio.timeout(1):
+            while mmdb_path.exists() or addon_dir.exists():
+                await asyncio.sleep(0)
+
+        async with asyncio.timeout(1):
+            async with _camoufox_install_lock(lock_path):
+                pass
+
+    def test_install_lock_serializes_independent_processes(self, tmp_path):
+        lock_path = tmp_path / "camoufox-install.lock"
+        context = multiprocessing.get_context("spawn")
+        receive_connection, send_connection = context.Pipe(duplex=False)
+        release_event = context.Event()
+        child = context.Process(
+            target=_camoufox_install_lock_probe,
+            args=(lock_path, send_connection, release_event),
+        )
+        child.start()
+        send_connection.close()
+
+        async def attempt_while_owned() -> None:
+            async with asyncio.timeout(0.05):
+                async with _camoufox_install_lock(lock_path):
+                    raise AssertionError("second process bypassed install lock")
+
+        try:
+            assert receive_connection.poll(5), "child did not acquire install lock"
+            assert receive_connection.recv() == "acquired"
+            with pytest.raises(TimeoutError):
+                asyncio.run(attempt_while_owned())
+        finally:
+            release_event.set()
+            receive_connection.close()
+            child.join(timeout=10)
+            if child.is_alive():
+                child.terminate()
+                child.join(timeout=10)
+
+        assert child.exitcode == 0
+
+        async def acquire_after_release() -> None:
+            async with _camoufox_install_lock(lock_path):
+                pass
+
+        asyncio.run(acquire_after_release())
+
+    async def test_concurrent_fetch_rechecks_ready_inside_install_lock(
+        self, monkeypatch, tmp_path
+    ):
+        _isolate_fetch_assets(monkeypatch, tmp_path)
+        ready = False
+        release_fetch = asyncio.Event()
+        fetch_started = asyncio.Event()
+        subprocess_calls = 0
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                nonlocal ready
+                fetch_started.set()
+                await release_fetch.wait()
+                ready = True
+                return b"installed", b""
+
+        async def fake_subprocess(*_args, **_kwargs):
+            nonlocal subprocess_calls
+            subprocess_calls += 1
+            return FakeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: ready
+        )
+
+        first = asyncio.create_task(_run_camoufox_fetch())
+        await fetch_started.wait()
+        second = asyncio.create_task(_run_camoufox_fetch())
+        await asyncio.sleep(0)
+        release_fetch.set()
+        await asyncio.gather(first, second)
+
+        assert subprocess_calls == 1
+
+    async def test_cancelled_fetch_terminates_and_reaps_child(
+        self, monkeypatch, tmp_path
+    ):
+        mmdb_path, addon_dir = _isolate_fetch_assets(monkeypatch, tmp_path)
+        communicate_started = asyncio.Event()
+        terminated = asyncio.Event()
+
+        class FakeProcess:
+            returncode = None
+            terminate_calls = 0
+            kill_calls = 0
+            reaped = False
+
+            async def communicate(self):
+                communicate_started.set()
+                await terminated.wait()
+                self.returncode = -15
+                self.reaped = True
+                return b"", b"terminated"
+
+            def terminate(self):
+                self.terminate_calls += 1
+                terminated.set()
+
+            def kill(self):
+                self.kill_calls += 1
+                terminated.set()
+
+        process = FakeProcess()
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: tmp_path / "camoufox-install.lock",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+
+        task = asyncio.create_task(_run_camoufox_fetch())
+        await communicate_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 0
+        assert process.reaped is True
+        assert not mmdb_path.exists()
+        assert not addon_dir.exists()
+
+    async def test_unreaped_fetch_retains_lock_until_child_exits(
+        self, monkeypatch, tmp_path
+    ):
+        mmdb_path, addon_dir = _isolate_fetch_assets(monkeypatch, tmp_path)
+        communicate_started = asyncio.Event()
+        release_child = asyncio.Event()
+        lock_path = tmp_path / "camoufox-install.lock"
+
+        class FakeProcess:
+            returncode = None
+            terminate_calls = 0
+            kill_calls = 0
+
+            async def communicate(self):
+                communicate_started.set()
+                mmdb_path.write_bytes(b"partial download")
+                addon_dir.mkdir(parents=True)
+                (addon_dir / "partial").write_bytes(b"incomplete")
+                await release_child.wait()
+                self.returncode = -9
+                return b"", b"killed"
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def kill(self):
+                self.kill_calls += 1
+
+        process = FakeProcess()
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: lock_path,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._SUBPROCESS_TERMINATE_TIMEOUT_SECONDS",
+            0.01,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._CAMOUFOX_INSTALL_LOCK_POLL_SECONDS",
+            0.001,
+        )
+
+        try:
+            task = asyncio.create_task(_run_camoufox_fetch())
+            await communicate_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            assert process.terminate_calls == 1
+            assert process.kill_calls == 1
+            assert mmdb_path.exists()
+            assert addon_dir.exists()
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.02):
+                    async with _camoufox_install_lock(lock_path):
+                        pass
+        finally:
+            release_child.set()
+
+        async with asyncio.timeout(1):
+            while mmdb_path.exists() or addon_dir.exists():
+                await asyncio.sleep(0)
+
+        async with asyncio.timeout(1):
+            async with _camoufox_install_lock(lock_path):
+                pass
+
+    async def test_signal_errors_also_retain_fetch_lock(self, monkeypatch, tmp_path):
+        _isolate_fetch_assets(monkeypatch, tmp_path)
+        communicate_started = asyncio.Event()
+        release_child = asyncio.Event()
+        lock_path = tmp_path / "camoufox-install.lock"
+
+        class FakeProcess:
+            returncode = None
+
+            async def communicate(self):
+                communicate_started.set()
+                await release_child.wait()
+                self.returncode = 1
+                return b"", b"permission denied"
+
+            def terminate(self):
+                raise PermissionError("terminate denied")
+
+            def kill(self):
+                raise PermissionError("kill denied")
+
+        async def fake_subprocess(*_args, **_kwargs):
+            return FakeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._camoufox_install_lock_path",
+            lambda: lock_path,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._SUBPROCESS_TERMINATE_TIMEOUT_SECONDS",
+            0.01,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._CAMOUFOX_INSTALL_LOCK_POLL_SECONDS",
+            0.001,
+        )
+
+        task = asyncio.create_task(_run_camoufox_fetch())
+        await communicate_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.02):
+                async with _camoufox_install_lock(lock_path):
+                    pass
+
+        release_child.set()
+        await asyncio.sleep(0)
+        async with asyncio.timeout(1):
+            async with _camoufox_install_lock(lock_path):
+                pass
+
+    async def test_background_completion_stays_failed_when_binary_is_missing(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        _set_camoufox(monkeypatch)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+
+        async def fake_fetch() -> None:
+            return None
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_camoufox_fetch", fake_fetch
+        )
+        initialize_bootstrap("managed")
+
+        await start_background_browser_setup_if_needed()
+        state = get_bootstrap_state()
+        assert state.setup_state is SetupState.RUNNING
+        assert state.setup_task is not None
+        await state.setup_task
+        await _refresh_background_task_state()
+
+        assert state.setup_state is SetupState.FAILED
+        assert state.setup_task is None
+        assert "binary is unavailable" in (state.last_error or "")
+
+    async def test_background_fetch_marks_ready_only_after_binary_exists(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        _set_camoufox(monkeypatch)
+        ready = False
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: ready
+        )
+
+        async def fake_fetch() -> None:
+            nonlocal ready
+            ready = True
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_camoufox_fetch", fake_fetch
+        )
+        initialize_bootstrap("managed")
+
+        await start_background_browser_setup_if_needed()
+        state = get_bootstrap_state()
+        assert state.setup_task is not None
+        await state.setup_task
+        await _refresh_background_task_state()
+
+        assert state.setup_state is SetupState.READY
+
+    async def test_docker_gate_fails_when_camoufox_binary_is_missing(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        _set_camoufox(monkeypatch)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.camoufox_ready", lambda: False
+        )
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._auth_ready", lambda: True)
+        initialize_bootstrap("docker")
+
+        with pytest.raises(BrowserSetupFailedError, match="missing from the Docker"):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        assert get_bootstrap_state().setup_state is SetupState.FAILED
 
 
 class TestModeAwareGate:
@@ -786,6 +1936,10 @@ class TestTwoStageInstall:
 
 class TestEnsureBrowserInstalledTarget:
     """ensure_browser_installed requests the shell or full chromium per mode."""
+
+    @pytest.fixture(autouse=True)
+    def _patchright_config(self, monkeypatch):
+        _set_headless(monkeypatch, True)
 
     def _stub(self, monkeypatch):
         shell_calls = {"value": 0}
@@ -1368,7 +2522,7 @@ def _stub_import_env(monkeypatch):
         "linkedin_mcp_server.bootstrap.browser_setup_ready", lambda: True
     )
     monkeypatch.setattr(
-        "linkedin_mcp_server.bootstrap.close_browser", AsyncMock(return_value=None)
+        "linkedin_mcp_server.bootstrap.close_browser", AsyncMock(return_value=True)
     )
     monkeypatch.setattr("linkedin_mcp_server.bootstrap.set_headless", lambda _x: None)
     monkeypatch.setattr("linkedin_mcp_server.bootstrap.current_headless", lambda: True)
@@ -1714,8 +2868,9 @@ class TestAutoLogin:
         order: list[str] = []
         headless_calls: list[bool] = []
 
-        async def spy_close_browser() -> None:
+        async def spy_close_browser() -> bool:
             order.append("close")
+            return True
 
         async def fake_import(_browser, *, user_data_dir):
             order.append("import")
@@ -1747,6 +2902,21 @@ class TestAutoLogin:
         assert order == ["close", "import"]
         # Forced headless True for the probe, then restored the original False.
         assert headless_calls == [True, False]
+
+    async def test_uncertain_teardown_aborts_before_import(
+        self, isolate_profile_dir, monkeypatch, _stub_import_env
+    ):
+        import_mock = AsyncMock(return_value=True)
+        monkeypatch.setattr(_IMPORT_TARGET, import_mock)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.close_browser",
+            AsyncMock(return_value=False),
+        )
+
+        with pytest.raises(NetworkError, match="teardown before session import"):
+            await _try_auto_import_session()
+
+        import_mock.assert_not_awaited()
 
     async def test_announce_fires_once_and_import_survives_ctx_failure(
         self, isolate_profile_dir, monkeypatch, _stub_import_env

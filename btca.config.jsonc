@@ -81,6 +81,13 @@
     },
     {
       "type": "git",
+      "name": "camoufox",
+      "url": "https://github.com/daijro/camoufox",
+      "branch": "main",
+      "specialNotes": "Camoufox Firefox engine used for native fingerprint masking and persistent browser sessions."
+    },
+    {
+      "type": "git",
       "name": "pythonCryptography",
       "url": "https://github.com/pyca/cryptography",
       "branch": "main",

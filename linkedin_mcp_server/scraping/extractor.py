@@ -25,6 +25,7 @@ from linkedin_mcp_server.core.exceptions import (
     BlockError,
     ChallengeError,
     LinkedInScraperException,
+    NetworkError,
 )
 from linkedin_mcp_server.core.humanize import (
     human_move_and_click,
@@ -77,6 +78,40 @@ _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again lat
 # not a /details/ subpage or any other path -- SEARCH_FIRST navigation only
 # applies to the one-time "land on this profile" hop, see _navigate_to_page.
 _PROFILE_ROOT_RE = re.compile(r"^https://www\.linkedin\.com/in/([^/?#]+)/?$")
+
+
+def _is_https_linkedin_url(url: str) -> bool:
+    """Accept only the TLS main origin used by authenticated LinkedIn tools."""
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    return (
+        parsed.scheme.lower() == "https"
+        and port in {None, 443}
+        and hostname in {"linkedin.com", "www.linkedin.com"}
+    )
+
+
+def _is_target_profile_url(url: str, username: str) -> bool:
+    """Match the exact main-origin vanity profile, not a substring/lookalike."""
+    if not _is_https_linkedin_url(url):
+        return False
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    return (
+        hostname in {"linkedin.com", "www.linkedin.com"}
+        and parsed.path.rstrip("/").casefold() == f"/in/{username}".casefold()
+    )
+
+
+def _is_people_search_url(url: str) -> bool:
+    """Require the main-origin people-results page before touching its DOM."""
+    if not _is_https_linkedin_url(url):
+        return False
+    return urlparse(url).path.rstrip("/") == "/search/results/people"
 
 
 def _match_profile_root_username(url: str) -> str | None:
@@ -1007,6 +1042,21 @@ class LinkedInExtractor:
                     extra={"target_url": url, "wait_until": wait_until},
                 )
             except Exception as exc:
+                if not _is_https_linkedin_url(self._page.url):
+                    await record_page_trace(
+                        self._page,
+                        "extractor-navigation-error-off-origin",
+                        extra={
+                            "target_url": url,
+                            "wait_until": wait_until,
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "hops": hops,
+                        },
+                    )
+                    raise NetworkError(
+                        "LinkedIn navigation was redirected outside LinkedIn: "
+                        f"{self._page.url}"
+                    ) from exc
                 if allow_remember_me and await resolve_remember_me_prompt(self._page):
                     await stabilize_navigation(
                         f"remember-me resolution for {url}", logger
@@ -1050,7 +1100,22 @@ class LinkedInExtractor:
                 await self._raise_if_auth_barrier(url, navigation_error=exc)
                 raise
 
+            if not _is_https_linkedin_url(self._page.url):
+                await record_page_trace(
+                    self._page,
+                    "extractor-navigation-off-origin",
+                    extra={"target_url": url, "hops": hops},
+                )
+                raise NetworkError(
+                    "LinkedIn navigation was redirected outside LinkedIn: "
+                    f"{self._page.url}"
+                )
             barrier = await detect_auth_barrier_quick(self._page)
+            if not _is_https_linkedin_url(self._page.url):
+                raise NetworkError(
+                    "LinkedIn auth check was redirected outside LinkedIn: "
+                    f"{self._page.url}"
+                )
             if not barrier:
                 return
 
@@ -1116,9 +1181,9 @@ class LinkedInExtractor:
 
     _SEARCH_PEOPLE_URL = "https://www.linkedin.com/search/results/people/"
     _SEARCH_BOX_SELECTORS = (
-        'input[placeholder*="Search"]',
-        'input[aria-label*="Search"]',
-        ".search-global-typeahead__input",
+        'input[role="combobox"][aria-expanded]',
+        "input[aria-expanded][autocomplete]",
+        'input[type="text"][autocomplete]',
     )
 
     async def _navigate_via_search(self, username: str, target_url: str) -> bool:
@@ -1144,12 +1209,26 @@ class LinkedInExtractor:
 
         delays = self._stealth_profile.delays
         await asyncio.sleep(random.uniform(*delays.base))
+        if not _is_people_search_url(self._page.url or ""):
+            logger.warning(
+                "_navigate_via_search: refusing search DOM on unexpected URL %s",
+                self._page.url,
+            )
+            return False
 
         search_box = None
         for selector in self._SEARCH_BOX_SELECTORS:
             locator = self._page.locator(selector)
             try:
-                if await locator.count() > 0:
+                count = await locator.count()
+                if not _is_people_search_url(self._page.url or ""):
+                    logger.warning(
+                        "_navigate_via_search: search-box probe left the people "
+                        "search page: %s",
+                        self._page.url,
+                    )
+                    return False
+                if count > 0:
                     search_box = locator.first
                     break
             except Exception:
@@ -1157,30 +1236,59 @@ class LinkedInExtractor:
         if search_box is None:
             logger.debug("_navigate_via_search: no search box found")
             return False
+        if not _is_people_search_url(self._page.url or ""):
+            return False
 
         try:
             await search_box.click(timeout=3000)
+            if not _is_people_search_url(self._page.url or ""):
+                return False
             await search_box.fill("")
+            if not _is_people_search_url(self._page.url or ""):
+                return False
             await human_type(self._page, username)
+            if not _is_people_search_url(self._page.url or ""):
+                return False
             await asyncio.sleep(random.uniform(1.0, 2.0))
+            if not _is_people_search_url(self._page.url or ""):
+                return False
             await self._page.keyboard.press("Enter")
             await self._page.wait_for_load_state("domcontentloaded", timeout=10000)
         except Exception as e:
             logger.debug("_navigate_via_search: typing/submit failed: %s", e)
             return False
 
-        result_selectors = (
-            f'a[href*="{username}"][href*="/in/"]',
-            f'a[href*="/in/{username}"]',
-            ".entity-result__title-text a",
-        )
+        if not _is_people_search_url(self._page.url or ""):
+            logger.warning(
+                "_navigate_via_search: submit redirected away from people results: %s",
+                self._page.url,
+            )
+            return False
+
+        # Never interpolate the user-controlled vanity name into a CSS selector.
+        # Enumerate a bounded set of generic profile anchors, then validate each
+        # href against the exact main-origin target before any click.
+        result_locator = self._page.locator('a[href*="/in/"]')
         clicked = False
-        for selector in result_selectors:
-            locator = self._page.locator(selector).first
+        try:
+            result_count = min(await result_locator.count(), 50)
+        except Exception:
+            result_count = 0
+        if not _is_people_search_url(self._page.url or ""):
+            return False
+        for index in range(result_count):
+            locator = result_locator.nth(index)
             try:
-                if await locator.count() == 0:
+                href = await locator.get_attribute("href")
+                if not _is_people_search_url(self._page.url or ""):
+                    return False
+                if not href or not _is_target_profile_url(
+                    urljoin(self._SEARCH_PEOPLE_URL, href), username
+                ):
                     continue
                 await asyncio.sleep(random.uniform(*delays.base))
+                if not _is_people_search_url(self._page.url or ""):
+                    return False
                 await human_move_and_click(
                     self._page, locator, engine=self._engine, timeout=3000
                 )
@@ -1194,7 +1302,7 @@ class LinkedInExtractor:
             return False
 
         current_url = self._page.url or ""
-        if username.lower() not in current_url.lower():
+        if not _is_target_profile_url(current_url, username):
             logger.debug(
                 "_navigate_via_search: landed on unexpected URL %s (wanted %s)",
                 current_url,
@@ -2142,8 +2250,7 @@ class LinkedInExtractor:
                     can_reuse_main = (
                         section_name == "main_profile"
                         and main_profile_already_loaded
-                        and urlparse(self._page.url).path.rstrip("/")
-                        == f"/in/{username}"
+                        and _is_target_profile_url(self._page.url, username)
                     )
                     if can_reuse_main:
                         extracted = await self._extract_loaded_section(

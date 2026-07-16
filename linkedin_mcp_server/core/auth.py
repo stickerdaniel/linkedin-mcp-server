@@ -2,13 +2,12 @@
 
 import asyncio
 import logging
-import re
 from enum import Enum
 from urllib.parse import urlparse
 
 from patchright.async_api import Page
 
-from .exceptions import AuthenticationError
+from .exceptions import AuthenticationError, NetworkError
 from .utils import TIMEOUT_ERRORS
 
 logger = logging.getLogger(__name__)
@@ -57,18 +56,9 @@ _URL_PATTERN_KIND = {
     "/uas/consumer-email-challenge": AuthBarrierKind.CHALLENGE,
 }
 _AUTH_BLOCKER_URL_PATTERNS = tuple(_URL_PATTERN_KIND)
-_LOGIN_TITLE_PATTERNS = (
-    "linkedin login",
-    "sign in | linkedin",
-)
-_AUTH_BARRIER_TEXT_MARKERS = (
-    ("welcome back", "sign in using another account"),
-    ("welcome back", "join now"),
-    ("choose an account", "sign in using another account"),
-    ("continue as", "sign in using another account"),
-)
 _REMEMBER_ME_CONTAINER_SELECTOR = "#rememberme-div"
 _REMEMBER_ME_BUTTON_SELECTOR = "#rememberme-div button"
+_SESSION_RESUME_TIMEOUT_MS = 15_000
 
 # A profile page that rendered with essentially no text is a soft-block
 # signal distinct from any URL/title-based barrier -- scoped to /in/ URLs
@@ -83,36 +73,56 @@ _MIN_PROFILE_MAIN_TEXT_LENGTH = 100
 async def is_logged_in(page: Page) -> bool:
     """Check if currently logged in to LinkedIn.
 
-    Uses a three-tier strategy:
+    Uses a locale-independent three-tier strategy:
     1. Fail-fast on auth blocker URLs
-    2. Check for navigation elements (primary)
+    2. Check for structural navigation URLs and the auth cookie
     3. URL-based fallback for authenticated-only pages
     """
     try:
         current_url = page.url
 
+        # A captive portal or lookalike page can reproduce LinkedIn-like nav
+        # structure. Authentication proof is valid only on LinkedIn over TLS.
+        if not _is_linkedin_url(current_url):
+            return False
+
         # Step 1: Fail-fast on auth blockers
         if _is_auth_blocker_url(current_url):
             return False
 
-        # Step 2: Selector check (PRIMARY)
-        old_selectors = '.global-nav__primary-link, [data-control-name="nav.settings"]'
-        old_count = await page.locator(old_selectors).count()
-
-        new_selectors = 'nav a[href*="/feed"], nav button:has-text("Home"), nav a[href*="/mynetwork"]'
-        new_count = await page.locator(new_selectors).count()
-
-        has_nav_elements = old_count > 0 or new_count > 0
+        # Step 2: structural selector + cookie check. Never classify a button
+        # by localized text ("Home", "Inicio", ...), aria-label verb, or a
+        # LinkedIn layout class.
+        nav_selectors = ", ".join(
+            (
+                'nav a[href*="/feed"]',
+                'nav a[href*="/mynetwork"]',
+                'nav a[href*="/messaging"]',
+                'nav a[href*="/notifications"]',
+            )
+        )
+        has_nav_elements = await page.locator(nav_selectors).count() > 0
+        current_url = page.url
+        if not _is_linkedin_url(current_url) or _is_auth_blocker_url(current_url):
+            return False
+        usable_cookie = await _has_usable_li_at(page)
+        if not usable_cookie:
+            return False
+        current_url = page.url
+        if not _is_linkedin_url(current_url) or _is_auth_blocker_url(current_url):
+            return False
 
         # Step 3: URL fallback
-        authenticated_only_pages = [
+        authenticated_only_paths = [
             "/feed",
             "/mynetwork",
             "/messaging",
             "/notifications",
         ]
+        parsed_url = urlparse(current_url)
         is_authenticated_page = any(
-            pattern in current_url for pattern in authenticated_only_pages
+            parsed_url.path == path or parsed_url.path.startswith(f"{path}/")
+            for path in authenticated_only_paths
         )
 
         if not is_authenticated_page:
@@ -126,8 +136,12 @@ async def is_logged_in(page: Page) -> bool:
         body_text = await page.evaluate("() => document.body?.innerText || ''")
         if not isinstance(body_text, str):
             return False
-
-        return bool(body_text.strip())
+        current_url = page.url
+        return (
+            _is_linkedin_url(current_url)
+            and not _is_auth_blocker_url(current_url)
+            and bool(body_text.strip())
+        )
     except TIMEOUT_ERRORS:
         logger.warning(
             "Timeout checking login status on %s — treating as not logged in",
@@ -159,32 +173,37 @@ async def _detect_auth_barrier(
                 _URL_PATTERN_KIND.get(matched_pattern, AuthBarrierKind.BLOCK),
             )
 
-        try:
-            title = (await page.title()).strip().lower()
-        except Exception:
-            title = ""
-        if any(pattern in title for pattern in _LOGIN_TITLE_PATTERNS):
-            return AuthBarrier(f"login title: {title}", AuthBarrierKind.BLOCK)
-
-        if not include_body_text:
-            return None
-
-        try:
-            body_text = await page.evaluate("() => document.body?.innerText || ''")
-        except Exception:
-            body_text = ""
-        if not isinstance(body_text, str):
-            body_text = ""
-
-        normalized = re.sub(r"\s+", " ", body_text).strip().lower()
-        for marker_group in _AUTH_BARRIER_TEXT_MARKERS:
-            if all(marker in normalized for marker in marker_group):
+        # Authenticated tools must never accept LinkedIn's logged-out preview
+        # pages as valid profile content.  Cookie presence is locale-independent
+        # and catches the case where LinkedIn expires ``li_at`` without changing
+        # the requested /in/... URL or using a login-page title.
+        if _is_linkedin_url(current_url):
+            usable_cookie = await _has_usable_li_at(page)
+            latest_url = page.url
+            if not _is_linkedin_url(latest_url):
+                raise NetworkError(
+                    "Auth barrier check was redirected outside the main "
+                    f"LinkedIn origin: {latest_url}"
+                )
+            latest_pattern = _matched_auth_blocker_pattern(latest_url)
+            if latest_pattern is not None:
                 return AuthBarrier(
-                    f"auth barrier text: {' + '.join(marker_group)}",
-                    AuthBarrierKind.CHALLENGE,
+                    f"auth blocker URL: {latest_url}",
+                    _URL_PATTERN_KIND.get(latest_pattern, AuthBarrierKind.BLOCK),
+                )
+            if not usable_cookie:
+                return AuthBarrier(
+                    "authenticated LinkedIn page has no usable li_at cookie",
+                    AuthBarrierKind.BLOCK,
                 )
 
+        # ``include_body_text`` remains in the private signature for callers
+        # that distinguish quick/full checks, but barrier classification is
+        # intentionally URL/cookie/structure-only and locale-independent.
+        del include_body_text
         return None
+    except NetworkError:
+        raise
     except TIMEOUT_ERRORS:
         logger.warning(
             "Timeout checking auth barrier on %s — continuing without barrier detection",
@@ -257,12 +276,21 @@ async def detect_empty_profile_barrier(page: Page, url: str) -> AuthBarrier | No
 async def resolve_remember_me_prompt(page: Page) -> bool:
     """Click through LinkedIn's saved-account chooser when it appears."""
     try:
+        if not _is_linkedin_url(page.url):
+            logger.debug("Ignoring remember-me prompt outside LinkedIn: %s", page.url)
+            return False
         logger.debug("Checking remember-me prompt on %s", page.url)
         try:
             await page.wait_for_selector(_REMEMBER_ME_CONTAINER_SELECTOR, timeout=3000)
             logger.debug("Remember-me container appeared")
         except TIMEOUT_ERRORS:
             logger.debug("Remember-me container did not appear in time")
+            return False
+        if not _is_linkedin_url(page.url):
+            logger.warning(
+                "Remember-me wait redirected outside LinkedIn; refusing DOM access: %s",
+                page.url,
+            )
             return False
 
         target_locator = page.locator(_REMEMBER_ME_BUTTON_SELECTOR)
@@ -275,6 +303,12 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
                 exc_info=True,
             )
             target_count = -1
+        if not _is_linkedin_url(page.url):
+            logger.warning(
+                "Remember-me count redirected outside LinkedIn; refusing click: %s",
+                page.url,
+            )
+            return False
         logger.debug(
             "Remember-me target count for %s: %d",
             _REMEMBER_ME_BUTTON_SELECTOR,
@@ -293,17 +327,36 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
                 "Remember-me prompt container appeared without a visible login button"
             )
             return False
+        if not _is_linkedin_url(page.url):
+            logger.warning(
+                "Remember-me visibility wait redirected outside LinkedIn; "
+                "refusing click: %s",
+                page.url,
+            )
+            return False
 
         logger.info("Clicking LinkedIn saved-account chooser to resume session")
         try:
             await target.scroll_into_view_if_needed(timeout=3000)
         except TIMEOUT_ERRORS:
             logger.debug("Remember-me button did not scroll into view in time")
+        if not _is_linkedin_url(page.url):
+            logger.warning(
+                "Remember-me scroll redirected outside LinkedIn; refusing click: %s",
+                page.url,
+            )
+            return False
 
         try:
             await target.click(timeout=5000)
             logger.debug("Remember-me button click succeeded")
         except TIMEOUT_ERRORS:
+            if not _is_linkedin_url(page.url):
+                logger.warning(
+                    "Remember-me click redirected outside LinkedIn; refusing retry: %s",
+                    page.url,
+                )
+                return False
             logger.debug("Retrying remember-me prompt click with force=True")
             await target.click(timeout=5000, force=True)
             logger.debug("Remember-me button force-click succeeded")
@@ -312,7 +365,7 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
         except TIMEOUT_ERRORS:
             logger.debug("Remember-me prompt click did not finish loading in time")
         await asyncio.sleep(1)
-        return True
+        return _is_linkedin_url(page.url)
     except TIMEOUT_ERRORS:
         logger.debug("Remember-me prompt was present but not clickable in time")
         return False
@@ -321,12 +374,81 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
         return False
 
 
+async def wait_for_session_resume_redirect(page: Page) -> bool:
+    """Give LinkedIn's cookie-backed login interstitial one bounded chance.
+
+    Some cold sessions briefly land on ``/login/?session_redirect=...`` even
+    though a non-empty ``li_at`` is still installed.  The page can resume the
+    account automatically without exposing a clickable control.  Wait only
+    when that locale-independent cookie signal exists, then let the caller
+    retry its target navigation once.  A genuinely logged-out page has no
+    usable cookie and therefore fails immediately.
+    """
+    if _matched_auth_blocker_pattern(page.url) != "/login":
+        return False
+    if await _has_usable_li_at(page) is not True:
+        return False
+
+    logger.info("Waiting briefly for LinkedIn session-resume redirect")
+    try:
+        await page.wait_for_url(
+            lambda url: _matched_auth_blocker_pattern(str(url)) is None,
+            wait_until="domcontentloaded",
+            timeout=_SESSION_RESUME_TIMEOUT_MS,
+        )
+    except TIMEOUT_ERRORS:
+        # The interstitial sometimes updates the server-side session without
+        # navigating itself.  Return True so the caller performs one explicit
+        # target retry after the bounded wait.
+        logger.debug("Session-resume page did not redirect within the wait budget")
+    return True
+
+
+def _is_linkedin_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and port in {None, 443}
+        and _is_linkedin_hostname(parsed.hostname)
+    )
+
+
+def _is_linkedin_hostname(hostname: str | None) -> bool:
+    """Match the main LinkedIn web origin used by every authenticated tool."""
+    hostname = (hostname or "").lower().rstrip(".")
+    return hostname in {"linkedin.com", "www.linkedin.com"}
+
+
+async def _has_usable_li_at(page: Page) -> bool:
+    """Return auth-cookie presence; preserve driver failures as inconclusive."""
+    try:
+        cookies = await page.context.cookies("https://www.linkedin.com")
+    except Exception as exc:
+        raise NetworkError(
+            "Browser driver could not inspect the LinkedIn authentication cookie"
+        ) from exc
+    return any(
+        cookie.get("name") == "li_at"
+        and isinstance(cookie.get("value"), str)
+        and bool(cookie["value"].strip())
+        for cookie in cookies
+    )
+
+
 def _matched_auth_blocker_pattern(url: str) -> str | None:
     """Return the matched auth-blocker URL pattern, or None.
 
-    Matches real auth routes only, not arbitrary slug substrings.
+    Matches real auth routes only on LinkedIn origins, not arbitrary slug
+    substrings or a captive portal that happens to redirect to ``/login``.
     """
-    path = urlparse(url).path or "/"
+    if not _is_linkedin_url(url):
+        return None
+    parsed = urlparse(url)
+    path = parsed.path or "/"
 
     if path in _AUTH_BLOCKER_URL_PATTERNS:
         return path

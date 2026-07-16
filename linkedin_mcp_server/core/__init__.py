@@ -8,12 +8,14 @@ from .auth import (
     detect_empty_profile_barrier,
     is_logged_in,
     resolve_remember_me_prompt,
+    wait_for_session_resume_redirect,
     wait_for_manual_login,
 )
 from .browser import BrowserManager
 from .exceptions import (
     AuthenticationError,
     BlockError,
+    BrowserTeardownError,
     ChallengeError,
     ElementNotFoundError,
     LinkedInScraperException,
@@ -39,6 +41,7 @@ __all__ = [
     "AuthenticationError",
     "BlockError",
     "BrowserManager",
+    "BrowserTeardownError",
     "ChallengeError",
     "DEFAULT_STEALTH_PROFILE_NAME",
     "DelayConfig",
@@ -60,6 +63,7 @@ __all__ = [
     "handle_modal_close",
     "is_logged_in",
     "resolve_remember_me_prompt",
+    "wait_for_session_resume_redirect",
     "scroll_to_bottom",
     "wait_for_manual_login",
 ]

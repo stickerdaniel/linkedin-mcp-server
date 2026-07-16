@@ -14,9 +14,13 @@ def reset_singletons():
         _reset_ip_drift_call_counter_for_testing,
     )
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
+    from linkedin_mcp_server.session_state import (
+        reset_pending_profile_leases_for_testing,
+    )
 
     reset_bootstrap_for_testing()
     reset_browser_for_testing()
+    reset_pending_profile_leases_for_testing()
     reset_config()
     reset_rate_limiter_for_testing()
     reset_opsec_gate_for_testing()
@@ -26,6 +30,7 @@ def reset_singletons():
     yield
     reset_bootstrap_for_testing()
     reset_browser_for_testing()
+    reset_pending_profile_leases_for_testing()
     reset_config()
     reset_rate_limiter_for_testing()
     reset_opsec_gate_for_testing()

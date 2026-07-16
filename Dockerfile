@@ -23,11 +23,23 @@ ENV PATH="/app/.venv/bin:$PATH"
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright
 
 RUN patchright install-deps chromium && \
+    playwright install-deps firefox && \
     patchright install chromium && \
     chmod -R 755 /opt/patchright && \
     rm -rf /var/lib/apt/lists/*
 
+ENV HOME=/home/pwuser
+
+# Camoufox resolves its browser cache from HOME, but its GeoIP downloader writes
+# into the root-owned virtualenv package directory. Use the project's guarded
+# fetch so the cache is published only after all assets pass validation, then
+# hand only the user-cache tree to the non-root process.
+RUN python -c "import asyncio; from linkedin_mcp_server.bootstrap import _run_camoufox_fetch; asyncio.run(_run_camoufox_fetch())" && \
+    chown -R pwuser:pwuser /home/pwuser/.cache
+
 USER pwuser
+
+RUN python -c "from linkedin_mcp_server.bootstrap import camoufox_ready; raise SystemExit(0 if camoufox_ready() else 1)"
 
 ENTRYPOINT ["python", "-m", "linkedin_mcp_server"]
 CMD []

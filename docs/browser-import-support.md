@@ -1,7 +1,10 @@
 # Browser session import: supported browsers
 
 `--import-from-browser` reads and decrypts the LinkedIn session cookie from a
-locally installed Chromium-based browser. Each
+locally installed Chromium-based browser for the Patchright engine. Import into
+Camoufox is intentionally rejected before browser discovery: a Chromium cookie
+was minted under a different complete fingerprint, so use
+`--browser camoufox --login` instead. Each
 browser needs three things correct: the on-disk user-data path, the Cookies
 database location, and the OS keystore label used to decrypt the cookie value.
 
@@ -95,8 +98,20 @@ own brand token via `ua_brand_suffix` (`Edg/<major>.0.0.0`). Opera, Opera GX,
 Vivaldi, Yandex, Whale and Cốc Cốc version independently of the engine, so no UA
 is synthesized and they keep the runtime default. The UA is recorded in
 `source-state.json` (`user_agent`, absent for manual logins where the cookie is
-minted in the runtime browser itself) and every runtime replay adopts it. An
-explicit `USER_AGENT` env var or `--user-agent` flag always overrides it.
+minted in the runtime browser itself). Patchright replays that Chromium UA.
+Camoufox keeps its coherent Firefox identity and must create the session through
+its own headed `--login`; it never mixes an imported Chromium cookie or UA into
+that fingerprint. Explicit `USER_AGENT`/`--user-agent` overrides therefore
+apply to Patchright but are ignored by Camoufox.
+
+The candidate cookies are tested in a unique isolated Patchright profile. After
+`/feed/` succeeds, cookies observed in the validation browser (including rotated
+`li_at` or `JSESSIONID`) are merged into the complete extracted snapshot. A
+bridge token removed by LinkedIn is omitted rather than restored from the old
+snapshot. Only then, and only after confirmed browser teardown, are
+`cookies.json` and the matching `source-state.json` generation published.
+Rejected cookies and driver/network failures do not modify canonical source
+artifacts.
 
 ## Flat layout (Opera)
 

@@ -11,27 +11,23 @@ from linkedin_mcp_server.bootstrap import (
     configure_browser_environment,
     ensure_browser_installed,
 )
-from linkedin_mcp_server.core import AuthenticationError
+from linkedin_mcp_server.core import AuthenticationError, NetworkError
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.drivers.browser import (
-    experimental_persist_derived_runtime,
     close_browser,
     get_or_create_browser,
     get_profile_dir,
-    profile_exists,
     set_headless,
 )
 from linkedin_mcp_server.debug_trace import should_keep_traces
 from linkedin_mcp_server.logging_config import configure_logging, teardown_trace_logging
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
-    load_runtime_state,
     load_source_state,
-    portable_cookie_path,
+    portable_cookie_is_valid,
     runtime_profile_dir,
-    runtime_storage_state_path,
-    source_state_path,
+    runtime_profiles_root,
 )
 from linkedin_mcp_server.server import create_mcp_server
 from linkedin_mcp_server.setup import run_profile_creation
@@ -74,15 +70,6 @@ def clear_profile_and_exit() -> None:
 
     auth_root = get_profile_dir().parent
 
-    if not (
-        profile_exists(get_profile_dir())
-        or portable_cookie_path(get_profile_dir()).exists()
-        or source_state_path(get_profile_dir()).exists()
-    ):
-        print("ℹ️  No authentication state found")
-        print("Nothing to clear.")
-        sys.exit(0)
-
     print(f"🔑 Clear LinkedIn authentication state from {auth_root}?")
 
     try:
@@ -98,8 +85,18 @@ def clear_profile_and_exit() -> None:
 
     if clear_auth_state(get_profile_dir()):
         print("✅ LinkedIn authentication state cleared successfully!")
+        runtime_root = runtime_profiles_root(get_profile_dir())
+        if runtime_root.exists():
+            print(
+                "⚠️  Isolated runtime profiles were retained because another "
+                "MCP process may still own them. Stop those processes before "
+                f"removing {runtime_root}."
+            )
     else:
-        print("❌ Failed to clear authentication state")
+        print(
+            "❌ Failed to clear authentication state; another login/import "
+            "transaction may still be active"
+        )
         sys.exit(1)
 
     sys.exit(0)
@@ -187,11 +184,10 @@ def profile_info_and_exit() -> None:
     logger.info(f"LinkedIn MCP Server v{version} - Session Info mode")
 
     profile_dir = get_profile_dir()
-    cookies_path = portable_cookie_path(profile_dir)
     source_state = load_source_state(profile_dir)
     current_runtime = get_runtime_id()
 
-    if not source_state or not profile_exists(profile_dir) or not cookies_path.exists():
+    if not source_state or not portable_cookie_is_valid(profile_dir):
         print(f"❌ No valid source session found at {profile_dir}")
         print("   Run with --login to create a source session")
         sys.exit(1)
@@ -200,70 +196,33 @@ def profile_info_and_exit() -> None:
     print(f"Source runtime: {source_state.source_runtime_id}")
     print(f"Login generation: {source_state.login_generation}")
 
-    runtime_state = None
-    runtime_profile = None
-    runtime_storage_state = None
-    bridge_required = False
-
-    if current_runtime == source_state.source_runtime_id:
-        print(f"Profile mode: source ({profile_dir})")
-    else:
-        runtime_state = load_runtime_state(current_runtime, profile_dir)
-        runtime_profile = runtime_profile_dir(current_runtime, profile_dir)
-        runtime_storage_state = runtime_storage_state_path(current_runtime, profile_dir)
-        if not experimental_persist_derived_runtime():
-            bridge_required = True
-            print("Profile mode: foreign runtime (fresh bridge each startup)")
-            if runtime_profile.exists():
-                print(
-                    f"Derived runtime cache present but ignored by default: {runtime_profile}"
-                )
-        else:
-            if (
-                runtime_state
-                and runtime_state.source_login_generation
-                == source_state.login_generation
-                and profile_exists(runtime_profile)
-                and runtime_storage_state.exists()
-            ):
-                print(
-                    f"Profile mode: derived (committed, current generation) ({runtime_profile})"
-                )
-            else:
-                bridge_required = True
-                state = "stale generation" if runtime_state else "missing"
-                print(f"Profile mode: derived ({state})")
-            print(
-                "Storage snapshot: "
-                f"{runtime_storage_state if runtime_storage_state and runtime_storage_state.exists() else 'missing'}"
-            )
+    runtime_profile = runtime_profile_dir(current_runtime, profile_dir)
+    relation = (
+        "same-platform runtime"
+        if current_runtime == source_state.source_runtime_id
+        else "foreign runtime"
+    )
+    print(f"Profile mode: isolated {relation} (fresh bridge each startup)")
+    if runtime_profile.exists():
+        print(f"Previous runtime artifact present but not reused: {runtime_profile}")
 
     async def check_session() -> bool:
+        valid = False
         try:
             set_headless(True)  # Always check headless
             browser = await get_or_create_browser()
-            return browser.is_authenticated
+            valid = browser.is_authenticated
         except AuthenticationError:
             return False
         except Exception as e:
             logger.exception(f"Unexpected error checking session: {e}")
             raise
         finally:
-            await close_browser()
-
-    if bridge_required:
-        if experimental_persist_derived_runtime():
-            print(
-                "ℹ️  A derived runtime profile will be created and checkpoint-committed on the next server startup."
-            )
-        else:
-            print(
-                "ℹ️  A fresh bridged foreign-runtime session will be created on the next server startup."
-            )
-        print(
-            "ℹ️  Source cookie validity is not verified in this mode. Run the server to test the bridge end-to-end."
-        )
-        sys.exit(0)
+            if not await close_browser():
+                raise NetworkError(
+                    "Session validation finished, but browser teardown was not confirmed"
+                )
+        return valid
 
     try:
         valid = asyncio.run(check_session())
@@ -272,12 +231,13 @@ def profile_info_and_exit() -> None:
         print("   Check logs and browser configuration.")
         sys.exit(1)
 
-    active_profile = profile_dir if runtime_profile is None else runtime_profile
     if valid:
-        print(f"✅ Session is valid (profile: {active_profile})")
+        print(
+            f"✅ Session is valid (verified through isolated profile: {runtime_profile})"
+        )
         sys.exit(0)
 
-    print(f"❌ Session expired or invalid (profile: {active_profile})")
+    print(f"❌ Session expired or invalid (isolated profile: {runtime_profile})")
     print("   Run with --login to re-authenticate")
     sys.exit(1)
 

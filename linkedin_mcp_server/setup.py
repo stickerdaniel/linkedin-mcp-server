@@ -1,32 +1,51 @@
 """
 Interactive setup flows for LinkedIn MCP Server authentication.
 
-Handles session creation through interactive browser login using Patchright
-with persistent context. Profile state auto-persists to user_data_dir.
+Handles session creation through an isolated interactive browser. Only a
+validated cookie snapshot, optional Camoufox identity, and source metadata are
+published under the configured authentication root.
 """
 
 import asyncio
 from pathlib import Path
+import shutil
 from typing import Any
+from uuid import uuid4
 
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core import (
     BrowserManager,
+    BrowserTeardownError,
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
-from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
+from linkedin_mcp_server.common_utils import secure_mkdir
+from linkedin_mcp_server.session_state import (
+    acquire_pending_profile_lease,
+    auth_root_dir,
+    commit_source_session,
+    source_session_lock,
+    stage_bound_camoufox_identity,
+)
 
 from linkedin_mcp_server.drivers.browser import get_profile_dir
 
 
 async def interactive_login(user_data_dir: Path | None = None) -> bool:
+    """Run manual login while exclusively owning the canonical source session."""
+    profile_dir = user_data_dir or get_profile_dir()
+    async with source_session_lock(profile_dir):
+        return await _interactive_login_unlocked(profile_dir)
+
+
+async def _interactive_login_unlocked(user_data_dir: Path | None = None) -> bool:
     """
-    Open browser for manual LinkedIn login with persistent profile.
+    Open an isolated browser for manual LinkedIn login.
 
     Opens a non-headless browser, navigates to LinkedIn login page,
     and waits for user to complete authentication (including 2FA, captcha, etc.).
-    Profile state auto-persists to user_data_dir.
+    The disposable browser profile is removed after confirmed teardown; the
+    canonical source profile is never opened or mutated.
 
     Args:
         user_data_dir: Path to browser profile. Defaults to config's user_data_dir.
@@ -63,63 +82,143 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
         "width": config.browser.viewport_width,
         "height": config.browser.viewport_height,
     }
+    canonical_profile_dir = user_data_dir.expanduser().resolve()
+    pending_root = (
+        auth_root_dir(canonical_profile_dir) / f".login-pending-{uuid4().hex}"
+    )
+    secure_mkdir(pending_root)
+    pending_lease = acquire_pending_profile_lease(pending_root)
+    login_profile_dir = pending_root / "profile"
+    staged_cookie_path = pending_root / "cookies.json"
+    staged_identity_path = (
+        pending_root / "camoufox-identity.json"
+        if config.browser.browser_engine == "camoufox"
+        else None
+    )
+    try:
+        if staged_identity_path is not None:
+            # A corrupt/unbound canonical artifact is intentionally not copied.
+            # The isolated login then creates a fresh pending identity without
+            # touching the canonical source generation.
+            stage_bound_camoufox_identity(staged_identity_path, canonical_profile_dir)
 
-    async with BrowserManager(
-        user_data_dir=user_data_dir,
-        headless=False,
-        slow_mo=config.browser.slow_mo,
-        user_agent=config.browser.user_agent,
-        viewport=viewport,
-        engine=config.browser.browser_engine,
-        **launch_options,
-    ) as browser:
-        # Navigate to LinkedIn login
-        await browser.page.goto("https://www.linkedin.com/login")
-        # Let LinkedIn finish rendering the saved-account chooser, then retry the
-        # same exact click target a few times before falling back to the normal
-        # manual-login wait loop.
-        for _ in range(3):
+        async with BrowserManager(
+            user_data_dir=login_profile_dir,
+            headless=False,
+            slow_mo=config.browser.slow_mo,
+            user_agent=config.browser.user_agent,
+            viewport=viewport,
+            engine=config.browser.browser_engine,
+            camoufox_identity_path=staged_identity_path,
+            **launch_options,
+        ) as browser:
+            # Navigate to LinkedIn login
+            await browser.page.goto("https://www.linkedin.com/login")
+            # Let LinkedIn finish rendering the saved-account chooser, then retry the
+            # same exact click target a few times before falling back to the normal
+            # manual-login wait loop.
+            for _ in range(3):
+                await asyncio.sleep(2)
+                if await resolve_remember_me_prompt(browser.page):
+                    break
+
+            # Wait for manual login completion. The budget comes from
+            # LOGIN_TIMEOUT (config.browser.login_timeout_seconds); 0 = unlimited.
+            await wait_for_manual_login(browser.page, timeout=login_timeout_ms)
+
+            # Wait for persistent context to flush cookies to disk
             await asyncio.sleep(2)
-            if await resolve_remember_me_prompt(browser.page):
-                break
 
-        # Wait for manual login completion. The budget comes from
-        # LOGIN_TIMEOUT (config.browser.login_timeout_seconds); 0 = unlimited.
-        await wait_for_manual_login(browser.page, timeout=login_timeout_ms)
+            # Verify session cookie was persisted
+            cookies = await browser.context.cookies()
+            li_at = [
+                cookie
+                for cookie in cookies
+                if cookie.get("name") == "li_at"
+                and isinstance(cookie.get("value"), str)
+                and bool(cookie["value"].strip())
+            ]
+            login_ready = bool(li_at)
+            if not login_ready:
+                print(
+                    "   Warning: Session cookie not found. Login may not have persisted."
+                )
+                print("   Waiting longer for cookie propagation...")
+                await asyncio.sleep(5)
+                cookies = await browser.context.cookies()
+                li_at = [
+                    cookie
+                    for cookie in cookies
+                    if cookie.get("name") == "li_at"
+                    and isinstance(cookie.get("value"), str)
+                    and bool(cookie["value"].strip())
+                ]
+                login_ready = bool(li_at)
+                if not login_ready:
+                    print("   Error: no usable li_at cookie was persisted after login.")
 
-        # Wait for persistent context to flush cookies to disk
-        await asyncio.sleep(2)
+            # Stage the portable snapshot, but do not publish it or source-state
+            # until __aexit__ confirms that the isolated browser released its profile.
+            if login_ready and not await browser.export_cookies(staged_cookie_path):
+                print(
+                    "   Warning: cookie export failed; Docker bridge may not work. "
+                    "Run --login again to retry."
+                )
+                login_ready = False
+    except BrowserTeardownError:
+        # The context manager reports uncertain teardown by raising, possibly
+        # while propagating another error. Keep the owner lease open so logout
+        # cannot delete a profile that a browser may still hold.
+        pending_lease.retain_until_exit()
+        raise
+    except BaseException:
+        # All other context-manager exits confirmed teardown. Remove staged
+        # cookies immediately so ordinary network/login errors leave no secret
+        # pending artifact behind in a long-lived caller.
+        pending_lease.release()
+        shutil.rmtree(pending_root, ignore_errors=True)
+        raise
 
-        # Verify session cookie was persisted
-        cookies = await browser.context.cookies()
-        li_at = [c for c in cookies if c["name"] == "li_at"]
-        if not li_at:
-            print("   Warning: Session cookie not found. Login may not have persisted.")
-            print("   Waiting longer for cookie propagation...")
-            await asyncio.sleep(5)
+    # __aexit__ confirmed teardown, so no process needs to guard this profile.
+    pending_lease.release()
 
-        # Export source-session cookies for the one-time foreign-runtime bridge.
-        # Docker now checkpoint-commits its own derived runtime profile after the
-        # first successful /feed/ recovery instead of relying on browser teardown.
-        if await browser.export_cookies(portable_cookie_path(user_data_dir)):
-            print("   Cookies exported for Docker portability")
-            # Record the override UA the cookie was minted under (the login
-            # browser ran with config.browser.user_agent). Without this a later
-            # replay from a runtime that lacks the override would fall back to
-            # its default UA, a fingerprint mismatch. None when no override is
-            # set (the runtime default is stable across replays on that runtime).
-            source_state = write_source_state(
-                user_data_dir, user_agent=config.browser.user_agent
-            )
-            print(f"   Source session generation: {source_state.login_generation}")
-        else:
-            print(
-                "   Warning: cookie export failed; Docker bridge may not work. "
-                "Run --login again to retry."
-            )
-            return False
-        print(f"Profile saved to {user_data_dir}")
-        return True
+    # Reaching this point proves BrowserManager.__aexit__ confirmed teardown.
+    # Remove the disposable browser profile before publishing any canonical
+    # session artifact. An uncertain teardown raises above and leaves this
+    # unique directory abandoned rather than risking a live-profile deletion.
+    if login_profile_dir.exists():
+        shutil.rmtree(login_profile_dir)
+    if staged_identity_path is not None:
+        staged_identity_path.with_name(f".{staged_identity_path.name}.lock").unlink(
+            missing_ok=True
+        )
+
+    if not login_ready:
+        shutil.rmtree(pending_root, ignore_errors=True)
+        return False
+
+    # Record the effective override UA the cookie was minted under. Camoufox
+    # deliberately ignores overrides to keep its Firefox fingerprint coherent.
+    effective_user_agent = (
+        None
+        if config.browser.browser_engine == "camoufox"
+        else config.browser.user_agent
+    )
+    commit_options: dict[str, Any] = {"user_agent": effective_user_agent}
+    if staged_identity_path is not None:
+        commit_options["staged_camoufox_identity_path"] = staged_identity_path
+    try:
+        source_state = commit_source_session(
+            staged_cookie_path, canonical_profile_dir, **commit_options
+        )
+    finally:
+        # The browser profile was already released and removed, so cleaning the
+        # now-private pending directory is safe even if commit rolled back.
+        shutil.rmtree(pending_root, ignore_errors=True)
+    print("   Cookies exported for Docker portability")
+    print(f"   Source session generation: {source_state.login_generation}")
+    print(f"Session saved under {auth_root_dir(canonical_profile_dir)}")
+    return True
 
 
 def run_profile_creation(user_data_dir: str | None = None) -> bool:

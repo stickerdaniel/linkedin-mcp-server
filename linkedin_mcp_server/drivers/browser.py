@@ -6,39 +6,49 @@ context. Implements a singleton pattern for browser reuse across tool calls with
 automatic profile persistence.
 """
 
+import asyncio
 import logging
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
+from linkedin_mcp_server.core.camoufox_identity import (
+    CamoufoxIdentityError,
+    load_camoufox_identity_sha256,
+)
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    BrowserTeardownError,
     NetworkError,
     detect_auth_barrier_quick,
     detect_rate_limit,
     is_logged_in,
     resolve_remember_me_prompt,
+    wait_for_session_resume_redirect,
 )
 
 
-from linkedin_mcp_server.common_utils import utcnow_iso
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.session_state import (
     SourceState,
+    camoufox_identity_path as source_camoufox_identity_path,
+    clear_runtime_instance,
     clear_runtime_profile,
     get_runtime_id,
+    get_runtime_instance_id,
     get_source_profile_dir,
-    load_runtime_state,
     load_source_state,
     portable_cookie_path,
+    portable_cookie_is_valid,
     profile_exists as session_profile_exists,
+    rotate_runtime_instance_id,
     runtime_profile_dir,
-    runtime_storage_state_path,
-    write_runtime_state,
+    source_session_lock,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,40 +58,35 @@ logger = logging.getLogger(__name__)
 DEFAULT_PROFILE_DIR = Path.home() / ".linkedin-mcp" / "profile"
 # Global browser instance (singleton)
 _browser: BrowserManager | None = None
-_browser_cookie_export_path: Path | None = None
+_browser_runtime_id: str | None = None
+_browser_runtime_instance_id: str | None = None
+_browser_lifecycle_lock = asyncio.Lock()
+_browser_owner_pid = os.getpid()
 _headless: bool = True
 
 
-def _debug_skip_checkpoint_restart() -> bool:
-    """Return whether to keep the fresh bridged browser alive for this run."""
-    return os.getenv("LINKEDIN_DEBUG_SKIP_CHECKPOINT_RESTART", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+def _ensure_browser_process_state() -> None:
+    """Discard fork-inherited browser/lock objects without touching the parent."""
+    global _browser, _browser_runtime_id, _browser_runtime_instance_id
+    global _browser_lifecycle_lock, _browser_owner_pid
 
-
-def _debug_bridge_every_startup() -> bool:
-    """Return whether to force a fresh bridge on every foreign-runtime startup."""
-    return os.getenv("LINKEDIN_DEBUG_BRIDGE_EVERY_STARTUP", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def experimental_persist_derived_runtime() -> bool:
-    """Return whether Docker-style foreign runtimes should reuse derived profiles."""
-    return os.getenv(
-        "LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", ""
-    ).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    current_pid = os.getpid()
+    if current_pid == _browser_owner_pid:
+        return
+    logger.warning(
+        "Detected fork from browser owner PID %s to %s; discarding inherited "
+        "driver references",
+        _browser_owner_pid,
+        current_pid,
+    )
+    # The inherited transport and asyncio.Lock belong to the parent's event
+    # loop/process. Closing either copy could interfere with the live parent.
+    _browser = None
+    _browser_runtime_id = None
+    _browser_runtime_instance_id = None
+    _browser_lifecycle_lock = asyncio.Lock()
+    _browser_owner_pid = current_pid
+    rotate_runtime_instance_id()
 
 
 def _apply_browser_settings(browser: BrowserManager) -> None:
@@ -136,6 +141,35 @@ _TRANSPORT_FAILURE_MARKERS = (
 )
 
 
+def _is_linkedin_page_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and port in {None, 443}
+        and hostname in {"linkedin.com", "www.linkedin.com"}
+    )
+
+
+def _is_linkedin_feed_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and port in {None, 443}
+        and hostname in {"linkedin.com", "www.linkedin.com"}
+        and (parsed.path == "/feed" or parsed.path.startswith("/feed/"))
+    )
+
+
 def _is_transport_failure(exc: Exception) -> bool:
     """Return whether *exc* signals a dead browser/driver connection.
 
@@ -176,12 +210,26 @@ async def _feed_auth_succeeds(
             "feed-after-goto",
             extra={"allow_remember_me": allow_remember_me},
         )
+        if not _is_linkedin_page_url(browser.page.url):
+            # Never click an off-origin captive-portal/proxy form. It is
+            # neither a LinkedIn auth rejection nor proof that /feed loaded.
+            raise NetworkError(
+                f"Feed validation was redirected outside LinkedIn: {browser.page.url}"
+            )
         if allow_remember_me:
             if await resolve_remember_me_prompt(browser.page):
                 await stabilize_navigation("remember-me resolution", logger)
                 await record_page_trace(
                     browser.page,
                     "feed-after-remember-me",
+                    extra={"allow_remember_me": allow_remember_me},
+                )
+                return await _feed_auth_succeeds(browser, allow_remember_me=False)
+            if await wait_for_session_resume_redirect(browser.page):
+                await stabilize_navigation("session-resume interstitial", logger)
+                await record_page_trace(
+                    browser.page,
+                    "feed-after-session-resume-wait",
                     extra={"allow_remember_me": allow_remember_me},
                 )
                 return await _feed_auth_succeeds(browser, allow_remember_me=False)
@@ -194,8 +242,15 @@ async def _feed_auth_succeeds(
             )
             await _log_feed_failure_context(browser, barrier)
             return False
+        if not _is_linkedin_feed_url(browser.page.url):
+            raise NetworkError(
+                "Feed validation did not reach the expected LinkedIn feed: "
+                f"{browser.page.url}"
+            )
         return True
     except Exception as exc:
+        if isinstance(exc, NetworkError):
+            raise
         if _is_transport_failure(exc):
             # The connection itself died -- recovery attempts (remember-me
             # click, page.title() etc.) would just hang/fail again. Skip
@@ -207,6 +262,12 @@ async def _feed_auth_succeeds(
                 exc,
             )
             raise NetworkError(f"Feed validation could not complete: {exc}") from exc
+        if not _is_linkedin_page_url(browser.page.url):
+            # Navigation may fail only after a proxy/captive portal redirected
+            # the page. Never run recovery clicks against that foreign origin.
+            raise NetworkError(
+                f"Feed validation was redirected outside LinkedIn: {browser.page.url}"
+            ) from exc
         if allow_remember_me and await resolve_remember_me_prompt(browser.page):
             await stabilize_navigation(
                 "remember-me resolution after feed failure", logger
@@ -217,13 +278,27 @@ async def _feed_auth_succeeds(
                 extra={"error": f"{type(exc).__name__}: {exc}"},
             )
             return await _feed_auth_succeeds(browser, allow_remember_me=False)
+        if allow_remember_me and await wait_for_session_resume_redirect(browser.page):
+            await stabilize_navigation(
+                "session-resume interstitial after feed failure", logger
+            )
+            await record_page_trace(
+                browser.page,
+                "feed-after-session-resume-error-recovery",
+                extra={"error": f"{type(exc).__name__}: {exc}"},
+            )
+            return await _feed_auth_succeeds(browser, allow_remember_me=False)
         await record_page_trace(
             browser.page,
             "feed-navigation-error",
             extra={"error": f"{type(exc).__name__}: {exc}"},
         )
         await _log_feed_failure_context(browser, str(exc), exc)
-        return False
+        # A thrown navigation/detector error is not evidence that LinkedIn
+        # rejected the cookie. Only an observed auth barrier above may return
+        # False; timeouts, DNS/TLS failures, redirect errors, and unexpected
+        # page/driver failures are inconclusive infrastructure failures.
+        raise NetworkError(f"Feed validation could not complete: {exc}") from exc
 
 
 def _launch_options() -> tuple[dict[str, Any], dict[str, int]]:
@@ -257,47 +332,31 @@ def _launch_options() -> tuple[dict[str, Any], dict[str, int]]:
     return launch_options, viewport
 
 
-def _dynamic_user_agent() -> str | None:
-    """Generate a randomized, desktop-only, real-world Chrome UA string via
-    fake-useragent's bundled data (no network fetch -- confirmed the package
-    ships its data locally, see pyproject.toml). Best-effort: any failure
-    (missing/corrupt bundled data, a library API change) degrades to None
-    rather than blocking browser launch, matching this module's established
-    philosophy for stealth niceties (see warm_session, core.ip_monitor).
-    """
-    try:
-        from fake_useragent import UserAgent
-
-        return UserAgent(
-            os=["Windows", "Mac OS X", "Linux"],
-            platforms=["desktop"],
-            browsers=["Chrome"],
-        ).random
-    except Exception:
-        logger.debug("Dynamic user-agent generation failed", exc_info=True)
-        return None
-
-
 def _make_browser(
     profile_dir: Path,
     *,
     launch_options: dict[str, Any],
     viewport: dict[str, int],
     user_agent: str | None = None,
+    camoufox_identity_path: Path | None = None,
+    expected_camoufox_identity_sha256: str | None = None,
 ) -> BrowserManager:
-    """Build a BrowserManager. Precedence: an explicit USER_AGENT (env/CLI)
-    always wins; *user_agent* is the session's own UA (the source browser's,
-    recorded at import time) and applies next; a freshly generated dynamic
-    UA (gated on the resolved stealth profile's enable_fingerprint_masking)
-    is the last-resort fallback so a masking-enabled profile never launches
-    with the raw engine-default UA string."""
+    """Build a browser without changing the session's browser identity.
+
+    For Patchright, an explicit USER_AGENT (env/CLI) wins over the imported
+    source-session UA. Camoufox always keeps its own coherent Firefox identity:
+    injecting either value changes only part of its generated fingerprint and
+    can cause LinkedIn to invalidate ``li_at``.
+    """
     config = get_config()
     resolved_user_agent = config.browser.user_agent or user_agent
-    if (
-        not resolved_user_agent
-        and config.browser.resolve_stealth_profile().enable_fingerprint_masking
-    ):
-        resolved_user_agent = _dynamic_user_agent()
+    if config.browser.browser_engine == "camoufox":
+        if resolved_user_agent:
+            logger.warning(
+                "Ignoring configured/source user agent for Camoufox; using "
+                "the engine-native Firefox identity"
+            )
+        resolved_user_agent = None
     return BrowserManager(
         user_data_dir=profile_dir,
         headless=_headless,
@@ -305,38 +364,17 @@ def _make_browser(
         user_agent=resolved_user_agent,
         viewport=viewport,
         engine=config.browser.browser_engine,
+        camoufox_identity_path=camoufox_identity_path,
+        expected_camoufox_identity_sha256=expected_camoufox_identity_sha256,
         **launch_options,
     )
 
 
-async def _authenticate_existing_profile(
+async def validate_imported_cookies(
+    cookie_path: Path,
     profile_dir: Path,
     *,
-    launch_options: dict[str, Any],
-    viewport: dict[str, int],
     user_agent: str | None = None,
-) -> BrowserManager:
-    browser = _make_browser(
-        profile_dir,
-        launch_options=launch_options,
-        viewport=viewport,
-        user_agent=user_agent,
-    )
-    try:
-        await browser.start()
-        if not await _feed_auth_succeeds(browser):
-            raise AuthenticationError(
-                f"Stored runtime profile is invalid: {profile_dir}. Run with --login to refresh the source session."
-            )
-        browser.is_authenticated = True
-        return browser
-    except Exception:
-        await browser.close()
-        raise
-
-
-async def validate_imported_cookies(
-    cookie_path: Path, profile_dir: Path, *, user_agent: str | None = None
 ) -> bool:
     """Validate freshly imported cookies against /feed/ before persisting.
 
@@ -350,9 +388,10 @@ async def validate_imported_cookies(
     A local :class:`BrowserManager` is used (never the singleton), so
     ``close_browser()``'s export-on-close is not involved and cannot shrink
     ``cookies.json``. Injection routes through the existing ``import_cookies``
-    with ``preset_name="bridge_core"`` (the largest existing preset); the
-    on-disk ``cookies.json`` still holds the full superset for the Docker
-    bridge. Always closes the browser in ``finally``.
+    with ``preset_name="bridge_core"`` (the largest existing preset). After
+    the feed proof succeeds, post-navigation rotations/deletions are
+    merged back into the staged full snapshot before it can be committed.
+    Always closes the browser in ``finally``.
     """
     launch_options, viewport = _launch_options()
     secure_mkdir(profile_dir)
@@ -372,9 +411,30 @@ async def validate_imported_cookies(
         if not await browser.import_cookies(cookie_path, preset_name="bridge_core"):
             return False
         await stabilize_navigation("import cookie injection", logger)
-        return await _feed_auth_succeeds(browser)
+        if not await _feed_auth_succeeds(browser):
+            return False
+        if not await browser.refresh_imported_cookie_snapshot(
+            cookie_path, preset_name="bridge_core"
+        ):
+            raise NetworkError(
+                "Validated the imported session but could not capture its "
+                "post-feed cookie snapshot"
+            )
+        return True
     finally:
-        await browser.close()
+        try:
+            teardown_complete = await browser.close()
+        except asyncio.CancelledError as exc:
+            if not browser.teardown_complete:
+                raise BrowserTeardownError(
+                    "Imported-session validation was cancelled before browser "
+                    "teardown could be confirmed"
+                ) from exc
+            raise
+        if not teardown_complete:
+            raise BrowserTeardownError(
+                "Imported-session validation could not confirm browser teardown"
+            )
 
 
 async def _bridge_runtime_profile(
@@ -385,18 +445,49 @@ async def _bridge_runtime_profile(
     runtime_id: str,
     launch_options: dict[str, Any],
     viewport: dict[str, int],
-    persist_runtime: bool,
 ) -> BrowserManager:
     source_profile_dir = get_source_profile_dir()
-    bridge_started_at = utcnow_iso()
-    clear_runtime_profile(runtime_id, source_profile_dir)
+    runtime_instance_id = get_runtime_instance_id()
+    config = get_config()
+    if config.browser.browser_engine == "camoufox":
+        if not source_state.camoufox_identity_sha256:
+            raise AuthenticationError(
+                "The source session is not bound to a Camoufox identity. "
+                "Run with --browser camoufox --login before using Camoufox."
+            )
+        identity_path = source_camoufox_identity_path(source_profile_dir)
+        try:
+            identity_sha256 = load_camoufox_identity_sha256(identity_path)
+        except (CamoufoxIdentityError, OSError) as exc:
+            raise AuthenticationError(
+                "The Camoufox identity bound to the source session is missing "
+                "or incompatible. Run with --browser camoufox --login."
+            ) from exc
+        if identity_sha256 != source_state.camoufox_identity_sha256:
+            raise AuthenticationError(
+                "The Camoufox identity does not match the source session. "
+                "Run with --browser camoufox --login."
+            )
+    elif source_state.camoufox_identity_sha256:
+        raise AuthenticationError(
+            "The source session was minted under Camoufox and cannot be replayed "
+            "under Patchright. Run with --login or --import-from-browser."
+        )
+    if not clear_runtime_profile(runtime_id, source_profile_dir):
+        rotate_runtime_instance_id()
+        raise NetworkError(f"Could not prepare isolated runtime profile: {profile_dir}")
     secure_mkdir(profile_dir.parent)
-    storage_state_path = runtime_storage_state_path(runtime_id, source_profile_dir)
     browser = _make_browser(
         profile_dir,
         launch_options=launch_options,
         viewport=viewport,
         user_agent=source_state.user_agent,
+        camoufox_identity_path=source_camoufox_identity_path(source_profile_dir),
+        expected_camoufox_identity_sha256=(
+            source_state.camoufox_identity_sha256
+            if config.browser.browser_engine == "camoufox"
+            else None
+        ),
     )
     try:
         await browser.start()
@@ -426,78 +517,66 @@ async def _bridge_runtime_profile(
             )
         await stabilize_navigation("post-import feed validation", logger)
         await record_page_trace(browser.page, "bridge-after-feed-validation")
-        if not persist_runtime:
-            logger.info(
-                "Foreign runtime %s authenticated via fresh bridge "
-                "(derived runtime persistence disabled)",
-                runtime_id,
+        if not await browser.refresh_imported_cookie_snapshot(cookie_path):
+            raise NetworkError(
+                "Validated the runtime session but could not capture its "
+                "post-feed cookie snapshot"
             )
-            browser.is_authenticated = True
-            return browser
-        if _debug_skip_checkpoint_restart():
+        logger.info("Runtime %s authenticated via fresh isolated bridge", runtime_id)
+        browser.is_authenticated = True
+        return browser
+    except asyncio.CancelledError:
+        # Abandon the namespace before the first await: a second cancellation
+        # can interrupt close(), and no later startup may then reopen/delete a
+        # directory whose browser lock ownership is uncertain.
+        rotate_runtime_instance_id()
+        if await browser.close():
+            clear_runtime_instance(runtime_id, runtime_instance_id, source_profile_dir)
+        else:
             logger.warning(
-                "Skipping checkpoint restart for derived runtime profile %s "
-                "(LINKEDIN_DEBUG_SKIP_CHECKPOINT_RESTART enabled)",
+                "Preserving runtime profile after cancelled bridge because "
+                "browser teardown was not confirmed: %s",
                 profile_dir,
             )
-            browser.is_authenticated = True
-            return browser
-        if not await browser.export_storage_state(storage_state_path, indexed_db=True):
-            raise AuthenticationError(
-                "Derived runtime session could not be checkpointed. Run with --login to create a fresh source session."
-            )
-        await stabilize_navigation("runtime storage-state export", logger)
-        logger.info("Checkpoint-restarting derived runtime profile %s", profile_dir)
-        await browser.close()
-        reopened = _make_browser(
-            profile_dir,
-            launch_options=launch_options,
-            viewport=viewport,
-            user_agent=source_state.user_agent,
-        )
-        try:
-            await reopened.start()
-            await stabilize_navigation("derived profile reopen", logger)
-            await record_page_trace(
-                reopened.page,
-                "bridge-after-profile-reopen",
-                extra={"profile_dir": str(profile_dir)},
-            )
-            if not await _feed_auth_succeeds(reopened):
-                logger.warning(
-                    "Stored derived runtime profile failed post-commit validation"
-                )
-                raise AuthenticationError(
-                    "Derived runtime validation failed; no automatic re-bridge will be attempted. Run with --login to create a fresh source session."
-                )
-            await stabilize_navigation("post-reopen feed validation", logger)
-            await record_page_trace(reopened.page, "bridge-after-reopen-validation")
-            write_runtime_state(
-                runtime_id,
-                source_state,
-                storage_state_path,
-                source_profile_dir,
-                created_at=bridge_started_at,
-            )
-            logger.info("Derived runtime profile committed for %s", runtime_id)
-            reopened.is_authenticated = True
-            return reopened
-        except Exception:
-            await reopened.close()
-            raise
+        raise
     except NetworkError:
-        # A dead browser/driver connection says nothing about whether this
-        # derived profile is actually invalid -- don't destroy it over a
-        # transport hiccup. Same rationale as orchestrate.py:_reset_profile_dir.
-        await browser.close()
+        # A network/driver error says nothing about cookie validity, but the
+        # bounded close still determines whether this isolated directory is
+        # safe to remove. Preserve it only when lock ownership is uncertain.
+        rotate_runtime_instance_id()
+        if await browser.close():
+            clear_runtime_instance(runtime_id, runtime_instance_id, source_profile_dir)
+        else:
+            logger.warning(
+                "Preserving runtime profile after network failure because "
+                "browser teardown was not confirmed: %s",
+                profile_dir,
+            )
         raise
     except Exception:
-        await browser.close()
-        clear_runtime_profile(runtime_id, source_profile_dir)
+        rotate_runtime_instance_id()
+        if await browser.close():
+            clear_runtime_instance(runtime_id, runtime_instance_id, source_profile_dir)
+        else:
+            logger.warning(
+                "Preserving runtime profile after bridge failure because "
+                "browser teardown was not confirmed: %s",
+                profile_dir,
+            )
         raise
 
 
 async def get_or_create_browser(
+    headless: bool | None = None,
+) -> BrowserManager:
+    """Get/create a runtime browser from one consistent source snapshot."""
+    _ensure_browser_process_state()
+    async with _browser_lifecycle_lock:
+        async with source_session_lock(get_source_profile_dir()):
+            return await _get_or_create_browser_locked(headless)
+
+
+async def _get_or_create_browser_locked(
     headless: bool | None = None,
 ) -> BrowserManager:
     """
@@ -515,7 +594,7 @@ async def get_or_create_browser(
     Raises:
         AuthenticationError: If no valid authentication found
     """
-    global _browser, _browser_cookie_export_path, _headless
+    global _browser, _browser_runtime_id, _browser_runtime_instance_id, _headless
 
     if headless is not None:
         _headless = headless
@@ -527,140 +606,83 @@ async def get_or_create_browser(
     source_profile_dir = get_profile_dir()
     cookie_path = portable_cookie_path(source_profile_dir)
     source_state = load_source_state(source_profile_dir)
-    if (
-        not source_state
-        or not profile_exists(source_profile_dir)
-        or not cookie_path.exists()
-    ):
+    if not source_state or not portable_cookie_is_valid(source_profile_dir):
         raise AuthenticationError(
             "No source authentication found. Run with --login to create a profile."
         )
 
     current_runtime_id = get_runtime_id()
+    current_runtime_instance_id = get_runtime_instance_id()
 
-    if current_runtime_id == source_state.source_runtime_id:
-        logger.info(
-            "Using source profile for runtime %s (profile=%s)",
-            current_runtime_id,
-            source_profile_dir,
-        )
-        browser = await _authenticate_existing_profile(
-            source_profile_dir,
-            launch_options=launch_options,
-            viewport=viewport,
-            user_agent=source_state.user_agent,
-        )
-        _apply_browser_settings(browser)
-        _browser = browser
-        _browser_cookie_export_path = cookie_path
-        return _browser
-
-    persist_runtime = experimental_persist_derived_runtime()
-    force_bridge = _debug_bridge_every_startup()
-
-    if not persist_runtime:
-        logger.info(
-            "Using fresh bridge for foreign runtime %s "
-            "(derived runtime persistence disabled by default)",
-            current_runtime_id,
-        )
-        browser = await _bridge_runtime_profile(
-            runtime_profile_dir(current_runtime_id, source_profile_dir),
-            cookie_path=cookie_path,
-            source_state=source_state,
-            runtime_id=current_runtime_id,
-            launch_options=launch_options,
-            viewport=viewport,
-            persist_runtime=False,
-        )
-        _apply_browser_settings(browser)
-        _browser = browser
-        _browser_cookie_export_path = None
-        return _browser
-
-    runtime_state = load_runtime_state(current_runtime_id, source_profile_dir)
-    derived_profile_dir = runtime_profile_dir(current_runtime_id, source_profile_dir)
-    storage_state_path = runtime_storage_state_path(
-        current_runtime_id, source_profile_dir
-    )
-    generation_matches = (
-        runtime_state is not None
-        and runtime_state.source_login_generation == source_state.login_generation
-    )
-    if (
-        not force_bridge
-        and generation_matches
-        and profile_exists(derived_profile_dir)
-        and storage_state_path.exists()
-    ):
-        logger.info(
-            "Using derived runtime profile for %s (profile=%s)",
-            current_runtime_id,
-            derived_profile_dir,
-        )
-        try:
-            browser = await _authenticate_existing_profile(
-                derived_profile_dir,
-                launch_options=launch_options,
-                viewport=viewport,
-                user_agent=source_state.user_agent,
-            )
-            _apply_browser_settings(browser)
-            _browser = browser
-            _browser_cookie_export_path = None
-            return _browser
-        except AuthenticationError:
-            logger.warning(
-                "Derived runtime profile auth failed for %s; re-bridging from source cookies",
-                current_runtime_id,
-            )
-
-    if force_bridge:
-        logger.warning(
-            "Forcing a fresh bridge for %s on every startup "
-            "(LINKEDIN_DEBUG_BRIDGE_EVERY_STARTUP enabled)",
-            current_runtime_id,
-        )
     logger.info(
-        "Deriving runtime profile for %s from source generation %s",
+        "Using fresh isolated bridge for runtime %s from source generation %s",
         current_runtime_id,
         source_state.login_generation,
     )
     browser = await _bridge_runtime_profile(
-        derived_profile_dir,
+        runtime_profile_dir(current_runtime_id, source_profile_dir),
         cookie_path=cookie_path,
         source_state=source_state,
         runtime_id=current_runtime_id,
         launch_options=launch_options,
         viewport=viewport,
-        persist_runtime=True,
     )
     _apply_browser_settings(browser)
     _browser = browser
-    _browser_cookie_export_path = None
+    _browser_runtime_id = current_runtime_id
+    _browser_runtime_instance_id = current_runtime_instance_id
     return _browser
 
 
-async def close_browser() -> None:
+async def close_browser() -> bool:
     """Close the browser and cleanup resources."""
-    global _browser, _browser_cookie_export_path
+    _ensure_browser_process_state()
+    async with _browser_lifecycle_lock:
+        return await _close_browser_locked()
+
+
+async def _close_browser_locked() -> bool:
+    """Close the singleton while holding ``_browser_lifecycle_lock``."""
+    global _browser, _browser_runtime_id, _browser_runtime_instance_id
 
     browser = _browser
-    cookie_export_path = _browser_cookie_export_path
+    runtime_id = _browser_runtime_id
+    runtime_instance_id = _browser_runtime_instance_id
     _browser = None
-    _browser_cookie_export_path = None
+    _browser_runtime_id = None
+    _browser_runtime_instance_id = None
 
     if browser is None:
-        return
+        return True
 
     logger.info("Closing browser...")
-    if cookie_export_path is not None:
-        try:
-            await browser.export_cookies(cookie_export_path)
-        except Exception:
-            logger.debug("Cookie export on close skipped", exc_info=True)
-    await browser.close()
+    # Rotate before the await so cancellation can never leave the next startup
+    # pointing at a namespace whose teardown result was lost.
+    rotate_runtime_instance_id()
+    teardown_complete = await browser.close()
+    cleanup_complete = teardown_complete
+    if runtime_id is not None and runtime_instance_id is not None:
+        if teardown_complete:
+            cleanup_complete = clear_runtime_instance(
+                runtime_id,
+                runtime_instance_id,
+                get_source_profile_dir(),
+            )
+            if not cleanup_complete:
+                logger.error(
+                    "Browser teardown completed but isolated runtime cleanup "
+                    "failed for %s/%s",
+                    runtime_id,
+                    runtime_instance_id,
+                )
+        else:
+            logger.warning(
+                "Preserving isolated runtime profile because browser teardown "
+                "was not confirmed"
+            )
+            rotate_runtime_instance_id()
     logger.info("Browser closed")
+    return teardown_complete and cleanup_complete
 
 
 def get_profile_dir() -> Path:
@@ -726,7 +748,11 @@ async def check_rate_limit() -> None:
 
 def reset_browser_for_testing() -> None:
     """Reset global browser state for test isolation."""
-    global _browser, _browser_cookie_export_path, _headless
+    global _browser, _browser_lifecycle_lock, _browser_owner_pid
+    global _browser_runtime_id, _browser_runtime_instance_id, _headless
     _browser = None
-    _browser_cookie_export_path = None
+    _browser_runtime_id = None
+    _browser_runtime_instance_id = None
+    _browser_lifecycle_lock = asyncio.Lock()
+    _browser_owner_pid = os.getpid()
     _headless = True

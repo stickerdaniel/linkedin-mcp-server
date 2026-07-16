@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import Enum
+import errno
 import functools
 import importlib.metadata
 import json
 import logging
 import os
 from pathlib import Path
+import shutil
+import stat
 import sys
-from typing import NoReturn
+import tempfile
+from typing import Any, AsyncIterator, BinaryIO, Callable, NoReturn
 
 from fastmcp import Context
 
@@ -35,11 +40,13 @@ from linkedin_mcp_server.exceptions import (
 )
 from linkedin_mcp_server.session_state import (
     auth_root_dir,
+    camoufox_identity_path,
     get_runtime_id,
+    load_source_state,
     move_artifacts_aside,
     portable_cookie_path,
-    profile_exists,
-    runtime_profiles_root,
+    portable_cookie_is_valid,
+    source_session_lock,
     source_state_path,
 )
 from linkedin_mcp_server.setup import interactive_login
@@ -49,6 +56,50 @@ logger = logging.getLogger(__name__)
 _BROWSER_DIR = "patchright-browsers"
 _BROWSER_INSTALL_METADATA = "browser-install.json"
 _INSTALL_METADATA_SCHEMA = 3
+_CAMOUFOX_INSTALL_LOCK_FILE = ".camoufox-install.lock"
+_CAMOUFOX_READY_MARKER_FILE = ".linkedin-mcp-ready.json"
+_CAMOUFOX_READY_MARKER_SCHEMA = 1
+_CAMOUFOX_INSTALL_LOCK_POLL_SECONDS = 0.1
+_SUBPROCESS_TERMINATE_TIMEOUT_SECONDS = 5
+_CAMOUFOX_FETCH_TIMEOUT_SECONDS = 600
+_CAMOUFOX_FETCH_FAILURE_MARKERS = (
+    "failed to download and extract",
+    "error installing camoufox",
+)
+
+
+@dataclass(slots=True)
+class _CamoufoxInstallLease:
+    """Ownership metadata for a cache lock that may outlive its caller."""
+
+    process: Any | None = None
+    reap_task: asyncio.Task[Any] | None = None
+    cleanup: Callable[[], object] | None = None
+
+    def retain_until_reaped(
+        self,
+        process: Any,
+        reap_task: asyncio.Task[Any],
+    ) -> None:
+        self.process = process
+        self.reap_task = reap_task
+
+    def defer_cleanup(self, cleanup: Callable[[], object]) -> None:
+        self.cleanup = cleanup
+
+    @property
+    def must_retain(self) -> bool:
+        return self.process is not None and self.reap_task is not None
+
+
+# A cancelled fetch normally terminates and reaps its child before returning.
+# In the hard-failure case (an unkillable child or an OS signalling error), keep
+# the advisory-lock file descriptor alive until wait()+communicate() have
+# completed and the process has a return code. This prevents a later fetch or
+# another process from mutating the same Camoufox cache concurrently.
+_retained_camoufox_install_locks: dict[
+    Path, tuple[BinaryIO, _CamoufoxInstallLease]
+] = {}
 
 # Registry browser names mapped to on-disk dir prefixes for the binaries this
 # server actually launches. ffmpeg/firefox/webkit are excluded — ffmpeg is only
@@ -102,6 +153,8 @@ class BootstrapState:
     login_task: asyncio.Task[None] | None = None
     import_task: asyncio.Task[bool] | None = None
     import_attempted: bool = False
+    force_auth_reset: bool = False
+    force_auth_reset_generation: str | None = None
     initialized: bool = False
 
 
@@ -212,20 +265,23 @@ def _uses_custom_chrome() -> bool:
     """Return whether an operator-supplied Chrome/Chromium executable is set.
 
     Every launch passes ``executable_path`` from ``chrome_path``, so the managed
-    binary is never used and the background install is unnecessary.
+    Patchright binary is never used and its background install is unnecessary.
+    ``chrome_path`` is a Chromium-only option and must not bypass Camoufox's own
+    binary readiness gate.
     """
-    return bool(get_config().browser.chrome_path)
+    browser = get_config().browser
+    engine = getattr(browser, "browser_engine", "patchright")
+    return engine == "patchright" and bool(browser.chrome_path)
 
 
 def _engine_self_manages_binary() -> bool:
-    """Return whether the configured engine provisions its own browser binary.
+    """Return whether the configured engine uses a non-Patchright provisioner.
 
     Delegates to the engine's own adapter (``core.engines.ENGINES``) rather
     than naming a specific engine here, so a future third engine that
-    self-manages its binary (like Camoufox does via ``uv run camoufox
-    fetch``, cached under ``~/.cache/camoufox``) is automatically respected
-    just by declaring ``needs_managed_install() == False`` on its adapter --
-    no edit to this module required.
+    uses its own binary (like Camoufox, cached under ``~/.cache/camoufox``)
+    does not accidentally run Patchright's Chromium installer. Such engines
+    still need their own explicit readiness and provisioning path below.
     """
     from linkedin_mcp_server.core.engines import ENGINES
 
@@ -235,13 +291,481 @@ def _engine_self_manages_binary() -> bool:
 
 
 def _skips_managed_binary() -> bool:
-    """Return whether the Patchright managed-binary install should be skipped.
+    """Return whether Patchright's managed-binary install should be skipped.
 
     True for either a custom Chrome/Chromium executable or an engine that
-    self-manages its own binary -- both provision their own browser outside
-    this module's install/version-tracking state machine.
+    uses its own provisioner. This says nothing about whether the selected
+    engine is ready: Camoufox is checked and fetched separately.
     """
     return _uses_custom_chrome() or _engine_self_manages_binary()
+
+
+def _camoufox_browser_dir() -> Path | None:
+    """Return the installed, supported Camoufox browser root without mutation.
+
+    Camoufox 0.4's ``camoufox_path(download_if_missing=False)`` is read-only,
+    but probing through package metadata avoids depending on that side effect.
+    The dependency is intentionally capped below 0.5 because 0.5 changes the
+    browser, addon, and GeoIP layouts together.
+    """
+    try:
+        from camoufox.pkgman import INSTALL_DIR, Version
+
+        install_dir = Path(INSTALL_DIR)
+        return install_dir if Version.from_path(install_dir).is_supported() else None
+    except Exception:
+        logger.debug("Camoufox browser binary is not ready", exc_info=True)
+        return None
+
+
+def _camoufox_binary_path() -> Path | None:
+    """Return the supported Camoufox executable path without mutation."""
+    try:
+        from camoufox.pkgman import LAUNCH_FILE, OS_NAME
+
+        browser_dir = _camoufox_browser_dir()
+        if browser_dir is None:
+            return None
+        launch_file = Path(LAUNCH_FILE[OS_NAME])
+        if OS_NAME == "mac":
+            return browser_dir / "Camoufox.app" / "Contents" / "Resources" / launch_file
+        return browser_dir / launch_file
+    except Exception:
+        logger.debug("Camoufox browser binary is not ready", exc_info=True)
+        return None
+
+
+def _camoufox_resource_dir(browser_dir: Path) -> Path:
+    from camoufox.pkgman import OS_NAME
+
+    if OS_NAME == "mac":
+        return browser_dir / "Camoufox.app" / "Contents" / "Resources"
+    return browser_dir
+
+
+def _camoufox_addon_dirs(browser_dir: Path) -> list[Path]:
+    from camoufox.addons import DefaultAddons
+
+    addon_root = _camoufox_resource_dir(browser_dir) / "addons"
+    return [addon_root / addon.name for addon in DefaultAddons]
+
+
+def _camoufox_addon_ready(addon_dir: Path) -> bool:
+    manifest_path = addon_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return isinstance(manifest, dict) and all(
+        manifest.get(key) for key in ("manifest_version", "name", "version")
+    )
+
+
+def _camoufox_mmdb_path() -> Path | None:
+    try:
+        from camoufox.locale import ALLOW_GEOIP, MMDB_FILE
+
+        return Path(MMDB_FILE) if ALLOW_GEOIP else None
+    except Exception:
+        return None
+
+
+def _camoufox_mmdb_ready(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        from geoip2.database import Reader
+
+        with Reader(str(path)):
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def _camoufox_assets_ready() -> bool:
+    """Validate every non-browser asset used by our Camoufox adapter."""
+    browser_dir = _camoufox_browser_dir()
+    mmdb_path = _camoufox_mmdb_path()
+    return (
+        browser_dir is not None
+        and mmdb_path is not None
+        and _camoufox_mmdb_ready(mmdb_path)
+        and all(
+            _camoufox_addon_ready(path) for path in _camoufox_addon_dirs(browser_dir)
+        )
+    )
+
+
+def _camoufox_components_ready() -> bool:
+    """Return whether the browser and launch-time assets are structurally usable."""
+    executable = _camoufox_binary_path()
+    if not _camoufox_executable_ready(executable):
+        return False
+    return _camoufox_assets_ready()
+
+
+def _camoufox_executable_ready(executable: Path | None) -> bool:
+    """Reject absent, empty and non-executable Camoufox launch binaries."""
+    if executable is None or not executable.is_file():
+        return False
+    try:
+        if executable.stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+    return os.name == "nt" or os.access(executable, os.X_OK)
+
+
+def _camoufox_ready_marker_path() -> Path | None:
+    try:
+        from camoufox.pkgman import INSTALL_DIR
+
+        return Path(INSTALL_DIR).expanduser() / _CAMOUFOX_READY_MARKER_FILE
+    except Exception:
+        return None
+
+
+def _camoufox_ready_marker_valid() -> bool:
+    marker_path = _camoufox_ready_marker_path()
+    if marker_path is None:
+        return False
+    try:
+        payload = json.loads(marker_path.read_text())
+        package_version = importlib.metadata.version("camoufox")
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        importlib.metadata.PackageNotFoundError,
+    ):
+        return False
+    return payload == {
+        "schema": _CAMOUFOX_READY_MARKER_SCHEMA,
+        "camoufox_package_version": package_version,
+    }
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt" or not path.exists():
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _invalidate_camoufox_ready_marker() -> None:
+    """Make every lock-free readiness probe fail before cache mutation."""
+    marker_path = _camoufox_ready_marker_path()
+    if marker_path is None:
+        raise BrowserSetupFailedError("Could not resolve Camoufox readiness marker")
+    existed = marker_path.exists() or marker_path.is_symlink()
+    try:
+        marker_path.unlink(missing_ok=True)
+        if marker_path.exists() or marker_path.is_symlink():
+            raise OSError("marker still exists after unlink")
+        if existed:
+            _fsync_directory(marker_path.parent)
+    except OSError as exc:
+        raise BrowserSetupFailedError(
+            f"Could not invalidate Camoufox readiness marker: {exc}"
+        ) from exc
+
+
+def _write_camoufox_ready_marker() -> None:
+    """Publish the crash/cross-process completion proof as the final fetch step."""
+    marker_path = _camoufox_ready_marker_path()
+    if marker_path is None:
+        raise BrowserSetupFailedError("Could not resolve Camoufox readiness marker")
+    payload = {
+        "schema": _CAMOUFOX_READY_MARKER_SCHEMA,
+        "camoufox_package_version": importlib.metadata.version("camoufox"),
+    }
+    secure_mkdir(marker_path.parent)
+    marker_fd, temp_name = tempfile.mkstemp(
+        dir=marker_path.parent,
+        prefix=f".{marker_path.name}.",
+        suffix=".tmp",
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(marker_fd, "w") as marker_file:
+            marker_file.write(json.dumps(payload, sort_keys=True) + "\n")
+            marker_file.flush()
+            os.fsync(marker_file.fileno())
+        if os.name != "nt":
+            temp_path.chmod(0o600)
+        os.replace(temp_path, marker_path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+    # Once replace succeeds, the marker names fully-written, fsynced content
+    # and is safe for readers. A filesystem that rejects directory fsync may
+    # lose the marker after a crash (safe false-negative/refetch), but must not
+    # turn a currently valid install into an exception after publication.
+    try:
+        _fsync_directory(marker_path.parent)
+    except OSError as exc:
+        logger.warning("Could not fsync Camoufox marker directory: %s", exc)
+
+
+def camoufox_ready() -> bool:
+    """Return whether a completed Camoufox install is safe to launch."""
+    # Marker first: while another process is fetching, no consumer observes a
+    # momentarily plausible binary/MMDB/manifest and launches into a partial
+    # cache. The marker is removed before mutation and published last.
+    return _camoufox_ready_marker_valid() and _camoufox_components_ready()
+
+
+def _remove_incomplete_camoufox_assets() -> None:
+    """Delete partial MMDB/addon outputs so Camoufox fetch will retry them."""
+    mmdb_path = _camoufox_mmdb_path()
+    if (
+        mmdb_path is not None
+        and mmdb_path.exists()
+        and not _camoufox_mmdb_ready(mmdb_path)
+    ):
+        mmdb_path.unlink()
+
+    browser_dir = _camoufox_browser_dir()
+    if browser_dir is None:
+        return
+    for addon_dir in _camoufox_addon_dirs(browser_dir):
+        if addon_dir.exists() and not _camoufox_addon_ready(addon_dir):
+            if addon_dir.is_dir() and not addon_dir.is_symlink():
+                shutil.rmtree(addon_dir)
+            else:
+                addon_dir.unlink()
+
+
+def _remove_path_without_following_symlinks(path: Path) -> bool:
+    """Best-effort removal for fetch outputs while the install lock is owned."""
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Could not remove incomplete Camoufox asset %s: %s", path, exc)
+        return False
+    return not path.exists() and not path.is_symlink()
+
+
+def _remove_camoufox_fetch_assets() -> bool:
+    """Unconditionally discard assets a failed/interrupted fetch may truncate."""
+    removed = True
+    try:
+        mmdb_path = _camoufox_mmdb_path()
+    except Exception as exc:
+        logger.warning("Could not locate Camoufox GeoIP asset for cleanup: %s", exc)
+        mmdb_path = None
+    if mmdb_path is not None:
+        removed = _remove_path_without_following_symlinks(mmdb_path) and removed
+    else:
+        removed = False
+
+    browser_dir = _camoufox_browser_dir()
+    if browser_dir is None:
+        try:
+            from camoufox.pkgman import INSTALL_DIR
+
+            browser_dir = Path(INSTALL_DIR)
+        except Exception:
+            return False
+    try:
+        addon_dirs = _camoufox_addon_dirs(browser_dir)
+    except Exception as exc:
+        logger.warning("Could not locate Camoufox addons for cleanup: %s", exc)
+        return False
+    for addon_dir in addon_dirs:
+        removed = _remove_path_without_following_symlinks(addon_dir) and removed
+    return removed
+
+
+def _remove_broken_camoufox_browser_cache(browser_dir: Path) -> bool:
+    """Invalidate 0.4 cache metadata when its advertised binary is unusable."""
+    try:
+        from camoufox.pkgman import INSTALL_DIR
+
+        install_dir = Path(INSTALL_DIR).expanduser()
+        if browser_dir.expanduser().resolve() != install_dir.resolve():
+            logger.error(
+                "Refusing to remove unexpected Camoufox cache path %s", browser_dir
+            )
+            return False
+        _remove_path_without_following_symlinks(install_dir)
+        return not install_dir.exists()
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.warning("Could not invalidate broken Camoufox cache: %s", exc)
+        return False
+
+
+def _repair_camoufox_execute_permissions() -> bool:
+    """Finish Camoufox's interrupted post-extraction chmod on POSIX.
+
+    Camoufox 0.4 writes supported version metadata before its final recursive
+    chmod. If the fetch process is killed in that narrow window, a later fetch
+    reports "up to date" and never repairs the non-executable tree. Add only
+    owner read/execute (and owner write for directories), preserving all other
+    mode bits and never following symlinks.
+    """
+    if os.name == "nt":
+        return False
+    try:
+        from camoufox.pkgman import INSTALL_DIR
+
+        install_dir = Path(INSTALL_DIR)
+        if not install_dir.is_dir():
+            return False
+
+        def repair_path(path: Path) -> None:
+            if path.is_symlink():
+                return
+            mode = stat.S_IMODE(path.stat().st_mode) | stat.S_IRUSR | stat.S_IXUSR
+            if path.is_dir():
+                mode |= stat.S_IWUSR
+            path.chmod(mode)
+
+        repair_path(install_dir)
+        for path in install_dir.rglob("*"):
+            repair_path(path)
+        return True
+    except OSError as exc:
+        logger.warning("Could not repair Camoufox cache permissions: %s", exc)
+        return False
+
+
+def _camoufox_install_lock_path() -> Path:
+    """Return a lock beside (not inside) Camoufox's destructively replaced cache."""
+    from camoufox.pkgman import INSTALL_DIR
+
+    return Path(INSTALL_DIR).expanduser().resolve().parent / _CAMOUFOX_INSTALL_LOCK_FILE
+
+
+def _try_acquire_install_lock(handle: BinaryIO) -> bool:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                return False
+            raise
+        return True
+
+    import fcntl
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            return False
+        raise
+    return True
+
+
+def _release_install_lock(handle: BinaryIO) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@asynccontextmanager
+async def _camoufox_install_lock(
+    lock_path: Path | None = None,
+) -> AsyncIterator[_CamoufoxInstallLease]:
+    """Serialize Camoufox fetch across every process sharing its user cache."""
+    path = (lock_path or _camoufox_install_lock_path()).expanduser().resolve()
+    secure_mkdir(path.parent)
+    handle = path.open("a+b")
+    if os.name != "nt":
+        path.chmod(0o600)
+    acquired = False
+    lease = _CamoufoxInstallLease()
+    try:
+        while not acquired:
+            if path not in _retained_camoufox_install_locks:
+                acquired = _try_acquire_install_lock(handle)
+            if not acquired:
+                await asyncio.sleep(_CAMOUFOX_INSTALL_LOCK_POLL_SECONDS)
+        yield lease
+    finally:
+        if acquired and lease.must_retain:
+            assert lease.process is not None
+            assert lease.reap_task is not None
+            if (
+                lease.reap_task.done()
+                and getattr(lease.process, "returncode", None) is not None
+            ):
+                if lease.cleanup is not None:
+                    lease.cleanup()
+            else:
+                _retain_camoufox_install_lock(path, handle, lease)
+                acquired = False
+        if acquired:
+            try:
+                _release_install_lock(handle)
+            finally:
+                handle.close()
+        elif not lease.must_retain:
+            handle.close()
+
+
+def _retain_camoufox_install_lock(
+    path: Path,
+    handle: BinaryIO,
+    lease: _CamoufoxInstallLease,
+) -> None:
+    """Transfer a lock to a child-completion callback after caller cancellation."""
+    assert lease.process is not None
+    assert lease.reap_task is not None
+    _retained_camoufox_install_locks[path] = (handle, lease)
+
+    def release_if_reaped(_task: asyncio.Task[Any]) -> None:
+        retained = _retained_camoufox_install_locks.get(path)
+        if retained is None or retained[0] is not handle:
+            return
+        if getattr(lease.process, "returncode", None) is None:
+            logger.error(
+                "Camoufox installer communicate() ended without reaping the child; "
+                "retaining cache lock until process exit"
+            )
+            return
+        try:
+            with suppress(Exception, asyncio.CancelledError):
+                _task.result()
+            if lease.cleanup is not None:
+                lease.cleanup()
+            _release_install_lock(handle)
+        except Exception as exc:
+            logger.warning(
+                "Could not explicitly release Camoufox install lock: %s", exc
+            )
+        finally:
+            try:
+                handle.close()
+            except OSError as exc:
+                logger.warning("Could not close Camoufox install lock: %s", exc)
+            _retained_camoufox_install_locks.pop(path, None)
+
+    lease.reap_task.add_done_callback(release_if_reaped)
 
 
 def initialize_bootstrap(runtime_policy: RuntimePolicy | str | None = None) -> None:
@@ -263,8 +787,8 @@ async def start_background_browser_setup_if_needed() -> None:
     initialize_bootstrap()
     if get_runtime_policy() != RuntimePolicy.MANAGED:
         return
-    if _skips_managed_binary():
-        # A custom executable or Camoufox skips the managed binary; nothing to install.
+    if _uses_custom_chrome():
+        # An explicit Patchright executable is provisioned by the operator.
         _state.setup_state = SetupState.READY
         _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
         return
@@ -360,6 +884,8 @@ def browser_setup_ready() -> bool:
     metadata or in-memory state. Mutation happens in
     :func:`invalidate_browser_setup`, called by the gate paths.
     """
+    if _engine_self_manages_binary():
+        return camoufox_ready()
     if get_config().browser.headless:
         return shell_ready()
     return full_chromium_ready()
@@ -402,7 +928,7 @@ async def _run_patchright_install(extra_arg: str) -> None:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    stdout, stderr = await _communicate_installer(proc)
     if proc.returncode != 0:
         output = "\n".join(
             text for text in (stderr.decode().strip(), stdout.decode().strip()) if text
@@ -410,6 +936,199 @@ async def _run_patchright_install(extra_arg: str) -> None:
         raise BrowserSetupFailedError(
             output or "Patchright Chromium browser setup failed."
         )
+
+
+async def _terminate_and_reap_subprocess(
+    proc: Any,
+    communicate_task: asyncio.Task[tuple[bytes, bytes]],
+) -> tuple[bool, asyncio.Task[Any]]:
+    """Stop a cancelled installer child and always collect its exit status."""
+
+    async def confirm_reaped() -> None:
+        # communicate() itself can fail before asyncio's child watcher has set
+        # returncode. A separate wait() supplies the later completion edge the
+        # retained-lock callback needs; reusing an already-done communicate
+        # task would otherwise retain the lock until process exit.
+        wait = getattr(proc, "wait", None)
+        if callable(wait):
+            with suppress(Exception, asyncio.CancelledError):
+                await wait()
+        with suppress(Exception, asyncio.CancelledError):
+            await communicate_task
+
+    reap_task = asyncio.create_task(confirm_reaped())
+
+    async def wait_bounded(timeout: float) -> bool:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not reap_task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(asyncio.shield(reap_task), timeout=remaining)
+            except asyncio.CancelledError:
+                # A repeated cancellation must not strand the installer child.
+                # Cleanup stays bounded by the original monotonic deadline.
+                continue
+            except TimeoutError:
+                return (
+                    reap_task.done() and getattr(proc, "returncode", None) is not None
+                )
+            except Exception:
+                break
+        with suppress(Exception, asyncio.CancelledError):
+            reap_task.result()
+        return reap_task.done() and getattr(proc, "returncode", None) is not None
+
+    if proc.returncode is None:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            logger.warning("Could not terminate cancelled installer child: %s", exc)
+    if await wait_bounded(_SUBPROCESS_TERMINATE_TIMEOUT_SECONDS):
+        return True, reap_task
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            logger.warning("Could not kill cancelled installer child: %s", exc)
+    if not await wait_bounded(_SUBPROCESS_TERMINATE_TIMEOUT_SECONDS):
+        logger.error("Timed out reaping cancelled browser installer subprocess")
+        return False, reap_task
+    return True, reap_task
+
+
+async def _communicate_installer(
+    proc: Any,
+    on_unreaped: Callable[[Any, asyncio.Task[Any]], None] | None = None,
+) -> tuple[bytes, bytes]:
+    communicate_task = asyncio.create_task(proc.communicate())
+    try:
+        return await asyncio.shield(communicate_task)
+    except (Exception, asyncio.CancelledError):
+        reaped, reap_task = await _terminate_and_reap_subprocess(proc, communicate_task)
+        if not reaped and on_unreaped is not None:
+            on_unreaped(proc, reap_task)
+        raise
+
+
+async def _run_camoufox_fetch() -> None:
+    """Fetch Camoufox through its supported CLI and verify the executable.
+
+    The post-check is required because some Camoufox CLI versions print a
+    download error and still exit successfully. A zero subprocess exit status
+    alone must therefore never advance the bootstrap state to READY.
+    """
+    async with _camoufox_install_lock() as install_lease:
+        # A second process may have completed the install while this caller was
+        # waiting. Re-check only after owning the cache-wide advisory lock.
+        try:
+            from camoufox.pkgman import INSTALL_DIR
+
+            install_dir = Path(INSTALL_DIR).expanduser()
+        except Exception:
+            install_dir = None
+        browser_dir = _camoufox_browser_dir()
+        candidate = _camoufox_binary_path()
+        if (
+            candidate is not None
+            and candidate.is_file()
+            and os.name != "nt"
+            and not os.access(candidate, os.X_OK)
+        ):
+            _repair_camoufox_execute_permissions()
+            candidate = _camoufox_binary_path()
+        if (
+            install_dir is not None
+            and install_dir.exists()
+            and (browser_dir is None or not _camoufox_executable_ready(candidate))
+        ):
+            if not _remove_broken_camoufox_browser_cache(install_dir):
+                raise BrowserSetupFailedError(
+                    "Could not invalidate unusable Camoufox browser cache"
+                )
+        _remove_incomplete_camoufox_assets()
+        if camoufox_ready():
+            return
+        # A missing/invalid marker means the preceding fetch may have died at
+        # any extraction offset. Invalidate first so lock-free consumers fail,
+        # then remove every upstream asset whose downloader skips on existence.
+        _invalidate_camoufox_ready_marker()
+        if not _remove_camoufox_fetch_assets():
+            raise BrowserSetupFailedError(
+                "Could not clear incomplete Camoufox runtime assets before fetch"
+            )
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "camoufox",
+            "fetch",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            async with asyncio.timeout(_CAMOUFOX_FETCH_TIMEOUT_SECONDS):
+                stdout, stderr = await _communicate_installer(
+                    proc, on_unreaped=install_lease.retain_until_reaped
+                )
+        except TimeoutError as exc:
+            if install_lease.must_retain:
+                install_lease.defer_cleanup(_remove_camoufox_fetch_assets)
+            else:
+                _remove_camoufox_fetch_assets()
+            raise BrowserSetupFailedError(
+                "Camoufox browser setup timed out after "
+                f"{_CAMOUFOX_FETCH_TIMEOUT_SECONDS} seconds"
+            ) from exc
+        except (Exception, asyncio.CancelledError):
+            if install_lease.must_retain:
+                install_lease.defer_cleanup(_remove_camoufox_fetch_assets)
+            else:
+                _remove_camoufox_fetch_assets()
+            raise
+        if proc.returncode != 0:
+            _remove_camoufox_fetch_assets()
+            output = "\n".join(
+                text
+                for text in (
+                    stderr.decode(errors="replace").strip(),
+                    stdout.decode(errors="replace").strip(),
+                )
+                if text
+            )
+            raise BrowserSetupFailedError(output or "Camoufox browser setup failed.")
+        combined_output = "\n".join(
+            text
+            for text in (
+                stderr.decode(errors="replace").strip(),
+                stdout.decode(errors="replace").strip(),
+            )
+            if text
+        )
+        if any(
+            marker in combined_output.casefold()
+            for marker in _CAMOUFOX_FETCH_FAILURE_MARKERS
+        ):
+            _remove_camoufox_fetch_assets()
+            raise BrowserSetupFailedError(
+                combined_output or "Camoufox reported an incomplete runtime download."
+            )
+        if not _camoufox_components_ready():
+            _remove_camoufox_fetch_assets()
+            raise BrowserSetupFailedError(
+                "Camoufox fetch completed without installing usable runtime components."
+            )
+        _write_camoufox_ready_marker()
+        if not camoufox_ready():
+            _invalidate_camoufox_ready_marker()
+            _remove_camoufox_fetch_assets()
+            raise BrowserSetupFailedError(
+                "Camoufox fetch completion marker could not be verified."
+            )
 
 
 def _write_install_metadata(
@@ -444,14 +1163,17 @@ def _needs_full_chromium() -> bool:
 
 
 async def _run_browser_setup() -> None:
-    """Install the headless shell first, then full chromium when needed.
+    """Install the configured engine's browser runtime.
 
-    Stage one (``--only-shell``) lands the headless shell + ffmpeg so the
-    headless first-run path becomes usable as early as possible; metadata is
-    written after it so a crash before stage two still records the shell as
-    ready. Stage two (``--no-shell``) adds full Chrome for Testing for the
-    headed login fallback / ``--no-headless`` mode, and runs only when needed.
+    Camoufox has one browser artifact for headed and headless launches, fetched
+    through its own module. Patchright remains two-stage: the headless shell is
+    installed first and full Chrome for Testing only when the configured mode
+    needs it.
     """
+    if _engine_self_manages_binary():
+        await _run_camoufox_fetch()
+        return
+
     browser_dir = configure_browser_environment()
     secure_mkdir(browser_dir)
 
@@ -495,15 +1217,27 @@ async def _ensure_full_chromium_installed() -> None:
 
 
 def ensure_browser_installed(*, full: bool = False) -> None:
-    """Install the Patchright Chromium binaries a CLI mode needs, if absent.
+    """Install the configured browser runtime a CLI mode needs, if absent.
 
     Used by CLI modes (--login, --status, --import-from-browser) to guarantee
-    the right binary exists before launching it: ``--status`` and
-    ``--import-from-browser`` run headless and need only the shell, while
-    ``--login`` is headed and needs full chromium. The normal server path uses
-    async background setup instead (non-blocking).
+    the right binary exists before launching it. Camoufox uses the same fetched
+    Firefox artifact in both modes. Patchright's ``--status`` and import paths
+    need only the shell, while ``--login`` needs full Chromium. The normal
+    server path uses async background setup instead (non-blocking).
     """
     configure_browser_environment()
+    if _engine_self_manages_binary():
+        if camoufox_ready():
+            return
+        print("   Installing Camoufox browser...")
+        try:
+            asyncio.run(_run_camoufox_fetch())
+        except Exception as exc:
+            print(f"   ❌ Browser installation failed: {exc}")
+            raise
+        print("   Browser installed.")
+        return
+
     if full:
         if full_chromium_ready():
             return
@@ -547,14 +1281,24 @@ async def _refresh_background_task_state() -> None:
         except asyncio.CancelledError:
             _state.setup_state = SetupState.FAILED
             _state.last_error = "Browser setup task was cancelled"
-            logger.warning("Patchright Chromium browser setup task cancelled")
+            logger.warning("Browser setup task cancelled")
         except Exception as exc:
             _state.setup_state = SetupState.FAILED
             _state.last_error = str(exc)
-            logger.warning("Patchright Chromium browser setup failed: %s", exc)
+            logger.warning("Browser setup failed: %s", exc)
         else:
-            _state.setup_state = SetupState.READY
-            _state.setup_completed_at = utcnow_iso()
+            # Do not trust task completion alone: Camoufox CLI releases have
+            # returned success after printing a fetch failure, and a binary can
+            # disappear between installation and reconciliation.
+            if _browser_setup_ready():
+                _state.setup_state = SetupState.READY
+                _state.setup_completed_at = utcnow_iso()
+            else:
+                _state.setup_state = SetupState.FAILED
+                _state.last_error = (
+                    "Browser setup completed but the configured binary is unavailable"
+                )
+                logger.warning(_state.last_error)
 
     if _safe_task_done(_state.login_task):
         task = _state.login_task
@@ -583,12 +1327,22 @@ async def ensure_tool_ready_or_raise(
     await _refresh_background_task_state()
 
     if get_runtime_policy() == RuntimePolicy.DOCKER:
+        if _engine_self_manages_binary() and not camoufox_ready():
+            _state.setup_state = SetupState.FAILED
+            _state.last_error = (
+                "Camoufox browser binary is missing from the Docker image"
+            )
+            raise BrowserSetupFailedError(
+                f"{_state.last_error}. Rebuild or update the image; the binary "
+                "and its runtime assets must be baked for pwuser's HOME during "
+                "the image build."
+            )
         _raise_if_docker_auth_missing()
         return
 
-    if _skips_managed_binary():
-        # A custom executable or Camoufox bypasses the managed binary entirely,
-        # so the background install is irrelevant; jump straight to the auth gate.
+    if _uses_custom_chrome():
+        # The operator-provisioned Patchright executable bypasses background
+        # setup; jump straight to the auth gate.
         _state.setup_state = SetupState.READY
         _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
         if _auth_ready():
@@ -606,20 +1360,21 @@ async def ensure_tool_ready_or_raise(
             _state.setup_task is None or _state.setup_task.done()
         ):
             await start_background_browser_setup_if_needed()
+        browser_name = (
+            "Camoufox" if _engine_self_manages_binary() else "Patchright Chromium"
+        )
         if ctx is not None:
             await ctx.report_progress(
                 progress=5,
                 total=100,
-                message=f"{tool_name}: Patchright Chromium browser setup still in progress",
+                message=f"{tool_name}: {browser_name} browser setup still in progress",
             )
         raise BrowserSetupInProgressError(
             "LinkedIn setup is not complete yet: the server is downloading the "
-            "Patchright Chromium browser in the background and will use it "
-            "automatically once ready. Do not install the browser yourself (no "
-            "`patchright install` or `uv run patchright install`), and do not "
-            "restart the server. A manual install only fights the background one "
-            "for the same lock and slows it down. Just wait and call this tool "
-            "again in a minute or two."
+            f"{browser_name} browser in the background and will use it "
+            "automatically once ready. Do not start a second manual browser "
+            "installation or restart the server while this is running. Just wait "
+            "and call this tool again in a minute or two."
         )
 
     if _auth_ready():
@@ -640,8 +1395,7 @@ def _raise_if_docker_auth_missing() -> None:
 def _auth_ready() -> bool:
     profile_dir = get_profile_dir()
     return (
-        profile_exists(profile_dir)
-        and portable_cookie_path(profile_dir).exists()
+        portable_cookie_is_valid(profile_dir)
         and source_state_path(profile_dir).exists()
         and _has_source_state()
     )
@@ -758,26 +1512,28 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
 
     await _announce_auto_import_once(ctx)
     user_data_dir = get_profile_dir()
-    # The import opens a persistent context on user_data_dir; the singleton holds
-    # a SingletonLock on that same dir, so release it first. No-op on the
-    # no-session path (_browser is None); defensive on any relogin reuse.
-    await close_browser()
+    # Import validation uses its own one-shot isolated profile. Close any
+    # singleton first anyway so the bootstrap attempt has one browser owner and
+    # a teardown failure cannot be misreported as an authentication verdict.
+    if not await close_browser():
+        raise NetworkError("Could not confirm browser teardown before session import")
     prev_headless = current_headless()
     set_headless(True)  # background probe; never pop a visible window
     try:
-        # Hard ceiling on the whole import. The on-loop validation step launches
-        # a persistent Chromium context (drivers/browser.py validate_imported_cookies
-        # -> core/browser.py start) with NO launch timeout, so a wedged binary
-        # (stale SingletonLock, sandbox stall, half-installed Chromium, X-less
-        # Linux desktop) would otherwise hang the first no-session tool call.
-        # Default-on routes every desktop first-call through this, so the bound
-        # is what makes "fails fast and falls back" hold end to end. Keychain
-        # reads are already bounded (security 10s / secret-tool 10s); this covers
-        # the launch + navigation budget on top.
-        result = await asyncio.wait_for(
-            import_session_from_browser(None, user_data_dir=user_data_dir),
-            timeout=60,
-        )
+        # Hard ceiling on the complete lock + discovery + decryption + isolated
+        # live-validation transaction. BrowserManager has its own launch bound;
+        # this outer budget also covers waiting for the source lock and page
+        # navigation. Keychain reads are independently bounded.
+        async with asyncio.timeout(60):
+            async with source_session_lock(user_data_dir):
+                # Another server may have repaired the source session while this
+                # process waited for the cross-process lock. Never overwrite it
+                # with another staged import in that case.
+                if _auth_ready():
+                    return True
+                result = await import_session_from_browser(
+                    None, user_data_dir=user_data_dir
+                )
         if not result:
             # Reached only when a live li_at decrypted but LinkedIn rejected the
             # session (orchestrate.py:254). The "no live session" and "could not
@@ -872,7 +1628,6 @@ async def _start_login_if_needed(ctx: Context | None = None) -> None:
                 prior_error = None
             else:
                 prior_error = _state.last_error
-                _move_invalid_auth_state_aside()
                 _state.auth_state = AuthState.STARTING
                 _state.auth_started_at = utcnow_iso()
                 _state.last_error = None
@@ -945,8 +1700,14 @@ async def invalidate_auth_and_trigger_relogin(
                 "then retry this tool."
             )
 
-        # Force-move stale profile files (skip _auth_ready() guard).
-        _force_move_auth_state_aside()
+        # Defer filesystem mutation to the login task. It acquires the
+        # cross-process source-session lock first, so it cannot move a profile
+        # another server is currently importing into or using for login.
+        _state.force_auth_reset = True
+        source_state = load_source_state(get_profile_dir())
+        _state.force_auth_reset_generation = (
+            source_state.login_generation if source_state is not None else None
+        )
 
         # A force-move starts a fresh no-session episode; allow auto-import to
         # be re-attempted on the next tool call (the prior latch was for the
@@ -991,7 +1752,7 @@ def _move_auth_state_aside(*, force: bool = False) -> None:
             profile_dir,
             portable_cookie_path(profile_dir),
             source_state_path(profile_dir),
-            runtime_profiles_root(profile_dir),
+            camoufox_identity_path(profile_dir),
         ],
         profile_dir,
     )
@@ -1015,7 +1776,32 @@ async def _run_login_flow() -> None:
     # dependencies.py binary-missing backstop remains as a recovery path.
     if not _skips_managed_binary():
         await _ensure_full_chromium_installed()
-    success = await interactive_login(get_profile_dir())
+    profile_dir = get_profile_dir()
+    async with source_session_lock(profile_dir):
+        force_reset = _state.force_auth_reset
+        requested_generation = _state.force_auth_reset_generation
+        if force_reset and _auth_ready():
+            current_source_state = load_source_state(profile_dir)
+            current_generation = (
+                current_source_state.login_generation
+                if current_source_state is not None
+                else None
+            )
+            if current_generation != requested_generation:
+                # A different process refreshed the source while this login
+                # task waited. Its new generation supersedes our stale verdict.
+                _state.force_auth_reset = False
+                _state.force_auth_reset_generation = None
+                return
+        if not force_reset and _auth_ready():
+            return
+        if force_reset:
+            _force_move_auth_state_aside()
+        else:
+            _move_invalid_auth_state_aside()
+        _state.force_auth_reset = False
+        _state.force_auth_reset_generation = None
+        success = await interactive_login(profile_dir)
     if not success:
         raise AuthenticationBootstrapFailedError(
             "LinkedIn login was not completed. Retry the tool call to reopen the browser and continue setup."

@@ -13,10 +13,10 @@ touched for the browser we actually import from:
 2. Recency ranking (also keychain-free): live candidates are ordered by
    ``li_at.last_access`` descending, so the browser the user most recently used
    LinkedIn in is tried first.
-3. Authoritative confirm: in that order, decrypt the one profile (keychain
-   prompt for that browser only), inject the cookies into the source profile,
-   and prove ``/feed/``. The first that passes is imported; a profile whose
-   cookie is present but server-rejected falls through to the next.
+3. Authoritative confirm: in that order, decrypt one profile (keychain prompt
+   for that browser only), inject the cookies into a unique isolated validation
+   profile, and prove ``/feed/``. Only the first successful candidate is
+   transactionally published as the canonical source snapshot.
 """
 
 from __future__ import annotations
@@ -24,8 +24,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import time
 from pathlib import Path
+from uuid import uuid4
 
 from linkedin_mcp_server.browser_import.discovery import (
     BrowserProfile,
@@ -33,20 +35,31 @@ from linkedin_mcp_server.browser_import.discovery import (
 )
 from linkedin_mcp_server.browser_import.extract import (
     LiAtMeta,
+    LinkedInCookie,
     extract_linkedin_cookies,
     read_li_at_meta,
 )
 from linkedin_mcp_server.browser_import.user_agent import synthesize_user_agent
-from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_write_text
-from linkedin_mcp_server.core.exceptions import NetworkError
+from linkedin_mcp_server.common_utils import (
+    harden_linkedin_tree,
+    secure_mkdir,
+    secure_write_text,
+)
+import linkedin_mcp_server.config as config_module
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    BrowserTeardownError,
+)
 
 from linkedin_mcp_server.exceptions import (
     CookieDecryptionError,
     NoLinkedInSessionFoundError,
 )
 from linkedin_mcp_server.session_state import (
-    portable_cookie_path,
-    write_source_state,
+    acquire_pending_profile_lease,
+    auth_root_dir,
+    commit_source_session,
+    source_session_lock,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,14 +152,13 @@ def _discover_and_rank(
     return rank_live_profiles(profiles)
 
 
-def _extract_and_stage(profile: BrowserProfile, cookie_path: Path) -> bool:
-    """Decrypt *profile*'s cookies and stage them at ``cookie_path``.
+def _extract_cookies(profile: BrowserProfile) -> list[LinkedInCookie] | None:
+    """Decrypt *profile*'s cookies without mutating source-session files.
 
-    Returns ``True`` when an ``li_at`` was extracted and written (ready for
-    validation), ``False`` when the profile yielded nothing usable. Holds all
-    the blocking work: the OS keystore read (keychain subprocess on macOS), the
-    SQLite copy/read, AES decryption, and the cookie-file write. Kept
-    synchronous so the caller offloads the whole unit to a worker thread.
+    This is the only part offloaded to a worker thread. Cancellation cannot stop
+    ``asyncio.to_thread``, so the worker must remain read-only: committing the
+    portable snapshot happens back on the owning event-loop task while it still
+    holds the cross-process source lock.
     """
     try:
         cookies = extract_linkedin_cookies(profile)
@@ -159,7 +171,7 @@ def _extract_and_stage(profile: BrowserProfile, cookie_path: Path) -> bool:
             profile.profile_dir_name,
             exc,
         )
-        return False
+        return None
     except Exception as exc:  # noqa: BLE001 - one bad profile must not abort the run
         logger.info(
             "Skipping %s/%s: %s",
@@ -167,9 +179,19 @@ def _extract_and_stage(profile: BrowserProfile, cookie_path: Path) -> bool:
             profile.profile_dir_name,
             exc,
         )
-        return False
-    if not any(c.name == "li_at" for c in cookies):
-        return False
+        return None
+    if not any(
+        cookie.name == "li_at" and bool(cookie.value.strip()) for cookie in cookies
+    ):
+        return None
+
+    return cookies
+
+
+def _stage_cookies(
+    cookies: list[LinkedInCookie], profile: BrowserProfile, cookie_path: Path
+) -> None:
+    """Atomically publish extracted cookies from the lock-owning event-loop task."""
 
     payload = json.dumps([c.to_playwright() for c in cookies], indent=2)
     secure_write_text(cookie_path, payload, mode=_PRIVATE_FILE_MODE)
@@ -180,10 +202,27 @@ def _extract_and_stage(profile: BrowserProfile, cookie_path: Path) -> bool:
         profile.browser,
         profile.profile_dir_name,
     )
-    return True
 
 
 async def import_session_from_browser(
+    browser: str | None,
+    *,
+    user_data_dir: Path,
+) -> bool:
+    """Import while exclusively owning all canonical source-session artifacts."""
+    if config_module.get_config().browser.browser_engine == "camoufox":
+        raise AuthenticationError(
+            "Importing a Chromium browser session into Camoufox is not supported: "
+            "the LinkedIn session was minted under a different complete browser "
+            "fingerprint. Run with --browser camoufox --login instead."
+        )
+    async with source_session_lock(user_data_dir):
+        return await _import_session_from_browser_unlocked(
+            browser, user_data_dir=user_data_dir
+        )
+
+
+async def _import_session_from_browser_unlocked(
     browser: str | None,
     *,
     user_data_dir: Path,
@@ -215,90 +254,96 @@ async def import_session_from_browser(
         "recently used first",
         len(live),
     )
-    cookie_path = portable_cookie_path(user_data_dir)
+    pending_root = auth_root_dir(user_data_dir) / f".import-pending-{uuid4().hex}"
+    secure_mkdir(pending_root)
+    pending_lease = acquire_pending_profile_lease(pending_root)
+    pending_cookie_path = pending_root / "cookies.json"
 
-    staged_any = False
-    for profile, _meta in live:
-        if not await asyncio.to_thread(_extract_and_stage, profile, cookie_path):
-            continue
-        staged_any = True
+    try:
+        staged_any = False
+        for profile, _meta in live:
+            cookies = await asyncio.to_thread(_extract_cookies, profile)
+            if not cookies:
+                continue
+            staged_any = True
+            _stage_cookies(cookies, profile, pending_cookie_path)
 
-        # Synthesize the source browser's UA so validation and every later
-        # runtime session replay the cookie under the fingerprint it was minted
-        # with (None keeps the runtime default; file I/O, so off the loop).
-        user_agent = await asyncio.to_thread(synthesize_user_agent, profile)
-        try:
-            validated = await validate_imported_cookies(
-                cookie_path, user_data_dir, user_agent=user_agent
-            )
-        except NetworkError as exc:
-            # The browser/driver connection died mid-validation -- this says
-            # nothing about whether the cookie itself is good, so it must NOT
-            # be treated as "LinkedIn rejected it". Try the next candidate
-            # without touching the staged cookie or the profile directory;
-            # a real rejection (validated is False, below) is what triggers
-            # cleanup, not an inconclusive check.
-            logger.warning(
-                "%s/%s: infra error validating session, trying next candidate "
-                "(profile NOT reset): %s",
-                profile.browser,
-                profile.profile_dir_name,
-                exc,
-            )
-            continue
+            # Synthesize the source browser's UA so validation and every later
+            # runtime session replay the cookie under the fingerprint it was minted
+            # with (None keeps the runtime default; file I/O, so off the loop).
+            user_agent = await asyncio.to_thread(synthesize_user_agent, profile)
+            validation_profile = pending_root / f"validation-profile-{uuid4().hex}"
+            try:
+                validated = await validate_imported_cookies(
+                    pending_cookie_path,
+                    validation_profile,
+                    user_agent=user_agent,
+                )
+            except BrowserTeardownError as exc:
+                # The isolated validator's teardown state is inconclusive.
+                # Keep its unique owner lease until this process exits.
+                logger.warning(
+                    "%s/%s: infra error validating session; aborting import "
+                    "(isolated pending transaction preserved at %s): %s",
+                    profile.browser,
+                    profile.profile_dir_name,
+                    pending_root,
+                    exc,
+                )
+                pending_lease.retain_until_exit()
+                raise
 
-        if validated:
-            write_source_state(user_data_dir, user_agent=user_agent)
+            # validate_imported_cookies only returns after confirmed teardown.
+            if validation_profile.exists():
+                shutil.rmtree(validation_profile)
+
+            if validated:
+                # No browser owns the pending directory now. Release its lease
+                # before publishing/cleaning the inert staged artifacts.
+                pending_lease.release()
+                try:
+                    commit_source_session(
+                        pending_cookie_path,
+                        user_data_dir,
+                        user_agent=user_agent,
+                    )
+                finally:
+                    # Commit either succeeded or restored every canonical artifact.
+                    shutil.rmtree(pending_root, ignore_errors=True)
+                logger.info(
+                    "Imported LinkedIn session from %s/%s",
+                    profile.browser,
+                    profile.profile_dir_name,
+                )
+                return True
+
+            # Cookie was present but LinkedIn rejected it (revoked/remote logout).
+            # Canonical source artifacts remain untouched and validation never
+            # opens the canonical browser profile.
             logger.info(
-                "Imported LinkedIn session from %s/%s",
+                "%s/%s had an li_at but LinkedIn rejected the session; trying the "
+                "next browser",
                 profile.browser,
                 profile.profile_dir_name,
             )
-            return True
 
-        # Cookie was present but LinkedIn rejected it (revoked/remote logout).
-        # Drop the partial artifacts and try the next-freshest browser.
-        cookie_path.unlink(missing_ok=True)
-        _reset_profile_dir(user_data_dir)
-        logger.info(
-            "%s/%s had an li_at but LinkedIn rejected the session; trying the "
-            "next browser",
-            profile.browser,
-            profile.profile_dir_name,
-        )
+        if not staged_any:
+            # Live li_at cookies were found on disk but none could be decrypted
+            # (keychain key unavailable, or app-bound v20). Distinct from
+            # "decrypted but LinkedIn rejected it" (False below).
+            raise CookieDecryptionError(
+                "Found a logged-in browser session but could not decrypt its "
+                "cookies (the keychain key was unavailable, or the cookies use "
+                "app-bound encryption). Run --login to create a session instead."
+            )
+    except BaseException:
+        if not pending_lease.retained:
+            # No browser ownership is uncertain. Drop decrypted cookies and any
+            # partial staged identity immediately on every other failure path.
+            pending_lease.release()
+            shutil.rmtree(pending_root, ignore_errors=True)
+        raise
 
-    if not staged_any:
-        # Live li_at cookies were found on disk but none could be decrypted
-        # (keychain key unavailable, or app-bound v20). Distinct from "decrypted
-        # but LinkedIn rejected it" (False below) so the caller tells the user to
-        # fix keychain access rather than to re-login.
-        raise CookieDecryptionError(
-            "Found a logged-in browser session but could not decrypt its "
-            "cookies (the keychain key was unavailable, or the cookies use "
-            "app-bound encryption). Run --login to create a session instead."
-        )
+    pending_lease.release()
+    shutil.rmtree(pending_root, ignore_errors=True)
     return False
-
-
-def _reset_profile_dir(user_data_dir: Path) -> None:
-    """Move the current engine's profile subdirectory aside between failed
-    import attempts, so a stale/rejected cookie set never leaks into the
-    next candidate browser's validation run.
-
-    Scoped to ONLY the configured engine's own on-disk profile via
-    ``ENGINES[engine].profile_dir()`` (``core.engines``) -- the single
-    source of truth for that mapping -- never the shared ``user_data_dir``
-    root a sibling engine's profile also lives under. Moved into a
-    timestamped backup (mirroring ``bootstrap.py``'s auth-state backup
-    convention) rather than deleted: a validation failure here can be a
-    real rejection, but it can also be a driver/transport error the caller
-    failed to classify, so destroying real session state on a guess would
-    be unsafe.
-    """
-    from linkedin_mcp_server.config import get_config
-    from linkedin_mcp_server.core.engines import ENGINES
-    from linkedin_mcp_server.session_state import move_artifacts_aside
-
-    engine = get_config().browser.browser_engine
-    target = ENGINES[engine].profile_dir(user_data_dir)
-    move_artifacts_aside([target], user_data_dir)

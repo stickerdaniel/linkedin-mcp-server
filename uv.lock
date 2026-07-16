@@ -691,15 +691,6 @@ wheels = [
 ]
 
 [[package]]
-name = "fake-useragent"
-version = "2.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/41/43/948d10bf42735709edb5ae51e23297d034086f17fc7279fef385a7acb473/fake_useragent-2.2.0.tar.gz", hash = "sha256:4e6ab6571e40cc086d788523cf9e018f618d07f9050f822ff409a4dfe17c16b2", size = 158898, upload-time = "2025-04-14T15:32:19.238Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/37/b3ea9cd5558ff4cb51957caca2193981c6b0ff30bd0d2630ac62505d99d0/fake_useragent-2.2.0-py3-none-any.whl", hash = "sha256:67f35ca4d847b0d298187443aaf020413746e56acd985a611908c73dba2daa24", size = 161695, upload-time = "2025-04-14T15:32:17.732Z" },
-]
-
-[[package]]
 name = "fastmcp"
 version = "3.4.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1340,7 +1331,6 @@ source = { editable = "." }
 dependencies = [
     { name = "camoufox", extra = ["geoip"] },
     { name = "cryptography" },
-    { name = "fake-useragent" },
     { name = "fastmcp" },
     { name = "inquirer" },
     { name = "packaging" },
@@ -1363,9 +1353,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "camoufox", extras = ["geoip"], specifier = ">=0.4.11" },
+    { name = "camoufox", extras = ["geoip"], specifier = ">=0.4.11,<0.5" },
     { name = "cryptography", specifier = ">=48.0.1" },
-    { name = "fake-useragent", specifier = ">=2.2.0" },
     { name = "fastmcp", specifier = ">=3.0.0" },
     { name = "inquirer", specifier = ">=3.4.0" },
     { name = "packaging", specifier = ">=26.2" },

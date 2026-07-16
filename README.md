@@ -105,14 +105,14 @@ When you set up or maintain this server, verify its entry in the MCP client conf
 **CLI Options:**
 
 - `--login` - Open browser to log in and save persistent profile
-- `--import-from-browser [BROWSER]` - Import a LinkedIn session from a locally logged-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, or `auto`). Bare flag picks `auto`, which auto-selects the most recently used browser with a live LinkedIn session.
+- `--import-from-browser [BROWSER]` - Import a LinkedIn session from a locally logged-in Chromium browser into Patchright (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, or `auto`). Bare flag picks `auto`, which auto-selects the most recently used browser with a live LinkedIn session. Camoufox requires its own `--login`.
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--logout` - Clear stored LinkedIn browser profile
+- `--logout` - Clear source credentials and private pending/backup artifacts under a cross-process lock. Process-isolated runtime profiles are retained because another MCP process may still own them.
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in.
@@ -135,6 +135,7 @@ uvx mcp-server-linkedin@latest --import-from-browser brave
 
 This reads the browser's LinkedIn cookies, validates them against your feed, and saves them to `~/.linkedin-mcp/profile/`, the same place `--login` writes to. Notes:
 
+- Browser import targets Patchright only. Chromium sessions are not replayed under Camoufox's different complete fingerprint; use `--browser camoufox --login` instead.
 - With several signed-in browsers, the most recently used live LinkedIn session is tried first. If LinkedIn rejects it (revoked or remote-logged-out), the next most recent is tried automatically; the first the server accepts is imported. There is no prompt to pick. Pass a browser name to target one specifically.
 - On macOS the OS keychain may prompt to allow access to the browser's Safe Storage. Close the source browser first for the most reliable read.
 - Cookies protected by Chrome 127+ app-bound encryption (`v20`) cannot be decrypted without OS elevation; in that case use `--login` instead.
@@ -306,7 +307,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--logout` - Clear all stored LinkedIn auth state, including source and derived runtime profiles
+- `--logout` - Clear source credentials and pending/backup auth artifacts; retain process-isolated runtime profiles that may still have a live owner
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in.
@@ -400,7 +401,7 @@ uv run pre-commit install
 uv run -m linkedin_mcp_server
 ```
 
-The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepares the Patchright Chromium browser cache in the background and opens LinkedIn login on the first auth-requiring tool call. You can still run `uv run -m linkedin_mcp_server --login` when you want to create the session explicitly.
+The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepares the selected browser in the background (Patchright Chromium or a guarded Camoufox fetch) and opens LinkedIn login on the first auth-requiring tool call. The Camoufox gate validates every runtime asset and publishes an atomic completion marker before allowing a launch. You can still run `uv run -m linkedin_mcp_server --login` when you want to create the session explicitly; CLI modes verify and install the selected browser before launching it.
 
 ### Local Setup Help
 
@@ -410,20 +411,21 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 **CLI Options:**
 
 - `--login` - Open browser to log in and save persistent profile
-- `--import-from-browser [BROWSER]` - Import a LinkedIn session from a locally logged-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, or `auto`). Bare flag picks `auto`, which auto-selects the most recently used browser with a live LinkedIn session.
+- `--import-from-browser [BROWSER]` - Import a LinkedIn session from a locally logged-in Chromium browser into Patchright (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, or `auto`). Bare flag picks `auto`, which auto-selects the most recently used browser with a live LinkedIn session. Camoufox requires its own `--login`.
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
 - `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--logout` - Clear stored LinkedIn browser profile
+- `--logout` - Clear source credentials and private pending/backup artifacts under a cross-process lock; retain process-isolated runtime profiles
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
-- `--status` - Check if current session is valid and exit
+- `--status` - Live-check the current session through a temporary isolated profile and exit
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
+- `--browser {patchright,camoufox}` - Browser engine; changing to Camoufox requires `--login` (Patchright also supports browser import)
 - `--slow-mo MS` - Delay between browser actions in milliseconds (default: 0, useful for debugging)
-- `--user-agent STRING` - Custom browser user agent
+- `--user-agent STRING` - Custom Patchright user agent (ignored by Camoufox)
 - `--viewport WxH` - Browser viewport size (default: 1280x720)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
 - `--help` - Show help
@@ -470,12 +472,13 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 **Session issues:**
 
 - Browser profile is stored at `~/.linkedin-mcp/profile/`
-- Use `--logout` to clear the profile and start fresh
+- Stop other MCP consumers, then use `--logout` to clear the source session. Isolated runtime directories are left for their owning processes to remove after confirmed teardown.
 
-**Python/Patchright issues:**
+**Python/browser issues:**
 
 - Check Python version: `python --version` (should be 3.12+)
 - Reinstall Patchright: `uv run patchright install chromium`
+- Repair/provision Camoufox: `uv run -m linkedin_mcp_server --browser camoufox --status` (the session check runs after browser provisioning)
 - Reinstall dependencies: `uv sync --reinstall`
 
 **Timeout issues:**

@@ -20,7 +20,15 @@ from linkedin_mcp_server.session_state import (
 
 def _write_source_metadata(profile_dir, *, runtime_id="macos-arm64-host"):
     portable_cookie_path(profile_dir).write_text(
-        json.dumps([{"name": "li_at", "domain": ".linkedin.com"}])
+        json.dumps(
+            [
+                {
+                    "name": "li_at",
+                    "domain": ".linkedin.com",
+                    "value": "session",
+                }
+            ]
+        )
     )
     source_state_path(profile_dir).write_text(
         json.dumps(
@@ -78,7 +86,7 @@ def test_clear_profile_removes_dir(profile_dir):
     assert not profile_dir.exists()
 
 
-def test_clear_auth_state_removes_source_and_runtime_files(profile_dir):
+def test_clear_auth_state_removes_source_but_retains_runtime_files(profile_dir):
     _write_source_metadata(profile_dir)
     runtime_profile = runtime_profile_dir("linux-amd64-container", profile_dir)
     runtime_profile.mkdir(parents=True)
@@ -107,4 +115,4 @@ def test_clear_auth_state_removes_source_and_runtime_files(profile_dir):
     assert not profile_dir.exists()
     assert not portable_cookie_path(profile_dir).exists()
     assert not source_state_path(profile_dir).exists()
-    assert not runtime_profile_dir("linux-amd64-container", profile_dir).exists()
+    assert runtime_profile_dir("linux-amd64-container", profile_dir).exists()

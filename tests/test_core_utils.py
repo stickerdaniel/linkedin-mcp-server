@@ -18,6 +18,9 @@ def mock_page():
     """Create a mock Patchright page for rate-limit tests."""
     page = MagicMock()
     page.url = "https://www.linkedin.com/in/testuser/details/experience/"
+    page.context.cookies = AsyncMock(
+        return_value=[{"name": "li_at", "value": "session"}]
+    )
 
     mock_locator = MagicMock()
     mock_locator.count = AsyncMock(return_value=0)

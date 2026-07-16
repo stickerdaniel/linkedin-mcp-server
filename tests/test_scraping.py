@@ -9,6 +9,7 @@ from linkedin_mcp_server.core.auth import AuthBarrier, AuthBarrierKind
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+    NetworkError,
 )
 from linkedin_mcp_server.scraping.connection import (
     ActionSignals,
@@ -135,6 +136,9 @@ def mock_page():
     page.wait_for_function = AsyncMock()
     page.evaluate = AsyncMock(
         return_value={"source": "root", "text": "Sample page text", "references": []}
+    )
+    page.context.cookies = AsyncMock(
+        return_value=[{"name": "li_at", "value": "session"}]
     )
     page.url = "https://www.linkedin.com/in/testuser/"
     page.locator = MagicMock()
@@ -443,6 +447,9 @@ class TestNavigateViaSearch:
         page.goto = AsyncMock()
         page.title = AsyncMock(return_value="LinkedIn")
         page.evaluate = AsyncMock(return_value="")
+        page.context.cookies = AsyncMock(
+            return_value=[{"name": "li_at", "value": "session"}]
+        )
         page.keyboard = MagicMock()
         page.keyboard.type = AsyncMock()
         page.keyboard.press = AsyncMock()
@@ -450,7 +457,7 @@ class TestNavigateViaSearch:
         page.main_frame = object()
         page.on = MagicMock()
         page.remove_listener = MagicMock()
-        page.url = "https://www.linkedin.com/in/janedoe/"
+        page.url = "https://www.linkedin.com/search/results/people/?keywords=janedoe"
         page.viewport_size = {"width": 1280, "height": 720}
         page.mouse = MagicMock()
         page.mouse.move = AsyncMock()
@@ -470,24 +477,33 @@ class TestNavigateViaSearch:
         result_locator = MagicMock()
         result_locator.count = AsyncMock(return_value=1 if result_present else 0)
         result_locator.first = result_locator
+        result_locator.nth = MagicMock(return_value=result_locator)
+        result_locator.get_attribute = AsyncMock(return_value="/in/janedoe/")
         result_locator.is_visible = AsyncMock(return_value=True)
         result_locator.bounding_box = AsyncMock(
             return_value={"x": 0, "y": 0, "width": 10, "height": 10}
         )
         result_locator.scroll_into_view_if_needed = AsyncMock()
-        result_locator.click = AsyncMock()
+
+        async def click_result(*_args, **_kwargs):
+            page.url = "https://www.linkedin.com/in/janedoe/"
+
+        result_locator.click = AsyncMock(side_effect=click_result)
+        page.mouse.click = AsyncMock(side_effect=click_result)
 
         empty_locator = MagicMock()
         empty_locator.count = AsyncMock(return_value=0)
 
         def locator_side_effect(selector):
-            if "janedoe" in selector or "entity-result" in selector:
+            if selector == 'a[href*="/in/"]':
                 return result_locator
-            if "Search" in selector or "search-global" in selector:
+            if selector.startswith("input"):
                 return search_locator
             return empty_locator
 
         page.locator = MagicMock(side_effect=locator_side_effect)
+        page._search_locator = search_locator
+        page._result_locator = result_locator
         return page
 
     async def test_happy_path_returns_true_and_lands_on_target(self, monkeypatch):
@@ -554,6 +570,78 @@ class TestNavigateViaSearch:
 
         assert result is False
 
+    async def test_submit_redirect_never_touches_external_results(self, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
+        )
+        page = self._search_page()
+
+        async def redirect_on_submit(*_args, **_kwargs):
+            page.url = "https://captive.portal.example/login"
+
+        page.keyboard.press = AsyncMock(side_effect=redirect_on_submit)
+        extractor = LinkedInExtractor(page)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", AsyncMock())
+
+        assert (
+            await extractor._navigate_via_search(
+                "janedoe", "https://www.linkedin.com/in/janedoe"
+            )
+            is False
+        )
+        page.mouse.click.assert_not_awaited()
+
+    async def test_search_box_probe_redirect_never_clicks_external_dom(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
+        )
+        page = self._search_page()
+
+        async def redirect_during_count(*_args, **_kwargs):
+            page.url = "https://captive.portal.example/login"
+            return 1
+
+        page._search_locator.count = AsyncMock(side_effect=redirect_during_count)
+        extractor = LinkedInExtractor(page)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", AsyncMock())
+
+        assert (
+            await extractor._navigate_via_search(
+                "janedoe", "https://www.linkedin.com/in/janedoe"
+            )
+            is False
+        )
+        page._search_locator.click.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "href",
+        [
+            "https://evil.example/in/janedoe/",
+            "/in/janedoe-lookalike/",
+            "/in/janedoe%22%5D%5Bhref%3D%22evil/",
+        ],
+    )
+    async def test_result_href_is_exactly_validated_before_click(
+        self, monkeypatch, href
+    ):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
+        )
+        page = self._search_page()
+        page._result_locator.get_attribute = AsyncMock(return_value=href)
+        extractor = LinkedInExtractor(page)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", AsyncMock())
+
+        assert (
+            await extractor._navigate_via_search(
+                "janedoe", "https://www.linkedin.com/in/janedoe"
+            )
+            is False
+        )
+        page.mouse.click.assert_not_awaited()
+
     async def test_landing_on_unexpected_url_returns_false(self, monkeypatch):
         monkeypatch.setattr(
             "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
@@ -569,22 +657,45 @@ class TestNavigateViaSearch:
 
         assert result is False
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://evil.example/in/janedoe/",
+            "https://www.linkedin.com:444/in/janedoe/",
+            "https://www.linkedin.com/in/not-janedoe/?next=/in/janedoe",
+        ],
+    )
+    async def test_landing_on_lookalike_profile_returns_false(self, monkeypatch, url):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
+        )
+        page = self._search_page()
+        page.url = url
+        extractor = LinkedInExtractor(page)
+        monkeypatch.setattr(extractor, "_goto_with_auth_checks", AsyncMock())
+
+        assert (
+            await extractor._navigate_via_search(
+                "janedoe", "https://www.linkedin.com/in/janedoe"
+            )
+            is False
+        )
+
     async def test_auth_barrier_after_landing_raises_not_returns_false(
         self, monkeypatch
     ):
         """A real detected barrier is a signal worth surfacing, not a
-        reason to silently fall back to direct navigation. A login-title
-        match is classified BLOCK by core.auth's AuthBarrierKind (a hard
-        wall, not a recoverable challenge) -- see test_core_auth.py's
-        TestAuthBarrierKind for the CHALLENGE-vs-BLOCK classification
-        itself; this test only cares that SOME barrier subtype raises."""
+        reason to silently fall back to direct navigation. Missing ``li_at``
+        on a LinkedIn landing URL is a locale-independent BLOCK signal -- see
+        test_core_auth.py for CHALLENGE-vs-BLOCK classification itself; this
+        test only cares that SOME barrier subtype raises."""
         from linkedin_mcp_server.core.exceptions import BlockError
 
         monkeypatch.setattr(
             "linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()
         )
         page = self._search_page()
-        page.title = AsyncMock(return_value="Sign In | LinkedIn")
+        page.context.cookies = AsyncMock(return_value=[])
         extractor = LinkedInExtractor(page)
         monkeypatch.setattr(extractor, "_goto_with_auth_checks", AsyncMock())
 
@@ -1022,6 +1133,57 @@ class TestExtractEntryBoundaries:
 
 
 class TestNavigationDiagnostics:
+    async def test_goto_with_auth_checks_rejects_external_redirect(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://captive.portal.example/login"
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+            ) as detector,
+            pytest.raises(NetworkError, match="redirected outside LinkedIn"),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        detector.assert_not_awaited()
+
+    async def test_goto_rejects_redirect_during_auth_cookie_probe(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+
+        async def redirect_during_cookies(*_args, **_kwargs):
+            mock_page.url = "https://captive.portal.example/login"
+            return [{"name": "li_at", "value": "session"}]
+
+        mock_page.context.cookies = AsyncMock(side_effect=redirect_during_cookies)
+
+        with pytest.raises(NetworkError, match="redirected outside"):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+    async def test_goto_error_rejects_external_redirect_before_recovery(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://captive.portal.example/login"
+        mock_page.goto = AsyncMock(side_effect=Exception("navigation timed out"))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+            ) as remember_me,
+            pytest.raises(NetworkError, match="redirected outside LinkedIn"),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        remember_me.assert_not_awaited()
+
     async def test_goto_with_auth_checks_clicks_remember_me_and_retries(
         self, mock_page
     ):
@@ -4489,6 +4651,33 @@ class TestMainProfileAlreadyLoaded:
     ):
         extractor = LinkedInExtractor(mock_page)
         mock_page.url = "https://www.linkedin.com/feed/"
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("fallback"),
+            ) as extract_page,
+            patch.object(
+                extractor,
+                "_extract_loaded_section",
+                new_callable=AsyncMock,
+            ) as loaded,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.scrape_person(
+                "foo", {"main_profile"}, main_profile_already_loaded=True
+            )
+
+        extract_page.assert_awaited_once()
+        loaded.assert_not_awaited()
+
+    async def test_scrape_person_never_reuses_external_matching_path(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://evil.example/in/foo/"
         with (
             patch.object(
                 extractor,

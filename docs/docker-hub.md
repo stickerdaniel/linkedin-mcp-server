@@ -22,7 +22,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-Create a browser profile locally, then mount it into Docker. You still need [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on the host for the one-time `uvx mcp-server-linkedin@latest --login` step. Docker already includes its own Chromium runtime, so the managed Patchright Chromium browser download used by MCPB/`uvx` is not needed here.
+Create a browser profile locally, then mount it into Docker. You still need [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on the host for the one-time `uvx mcp-server-linkedin@latest --login` step. Docker already includes both the Patchright Chromium and Camoufox browser runtimes, so the managed browser download used by MCPB/`uvx` is not needed here.
 
 **Step 1: Create profile on the host (one-time setup)**
 
@@ -32,7 +32,7 @@ uvx mcp-server-linkedin@latest --login
 
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. For better stability, consider the [uvx setup](https://github.com/stickerdaniel/linkedin-mcp-server#-uvx-setup-recommended---universal).
 
-> **Already signed into LinkedIn in a browser on the host?** Run `uvx mcp-server-linkedin@latest --import-from-browser` on the host to reuse that session instead of `--login`. It supports Chrome, Chromium, Brave, Edge, Arc, Vivaldi, Helium, Yandex, and Naver Whale, auto-picks the most recently used browser with a live LinkedIn session (pass a browser name to target one), writes the same `~/.linkedin-mcp/` profile Docker mounts, and the Docker bridge still narrows to the minimal auth cookie subset it uses for a normal session. Cookies under Chrome 127+ app-bound encryption cannot be imported; use `--login` in that case.
+> **Already signed into LinkedIn in a browser on the host?** With Patchright, run `uvx mcp-server-linkedin@latest --import-from-browser` on the host to reuse that session instead of `--login`. It supports Chrome, Chromium, Brave, Edge, Arc, Vivaldi, Helium, Yandex, and Naver Whale, auto-picks the most recently used browser with a live LinkedIn session (pass a browser name to target one), writes the same `~/.linkedin-mcp/` profile Docker mounts, and the Docker bridge still narrows to the minimal auth cookie subset it uses for a normal session. Camoufox requires `--browser camoufox --login`; Chromium cookies are not replayed under its different complete fingerprint. Cookies under Chrome 127+ app-bound encryption cannot be imported; use `--login` in that case.
 
 **Step 2: Configure Claude Desktop with Docker**
 
@@ -51,13 +51,14 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 }
 ```
 
-> **Note:** Docker containers don't have a display server, so you can't use the `--login` command in Docker. Create a source profile on your host first.
+> **Note:** Docker containers don't have a display server, so you can't use the `--login` command in Docker. Create a source session on your host first and use the same browser engine on the host and in Docker.
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
 > **Note:** Tool calls are serialized within one server process to protect the
-> shared LinkedIn browser session. Concurrent client requests queue instead of
-> running in parallel. Use `LOG_LEVEL=DEBUG` to see scraper lock logs.
+> process browser session. Separate server processes use distinct PID+UUID
+> runtime profiles; source-session publication is serialized across processes.
+> Use `LOG_LEVEL=DEBUG` to see scraper lock logs.
 
 ## Environment Variables
 
@@ -70,7 +71,8 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `LOGIN_TIMEOUT` | `1800` | Manual login wait timeout in seconds (`0` = no limit). Applies to the host-side `--login` browser; the container itself never opens one. |
 | `LOGIN_INLINE_WAIT` | `25` | Bounded inline wait (seconds, max 45) for a tool call to resume after login completes. No effect in containers: the Docker runtime never opens a login window and raises a host-login-required error instead, so the session must be created on the host with `--login`. |
 | `AUTO_IMPORT_FROM_BROWSER` | on by default | Auto-import a LinkedIn session from a locally logged-in browser on the first no-session tool call, before falling back to manual login. On by default across interactive and non-interactive desktop runs; set `false` to require `--login` / `--import-from-browser`. No effect in containers (no host browser or keychain) or on a non-loopback HTTP bind. On macOS the OS keychain may prompt once for Safe Storage access. |
-| `USER_AGENT` | - | Custom browser user agent |
+| `BROWSER_ENGINE` | `patchright` | Browser engine: `patchright` or `camoufox`. A source session is engine-bound; Patchright supports login/import, while Camoufox requires its own login. |
+| `USER_AGENT` | - | Custom browser user agent for Patchright; ignored by Camoufox to preserve its coherent Firefox identity |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
@@ -78,7 +80,6 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
-| `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: reuse checkpointed derived Linux runtime profiles across Docker restarts instead of fresh-bridging each startup |
 | `LINKEDIN_TRACE_MODE` | `on_error` | Trace/log retention mode: `on_error` keeps ephemeral artifacts only when a failure occurs, `always` keeps every run, `off` disables trace persistence |
 
 **Example with custom timeouts:**

@@ -486,7 +486,8 @@ def load_from_args(config: AppConfig) -> AppConfig:
             "(chrome, chromium, brave, edge, arc, vivaldi, helium, yandex, whale, "
             "coccoc, opera, opera_gx, or auto). Bare flag = auto (most recently "
             "used live session). On macOS the OS keychain may prompt for access "
-            "to the browser's Safe Storage."
+            "to the browser's Safe Storage. Patchright only; Camoufox requires "
+            "--browser camoufox --login."
         ),
     )
 
@@ -498,8 +499,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
         default=None,
         help=(
             "Auto-import a session from a locally logged-in browser on first "
-            "use (the default). Provided for explicitness; it cannot override "
-            "the Docker or non-loopback-HTTP gates."
+            "use with Patchright (the default). Camoufox falls through to its "
+            "own login. Provided for explicitness; it cannot override the "
+            "Docker or non-loopback-HTTP gates."
         ),
     )
     auto_import_group.add_argument(

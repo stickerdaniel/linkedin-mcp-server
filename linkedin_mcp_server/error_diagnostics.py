@@ -22,11 +22,9 @@ from linkedin_mcp_server.session_state import (
     auth_root_dir,
     get_runtime_id,
     get_source_profile_dir,
-    load_runtime_state,
     load_source_state,
     portable_cookie_path,
     runtime_profile_dir,
-    runtime_storage_state_path,
 )
 
 ISSUE_URL = "https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose"
@@ -46,7 +44,6 @@ def build_issue_diagnostics(
     source_profile_dir = _safe_source_profile_dir()
     current_runtime_id = get_runtime_id()
     source_state = load_source_state(source_profile_dir)
-    runtime_state = load_runtime_state(current_runtime_id, source_profile_dir)
     trace_dir = mark_trace_for_retention() or get_trace_dir()
     log_path = trace_dir / "server.log" if trace_dir else None
     issue_dir = trace_dir or (auth_root_dir(source_profile_dir) / "issue-reports")
@@ -66,10 +63,6 @@ def build_issue_diagnostics(
         "runtime_profile_dir": str(
             runtime_profile_dir(current_runtime_id, source_profile_dir)
         ),
-        "runtime_storage_state_path": str(
-            runtime_storage_state_path(current_runtime_id, source_profile_dir)
-        ),
-        "runtime_state": asdict(runtime_state) if runtime_state else None,
         "trace_dir": str(trace_dir) if trace_dir else None,
         "log_path": str(log_path) if log_path and log_path.exists() else None,
         "suggested_gist_command": gist_command,
@@ -226,8 +219,7 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                 f"- Current runtime: {runtime['current_runtime_id']}",
                 f"- Source profile: {runtime['source_profile_dir']}",
                 f"- Portable cookies: {runtime['portable_cookie_path']}",
-                f"- Derived runtime profile: {runtime['runtime_profile_dir']}",
-                f"- Derived storage-state: {runtime['runtime_storage_state_path']}",
+                f"- Process-isolated runtime profile: {runtime['runtime_profile_dir']}",
                 f"- Trace artifacts: {runtime['trace_dir'] or 'not enabled'}",
                 f"- Server log: {runtime['log_path'] or 'not enabled'}",
                 f"- Suggested gist command: {runtime['suggested_gist_command'] or 'not available'}",
@@ -235,10 +227,7 @@ def _render_issue_template(payload: dict[str, Any]) -> str:
                 "### Session State",
                 "```json",
                 json.dumps(
-                    {
-                        "source_state": runtime["source_state"],
-                        "runtime_state": runtime["runtime_state"],
-                    },
+                    {"source_state": runtime["source_state"]},
                     indent=2,
                     sort_keys=True,
                 ),

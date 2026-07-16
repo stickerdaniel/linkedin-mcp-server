@@ -5,8 +5,8 @@ pyproject.toml).
 Skipped by default: importing camoufox/playwright and launching the real
 Firefox binary is deferred into the fixture, never done at collection time,
 so this file never breaks plain `pytest` collection on a host without the
-Camoufox binary fetched (`uv run camoufox fetch`) or without this project's
-NixOS LD_LIBRARY_PATH workaround (see run.sh). Run explicitly before
+Camoufox runtime provisioned through the managed server flow or without this
+project's NixOS LD_LIBRARY_PATH workaround (see run.sh). Run explicitly before
 bumping the `playwright` pin past 1.59.0:
 
     LD_LIBRARY_PATH=<gcc-lib>:<gtk/firefox libs> uv run pytest -m camoufox_smoke -v

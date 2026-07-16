@@ -1355,6 +1355,31 @@ class TestFeedTools:
             await mcp.call_tool("get_feed", {"num_posts": 51})
 
 
+class TestCloseSessionTool:
+    async def test_close_session_reports_uncertain_teardown_as_failure(self):
+        from linkedin_mcp_server.server import create_mcp_server
+
+        with patch(
+            "linkedin_mcp_server.server.close_browser",
+            new=AsyncMock(return_value=False),
+        ):
+            tool_fn = await get_tool_fn(create_mcp_server(), "close_session")
+            with pytest.raises(ToolError, match="Network error"):
+                await tool_fn()
+
+    async def test_close_session_reports_confirmed_teardown_as_success(self):
+        from linkedin_mcp_server.server import create_mcp_server
+
+        with patch(
+            "linkedin_mcp_server.server.close_browser",
+            new=AsyncMock(return_value=True),
+        ):
+            tool_fn = await get_tool_fn(create_mcp_server(), "close_session")
+            result = await tool_fn()
+
+        assert result["status"] == "success"
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.server import create_mcp_server

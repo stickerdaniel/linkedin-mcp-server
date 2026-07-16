@@ -18,6 +18,7 @@ from linkedin_mcp_server.bootstrap import (
     start_background_browser_setup_if_needed,
 )
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.core.exceptions import NetworkError
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
@@ -35,11 +36,7 @@ logger = logging.getLogger(__name__)
 
 @lifespan
 async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """Manage browser lifecycle — cleanup on shutdown.
-
-    Derived runtime durability must not depend on this hook. Docker runtime
-    sessions are checkpoint-committed when they are created.
-    """
+    """Manage the process-isolated browser lifecycle and cleanup on shutdown."""
     del app
     logger.info("LinkedIn MCP Server starting...")
     initialize_bootstrap(get_runtime_policy())
@@ -77,7 +74,11 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
     async def close_session() -> dict[str, Any]:
         """Close the current browser session and clean up resources."""
         try:
-            await close_browser()
+            if not await close_browser():
+                raise NetworkError(
+                    "Browser teardown could not be confirmed; its isolated "
+                    "runtime profile was preserved instead of being deleted."
+                )
             return {
                 "status": "success",
                 "message": "Successfully closed the browser session and cleaned up resources",

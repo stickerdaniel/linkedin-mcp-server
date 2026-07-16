@@ -195,7 +195,7 @@ def test_main_non_interactive_no_auth_still_starts_server(
     assert captured.out == ""
 
 
-def test_profile_info_reports_bridge_required_for_foreign_runtime(
+def test_profile_info_validates_foreign_runtime_through_fresh_bridge(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path,
@@ -204,7 +204,9 @@ def test_profile_info_reports_bridge_required_for_foreign_runtime(
     profile_dir.mkdir(parents=True)
     (profile_dir / "Default").mkdir(parents=True)
     (profile_dir / "Default" / "Cookies").write_text("placeholder")
-    (tmp_path / "cookies.json").write_text(json.dumps([{"name": "li_at"}]))
+    (tmp_path / "cookies.json").write_text(
+        json.dumps([{"name": "li_at", "domain": ".linkedin.com", "value": "session"}])
+    )
     (tmp_path / "source-state.json").write_text(
         json.dumps(
             {
@@ -229,18 +231,26 @@ def test_profile_info_reports_bridge_required_for_foreign_runtime(
         "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
     )
     monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
+    browser = MagicMock(is_authenticated=True)
+    get_browser = AsyncMock(return_value=browser)
+    close = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_or_create_browser", get_browser
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.close_browser", close)
 
     with pytest.raises(SystemExit) as exit_info:
         cli_main.profile_info_and_exit()
 
     assert exit_info.value.code == 0
+    get_browser.assert_awaited_once()
+    close.assert_awaited_once()
     captured = capsys.readouterr()
     assert "fresh bridge each startup" in captured.out.lower()
-    assert "fresh bridged foreign-runtime session" in captured.out.lower()
-    assert "source cookie validity is not verified" in captured.out.lower()
+    assert "session is valid" in captured.out.lower()
 
 
-def test_profile_info_reports_committed_derived_runtime(
+def test_profile_info_reports_expired_after_live_bridge(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path,
@@ -249,17 +259,9 @@ def test_profile_info_reports_committed_derived_runtime(
     profile_dir.mkdir(parents=True)
     (profile_dir / "Default").mkdir(parents=True)
     (profile_dir / "Default" / "Cookies").write_text("placeholder")
-    runtime_profile = (
-        tmp_path / "runtime-profiles" / "linux-amd64-container" / "profile"
+    (tmp_path / "cookies.json").write_text(
+        json.dumps([{"name": "li_at", "domain": ".linkedin.com", "value": "session"}])
     )
-    runtime_profile.mkdir(parents=True)
-    (runtime_profile / "Default").mkdir(parents=True)
-    (runtime_profile / "Default" / "Cookies").write_text("placeholder")
-    storage_state = (
-        tmp_path / "runtime-profiles" / "linux-amd64-container" / "storage-state.json"
-    )
-    storage_state.write_text("{}")
-    (tmp_path / "cookies.json").write_text(json.dumps([{"name": "li_at"}]))
     (tmp_path / "source-state.json").write_text(
         json.dumps(
             {
@@ -272,26 +274,7 @@ def test_profile_info_reports_committed_derived_runtime(
             }
         )
     )
-    (
-        tmp_path / "runtime-profiles" / "linux-amd64-container" / "runtime-state.json"
-    ).write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "runtime_id": "linux-amd64-container",
-                "source_runtime_id": "macos-arm64-host",
-                "source_login_generation": "gen-1",
-                "created_at": "2026-03-12T17:10:00Z",
-                "committed_at": "2026-03-12T17:10:05Z",
-                "profile_path": str(runtime_profile),
-                "storage_state_path": str(storage_state),
-                "commit_method": "checkpoint_restart",
-            }
-        )
-    )
-
-    browser = MagicMock()
-    browser.is_authenticated = True
+    browser = MagicMock(is_authenticated=False)
 
     monkeypatch.setattr(
         "linkedin_mcp_server.cli_main.get_profile_dir", lambda: profile_dir
@@ -299,7 +282,6 @@ def test_profile_info_reports_committed_derived_runtime(
     monkeypatch.setattr(
         "linkedin_mcp_server.cli_main.get_runtime_id", lambda: "linux-amd64-container"
     )
-    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
     monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: AppConfig())
     monkeypatch.setattr(
         "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
@@ -309,15 +291,16 @@ def test_profile_info_reports_committed_derived_runtime(
         "linkedin_mcp_server.cli_main.get_or_create_browser",
         AsyncMock(return_value=browser),
     )
-    monkeypatch.setattr("linkedin_mcp_server.cli_main.close_browser", AsyncMock())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.close_browser", AsyncMock(return_value=True)
+    )
 
     with pytest.raises(SystemExit) as exit_info:
         cli_main.profile_info_and_exit()
 
-    assert exit_info.value.code == 0
+    assert exit_info.value.code == 1
     captured = capsys.readouterr()
-    assert "derived (committed, current generation)" in captured.out.lower()
-    assert str(storage_state) in captured.out
+    assert "session expired or invalid" in captured.out.lower()
 
 
 def _patch_import_handler(monkeypatch, tmp_path, *, is_interactive=False):
@@ -487,3 +470,36 @@ def test_clear_profile_and_exit_clears_all_auth_state(
     assert cleared["profile"] == profile_dir
     captured = capsys.readouterr()
     assert "authentication state cleared" in captured.out.lower()
+
+
+def test_clear_profile_and_exit_does_not_skip_pending_only_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    config = AppConfig()
+    profile_dir = tmp_path / "profile"
+    config.browser.user_data_dir = str(profile_dir)
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: config)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_profile_dir", lambda: profile_dir
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+    pending = tmp_path / ".login-pending-only"
+    pending.mkdir()
+    (pending / "cookies.json").write_text("private li_at")
+
+    cleared: list[object] = []
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.clear_auth_state",
+        lambda profile: cleared.append(profile) or True,
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.clear_profile_and_exit()
+
+    assert exit_info.value.code == 0
+    assert cleared == [profile_dir]

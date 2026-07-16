@@ -58,6 +58,12 @@ class NetworkError(LinkedInScraperException):
     pass
 
 
+class BrowserTeardownError(NetworkError):
+    """Browser ownership is uncertain after bounded cleanup failed."""
+
+    pass
+
+
 class ScrapingError(LinkedInScraperException):
     """Raised when scraping fails for various reasons."""
 

@@ -30,9 +30,11 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "camoufox[geoip]>=0.4.11",
+    # Camoufox 0.5 changes browser, addon, and GeoIP cache APIs/layouts. Keep
+    # the fully audited 0.4 line until those three provisioning paths migrate
+    # and gain cross-version tests together.
+    "camoufox[geoip]>=0.4.11,<0.5",
     "cryptography>=48.0.1",
-    "fake-useragent>=2.2.0",
     "fastmcp>=3.0.0",
     "inquirer>=3.4.0",
     "packaging>=26.2",

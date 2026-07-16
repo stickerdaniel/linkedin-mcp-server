@@ -4,14 +4,15 @@ Authentication logic for LinkedIn MCP Server.
 Handles LinkedIn session management with persistent browser profile.
 """
 
+import asyncio
 import logging
-import shutil
 from pathlib import Path
 
 from linkedin_mcp_server.session_state import (
     clear_auth_state as clear_all_auth_state,
     get_source_profile_dir,
     portable_cookie_path,
+    portable_cookie_is_valid,
     profile_exists,
     source_state_path,
     load_source_state,
@@ -34,7 +35,7 @@ def get_authentication_source() -> bool:
     profile_dir = get_source_profile_dir()
     cookies_path = portable_cookie_path(profile_dir)
     source_state = load_source_state(profile_dir)
-    if profile_exists(profile_dir) and cookies_path.exists() and source_state:
+    if portable_cookie_is_valid(profile_dir) and source_state:
         logger.info("Using source profile from %s", profile_dir)
         return True
 
@@ -58,29 +59,20 @@ def get_authentication_source() -> bool:
 
 
 def clear_profile(profile_dir: Path | None = None) -> bool:
-    """
-    Clear stored browser profile directory.
-
-    Args:
-        profile_dir: Path to profile directory
-
-    Returns:
-        True if clearing was successful
-    """
-    if profile_dir is None:
-        profile_dir = get_source_profile_dir()
-
-    if profile_dir.exists():
-        try:
-            shutil.rmtree(profile_dir)
-            logger.info(f"Profile cleared from {profile_dir}")
-            return True
-        except OSError as e:
-            logger.warning(f"Could not clear profile: {e}")
-            return False
-    return True
+    """Compatibility alias for coordinated source-auth cleanup."""
+    return clear_auth_state(profile_dir)
 
 
 def clear_auth_state(profile_dir: Path | None = None) -> bool:
-    """Clear source session artifacts and all derived runtime sessions."""
-    return clear_all_auth_state(profile_dir or get_source_profile_dir())
+    """Clear source credentials under the cross-process publication lock."""
+    try:
+        return asyncio.run(
+            clear_all_auth_state(profile_dir or get_source_profile_dir())
+        )
+    except TimeoutError as exc:
+        logger.warning(
+            "Could not clear authentication while another source-session "
+            "transaction is active: %s",
+            exc,
+        )
+        return False
