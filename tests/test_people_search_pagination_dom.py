@@ -6,12 +6,14 @@ pagination, and early stopping without depending on a live account or locale.
 """
 
 from urllib.parse import parse_qs, urlparse
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from patchright.async_api import async_playwright
 
 from linkedin_mcp_server.scraping.extractor import LinkedInExtractor
+from linkedin_mcp_server.live_verification import verify_live_people_search
 
 pytestmark = pytest.mark.browser_dom
 
@@ -128,3 +130,56 @@ async def test_people_search_paginates_through_real_browser(routed_linkedin_page
             },
         ]
     }
+
+
+async def test_live_harness_requires_usable_page_two_results(routed_linkedin_page):
+    """Exercise the opt-in live harness against deterministic browser pages."""
+    page, requested_pages = routed_linkedin_page
+
+    with (
+        patch(
+            "linkedin_mcp_server.live_verification.ensure_authenticated",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "linkedin_mcp_server.live_verification.get_or_create_browser",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(page=page),
+        ),
+        patch(
+            "linkedin_mcp_server.live_verification.close_browser",
+            new_callable=AsyncMock,
+        ),
+        patch("linkedin_mcp_server.live_verification.set_headless"),
+        patch("linkedin_mcp_server.scraping.extractor._NAV_DELAY", 0),
+    ):
+        report = await verify_live_people_search(
+            "software engineer",
+            location="New York",
+            max_pages=2,
+            headless=True,
+        )
+
+        original_search_page = _search_page
+
+        def repeat_page_one_people(page_number: int) -> str:
+            return original_search_page(1 if page_number == 2 else page_number)
+
+        requested_pages.clear()
+        with (
+            patch(f"{__name__}._search_page", side_effect=repeat_page_one_people),
+            pytest.raises(RuntimeError, match="page 2 returned no new person"),
+        ):
+            await verify_live_people_search(
+                "software engineer",
+                location="New York",
+                max_pages=2,
+                headless=True,
+            )
+
+    assert requested_pages == [1, 2]
+    assert report["status"] == "passed"
+    assert report["visited_pages"] == [1, 2]
+    assert report["new_person_references_on_page_2"] == 1
+    assert report["unique_person_references"] == 3
+    assert report["page_result_characters"]["2"] > 0
