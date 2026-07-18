@@ -3245,8 +3245,9 @@ class LinkedInExtractor:
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        max_pages: int = 1,
     ) -> dict[str, Any]:
-        """Search for people and extract the results page.
+        """Search for people and extract one or more results pages.
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
@@ -3262,6 +3263,7 @@ class LinkedInExtractor:
                 unfiltered result set. Look up a company's URN via
                 ``get_company_profile`` -- it is exposed under
                 ``references["about"]``.
+            max_pages: Maximum pages to load (1-10, default 1).
 
         Returns:
             {url, sections: {name: text}}
@@ -3290,25 +3292,49 @@ class LinkedInExtractor:
         if current_company:
             params += f"&currentCompany={_encode_list_facet([current_company])}"
 
-        url = f"https://www.linkedin.com/search/results/people/?{params}"
-        extracted = await self.extract_page(url, section_name="search_results")
-
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
+        base_url = f"https://www.linkedin.com/search/results/people/?{params}"
+        page_texts: list[str] = []
+        page_references: list[Reference] = []
+        seen_person_urls: set[str] = set()
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-            sections["search_results"] = extracted.text
+
+        for page_num in range(1, max_pages + 1):
+            if page_num > 1:
+                await asyncio.sleep(_NAV_DELAY)
+
+            url = base_url if page_num == 1 else f"{base_url}&page={page_num}"
+            extracted = await self.extract_page(url, section_name="search_results")
+
+            if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                if extracted.error:
+                    section_errors["search_results"] = extracted.error
+                break
+
+            page_texts.append(extracted.text)
             if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
+                page_references.extend(extracted.references)
+
+            person_urls = {
+                reference["url"]
+                for reference in extracted.references
+                if reference["kind"] == "person"
+            }
+            new_person_urls = person_urls - seen_person_urls
+            if not new_person_urls:
+                logger.debug("No new people references on page %d, stopping", page_num)
+                break
+            seen_person_urls.update(new_person_urls)
 
         result: dict[str, Any] = {
-            "url": url,
-            "sections": sections,
+            "url": base_url,
+            "sections": {"search_results": "\n---\n".join(page_texts)}
+            if page_texts
+            else {},
         }
-        if references:
-            result["references"] = references
+        if page_references:
+            result["references"] = {
+                "search_results": dedupe_references(page_references)
+            }
         if section_errors:
             result["section_errors"] = section_errors
         return result

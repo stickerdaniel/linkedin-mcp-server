@@ -144,3 +144,21 @@ This project favours **innerText extraction and URL navigation** over DOM select
 - **Lint/format:** `uv run ruff check . --fix && uv run ruff format .`
 - **Type check:** `uv run ty check`
 - **Tests:** `uv run pytest --cov`
+
+## Live People-Search Verification
+
+People-search pagination also has an opt-in live harness. It uses the production
+browser manager and extractor against an authenticated LinkedIn account while
+printing a JSON summary with only navigation and count metadata (never result
+names or text). Production failure diagnostics may still appear on stderr, so
+review terminal output before sharing it.
+
+```bash
+uv run -m linkedin_mcp_server --login
+uv run python scripts/verify_live_people_search.py "software engineer" --max-pages 2
+```
+
+The command fails unless page 2 was visited and extracted, page 2 contributed
+readable text and new person references, and the final person reference URLs
+were deduplicated. Keep it out of CI because it requires a contributor-owned
+LinkedIn session.
