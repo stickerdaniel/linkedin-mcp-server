@@ -2621,6 +2621,110 @@ class TestSearchJobs:
         assert result["sections"] == {}
         assert "references" not in result
 
+    async def test_search_people_paginates_and_deduplicates_references(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        pages = iter(
+            [
+                extracted(
+                    "Page 1 text",
+                    [
+                        {"kind": "person", "url": "/in/jane/", "text": "Jane"},
+                        {"kind": "company", "url": "/company/acme/"},
+                    ],
+                ),
+                extracted(
+                    "Page 2 text",
+                    [
+                        {
+                            "kind": "person",
+                            "url": "/in/jane/",
+                            "text": "Jane Doe",
+                        },
+                        {"kind": "person", "url": "/in/john/", "text": "John"},
+                    ],
+                ),
+            ]
+        )
+        visited_urls: list[str] = []
+
+        async def mock_extract(url, *args, **kwargs):
+            visited_urls.append(url)
+            return next(pages)
+
+        with (
+            patch.object(extractor, "extract_page", side_effect=mock_extract),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
+            result = await extractor.search_people("engineer", max_pages=2)
+
+        assert visited_urls == [
+            "https://www.linkedin.com/search/results/people/?keywords=engineer",
+            "https://www.linkedin.com/search/results/people/?keywords=engineer&page=2",
+        ]
+        assert result["sections"]["search_results"] == ("Page 1 text\n---\nPage 2 text")
+        assert result["references"] == {
+            "search_results": [
+                {"kind": "person", "url": "/in/jane/", "text": "Jane Doe"},
+                {"kind": "company", "url": "/company/acme/"},
+                {"kind": "person", "url": "/in/john/", "text": "John"},
+            ]
+        }
+        mock_sleep.assert_awaited_once()
+
+    async def test_search_people_stops_when_page_has_no_new_people(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        pages = iter(
+            [
+                extracted(
+                    "Page 1 text",
+                    [{"kind": "person", "url": "/in/jane/", "text": "Jane"}],
+                ),
+                extracted(
+                    "Page 2 text",
+                    [
+                        {
+                            "kind": "person",
+                            "url": "/in/jane/",
+                            "text": "Jane Doe",
+                        }
+                    ],
+                ),
+            ]
+        )
+
+        with (
+            patch.object(
+                extractor, "extract_page", new_callable=AsyncMock, side_effect=pages
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_people("engineer", max_pages=10)
+
+        assert mock_extract.await_count == 2
+        assert result["sections"]["search_results"] == ("Page 1 text\n---\nPage 2 text")
+
+    async def test_search_people_stops_without_person_references(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "No people",
+                [{"kind": "company", "url": "/company/acme/", "text": "Acme"}],
+            ),
+        ) as mock_extract:
+            result = await extractor.search_people("nobody", max_pages=10)
+
+        mock_extract.assert_awaited_once()
+        assert result["sections"] == {"search_results": "No people"}
+
     async def test_search_people_network_filter_first_degree(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with patch.object(

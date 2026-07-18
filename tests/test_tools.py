@@ -263,6 +263,7 @@ class TestPersonTool:
             "New York",
             network=None,
             current_company=None,
+            max_pages=1,
         )
 
     async def test_search_people_with_network_and_company_filters(self, mock_context):
@@ -289,6 +290,7 @@ class TestPersonTool:
             mock_context,
             network=["F"],
             current_company="1115",
+            max_pages=4,
             extractor=mock_extractor,
         )
         assert "search_results" in result["sections"]
@@ -297,7 +299,25 @@ class TestPersonTool:
             None,
             network=["F"],
             current_company="1115",
+            max_pages=4,
         )
+
+    @pytest.mark.parametrize("max_pages", [0, 11])
+    async def test_search_people_rejects_invalid_max_pages(
+        self, mock_context, max_pages
+    ):
+        from pydantic import ValidationError
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        with pytest.raises(ValidationError, match="max_pages"):
+            await mcp.call_tool(
+                "search_people",
+                {"keywords": "engineer", "max_pages": max_pages},
+            )
 
     async def test_search_people_validation_error_surfaced_as_tool_error(
         self, mock_context
