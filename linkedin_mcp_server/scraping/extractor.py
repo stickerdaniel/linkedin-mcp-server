@@ -38,6 +38,7 @@ from linkedin_mcp_server.scraping.link_metadata import (
 )
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from .skills_parser import parse_skills, skill_names_from_aria_labels
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -417,6 +418,9 @@ class ExtractedSection:
     text: str
     references: list[Reference]
     error: dict[str, Any] | None = None
+    # Structured records for sections that support it (currently only skills).
+    # None means "not applicable to this section"; [] means "parsed, none found".
+    structured: list[dict[str, Any]] | None = None
 
 
 _FEED_RSC_MARKER = "sduiid=com.linkedin.sdui.pagers.feed.mainFeed"
@@ -1483,6 +1487,14 @@ class LinkedInExtractor:
         # panel loads asynchronously. Wait until the panel replaces the sidebar.
         # The sidebar placeholder starts with "Load more" or "More profiles for you".
         is_details = "/details/" in url
+        # The skills detail page is a special case: it has NO list-level "Show
+        # more" pager and does not paginate on window scroll. Instead it is an
+        # SDUI list that appends more skills only when the viewport-centre mouse
+        # wheel fires (like the home feed). It also renders a per-skill "Show all
+        # N details" button that matches the generic Show-more regex — clicking
+        # it would navigate away — so skills must bypass the Show-more loop and
+        # use the dedicated wheel-scroll path below.
+        is_skills = url.rstrip("/").endswith("/details/skills")
         if is_details:
             try:
                 await self._page.wait_for_function(
@@ -1501,7 +1513,7 @@ class LinkedInExtractor:
 
         # Detail pages paginate with a "Show more" button inside <main>, not scroll.
         # Click it until it disappears or the budget runs out.
-        if is_details:
+        if is_details and not is_skills:
             max_clicks = max_scrolls if max_scrolls is not None else 5
             for i in range(max_clicks):
                 button = self._page.locator("main button").filter(
@@ -1525,12 +1537,23 @@ class LinkedInExtractor:
                     break
 
         # Scroll to trigger lazy loading
-        if is_activity:
+        if is_skills:
+            # LinkedIn caps the initial skills render at ~10; the rest append via
+            # SDUI pagination that only fires on a viewport-centre wheel scroll.
+            scrolls = max_scrolls if max_scrolls is not None else 25
+            await self._wheel_scroll_until_stable(max_scrolls=scrolls)
+        elif is_activity:
             scrolls = max_scrolls if max_scrolls is not None else 10
             await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=scrolls)
         else:
             scrolls = max_scrolls if max_scrolls is not None else 5
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
+
+        # Authoritative skill names come from per-skill aria-labels; read them
+        # before extraction so the structured parser can key on them.
+        skill_names: list[str] = []
+        if is_skills:
+            skill_names = await self._collect_skill_names()
 
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])
@@ -1545,10 +1568,76 @@ class LinkedInExtractor:
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
+        structured = parse_skills(cleaned, skill_names) if is_skills else None
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name),
+            structured=structured,
         )
+
+    async def _wheel_scroll_until_stable(
+        self,
+        max_scrolls: int,
+        *,
+        stale_limit: int = 3,
+        pause_time: float = 1.3,
+    ) -> None:
+        """Wheel-scroll the viewport centre until <main> innerText stops growing.
+
+        LinkedIn's SDUI lists (skills, and the feed) ignore ``window.scrollTo``;
+        only a mouse wheel over the viewport centre triggers the pagination that
+        appends more items. innerText length is a locale-independent progress
+        signal — when it stays flat for ``stale_limit`` consecutive checks the
+        list is fully loaded.
+        """
+        viewport = self._page.viewport_size or {"width": 1280, "height": 720}
+        cx, cy = viewport["width"] // 2, viewport["height"] // 2
+        await self._page.mouse.move(cx, cy)
+
+        async def _length() -> int:
+            try:
+                return await self._page.evaluate(
+                    "() => { const m = document.querySelector('main');"
+                    " return m ? m.innerText.length : 0; }"
+                )
+            except Exception:
+                return 0
+
+        prev = -1
+        stale = 0
+        for _ in range(max_scrolls):
+            current = await _length()
+            if current == prev:
+                stale += 1
+                if stale >= stale_limit:
+                    break
+            else:
+                stale = 0
+            prev = current
+            await self._page.mouse.wheel(0, 2500)
+            await asyncio.sleep(pause_time)
+
+    async def _collect_skill_names(self) -> list[str]:
+        """Read authoritative skill names from per-skill aria-labels in <main>.
+
+        Own profile exposes ``Edit <name> skill``; other profiles expose
+        ``Endorse <name>`` / ``Endorsed <name>``. Returns [] when neither is
+        present (the parser then falls back to heuristic segmentation).
+        """
+        try:
+            labels = await self._page.evaluate(
+                """() => {
+                    const main = document.querySelector('main');
+                    if (!main) return [];
+                    return [...main.querySelectorAll('[aria-label]')]
+                        .map(e => e.getAttribute('aria-label'))
+                        .filter(Boolean);
+                }"""
+            )
+        except Exception:
+            logger.debug("Failed to read skill aria-labels", exc_info=True)
+            return []
+        return skill_names_from_aria_labels(labels)
 
     async def _extract_overlay(
         self,
@@ -1655,6 +1744,7 @@ class LinkedInExtractor:
         base_url = f"https://www.linkedin.com/in/{username}"
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
+        structured: dict[str, list[dict[str, Any]]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
         profile_urn: str | None = None
 
@@ -1712,6 +1802,8 @@ class LinkedInExtractor:
                         sections[section_name] = extracted.text
                         if extracted.references:
                             references[section_name] = extracted.references
+                        if extracted.structured is not None:
+                            structured[section_name] = extracted.structured
                     elif extracted.error:
                         section_errors[section_name] = extracted.error
 
@@ -1748,6 +1840,8 @@ class LinkedInExtractor:
             result["profile_urn"] = profile_urn
         if references:
             result["references"] = references
+        if structured:
+            result["structured"] = structured
         if section_errors:
             result["section_errors"] = section_errors
 
