@@ -11,18 +11,15 @@ ARIA attributes it sets do not depend on UI language. Detection here uses:
 
 Per ``AGENTS.md`` Scraping Rules, classification logic relies on URL
 patterns and attribute *presence* — never on the values of locale-dependent
-text labels like "Connect", "Follow", or "1st".
-
-The single text-based fallback that remains is incoming-request detection
-(Accept/Ignore present in the top-card text). LinkedIn does not expose a
-distinctive URL or attribute for this state. Per the same rules, that
-fallback lives behind an explicit per-locale label table that is trivial
-to extend.
+text labels like "Connect", "Follow", or "1st". Incoming-request detection
+is fully structural: the Accept/Ignore action row is fingerprinted by
+attribute presence, element counts, and DOM order
+(see :attr:`ActionSignals.has_incoming_action_row`), so no text labels are
+read for any state.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -35,25 +32,6 @@ ConnectionState = Literal[
     "self_profile",
     "unavailable",
 ]
-
-
-# Per AGENTS.md Scraping Rules: text-only signals must live behind an
-# explicit per-locale table. This table covers incoming-request detection
-# only — the one state without a structural URL/attribute signal we have
-# verified against the live DOM. Extend with additional ("xx", (a, b))
-# entries once the labels are confirmed against a real profile.
-INCOMING_REQUEST_LABELS: dict[str, tuple[str, str]] = {
-    "en": ("Accept", "Ignore"),
-}
-
-
-# Bound the text scan to the top-card region. The previous implementation
-# cut at the first occurrence of "About"/"Experience"/"Education" — but
-# those sentinel words are themselves locale-dependent, so a fixed
-# character budget is the locale-clean replacement. ~600 chars is enough
-# to comfortably cover name, headline, location, and the action-button
-# row in every locale we have observed.
-_TOP_CARD_CHAR_BUDGET = 600
 
 
 @dataclass(frozen=True)
@@ -99,23 +77,35 @@ class ActionSignals:
     locale-dependent and not read; presence-on-an-``<a>`` is the
     locale-independent Pending signal."""
 
+    has_incoming_action_row: bool
+    """The top-card action row matches the incoming-request fingerprint:
+    exactly three ``<button>``s in the smallest multi-button container
+    around a ``button[aria-expanded]`` — two with ``aria-label``
+    (Accept, Ignore) preceding one unlabeled expander (More) — and the
+    container holds no compose anchor, no invite anchor, and no labeled
+    ``<a>``. All checks are attribute presence and structural counts per
+    the AGENTS.md Scraping Rules; no label values are read. Verified
+    live 2026-06-11 against two German-locale incoming-request profiles.
+    Computed independently of the compose-anchor action-root walk, which
+    finds no top-card root on incoming profiles (they have no Message
+    button) and would otherwise mis-anchor on sidebar cards."""
 
-def detect_connection_state(
-    profile_text: str,
-    signals: ActionSignals,
-) -> ConnectionState:
-    """Determine the relationship state for a profile.
+
+def detect_connection_state(signals: ActionSignals) -> ConnectionState:
+    """Determine the relationship state for a profile from structural signals.
 
     Resolution order:
 
     1. ``self_profile`` — edit-intro anchor (URL).
     2. ``connectable`` — vanityName invite anchor (URL).
-    3. ``pending`` — labeled action ``<a>`` in the action root (the
+    3. ``incoming_request`` — structural action-row fingerprint. Must
+       precede the pending check: incoming profiles have no Message
+       button in the top card, so the compose-anchor action-root walk
+       mis-anchors on sidebar cards whose labeled anchors would
+       otherwise satisfy the pending signal.
+    4. ``pending`` — labeled action ``<a>`` in the action root (the
        Pending control LinkedIn renders for invitations awaiting
        response).
-    4. ``incoming_request`` — locale-table text fallback. The one
-       AGENTS.md-sanctioned text-based signal; extend
-       :data:`INCOMING_REQUEST_LABELS` to add locales.
     5. ``already_connected`` — compose anchor present in action root and
        no labeled action button. (1st-degree connections render Message
        as the primary action; there is no Follow/Connect button.)
@@ -131,46 +121,12 @@ def detect_connection_state(
         return "self_profile"
     if signals.has_invite_anchor:
         return "connectable"
+    if signals.has_incoming_action_row:
+        return "incoming_request"
     if signals.has_labeled_action_anchor:
         return "pending"
-    if _has_incoming_request_text(profile_text):
-        return "incoming_request"
     if signals.has_compose_anchor_in_action_root:
         if signals.has_labeled_action_button:
             return "follow_only"
         return "already_connected"
     return "unavailable"
-
-
-def _has_incoming_request_text(profile_text: str) -> bool:
-    """Return True if any locale's Accept+Ignore label pair appears in the
-    bounded top-card prefix of ``profile_text``.
-
-    This is the single text-based detector retained from the previous
-    implementation. Per AGENTS.md it is gated behind an explicit locale
-    table; new languages are added by appending to
-    :data:`INCOMING_REQUEST_LABELS`. The character budget keeps the scan
-    inside the top-card region without depending on locale-dependent
-    section sentinels.
-
-    Each label is matched with newline boundaries — LinkedIn renders
-    each action button on its own line in the top-card text, and
-    line-bounded matching prevents false positives from the same
-    substring appearing inside a name or headline (e.g. "Ignored" or
-    "Acceptance Speech" would not match "Ignore" / "Accept").
-    """
-    if not profile_text:
-        return False
-    head = profile_text[:_TOP_CARD_CHAR_BUDGET]
-    for accept, ignore in INCOMING_REQUEST_LABELS.values():
-        if _label_present(head, accept) and _label_present(head, ignore):
-            return True
-    return False
-
-
-def _label_present(head: str, label: str) -> bool:
-    """Return True if ``label`` appears as a complete, line-bounded token
-    inside ``head``. Allows the label to start at the beginning of the
-    head and to end at the end of the head."""
-    pattern = re.compile(r"(?:^|\n)" + re.escape(label) + r"(?:\n|$)")
-    return pattern.search(head) is not None

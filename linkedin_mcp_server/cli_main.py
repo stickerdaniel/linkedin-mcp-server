@@ -123,6 +123,57 @@ def get_profile_and_exit() -> None:
     sys.exit(0 if success else 1)
 
 
+def import_from_browser_and_exit() -> None:
+    """Import a LinkedIn session from a local browser, validate, persist, exit."""
+    config = get_config()
+    configure_logging(
+        log_level=config.server.log_level,
+        json_format=not config.is_interactive and config.server.log_level != "DEBUG",
+    )
+    logger.info("LinkedIn MCP Server v%s - Browser Import mode", get_version())
+
+    configure_browser_environment()
+    set_headless(True)  # validation runs headless
+    user_data_dir = get_profile_dir()
+    selector = (
+        None
+        if config.server.import_from_browser == "auto"
+        else config.server.import_from_browser
+    )
+
+    from linkedin_mcp_server.browser_import.orchestrate import (
+        import_session_from_browser,
+    )
+    from linkedin_mcp_server.exceptions import (
+        CookieDecryptionError,
+        NoLinkedInSessionFoundError,
+    )
+
+    if config.is_interactive:
+        print(
+            "ℹ️  macOS may prompt to allow keychain access to the browser's "
+            "Safe Storage."
+        )
+    try:
+        ok = asyncio.run(
+            import_session_from_browser(selector, user_data_dir=user_data_dir)
+        )
+    except NoLinkedInSessionFoundError as e:
+        print(f"❌ {e}")
+        print("   Log into LinkedIn in your browser first, or run with --login.")
+        sys.exit(1)
+    except (CookieDecryptionError, AuthenticationError) as e:
+        print(f"❌ Could not import session: {e}")
+        sys.exit(1)
+
+    if ok:
+        print(f"✅ Imported and validated LinkedIn session into {user_data_dir}")
+        sys.exit(0)
+    print("❌ Imported cookies did not produce a valid session.")
+    print("   The browser session may be expired. Re-login there or use --login.")
+    sys.exit(1)
+
+
 def profile_info_and_exit() -> None:
     """Check profile validity and display info, then exit."""
     config = get_config()
@@ -236,7 +287,11 @@ def get_version() -> str:
     try:
         from importlib.metadata import PackageNotFoundError, version
 
-        for package_name in ("linkedin-scraper-mcp", "linkedin-mcp-server"):
+        for package_name in (
+            "mcp-server-linkedin",
+            "linkedin-scraper-mcp",
+            "linkedin-mcp-server",
+        ):
             try:
                 return version(package_name)
             except PackageNotFoundError:
@@ -287,10 +342,20 @@ def main() -> None:
         if config.server.logout:
             clear_profile_and_exit()
 
-        # Ensure browser is installed for CLI modes that need it.
-        # Normal server startup uses async background setup instead.
-        if config.server.login or config.server.status:
-            ensure_browser_installed()
+        # Ensure browser is installed for CLI modes that launch it.
+        # Normal server startup uses async background setup instead. --login is
+        # headed and needs full chromium; --status and --import-from-browser run
+        # headless and need only the shell.
+        if (
+            config.server.login
+            or config.server.status
+            or config.server.import_from_browser
+        ):
+            ensure_browser_installed(full=config.server.login)
+
+        # Handle --import-from-browser flag
+        if config.server.import_from_browser:
+            import_from_browser_and_exit()
 
         # Handle --login flag
         if config.server.login:

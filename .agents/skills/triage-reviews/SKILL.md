@@ -1,7 +1,6 @@
 ---
 name: triage-reviews
 description: Fetch PR review comments, verify each against real code/docs, fix valid issues, commit and push
-disable-model-invocation: true
 argument-hint: '[PR number]'
 ---
 
@@ -52,12 +51,74 @@ For EVERY finding, verify against real code before accepting or rejecting:
    ```
 4. Push: `gt submit` (or `git push` if not using Graphite)
 
+## Phase 3.5: Reply on each thread, then resolve it
+
+Pushing the fix isn't enough. Each inline review comment lives in its own thread that GitHub keeps showing as "Unresolved" until someone explicitly resolves it. The skill must close that loop for every Valid and False-positive finding so the PR view actually reflects what was triaged.
+
+Workflow per finding:
+
+1. **Reply on the thread** with the verdict and evidence:
+   - Valid + fixed: `Fixed in <short-sha>. <one-line what changed>.`
+   - Valid + unfixed: `Valid, deferred to follow-up. Reason: <why>.`
+   - False positive: `False positive. <one-line evidence: file:line shows X, or doc link Y>.`
+
+2. **Resolve the thread only when the finding is Fixed or False positive.** `Valid + unfixed` threads must stay open so the PR view continues to surface the real bug. Resolving them would let the PR look ready while the bug is still in the code. Leave the maintainer to close those threads when they file the follow-up.
+
+GitHub's review threads can only be resolved via GraphQL (REST has no endpoint). The thread ID is a GraphQL node ID, not the REST comment ID, so fetch both together. Use `--paginate` so PRs with more than 100 threads are covered, the page size cap is per-request not total:
+
+```bash
+PR=<pr-number>
+OWNER=<owner>
+REPO=<repo>
+
+gh api graphql --paginate -f query='
+  query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $pr) {
+        reviewThreads(first: 100, after: $endCursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            isResolved
+            comments(first: 1) { nodes { databaseId path line body } }
+          }
+        }
+      }
+    }
+  }' \
+  -F owner="$OWNER" -F repo="$REPO" -F pr=$PR \
+  --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | {threadId: .id, commentId: .comments.nodes[0].databaseId, path: .comments.nodes[0].path, line: .comments.nodes[0].line}' \
+  > /tmp/triage-threads-$PR.json
+```
+
+Each entry now has `{threadId, commentId, path, line}`. Match it against your Phase-2 finding map (by `path` + `line` or `commentId`). For each match:
+
+```bash
+# Post reply (REST endpoint for replies on a specific review comment)
+gh api -X POST "/repos/$OWNER/$REPO/pulls/$PR/comments/$COMMENT_ID/replies" \
+  -f body="Fixed in $SHORT_SHA. <one-line>."
+
+# Resolve the thread (GraphQL) — Fixed and False-positive only. SKIP for Valid+unfixed.
+gh api graphql -f query="
+  mutation {
+    resolveReviewThread(input: {threadId: \"$THREAD_ID\"}) {
+      thread { isResolved }
+    }
+  }"
+```
+
+If the parent review left a separate top-level summary comment (Greptile's `Greptile Summary` issue-level comment, for example), leave it alone, only inline review threads need resolving.
+
+Cap: resolve only threads tied to findings you actually classified. Do not bulk-resolve unrelated threads (other reviewers, human discussion, follow-up questions that aren't from this triage round).
+
 ## Phase 4: Report
 
 Present a final summary table of ALL findings with verdicts:
 
-| # | Source | File:Line | Finding | Verdict | Reason |
-|---|--------|-----------|---------|---------|--------|
+| # | Source | File:Line | Finding | Verdict | Reason | Thread |
+|---|--------|-----------|---------|---------|--------|--------|
+
+Last column: `replied + resolved`, `replied + still open` (e.g. waiting on reviewer), or `n/a` (no inline thread, only summary). If any thread stayed open, name it explicitly so the next pass picks it up.
 
 ## Notes
 

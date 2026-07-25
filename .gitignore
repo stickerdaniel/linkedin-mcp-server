@@ -198,8 +198,8 @@ cython_debug/
 .claude/*
 !.claude/settings.json
 
-# opencode
-.opencode/plans
+# opencode (local config, not checked in)
+.opencode/
 
 # Portable cookie file (contains session data)
 cookies.json

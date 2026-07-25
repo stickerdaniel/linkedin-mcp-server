@@ -27,6 +27,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_company = AsyncMock(return_value=scrape_result)
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
+    mock.get_saved_jobs = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
     mock.get_inbox = AsyncMock(return_value=scrape_result)
@@ -383,6 +384,40 @@ class TestPersonTool:
             note=None,
         )
 
+    async def test_connect_with_person_custom_note_limit_reached(self, mock_context):
+        """The custom_note_limit_reached status returns LinkedIn's message."""
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "status": "custom_note_limit_reached",
+            "message": "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
+            "note_sent": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "connect_with_person")
+        result = await tool_fn(
+            "test-user",
+            mock_context,
+            note="Hello!",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "custom_note_limit_reached"
+        assert (
+            result["message"]
+            == "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
+        )
+        assert result["note_sent"] is False
+        mock_extractor.connect_with_person.assert_awaited_once_with(
+            "test-user",
+            note="Hello!",
+        )
+
     async def test_connect_with_person_auth_error(self, monkeypatch):
         """Auth failures in the DI layer trigger auto-relogin and report the login browser."""
         from fastmcp.exceptions import ToolError
@@ -606,6 +641,25 @@ class TestJobTools:
         )
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
+
+    async def test_get_saved_jobs(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/my-items/saved-jobs/",
+            "sections": {"saved_jobs": "Saved Job 1\nSaved Job 2"},
+            "job_ids": ["111", "222"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_saved_jobs")
+        result = await tool_fn(mock_context, max_pages=2, extractor=mock_extractor)
+        assert "saved_jobs" in result["sections"]
+        assert result["job_ids"] == ["111", "222"]
+        mock_extractor.get_saved_jobs.assert_awaited_once_with(max_pages=2)
 
 
 class TestGetSidebarProfilesTool:
@@ -1133,6 +1187,7 @@ class TestToolTimeouts:
             "get_company_posts",
             "get_job_details",
             "search_jobs",
+            "get_saved_jobs",
             "get_inbox",
             "get_conversation",
             "search_conversations",
@@ -1164,6 +1219,7 @@ class TestToolTimeouts:
             "get_company_employees",
             "get_job_details",
             "search_jobs",
+            "get_saved_jobs",
             "get_inbox",
             "get_conversation",
             "search_conversations",

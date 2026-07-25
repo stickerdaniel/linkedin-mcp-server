@@ -166,14 +166,14 @@ def test_get_version_prefers_installed_metadata(
 
     def fake_version(package_name: str) -> str:
         calls.append(package_name)
-        if package_name == "linkedin-scraper-mcp":
+        if package_name == "mcp-server-linkedin":
             return "4.2.0"
         raise importlib.metadata.PackageNotFoundError(package_name)
 
     monkeypatch.setattr(importlib.metadata, "version", fake_version)
 
     assert cli_main.get_version() == "4.2.0"
-    assert calls == ["linkedin-scraper-mcp"]
+    assert calls == ["mcp-server-linkedin"]
 
 
 def test_main_non_interactive_no_auth_still_starts_server(
@@ -318,6 +318,137 @@ def test_profile_info_reports_committed_derived_runtime(
     captured = capsys.readouterr()
     assert "derived (committed, current generation)" in captured.out.lower()
     assert str(storage_state) in captured.out
+
+
+def _patch_import_handler(monkeypatch, tmp_path, *, is_interactive=False):
+    config = AppConfig()
+    config.is_interactive = is_interactive
+    config.server.import_from_browser = "chrome"
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: config)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.set_headless", lambda _x: None)
+    configured = {"called": False}
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.configure_browser_environment",
+        lambda: configured.__setitem__("called", True),
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_profile_dir", lambda: tmp_path / "profile"
+    )
+    return config, configured
+
+
+def test_import_from_browser_success_exits_zero(monkeypatch, capsys, tmp_path):
+    _config, configured = _patch_import_handler(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.browser_import.orchestrate.import_session_from_browser",
+        AsyncMock(return_value=True),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.import_from_browser_and_exit()
+
+    assert exit_info.value.code == 0
+    assert configured["called"] is True
+    assert "imported and validated" in capsys.readouterr().out.lower()
+
+
+def test_import_from_browser_failure_exits_one(monkeypatch, capsys, tmp_path):
+    _patch_import_handler(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.browser_import.orchestrate.import_session_from_browser",
+        AsyncMock(return_value=False),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.import_from_browser_and_exit()
+
+    assert exit_info.value.code == 1
+    assert "did not produce a valid session" in capsys.readouterr().out.lower()
+
+
+def test_import_from_browser_no_session_guidance(monkeypatch, capsys, tmp_path):
+    from linkedin_mcp_server.exceptions import NoLinkedInSessionFoundError
+
+    _patch_import_handler(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.browser_import.orchestrate.import_session_from_browser",
+        AsyncMock(side_effect=NoLinkedInSessionFoundError("none found")),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.import_from_browser_and_exit()
+
+    assert exit_info.value.code == 1
+    out = capsys.readouterr().out.lower()
+    assert "log into linkedin" in out
+    assert "--login" in out
+
+
+def test_import_from_browser_app_bound_message(monkeypatch, capsys, tmp_path):
+    from linkedin_mcp_server.exceptions import CookieDecryptionError
+
+    _patch_import_handler(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.browser_import.orchestrate.import_session_from_browser",
+        AsyncMock(side_effect=CookieDecryptionError("app-bound in Brave")),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.import_from_browser_and_exit()
+
+    assert exit_info.value.code == 1
+    assert "could not import session" in capsys.readouterr().out.lower()
+
+
+def test_main_dispatches_import_before_login(monkeypatch, tmp_path):
+    # Driving the dispatch through main() (not the handler directly) proves the
+    # wiring: import is gated into ensure_browser_installed and runs before the
+    # --login handler.
+    config = _make_config(
+        is_interactive=False, transport="stdio", transport_explicitly_set=False
+    )
+    config.server.import_from_browser = "chrome"
+    config.server.login = True  # also set; import must win and exit first
+    _patch_main_dependencies(monkeypatch, config)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.configure_browser_environment", lambda: None
+    )
+
+    calls: list[str] = []
+
+    def fake_ensure(*, full: bool = False) -> None:
+        # Both --login and --import-from-browser are set; import dispatches
+        # first, so the install requests full chromium for the headed login.
+        calls.append(f"ensure(full={full})")
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.ensure_browser_installed", fake_ensure
+    )
+
+    def fake_import():
+        calls.append("import")
+        raise SystemExit(0)
+
+    def fake_login():
+        calls.append("login")
+        raise SystemExit(0)
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.import_from_browser_and_exit", fake_import
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_profile_and_exit", fake_login)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli_main.main()
+
+    assert exit_info.value.code == 0
+    # Browser install gate ran for import, import dispatched, login never reached.
+    # --login is also set, so the install requests full chromium.
+    assert calls == ["ensure(full=True)", "import"]
 
 
 def test_clear_profile_and_exit_clears_all_auth_state(

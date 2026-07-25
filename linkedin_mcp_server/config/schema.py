@@ -14,6 +14,12 @@ from typing import Literal
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOOL_TIMEOUT_SECONDS: float = 180.0
+DEFAULT_LOGIN_TIMEOUT_SECONDS: float = 1800.0  # 30 min; 0 = no limit
+DEFAULT_LOGIN_INLINE_WAIT_SECONDS: float = 25.0  # bounded inline wait
+# Clamp ceiling: scrape time stacks on top of the inline wait inside one tool
+# call and the smallest MCP client timeout is ~60s, so the wait alone must stay
+# well under that floor.
+MAX_LOGIN_INLINE_WAIT_SECONDS: float = 45.0
 
 
 class ConfigurationError(Exception):
@@ -32,6 +38,27 @@ class BrowserConfig:
     default_timeout: int = 5000  # Milliseconds for page operations
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
     user_data_dir: str = "~/.linkedin-mcp/profile"  # Persistent browser profile
+    # Manual-login wait timeout in seconds; 0 = unlimited
+    login_timeout_seconds: float = DEFAULT_LOGIN_TIMEOUT_SECONDS
+    # Bounded inline wait before the pending signal; 0 = immediate return
+    login_inline_wait_seconds: float = DEFAULT_LOGIN_INLINE_WAIT_SECONDS
+    # Auto-import a LinkedIn session from a locally logged-in browser on the
+    # first no-session tool call, before falling back to manual login. On by
+    # default: None ("auto") and True both enable it across interactive and
+    # non-interactive desktop runs on every platform. False disables it. No
+    # effect under Docker (no host browser/keychain) or on a non-loopback HTTP
+    # bind (a network-exposed server must not read the host browser cookie).
+    # Note the non-loopback gate covers network-exposed HTTP only, not
+    # stdio-over-SSH: a non-console session simply fails to read the local
+    # user's keychain and degrades to manual login, and no cookie crosses the
+    # network.
+    auto_import_from_browser: bool | None = None
+    # Install full Chrome for Testing up front during background setup instead
+    # of lazily on the first headed login. Off by default: the headless scrape +
+    # auto-import path needs only the headless shell, so a headless-only operator
+    # never downloads the larger full-chromium binary unless interactive login is
+    # actually triggered. Set True to pre-warm the headed login fallback.
+    eager_full_chromium: bool = False
 
     def validate(self) -> None:
         """Validate browser configuration values."""
@@ -47,6 +74,35 @@ class BrowserConfig:
             raise ConfigurationError(
                 f"viewport dimensions must be positive, got {self.viewport_width}x{self.viewport_height}"
             )
+        # 0 is a valid sentinel for both (unlimited login wait / no inline wait),
+        # so these use >= 0 rather than the > 0 check tool_timeout_seconds uses.
+        if not (
+            math.isfinite(self.login_timeout_seconds)
+            and self.login_timeout_seconds >= 0
+        ):
+            raise ConfigurationError(
+                "login_timeout_seconds must be a non-negative finite number, "
+                f"got {self.login_timeout_seconds}"
+            )
+        if not (
+            math.isfinite(self.login_inline_wait_seconds)
+            and self.login_inline_wait_seconds >= 0
+        ):
+            raise ConfigurationError(
+                "login_inline_wait_seconds must be a non-negative finite number, "
+                f"got {self.login_inline_wait_seconds}"
+            )
+        # Clamp (do not reject) so a misconfigured large value can never alone
+        # approach the client timeout floor once scrape time is added on top.
+        if self.login_inline_wait_seconds > MAX_LOGIN_INLINE_WAIT_SECONDS:
+            logger.warning(
+                "login_inline_wait_seconds %.1f exceeds the %.1fs ceiling; "
+                "clamping (scrape time stacks on top of the wait inside one "
+                "tool call).",
+                self.login_inline_wait_seconds,
+                MAX_LOGIN_INLINE_WAIT_SECONDS,
+            )
+            self.login_inline_wait_seconds = MAX_LOGIN_INLINE_WAIT_SECONDS
         if self.chrome_path:
             chrome_path = Path(self.chrome_path)
             if not chrome_path.exists():
@@ -69,6 +125,8 @@ class ServerConfig:
     login: bool = False
     status: bool = False  # Check session validity and exit
     logout: bool = False
+    # Browser key or "auto"; triggers import-from-browser-and-exit.
+    import_from_browser: str | None = None
     # HTTP transport configuration
     host: str = "127.0.0.1"
     port: int = 8000
@@ -83,6 +141,18 @@ class ServerConfig:
             raise ConfigurationError(
                 f"tool_timeout_seconds must be a positive finite number, got {self.tool_timeout_seconds}"
             )
+        if self.import_from_browser is not None:
+            # Import the submodule, NOT the package, to avoid a config ->
+            # browser_import -> drivers.browser -> config import cycle.
+            from linkedin_mcp_server.browser_import.discovery import SUPPORTED_BROWSERS
+
+            allowed = set(SUPPORTED_BROWSERS) | {"auto"}
+            if self.import_from_browser not in allowed:
+                raise ConfigurationError(
+                    "import_from_browser "
+                    f"'{self.import_from_browser}' is not supported. "
+                    f"Choose one of: {', '.join(sorted(allowed))}"
+                )
 
 
 @dataclass

@@ -1,6 +1,7 @@
 {
-  "$schema": "https://btca.dev/btca.schema.json",
-  "providerTimeoutMs": 300000,
+  // Resource manifest for the btca-local skill: repos pre-cloned into
+  // ~/.btca/agent/sandbox/<name>. The sandbox is shared across projects,
+  // so resource names must identify the repo unambiguously.
   "resources": [
     {
       "type": "git",
@@ -11,7 +12,7 @@
     },
     {
       "type": "git",
-      "name": "playwright",
+      "name": "playwrightPython",
       "url": "https://github.com/microsoft/playwright-python",
       "branch": "main",
       "specialNotes": "Playwright Python bindings for browser automation."
@@ -48,7 +49,7 @@
       "type": "git",
       "name": "inquirer",
       "url": "https://github.com/magmax/python-inquirer",
-      "branch": "master",
+      "branch": "main",
       "specialNotes": "Python library for CLI interactive prompts."
     },
     {
@@ -77,8 +78,20 @@
       "name": "patchright",
       "url": "https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python",
       "branch": "main"
+    },
+    {
+      "type": "git",
+      "name": "pythonCryptography",
+      "url": "https://github.com/pyca/cryptography",
+      "branch": "main",
+      "specialNotes": "PyCA cryptography. AES-CBC/GCM + PBKDF2 for Chromium cookie decryption (browser session import, #534)."
+    },
+    {
+      "type": "git",
+      "name": "packaging",
+      "url": "https://github.com/pypa/packaging",
+      "branch": "main",
+      "specialNotes": "PyPA packaging. version.Version parsing/comparison for the PyPI update check (update_check.py)."
     }
-  ],
-  "model": "gpt-5.4-mini",
-  "provider": "openai"
+  ]
 }

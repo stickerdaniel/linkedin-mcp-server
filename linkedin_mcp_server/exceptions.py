@@ -61,3 +61,19 @@ class LinuxBrowserDependencyError(LinkedInMCPError):
 
 class BrowserBinaryMissingError(LinkedInMCPError):
     """Patchright Chromium binary is absent or stale on disk."""
+
+
+class CookieDecryptionError(LinkedInMCPError):
+    """A browser cookie could not be decrypted."""
+
+
+class KeystoreUnavailableError(CookieDecryptionError):
+    """The OS keystore holding the browser's Safe Storage key is unavailable."""
+
+
+class V20EncryptedError(CookieDecryptionError):
+    """Cookie uses Chrome 127+ app-bound encryption (v20); needs OS elevation."""
+
+
+class NoLinkedInSessionFoundError(LinkedInMCPError):
+    """No discoverable local browser profile has a decryptable LinkedIn (li_at) session."""
