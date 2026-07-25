@@ -110,16 +110,24 @@ class BrowserManager:
             await self.close()
             raise NetworkError(f"Failed to start browser: {e}") from e
 
-    async def close(self) -> None:
-        """Close persistent context and cleanup resources."""
+    async def close(self) -> bool:
+        """Close persistent context and cleanup resources.
+
+        Returns whether shutdown was *confirmed*. Both cleanup steps are bounded
+        and their failures swallowed, so a wedged Chromium can still be running
+        when this returns. Callers that hand the profile to another process on
+        the strength of a close must check this: releasing it while Chromium is
+        alive reintroduces the concurrent-profile corruption.
+        """
         context = self._context
         playwright = self._playwright
         self._context = None
         self._page = None
         self._playwright = None
+        confirmed = True
 
         if context is None and playwright is None:
-            return
+            return True
 
         # Bound each cleanup step. A wedged Chromium (stale SingletonLock,
         # sandbox stall, X-less host) can hang context.close() / playwright.stop()
@@ -132,11 +140,13 @@ class BrowserManager:
                     context.close(), timeout=_CLEANUP_TIMEOUT_SECONDS
                 )
             except TimeoutError:
+                confirmed = False
                 logger.error(
                     "Timed out closing browser context after %ss",
                     _CLEANUP_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
+                confirmed = False
                 logger.error("Error closing browser context: %s", exc)
 
         if playwright is not None:
@@ -145,14 +155,17 @@ class BrowserManager:
                     playwright.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS
                 )
             except TimeoutError:
+                confirmed = False
                 logger.error(
                     "Timed out stopping playwright after %ss",
                     _CLEANUP_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
+                confirmed = False
                 logger.error("Error stopping playwright: %s", exc)
 
         logger.info("Browser closed")
+        return confirmed
 
     @property
     def page(self) -> Page:

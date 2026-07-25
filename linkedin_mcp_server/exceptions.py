@@ -77,3 +77,23 @@ class V20EncryptedError(CookieDecryptionError):
 
 class NoLinkedInSessionFoundError(LinkedInMCPError):
     """No discoverable local browser profile has a decryptable LinkedIn (li_at) session."""
+
+
+class BrowserBusyError(LinkedInMCPError):
+    """Another server process holds the shared browser profile.
+
+    Deliberately not an ``AuthenticationError``: that class is routed into
+    ``invalidate_auth_and_trigger_relogin``, which force-retires the shared
+    profile. Classifying contention as an auth failure would let a process that
+    merely lost a race destroy every other process's session.
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message
+            or (
+                "Another LinkedIn MCP client is currently using the browser. "
+                "This is not a failure and your saved session was not changed. "
+                "Wait a moment and call this exact tool again."
+            )
+        )

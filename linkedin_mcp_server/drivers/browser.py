@@ -9,6 +9,7 @@ automatic profile persistence.
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
@@ -26,6 +27,8 @@ from linkedin_mcp_server.common_utils import utcnow_iso
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
+from linkedin_mcp_server.exceptions import BrowserBusyError
+from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.session_state import (
     SourceState,
     clear_runtime_profile,
@@ -54,6 +57,11 @@ _headless: bool = True
 # this path and race the first tool call, and an unguarded check-then-create
 # would launch two browsers against the same profile.
 _browser_create_lock = asyncio.Lock()
+# Set while the singleton holds a profile-lease reference, so close_browser()
+# releases exactly the reference the browser took and never someone else's.
+_browser_holds_lease: bool = False
+# Monotonic timestamp of the last completed tool call, for the idle timer.
+_last_activity: float | None = None
 
 
 def _debug_skip_checkpoint_restart() -> bool:
@@ -438,6 +446,32 @@ async def get_or_create_browser(
 
 async def _create_browser() -> BrowserManager:
     """Create and initialize the singleton (caller holds _browser_create_lock)."""
+    global _browser, _browser_cookie_export_path, _browser_holds_lease
+
+    # Own the profile before Chromium touches it. The middleware normally holds a
+    # reference already, so this is usually a cheap second reference; taking it
+    # here as well keeps every launch path covered, including the CLI ones.
+    lease = get_profile_lease()
+    took_lease = False
+    if not _browser_holds_lease:
+        if not lease.try_acquire():
+            raise BrowserBusyError()
+        took_lease = True
+
+    try:
+        browser = await _create_browser_locked()
+    except Exception:
+        if took_lease:
+            lease.release()
+        raise
+
+    if took_lease:
+        _browser_holds_lease = True
+    return browser
+
+
+async def _create_browser_locked() -> BrowserManager:
+    """Build the singleton browser; the profile lease is already held."""
     global _browser, _browser_cookie_export_path
 
     launch_options, viewport = _launch_options()
@@ -559,13 +593,14 @@ async def _create_browser() -> BrowserManager:
 
 
 async def close_browser() -> None:
-    """Close the browser and cleanup resources."""
-    global _browser, _browser_cookie_export_path
+    """Close the browser, releasing the profile once Chromium is confirmed gone."""
+    global _browser, _browser_cookie_export_path, _browser_holds_lease, _last_activity
 
     browser = _browser
     cookie_export_path = _browser_cookie_export_path
     _browser = None
     _browser_cookie_export_path = None
+    _last_activity = None
 
     if browser is None:
         return
@@ -576,7 +611,21 @@ async def close_browser() -> None:
             await browser.export_cookies(cookie_export_path)
         except Exception:
             logger.debug("Cookie export on close skipped", exc_info=True)
-    await browser.close()
+    confirmed = await browser.close()
+
+    if _browser_holds_lease:
+        if confirmed:
+            _browser_holds_lease = False
+            get_profile_lease().release()
+        else:
+            # Chromium may still be running: close() bounds its cleanup steps and
+            # reports failure rather than hanging. Handing the profile to another
+            # process now is exactly the corruption the lease prevents, so keep
+            # it until this process exits and the kernel frees it.
+            logger.warning(
+                "Browser shutdown could not be confirmed; keeping the profile "
+                "lease until this process exits."
+            )
     logger.info("Browser closed")
 
 
@@ -641,9 +690,61 @@ async def check_rate_limit() -> None:
     await detect_rate_limit(browser.page)
 
 
+def note_activity() -> None:
+    """Record that a tool call just finished, for the idle timer."""
+    global _last_activity
+    _last_activity = time.monotonic()
+
+
+async def release_profile_if_idle_or_requested() -> bool:
+    """Close the browser when another process wants it, or when we are idle.
+
+    Called after each tool call and from a background poller. Polling matters:
+    if the owner only checked between calls, a waiter that announces *after* the
+    owner's last call would block until the idle timeout while the owner sits
+    doing nothing.
+
+    Returns whether the browser was closed.
+    """
+    if _browser is None or not _browser_holds_lease:
+        return False
+
+    config = get_config().browser
+    lease = get_profile_lease()
+    idle_for = time.monotonic() - _last_activity if _last_activity else 0.0
+
+    if lease.handoff_requested():
+        # Every handoff costs a reopen, and a reopen re-validates /feed/. The
+        # hold window stops a busy pair of clients from trading the browser back
+        # and forth on every single call. An idle owner has nothing to protect,
+        # so it hands over immediately.
+        held = lease.held_seconds
+        if idle_for > 0 or held >= config.browser_min_hold_seconds:
+            logger.info(
+                "Another process is waiting for the browser; handing over (held %.1fs)",
+                held,
+            )
+            await close_browser()
+            return True
+        return False
+
+    timeout = config.browser_idle_timeout_seconds
+    if timeout > 0 and _last_activity is not None and idle_for >= timeout:
+        logger.info(
+            "Closing idle browser after %.0fs and releasing the profile", idle_for
+        )
+        await close_browser()
+        return True
+
+    return False
+
+
 def reset_browser_for_testing() -> None:
     """Reset global browser state for test isolation."""
     global _browser, _browser_cookie_export_path, _headless
+    global _browser_holds_lease, _last_activity
     _browser = None
     _browser_cookie_export_path = None
     _headless = True
+    _browser_holds_lease = False
+    _last_activity = None

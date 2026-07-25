@@ -439,6 +439,48 @@ def profile_in_use_by(profile_dir: Path) -> Path | None:
     return candidate
 
 
+def _require_exclusive_profile(profile_dir: Path, *, action: str) -> None:
+    """Refuse to mutate auth state while any process is using the profile.
+
+    Two independent signals, because neither alone is sufficient:
+
+    * Our own profile lease, which every cooperating process takes before it
+      opens Chromium. Authoritative, but only among processes that know about it.
+    * Chromium's ``SingletonLock``, which catches a foreign holder — an older
+      version, a container, a human with a browser open on the directory. Note it
+      is written only by full Chrome: the default ``chrome-headless-shell`` never
+      writes one, which is precisely why the lease exists.
+
+    Every profile is checked, not just the source: a container runs Chromium out
+    of ``runtime-profiles/<runtime>/profile`` while sharing the mounted auth
+    root, so checking only the source would move a live container's profile out
+    from under it.
+    """
+    from linkedin_mcp_server.profile_lease import get_profile_lease
+
+    lease = get_profile_lease(profile_dir)
+    if not lease.try_acquire():
+        raise RuntimeError(
+            "The browser profile is in use by another process. "
+            f"Stop the running server or container before {action}."
+        )
+    lease.release()
+
+    lock = next(
+        (
+            held
+            for candidate in [profile_dir, *_runtime_profile_dirs(profile_dir)]
+            if (held := profile_in_use_by(candidate)) is not None
+        ),
+        None,
+    )
+    if lock is not None:
+        raise RuntimeError(
+            f"The browser profile is in use by another process (found {lock.name}). "
+            f"Stop the running server or container before {action}."
+        )
+
+
 def rotate_source_profile(source_profile_dir: Path | None = None) -> Path | None:
     """Retire the current source session so the next one starts clean.
 
@@ -469,23 +511,7 @@ def rotate_source_profile(source_profile_dir: Path | None = None) -> Path | None
     if not existing:
         return None
 
-    # Every profile being moved must be free, not just the source one: a Docker
-    # container runs Chromium out of runtime-profiles/<runtime>/profile while
-    # sharing the mounted auth root, so checking only the source would move a
-    # live container's profile out from under it.
-    lock = next(
-        (
-            held
-            for candidate in [profile_dir, *_runtime_profile_dirs(profile_dir)]
-            if (held := profile_in_use_by(candidate)) is not None
-        ),
-        None,
-    )
-    if lock is not None:
-        raise RuntimeError(
-            f"The browser profile is in use by another process (found {lock.name}). "
-            "Stop the running server or container before creating a new session."
-        )
+    _require_exclusive_profile(profile_dir, action="creating a new session")
 
     # utcnow_iso() is second-resolution and rotation is now routine rather than
     # exceptional, so two rotations can land in the same second. The suffix keeps
@@ -604,8 +630,15 @@ def _retire(backup_dir: Path, targets: list[Path]) -> None:
 
 
 def clear_auth_state(source_profile_dir: Path | None = None) -> bool:
-    """Remove source auth artifacts, derived runtime profiles and quarantines."""
+    """Remove source auth artifacts, derived runtime profiles and quarantines.
+
+    Raises:
+        RuntimeError: Another process is using the profile. Deleting it out from
+            under a live browser corrupts that session and, with several clients,
+            destroys everyone's rather than just this caller's.
+    """
     profile_dir = (source_profile_dir or get_source_profile_dir()).expanduser()
+    _require_exclusive_profile(profile_dir, action="clearing the stored session")
     # Quarantines hold previous sessions' cookies, so a logout that left them
     # behind would not be the "clear all stored auth state" the CLI advertises.
     targets = _auth_state_targets(profile_dir) + quarantine_dirs(profile_dir)

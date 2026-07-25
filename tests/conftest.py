@@ -7,13 +7,18 @@ def reset_singletons():
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
+    from linkedin_mcp_server.profile_lease import reset_leases_for_testing
 
     reset_bootstrap_for_testing()
     reset_browser_for_testing()
+    reset_leases_for_testing()
     reset_config()
     yield
     reset_bootstrap_for_testing()
     reset_browser_for_testing()
+    # After the browser, so a lease the browser still held is released by its
+    # own bookkeeping first rather than yanked out from under it.
+    reset_leases_for_testing()
     reset_config()
 
 
