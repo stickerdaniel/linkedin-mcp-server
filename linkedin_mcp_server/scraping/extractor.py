@@ -3331,9 +3331,16 @@ class LinkedInExtractor:
     async def _get_total_list_pages(self) -> int | None:
         """Read last page number from artdeco pagination buttons.
 
-        Parses numeric page labels from ``ul.artdeco-pagination__pages`` so
-        pagination works on locale-independent my-items list pages. Returns
-        ``None`` when pagination is absent or unparseable.
+        Parses numeric page labels from ``ul.artdeco-pagination__pages``.
+        Returns ``None`` when pagination is absent or unparseable.
+
+        NOTE: This is a deliberate DOM exception, mirroring
+        ``_get_total_search_pages``. The my-items pager exposes no page count
+        in ``innerText`` and no stable attribute to count, so a design-system
+        class is the only reachable signal. The button labels are bare digits,
+        which stay identical across locales. Gracefully returns ``None`` if
+        LinkedIn renames the class — pagination then falls back to
+        ``max_pages`` and the no-new-ids early stop.
         """
         value = await self._page.evaluate(
             """() => {
