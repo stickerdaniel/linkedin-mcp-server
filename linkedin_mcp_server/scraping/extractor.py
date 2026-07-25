@@ -60,6 +60,11 @@ _PAGE_SIZE = 25
 
 _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 
+# The my-items lists page in 10s, unlike job search. Verified live: ?start=10
+# returns the 11th saved job, while ?start=25 lands past the end of a two-page
+# list and yields nothing.
+_SAVED_JOBS_PAGE_SIZE = 10
+
 # Normalization maps for job search filters
 _DATE_POSTED_MAP = {
     "past_hour": "r3600",
@@ -3348,7 +3353,7 @@ class LinkedInExtractor:
         """List the authenticated user's saved job postings.
 
         Navigates to ``/my-items/saved-jobs/``, extracts innerText and job IDs
-        from each page, and paginates with ``?start=`` offsets (25 per step).
+        from each page, and paginates with ``?start=`` offsets (10 per step).
 
         Args:
             max_pages: Maximum pages to load (1-10, default 3)
@@ -3376,7 +3381,7 @@ class LinkedInExtractor:
             url = (
                 base_url
                 if page_num == 0
-                else f"{base_url}?start={page_num * _PAGE_SIZE}"
+                else f"{base_url}?start={page_num * _SAVED_JOBS_PAGE_SIZE}"
             )
 
             try:

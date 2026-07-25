@@ -2640,8 +2640,9 @@ class TestGetSavedJobs:
         assert result["url"] == "https://www.linkedin.com/my-items/saved-jobs/"
 
     async def test_pagination_uses_start_offset(self, mock_page):
+        """The my-items list pages in 10s, not the 25 used by job search."""
         extractor = LinkedInExtractor(mock_page)
-        id_pages = iter([["100", "200"], ["300"]])
+        id_pages = iter([["100", "200"], ["300"], ["400"]])
         urls_visited: list[str] = []
 
         async def mock_extract(url, *args, **kwargs):
@@ -2669,11 +2670,14 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await extractor.get_saved_jobs(max_pages=2)
+            result = await extractor.get_saved_jobs(max_pages=3)
 
-        assert result["job_ids"] == ["100", "200", "300"]
-        assert len(urls_visited) == 2
-        assert urls_visited[1].endswith("?start=25")
+        assert result["job_ids"] == ["100", "200", "300", "400"]
+        assert urls_visited == [
+            "https://www.linkedin.com/my-items/saved-jobs/",
+            "https://www.linkedin.com/my-items/saved-jobs/?start=10",
+            "https://www.linkedin.com/my-items/saved-jobs/?start=20",
+        ]
 
     async def test_early_stop_no_new_ids(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
