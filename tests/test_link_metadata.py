@@ -304,6 +304,30 @@ class TestBuildReferences:
             }
         ]
 
+    def test_rejects_invisible_hangul_filler_labels(self):
+        """Hangul fillers carry the Unicode word property but render as
+        nothing, so a label made only of them must not shadow the
+        aria-label fallback with invisible text."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/williamhgates/",
+                    "text": "\u115f\u1160\u3164\uffa0",
+                    "aria_label": "Bill Gates",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references == [
+            {
+                "kind": "person",
+                "url": "/in/williamhgates/",
+                "text": "Bill Gates",
+                "context": "top card",
+            }
+        ]
+
     def test_preserves_words_starting_with_view(self):
         references = build_references(
             [

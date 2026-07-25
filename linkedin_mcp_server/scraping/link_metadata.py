@@ -107,6 +107,15 @@ _REFERENCE_CAPS = {
     "feed": 50,
 }
 
+# A label must carry at least one letter or digit in any script, so the class is
+# Unicode-aware rather than ``[A-Za-z0-9]`` — otherwise every reference on a
+# Cyrillic, CJK or Arabic-script profile is dropped. The four Hangul fillers are
+# excluded because they carry the word property while rendering as nothing: a
+# label made only of them would pass as valid and yield an invisible reference
+# text, shadowing the aria-label fallback. They are the only invisible code
+# points in ``[^\W_]`` (verified by scanning the full Unicode range).
+_LABEL_CONTENT_RE = re.compile("[^\\W_\u115f\u1160\u3164\uffa0]")
+
 _URL_LIKE_RE = re.compile(r"^(?:https?://|/)\S+$", re.IGNORECASE)
 _DUPLICATE_HALVES_RE = re.compile(r"^(?P<value>.+?)\s+(?P=value)$")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -324,10 +333,9 @@ def choose_reference_text(
 def clean_label(value: str, kind: ReferenceKind) -> str | None:
     """Normalize and compact a candidate label.
 
-    A label must contain at least one letter or digit in any script —
-    ``[^\\W_]`` matches a Unicode word character that is not an
-    underscore, so Cyrillic (and other non-Latin) profile names survive
-    while punctuation-only strings are rejected.
+    Rejects the label when nothing visible survives normalization, so
+    non-Latin names are kept while punctuation-only strings are dropped.
+    See ``_LABEL_CONTENT_RE``.
     """
     value = _WHITESPACE_RE.sub(" ", value).strip()
     if not value:
@@ -364,7 +372,7 @@ def clean_label(value: str, kind: ReferenceKind) -> str | None:
         return None
     if len(value) > 80:
         return None
-    if not re.search(r"[^\W_]", value):
+    if not _LABEL_CONTENT_RE.search(value):
         return None
 
     return value
