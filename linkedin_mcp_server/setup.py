@@ -73,7 +73,12 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
         return await _login_holding_the_profile(user_data_dir, lease, state)
     finally:
         if state.close_confirmed:
-            lease.mark_browser_closed()
+            # Only clear liveness this login actually set. A pre-launch failure
+            # can happen because a *previous* unconfirmed browser still holds
+            # the profile, and clearing that flag here would erase the warning
+            # someone else raised.
+            if state.browser_opened:
+                lease.mark_browser_closed()
             lease.release()
         else:
             # Keep the kernel lock as well as the process-local flag: other
@@ -124,8 +129,25 @@ async def _login_holding_the_profile(
         # The retirement happens before the replacement exists, so a login that
         # is cancelled, times out, or fails to export its cookies would
         # otherwise leave the user logged out of a session that was working.
+        #
+        # Not on an unconfirmed close: the login browser may still be running,
+        # so moving the old session back underneath it would corrupt both. The
+        # backup stays in quarantine, which is recoverable; writing over a live
+        # profile is not. Restore would also raise from this finally and mask
+        # whatever actually failed.
+        if state.close_confirmed:
+            # Cleared before restore, which now takes the profile exclusively
+            # and would otherwise refuse against our own liveness flag. The
+            # lease reference is still held, so no other process can slip in.
+            lease.mark_browser_closed()
         if retired is not None and not succeeded:
-            if not await asyncio.to_thread(
+            if not state.close_confirmed:
+                print(
+                    f"   The previous session was not restored because the "
+                    f"login browser did not shut down cleanly. It is kept at "
+                    f"{retired}."
+                )
+            elif not await asyncio.to_thread(
                 restore_source_profile, retired, user_data_dir
             ):
                 print(

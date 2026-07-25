@@ -41,6 +41,7 @@ from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_write_
 
 from linkedin_mcp_server.exceptions import (
     BrowserBusyError,
+    BrowserShutdownUnconfirmedError,
     CookieDecryptionError,
     NoLinkedInSessionFoundError,
 )
@@ -237,12 +238,20 @@ async def import_session_from_browser(
             "Another LinkedIn MCP client is using the browser, so a session "
             "cannot be imported. Close it and try again."
         )
+    release_profile = True
     try:
         return await _import_holding_the_profile(
             live, cookie_path, user_data_dir, lease
         )
+    except BrowserShutdownUnconfirmedError:
+        # A validation browser may still hold the profile, so keep the lease
+        # rather than letting the next process launch on top of it. The kernel
+        # frees the lock when this process exits.
+        release_profile = False
+        raise
     finally:
-        lease.release()
+        if release_profile:
+            lease.release()
 
 
 async def _import_holding_the_profile(
@@ -258,23 +267,38 @@ async def _import_holding_the_profile(
     retired = await rotate_shielded(user_data_dir)
 
     imported = False
+    shutdown_confirmed = True
     lease.mark_browser_open()
     try:
         imported = await _import_first_accepted(live, cookie_path, user_data_dir)
         return imported
+    except BrowserShutdownUnconfirmedError:
+        # A validation browser may still be running on this profile. Leave
+        # everything exactly as it is: the lease stays held and the retired
+        # session stays in quarantine until the operator restarts.
+        shutdown_confirmed = False
+        raise
     finally:
-        lease.mark_browser_closed()
-        # The retirement happens before a replacement exists, so an import where
-        # every candidate is rejected — or that raises on undecryptable cookies —
-        # would otherwise leave the user logged out of a working session.
-        if retired is not None and not imported:
-            if not await asyncio.to_thread(
-                restore_source_profile, retired, user_data_dir
-            ):
-                logger.warning(
-                    "Could not restore the previous session; it is kept at %s",
-                    retired,
-                )
+        if shutdown_confirmed:
+            lease.mark_browser_closed()
+            # The retirement happens before a replacement exists, so an import
+            # where every candidate is rejected — or that raises on
+            # undecryptable cookies — would otherwise leave the user logged out
+            # of a working session.
+            if retired is not None and not imported:
+                if not await asyncio.to_thread(
+                    restore_source_profile, retired, user_data_dir
+                ):
+                    logger.warning(
+                        "Could not restore the previous session; it is kept at %s",
+                        retired,
+                    )
+        elif retired is not None:
+            logger.warning(
+                "The previous session was not restored because a validation "
+                "browser did not shut down cleanly; it is kept at %s",
+                retired,
+            )
 
 
 async def _import_first_accepted(

@@ -79,6 +79,25 @@ class NoLinkedInSessionFoundError(LinkedInMCPError):
     """No discoverable local browser profile has a decryptable LinkedIn (li_at) session."""
 
 
+class BrowserShutdownUnconfirmedError(LinkedInMCPError):
+    """A browser's teardown did not complete, so it may still hold the profile.
+
+    Distinct from an ordinary failure because the recovery differs: the profile
+    must be left exactly as it is. Resetting it, restoring over it, or trying
+    the next candidate would all write underneath a Chromium that may still be
+    running.
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message
+            or (
+                "A browser on this profile did not shut down cleanly and may "
+                "still be running. Restart the server to recover."
+            )
+        )
+
+
 class BrowserBusyError(LinkedInMCPError):
     """Another server process holds the shared browser profile.
 

@@ -27,7 +27,10 @@ from linkedin_mcp_server.common_utils import utcnow_iso
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
-from linkedin_mcp_server.exceptions import BrowserBusyError
+from linkedin_mcp_server.exceptions import (
+    BrowserBusyError,
+    BrowserShutdownUnconfirmedError,
+)
 from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.session_state import (
     SourceState,
@@ -307,13 +310,13 @@ async def validate_imported_cookies(
         confirmed = await browser.close()
 
     if not confirmed:
-        # The validation browser may still be running on this profile, so the
-        # caller must not go on to commit a session over it.
-        logger.warning(
-            "The validation browser did not shut down cleanly; treating the "
-            "import as failed rather than committing over a live profile."
+        # Raised rather than returned False: a rejected cookie makes the caller
+        # wipe the profile and try the next candidate, and doing that over a
+        # Chromium that may still be running is the corruption we are avoiding.
+        raise BrowserShutdownUnconfirmedError(
+            "The validation browser did not shut down cleanly, so the imported "
+            "session cannot be committed. Restart the server to retry."
         )
-        return False
     return accepted
 
 
@@ -391,7 +394,7 @@ async def _bridge_runtime_profile(
         if not await browser.close():
             # Reopening the same directory while the first Chromium may still be
             # running is the concurrent-profile corruption in miniature.
-            raise AuthenticationError(
+            raise BrowserShutdownUnconfirmedError(
                 "The bridge browser did not shut down cleanly, so its profile "
                 "cannot be reopened. Restart the server to retry."
             )
@@ -431,6 +434,12 @@ async def _bridge_runtime_profile(
         except BaseException:
             await reopened.close()
             raise
+    except BrowserShutdownUnconfirmedError:
+        # Chromium may still be running on this runtime profile. Closing again
+        # would report success — the manager has already dropped its handles —
+        # and deleting the directory underneath a live browser is exactly what
+        # this guard exists to prevent. Leave everything for the operator.
+        raise
     except BaseException:
         # BaseException so a cancelled bridge still closes Chromium before the
         # caller releases the profile, and before the runtime dir is removed.
@@ -500,6 +509,15 @@ async def _create_browser() -> BrowserManager:
 
     try:
         browser = await _create_browser_locked()
+    except BrowserShutdownUnconfirmedError:
+        # A browser from this attempt may still be running on the profile. Keep
+        # the lease so nobody launches on top of it. The reference taken here is
+        # deliberately not released, and one extra is taken so the caller's own
+        # release cannot drop the last one; the kernel frees the lock when this
+        # process exits.
+        lease.mark_browser_open()
+        lease.try_acquire()
+        raise
     except BaseException:
         # BaseException, not Exception: a cancelled startup would otherwise
         # leave the reference held with nothing tracking it, wedging every other

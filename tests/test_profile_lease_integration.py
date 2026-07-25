@@ -432,6 +432,39 @@ class TestMinimumHoldWindow:
             lease.release()
 
 
+class TestFailedLoginStillRestores:
+    """A failed login must put the previous session back.
+
+    Restore takes the profile exclusively, and the login flow marks its own
+    browser live, so the liveness flag has to be cleared first on a confirmed
+    close — otherwise every failed login refuses to restore and the user is left
+    logged out of a session that was working.
+    """
+
+    async def test_restore_runs_after_a_failed_login(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from linkedin_mcp_server import setup as setup_module
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        profile = tmp_path / "profile"
+        profile.mkdir(parents=True)
+        (profile / "Default").mkdir()
+        (profile / "Default" / "Cookies").write_text("previous session")
+
+        async def failing_login(user_data_dir, *, config, state):  # type: ignore[no-untyped-def]
+            state.close_confirmed = True  # the browser did close cleanly
+            return False
+
+        monkeypatch.setattr(setup_module, "_login_into_fresh_profile", failing_login)
+        monkeypatch.setattr(setup_module, "close_browser", AsyncMock(return_value=None))
+
+        assert await setup_module.interactive_login(profile) is False
+        assert (profile / "Default" / "Cookies").read_text() == "previous session", (
+            "the previous session was not restored after a failed login"
+        )
+
+
 class TestConfirmedClose:
     """The lease is released only when Chromium is confirmed gone.
 
