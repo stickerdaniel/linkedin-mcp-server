@@ -88,6 +88,7 @@ class SequentialToolExecutionMiddleware(Middleware):
         # Imported here so the module stays importable without the driver.
         from linkedin_mcp_server.drivers.browser import (
             note_activity,
+            note_call_started,
             release_profile_if_idle_or_requested,
         )
 
@@ -112,6 +113,9 @@ class SequentialToolExecutionMiddleware(Middleware):
             raise ToolError(str(BrowserBusyError()))
 
         hold_started = time.perf_counter()
+        # Marks the browser as in use so the background handoff poll cannot close
+        # it out from under this call.
+        note_call_started()
         try:
             return await call_next(context)
         finally:

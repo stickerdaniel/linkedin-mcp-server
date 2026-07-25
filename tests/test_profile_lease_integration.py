@@ -316,6 +316,58 @@ class TestIdleOwnerHandsOver:
                 waiter.wait(timeout=10)
 
 
+class TestPollerDoesNotInterruptWork:
+    """The poller runs outside the tool-call lock, so it must not close a
+    browser a call is currently using: the tool holds a Page from it and would
+    fail with a closed-target error."""
+
+    async def test_poller_leaves_an_in_flight_call_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+
+        lease = get_profile_lease(tmp_path / "profile")
+        assert lease.try_acquire()
+        lease.mark_browser_open()
+
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        waiter = subprocess.Popen(
+            [sys.executable, str(_WORKER), "announce", str(tmp_path), "5"],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert waiter.stdout is not None
+            while "ANNOUNCED" not in waiter.stdout.readline():
+                pass
+
+            with (
+                patch.multiple(
+                    browser_module,
+                    _browser=fake_browser,
+                    _browser_cookie_export_path=None,
+                    _browser_holds_lease=True,
+                ),
+                patch.object(browser_module, "get_profile_lease", return_value=lease),
+            ):
+                browser_module.note_call_started()
+                closed = await browser_module.release_profile_if_idle_or_requested()
+                assert not closed, "the poller closed a browser mid tool call"
+                fake_browser.close.assert_not_awaited()
+
+                # Once the call finishes, the handoff goes through.
+                browser_module.note_activity()
+                assert await browser_module.release_profile_if_idle_or_requested()
+                fake_browser.close.assert_awaited()
+        finally:
+            waiter.kill()
+            waiter.wait(timeout=10)
+
+
 class TestConfirmedClose:
     """The lease is released only when Chromium is confirmed gone.
 

@@ -62,6 +62,9 @@ _browser_create_lock = asyncio.Lock()
 _browser_holds_lease: bool = False
 # Monotonic timestamp of the last completed tool call, for the idle timer.
 _last_activity: float | None = None
+# Tool calls currently driving the browser. The background handoff poll must not
+# close a browser out from under a running call: the tool holds a Page from it.
+_calls_in_flight: int = 0
 
 
 def _debug_skip_checkpoint_restart() -> bool:
@@ -699,10 +702,17 @@ async def check_rate_limit() -> None:
     await detect_rate_limit(browser.page)
 
 
+def note_call_started() -> None:
+    """Record that a tool call is now driving the browser."""
+    global _calls_in_flight
+    _calls_in_flight += 1
+
+
 def note_activity() -> None:
     """Record that a tool call just finished, for the idle timer."""
-    global _last_activity
+    global _last_activity, _calls_in_flight
     _last_activity = time.monotonic()
+    _calls_in_flight = max(0, _calls_in_flight - 1)
 
 
 # Interval of the background handoff poll. A probe costs about 40 microseconds,
@@ -745,6 +755,13 @@ async def release_profile_if_idle_or_requested() -> bool:
     if _browser is None or not _browser_holds_lease:
         return False
 
+    # A tool call is using this browser's Page right now. Closing it here would
+    # fail that call with a closed-target error, which is worse than making the
+    # waiting process wait a few seconds longer; the caller's own post-call check
+    # hands over as soon as the call finishes.
+    if _calls_in_flight > 0:
+        return False
+
     config = get_config().browser
     lease = get_profile_lease()
     # None means no tool call has run at all, which is idle in the strongest
@@ -780,9 +797,10 @@ async def release_profile_if_idle_or_requested() -> bool:
 def reset_browser_for_testing() -> None:
     """Reset global browser state for test isolation."""
     global _browser, _browser_cookie_export_path, _headless
-    global _browser_holds_lease, _last_activity
+    global _browser_holds_lease, _last_activity, _calls_in_flight
     _browser = None
     _browser_cookie_export_path = None
     _headless = True
     _browser_holds_lease = False
     _last_activity = None
+    _calls_in_flight = 0
