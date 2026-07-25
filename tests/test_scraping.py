@@ -3250,6 +3250,83 @@ class TestActivityFeedExtraction:
         assert kwargs["max_scrolls"] == 10
         assert len(result.text) > 200
 
+    async def test_company_posts_page_waits_for_content_and_uses_slow_scroll(
+        self, mock_page
+    ):
+        """Company posts URLs get the same lazy-load wait and scroll budget
+        as person activity pages, even though they lack /recent-activity/."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Post content " * 50,
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/company/microsoft/posts/",
+                section_name="posts",
+            )
+
+        mock_page.wait_for_function.assert_awaited_once()
+        mock_scroll.assert_awaited_once()
+        _, kwargs = mock_scroll.call_args
+        assert kwargs["pause_time"] == 1.0
+        assert kwargs["max_scrolls"] == 10
+        assert len(result.text) > 200
+
+    async def test_company_posts_page_with_query_string_still_waits(self, mock_page):
+        """The lazy-load branch keys off the parsed path, so a company posts
+        url carrying a query string is not mistaken for a static page."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Post content " * 50,
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await extractor._extract_page_once(
+                "https://www.linkedin.com/company/microsoft/posts/?viewAsMember=true",
+                section_name="posts",
+            )
+
+        mock_page.wait_for_function.assert_awaited_once()
+        _, kwargs = mock_scroll.call_args
+        assert kwargs["max_scrolls"] == 10
+
     async def test_non_activity_non_details_page_skips_wait_and_uses_fast_scroll(
         self, mock_page
     ):
