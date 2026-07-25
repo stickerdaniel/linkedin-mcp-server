@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 import functools
 import json
@@ -12,7 +13,7 @@ import platform
 from pathlib import Path
 import shutil
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from uuid import uuid4
 
@@ -439,8 +440,13 @@ def profile_in_use_by(profile_dir: Path) -> Path | None:
     return candidate
 
 
-def _require_exclusive_profile(profile_dir: Path, *, action: str) -> None:
-    """Refuse to mutate auth state while any process is using the profile.
+@contextmanager
+def _exclusive_profile(profile_dir: Path, *, action: str) -> Iterator[None]:
+    """Hold the profile exclusively for the duration of an auth-state mutation.
+
+    Checking and then releasing before the move would leave a window in which
+    another process launches Chromium against the very files being moved, so the
+    lease is held until the mutation finishes.
 
     Three independent signals, because none alone is sufficient:
 
@@ -474,21 +480,24 @@ def _require_exclusive_profile(profile_dir: Path, *, action: str) -> None:
             "The browser profile is in use by another process. "
             f"Stop the running server or container before {action}."
         )
-    lease.release()
 
-    lock = next(
-        (
-            held
-            for candidate in [profile_dir, *_runtime_profile_dirs(profile_dir)]
-            if (held := profile_in_use_by(candidate)) is not None
-        ),
-        None,
-    )
-    if lock is not None:
-        raise RuntimeError(
-            f"The browser profile is in use by another process (found {lock.name}). "
-            f"Stop the running server or container before {action}."
+    try:
+        lock = next(
+            (
+                held
+                for candidate in [profile_dir, *_runtime_profile_dirs(profile_dir)]
+                if (held := profile_in_use_by(candidate)) is not None
+            ),
+            None,
         )
+        if lock is not None:
+            raise RuntimeError(
+                f"The browser profile is in use by another process (found {lock.name}). "
+                f"Stop the running server or container before {action}."
+            )
+        yield
+    finally:
+        lease.release()
 
 
 def rotate_source_profile(source_profile_dir: Path | None = None) -> Path | None:
@@ -521,26 +530,25 @@ def rotate_source_profile(source_profile_dir: Path | None = None) -> Path | None
     if not existing:
         return None
 
-    _require_exclusive_profile(profile_dir, action="creating a new session")
-
-    # utcnow_iso() is second-resolution and rotation is now routine rather than
-    # exceptional, so two rotations can land in the same second. The suffix keeps
-    # them from merging into one directory.
-    stamp = utcnow_iso().replace(":", "-")
-    backup_dir = (
-        auth_root_dir(profile_dir) / f"{QUARANTINE_PREFIX}{stamp}-{uuid4().hex[:8]}"
-    )
-    secure_mkdir(backup_dir)
-    moved: list[Path] = []
-    try:
-        for target in existing:
-            shutil.move(str(target), str(backup_dir / target.name))
-            moved.append(target)
-    except OSError:
-        _restore(backup_dir, moved)
-        raise
-    logger.info("Retired previous session to %s", backup_dir)
-    return backup_dir
+    with _exclusive_profile(profile_dir, action="creating a new session"):
+        # utcnow_iso() is second-resolution and rotation is now routine rather
+        # than exceptional, so two rotations can land in the same second. The
+        # suffix keeps them from merging into one directory.
+        stamp = utcnow_iso().replace(":", "-")
+        backup_dir = (
+            auth_root_dir(profile_dir) / f"{QUARANTINE_PREFIX}{stamp}-{uuid4().hex[:8]}"
+        )
+        secure_mkdir(backup_dir)
+        moved: list[Path] = []
+        try:
+            for target in existing:
+                shutil.move(str(target), str(backup_dir / target.name))
+                moved.append(target)
+        except OSError:
+            _restore(backup_dir, moved)
+            raise
+        logger.info("Retired previous session to %s", backup_dir)
+        return backup_dir
 
 
 def _restore(backup_dir: Path, targets: list[Path]) -> None:
@@ -648,24 +656,25 @@ def clear_auth_state(source_profile_dir: Path | None = None) -> bool:
             destroys everyone's rather than just this caller's.
     """
     profile_dir = (source_profile_dir or get_source_profile_dir()).expanduser()
-    _require_exclusive_profile(profile_dir, action="clearing the stored session")
-    # Quarantines hold previous sessions' cookies, so a logout that left them
-    # behind would not be the "clear all stored auth state" the CLI advertises.
-    targets = _auth_state_targets(profile_dir) + quarantine_dirs(profile_dir)
+    with _exclusive_profile(profile_dir, action="clearing the stored session"):
+        # Quarantines hold previous sessions' cookies, so a logout that left them
+        # behind would not be the "clear all stored auth state" the CLI
+        # advertises.
+        targets = _auth_state_targets(profile_dir) + quarantine_dirs(profile_dir)
 
-    success = True
-    for target in targets:
-        if not target.exists():
-            continue
-        try:
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-        except OSError as exc:
-            logger.warning("Could not clear auth artifact %s: %s", target, exc)
-            success = False
-    return success
+        success = True
+        for target in targets:
+            if not target.exists():
+                continue
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                else:
+                    target.unlink()
+            except OSError as exc:
+                logger.warning("Could not clear auth artifact %s: %s", target, exc)
+                success = False
+        return success
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:

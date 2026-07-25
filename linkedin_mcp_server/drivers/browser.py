@@ -705,6 +705,33 @@ def note_activity() -> None:
     _last_activity = time.monotonic()
 
 
+# Interval of the background handoff poll. A probe costs about 40 microseconds,
+# so a one-second cadence is free and makes a handover feel immediate.
+_HANDOFF_POLL_INTERVAL_SECONDS = 1.0
+
+
+async def watch_for_handoff_requests() -> None:
+    """Release the profile promptly once another process asks for it.
+
+    Checking only after each tool call is not enough: an owner that finishes its
+    last call, probes, and then goes idle never probes again. A process that
+    announces itself a moment later would wait out its whole budget and get a
+    busy error while the owner sat doing nothing. This poll closes that window,
+    and also drives the idle timeout, which likewise has nothing to trigger it
+    once calls stop arriving.
+    """
+    while True:
+        try:
+            await asyncio.sleep(_HANDOFF_POLL_INTERVAL_SECONDS)
+            await release_profile_if_idle_or_requested()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A poll failure must never take down the server; the next tool call
+            # checks again anyway.
+            logger.debug("Handoff poll failed", exc_info=True)
+
+
 async def release_profile_if_idle_or_requested() -> bool:
     """Close the browser when another process wants it, or when we are idle.
 
@@ -720,7 +747,9 @@ async def release_profile_if_idle_or_requested() -> bool:
 
     config = get_config().browser
     lease = get_profile_lease()
-    idle_for = time.monotonic() - _last_activity if _last_activity else 0.0
+    # None means no tool call has run at all, which is idle in the strongest
+    # sense: there is no work in progress to protect.
+    idle_for = time.monotonic() - _last_activity if _last_activity is not None else None
 
     if lease.handoff_requested():
         # Every handoff costs a reopen, and a reopen re-validates /feed/. The
@@ -728,7 +757,7 @@ async def release_profile_if_idle_or_requested() -> bool:
         # and forth on every single call. An idle owner has nothing to protect,
         # so it hands over immediately.
         held = lease.held_seconds
-        if idle_for > 0 or held >= config.browser_min_hold_seconds:
+        if idle_for is None or idle_for > 0 or held >= config.browser_min_hold_seconds:
             logger.info(
                 "Another process is waiting for the browser; handing over (held %.1fs)",
                 held,
@@ -738,7 +767,7 @@ async def release_profile_if_idle_or_requested() -> bool:
         return False
 
     timeout = config.browser_idle_timeout_seconds
-    if timeout > 0 and _last_activity is not None and idle_for >= timeout:
+    if timeout > 0 and idle_for is not None and idle_for >= timeout:
         logger.info(
             "Closing idle browser after %.0fs and releasing the profile", idle_for
         )

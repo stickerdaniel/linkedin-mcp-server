@@ -5,7 +5,9 @@ Creates and configures the MCP server with comprehensive LinkedIn tool suite inc
 person profiles, company data, job information, and session management capabilities.
 """
 
+import asyncio
 import logging
+from contextlib import suppress
 from typing import Any, AsyncIterator
 
 from fastmcp import FastMCP
@@ -18,7 +20,10 @@ from linkedin_mcp_server.bootstrap import (
     start_background_browser_setup_if_needed,
 )
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
-from linkedin_mcp_server.drivers.browser import close_browser
+from linkedin_mcp_server.drivers.browser import (
+    close_browser,
+    watch_for_handoff_requests,
+)
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
@@ -45,9 +50,20 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     logger.info("LinkedIn MCP Server starting...")
     initialize_bootstrap(get_runtime_policy())
     await start_background_browser_setup_if_needed()
-    yield {}
-    logger.info("LinkedIn MCP Server shutting down...")
-    await close_browser()
+    # Hands the browser to another process that asks for it, and closes it when
+    # idle. Both need a timer: once tool calls stop arriving, nothing else would
+    # ever notice a waiter.
+    handoff_watch = asyncio.create_task(
+        watch_for_handoff_requests(), name="linkedin-profile-handoff"
+    )
+    try:
+        yield {}
+    finally:
+        logger.info("LinkedIn MCP Server shutting down...")
+        handoff_watch.cancel()
+        with suppress(asyncio.CancelledError):
+            await handoff_watch
+        await close_browser()
 
 
 def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> FastMCP:

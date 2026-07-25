@@ -206,6 +206,116 @@ class TestDestructiveOperationsRefuse:
         assert (backup / "profile" / "Default" / "Cookies").exists()
 
 
+class TestMutationHoldsTheProfile:
+    """The lease is held *through* the mutation, not merely checked before it.
+
+    Checking and releasing first leaves a window in which another process
+    launches Chromium against the very files being moved.
+    """
+
+    def test_rotation_holds_the_lease_while_it_moves_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        profile = tmp_path / "profile"
+        profile.mkdir(parents=True)
+        (profile / "Default").mkdir()
+        (profile / "Default" / "Cookies").write_text("x")
+
+        import shutil as shutil_module
+
+        from linkedin_mcp_server import session_state
+
+        observed: list[bool] = []
+        real_move = shutil_module.move
+
+        def spy(src: str, dst: str):  # type: ignore[no-untyped-def]
+            # Ask a *separate* lease object, so this reflects what another
+            # process would see rather than our own reference count.
+            from linkedin_mcp_server.profile_lease import ProfileLease
+
+            probe = ProfileLease(tmp_path)
+            free = probe.try_acquire()
+            if free:
+                probe.release()
+            observed.append(free)
+            return real_move(src, dst)
+
+        monkeypatch.setattr(session_state.shutil, "move", spy)
+        assert rotate_source_profile(profile) is not None
+
+        assert observed, "rotation moved nothing, so the test proved nothing"
+        assert not any(observed), (
+            "the profile was acquirable mid-rotation: another process could have "
+            "launched Chromium against the files being moved"
+        )
+
+
+class TestIdleOwnerHandsOver:
+    """An owner that has gone idle must still notice a waiter.
+
+    Probing only after each tool call is not enough: a process that announces
+    itself once the owner has stopped working would wait out its whole budget
+    and get a busy error while the owner sat doing nothing.
+    """
+
+    async def test_poller_releases_the_profile_to_a_waiter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        monkeypatch.setattr(browser_module, "_HANDOFF_POLL_INTERVAL_SECONDS", 0.05)
+
+        lease = get_profile_lease(tmp_path / "profile")
+        assert lease.try_acquire()
+        lease.mark_browser_open()
+
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        with (
+            patch.multiple(
+                browser_module,
+                _browser=fake_browser,
+                _browser_cookie_export_path=None,
+                _browser_holds_lease=True,
+            ),
+            patch.object(browser_module, "get_profile_lease", return_value=lease),
+        ):
+            watcher = asyncio.create_task(browser_module.watch_for_handoff_requests())
+            waiter = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(_WORKER),
+                    "announce",
+                    str(tmp_path / "profile").rsplit("/profile", 1)[0],
+                    "5",
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert waiter.stdout is not None
+                while "ANNOUNCED" not in waiter.stdout.readline():
+                    pass
+
+                # No tool call happens here: only the poller can notice.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and lease.held:
+                    await asyncio.sleep(0.05)
+
+                assert not lease.held, (
+                    "an idle owner never handed the profile to a waiting process"
+                )
+                fake_browser.close.assert_awaited()
+            finally:
+                watcher.cancel()
+                waiter.kill()
+                waiter.wait(timeout=10)
+
+
 class TestConfirmedClose:
     """The lease is released only when Chromium is confirmed gone.
 
