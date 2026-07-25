@@ -310,16 +310,26 @@ async def validate_imported_cookies(
         )
         await stabilize_navigation("import pre-validate feed navigation", logger)
         if not await browser.import_cookies(cookie_path, preset_name="bridge_core"):
-            return False
-        await stabilize_navigation("import cookie injection", logger)
-        accepted = await _feed_auth_succeeds(browser)
-    finally:
-        confirmed = await browser.close()
+            accepted = False
+        else:
+            await stabilize_navigation("import cookie injection", logger)
+            accepted = await _feed_auth_succeeds(browser)
+    except BaseException as exc:
+        # The confirmation has to be checked on this path too. A plain finally
+        # would re-raise before it ran, and the caller would then treat an
+        # unconfirmed close as an ordinary failure: wipe the profile, try the
+        # next candidate, restore over it.
+        if not await browser.close():
+            raise BrowserShutdownUnconfirmedError(
+                "The validation browser did not shut down cleanly, so the "
+                "profile is kept. Restart the server to retry."
+            ) from exc
+        raise
 
-    if not confirmed:
-        # Raised rather than returned False: a rejected cookie makes the caller
-        # wipe the profile and try the next candidate, and doing that over a
-        # Chromium that may still be running is the corruption we are avoiding.
+    # Raised rather than returned False: a rejected cookie makes the caller wipe
+    # the profile and try the next candidate, and doing that over a Chromium
+    # that may still be running is the corruption we are avoiding.
+    if not await browser.close():
         raise BrowserShutdownUnconfirmedError(
             "The validation browser did not shut down cleanly, so the imported "
             "session cannot be committed. Restart the server to retry."

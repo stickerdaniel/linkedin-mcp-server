@@ -20,6 +20,8 @@ from linkedin_mcp_server.common_utils import (
     secure_write_text,
 )
 
+from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+
 from .exceptions import NetworkError
 
 logger = logging.getLogger(__name__)
@@ -116,7 +118,15 @@ class BrowserManager:
             logger.info("Browser context and page ready")
 
         except Exception as e:
-            await self.close()
+            # Recorded, not discarded: this close is the only one that can prove
+            # a partially launched Chromium exited. A caller closing again would
+            # get True from the already-cleared handles and could then release
+            # or delete the profile with the browser still on it.
+            if not await self.close():
+                raise BrowserShutdownUnconfirmedError(
+                    "The browser failed to start and did not shut down cleanly, "
+                    "so the profile is kept. Restart the server to recover."
+                ) from e
             raise NetworkError(f"Failed to start browser: {e}") from e
 
     async def close(self) -> bool:
