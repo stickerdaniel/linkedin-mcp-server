@@ -302,9 +302,19 @@ async def validate_imported_cookies(
         if not await browser.import_cookies(cookie_path, preset_name="bridge_core"):
             return False
         await stabilize_navigation("import cookie injection", logger)
-        return await _feed_auth_succeeds(browser)
+        accepted = await _feed_auth_succeeds(browser)
     finally:
-        await browser.close()
+        confirmed = await browser.close()
+
+    if not confirmed:
+        # The validation browser may still be running on this profile, so the
+        # caller must not go on to commit a session over it.
+        logger.warning(
+            "The validation browser did not shut down cleanly; treating the "
+            "import as failed rather than committing over a live profile."
+        )
+        return False
+    return accepted
 
 
 async def _bridge_runtime_profile(
@@ -378,7 +388,13 @@ async def _bridge_runtime_profile(
             )
         await stabilize_navigation("runtime storage-state export", logger)
         logger.info("Checkpoint-restarting derived runtime profile %s", profile_dir)
-        await browser.close()
+        if not await browser.close():
+            # Reopening the same directory while the first Chromium may still be
+            # running is the concurrent-profile corruption in miniature.
+            raise AuthenticationError(
+                "The bridge browser did not shut down cleanly, so its profile "
+                "cannot be reopened. Restart the server to retry."
+            )
         reopened = _make_browser(
             profile_dir,
             launch_options=launch_options,

@@ -576,6 +576,11 @@ def restore_source_profile(
     point somewhere other than the configured default, and restoring to the
     configured one would strand the artifacts in a foreign auth root.
 
+    Like rotation, this moves the active auth artifacts, so it holds the profile
+    exclusively while it does. Every caller already owns the lease (login,
+    import, and the cancelled-rotation path), which is re-entrant within a
+    process; the guard is here so a future caller cannot forget.
+
     Returns ``False`` when the active paths are already occupied — the
     replacement succeeded after all, and overwriting it would be the very
     fingerprint mixing this module exists to prevent.
@@ -583,6 +588,12 @@ def restore_source_profile(
     if not backup_dir.is_dir():
         return False
     profile_dir = (source_profile_dir or get_source_profile_dir()).expanduser()
+    with _exclusive_profile(profile_dir, action="restoring the previous session"):
+        return _restore_source_profile_locked(backup_dir, profile_dir)
+
+
+def _restore_source_profile_locked(backup_dir: Path, profile_dir: Path) -> bool:
+    """Put a retired session back; the caller holds the profile exclusively."""
     targets = {target.name: target for target in _auth_state_targets(profile_dir)}
 
     # Only a successful login or import commits all three of these together.

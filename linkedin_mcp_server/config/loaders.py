@@ -398,8 +398,8 @@ def load_from_args(config: AppConfig) -> AppConfig:
         metavar="SECONDS",
         help=(
             "Shortest time this process keeps the shared browser before honouring "
-            "a handoff request, in seconds (default: 25; 0 = hand over after "
-            "every tool call)"
+            "a handoff request, in seconds (default: 20, clamped below "
+            "--browser-wait; 0 = hand over after every tool call)"
         ),
     )
     parser.add_argument(

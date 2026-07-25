@@ -224,7 +224,12 @@ class ProfileLease:
     """
 
     def __init__(self, auth_root: Path) -> None:
-        self._auth_root = auth_root
+        # Resolved so two spellings of the same directory (a symlinked TMPDIR,
+        # a relative path) share one entry in the registry and therefore one
+        # reference count. The kernel lock keys on the inode and would agree
+        # regardless, but the in-process browser-open flag would not.
+        self._auth_root = auth_root.expanduser().resolve()
+        auth_root = self._auth_root
         self._lease_path = auth_root / _LEASE_FILE
         self._handoff_path = auth_root / _HANDOFF_FILE
         self._fd: int | None = None
@@ -436,7 +441,7 @@ def get_profile_lease(source_profile_dir: Path | None = None) -> ProfileLease:
     """Return this process's lease for the auth root of *source_profile_dir*."""
     from linkedin_mcp_server.session_state import auth_root_dir
 
-    auth_root = auth_root_dir(source_profile_dir)
+    auth_root = auth_root_dir(source_profile_dir).expanduser().resolve()
     lease = _leases.get(auth_root)
     if lease is None:
         lease = ProfileLease(auth_root)
