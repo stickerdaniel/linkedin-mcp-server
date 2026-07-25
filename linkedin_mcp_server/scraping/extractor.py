@@ -3655,9 +3655,11 @@ class LinkedInExtractor:
 
         Returns:
             {url, sections: {search_results: text}} plus optional ``references``
-            (``feed_post`` permalinks, post authors, companies) and
-            ``section_errors``. The LLM should parse the raw text to extract
-            each post's author, headline, body, date, and reaction counts.
+            (post authors, companies, linked jobs) and ``section_errors``.
+            Verified live: the results page carries no per-post permalink
+            anchors, so a post is addressable only through its author.
+            The LLM should parse the raw text to extract each post's author,
+            headline, body, date, and reaction counts.
         """
         if (
             date_posted is not None
