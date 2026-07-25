@@ -5,6 +5,7 @@ import pytest
 from linkedin_mcp_server.error_diagnostics import (
     _installation_method_lines,
     _installation_method_summary,
+    _tool_name_for_context,
     build_issue_diagnostics,
     format_tool_error_with_diagnostics,
 )
@@ -224,6 +225,18 @@ def test_build_issue_diagnostics_marks_inferred_tool_and_container_runtime(
     assert "`~/.linkedin-mcp` mounted into `/home/pwuser/.linkedin-mcp`" in issue_body
     assert "- [x] Docker" in issue_body
     assert "- Tool: search_jobs" in issue_body
+
+
+@pytest.mark.parametrize(
+    ("context", "expected"),
+    [
+        ("get_saved_jobs", "get_saved_jobs"),
+        ("extract_saved_jobs_page", "get_saved_jobs"),
+    ],
+)
+def test_saved_jobs_contexts_resolve_to_the_tool(context: str, expected: str) -> None:
+    """A saved-jobs failure names the tool the user called, not the helper."""
+    assert _tool_name_for_context({"context": context}) == expected
 
 
 def test_installation_method_lines_marks_managed_runtime() -> None:
