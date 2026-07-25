@@ -24,10 +24,13 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright
 
 RUN patchright install-deps chromium && \
     patchright install chromium && \
+    apt-get update && apt-get install -y --no-install-recommends tini && \
     chmod -R 755 /opt/patchright && \
     rm -rf /var/lib/apt/lists/*
 
 USER pwuser
 
-ENTRYPOINT ["python", "-m", "linkedin_mcp_server"]
+# tini reaps the chromium subprocesses Patchright orphans onto PID 1; without an
+# init the container leaks zombie chrome-headless processes over its lifetime.
+ENTRYPOINT ["tini", "--", "python", "-m", "linkedin_mcp_server"]
 CMD []
