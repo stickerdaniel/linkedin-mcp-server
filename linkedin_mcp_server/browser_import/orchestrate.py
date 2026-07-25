@@ -45,7 +45,8 @@ from linkedin_mcp_server.exceptions import (
 )
 from linkedin_mcp_server.session_state import (
     portable_cookie_path,
-    rotate_source_profile,
+    restore_source_profile,
+    rotate_shielded,
     write_source_state,
 )
 
@@ -204,8 +205,6 @@ async def import_session_from_browser(
     Returns ``True`` on a validated, persisted session, ``False`` when a live
     ``li_at`` was found but no browser's session was accepted by LinkedIn.
     """
-    from linkedin_mcp_server.drivers.browser import validate_imported_cookies
-
     live, skipped = await asyncio.to_thread(_discover_and_rank, browser)
     if not live:
         raise _no_live_session_error(skipped)
@@ -226,7 +225,33 @@ async def import_session_from_browser(
     from linkedin_mcp_server.drivers.browser import close_browser
 
     await close_browser()
-    await asyncio.to_thread(rotate_source_profile, user_data_dir)
+    retired = await rotate_shielded(user_data_dir)
+
+    imported = False
+    try:
+        imported = await _import_first_accepted(live, cookie_path, user_data_dir)
+        return imported
+    finally:
+        # The retirement happens before a replacement exists, so an import where
+        # every candidate is rejected — or that raises on undecryptable cookies —
+        # would otherwise leave the user logged out of a working session.
+        if retired is not None and not imported:
+            if not await asyncio.to_thread(
+                restore_source_profile, retired, user_data_dir
+            ):
+                logger.warning(
+                    "Could not restore the previous session; it is kept at %s",
+                    retired,
+                )
+
+
+async def _import_first_accepted(
+    live: list[tuple[BrowserProfile, LiAtMeta]],
+    cookie_path: Path,
+    user_data_dir: Path,
+) -> bool:
+    """Stage and validate candidates in order, keeping the first LinkedIn accepts."""
+    from linkedin_mcp_server.drivers.browser import validate_imported_cookies
 
     staged_any = False
     for profile, _meta in live:

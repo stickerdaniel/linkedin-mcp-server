@@ -17,7 +17,8 @@ from linkedin_mcp_server.core import (
 )
 from linkedin_mcp_server.session_state import (
     portable_cookie_path,
-    rotate_source_profile,
+    restore_source_profile,
+    rotate_shielded,
     write_source_state,
 )
 
@@ -50,9 +51,28 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
     # Closing first so a later teardown cannot export the retired session's
     # cookies over the new ones (drivers.browser exports on close).
     await close_browser()
-    await asyncio.to_thread(rotate_source_profile, user_data_dir)
+    retired = await rotate_shielded(user_data_dir)
 
-    config = get_config()
+    succeeded = False
+    try:
+        succeeded = await _login_into_fresh_profile(user_data_dir, config=get_config())
+        return succeeded
+    finally:
+        # The retirement happens before the replacement exists, so a login that
+        # is cancelled, times out, or fails to export its cookies would
+        # otherwise leave the user logged out of a session that was working.
+        if retired is not None and not succeeded:
+            if not await asyncio.to_thread(
+                restore_source_profile, retired, user_data_dir
+            ):
+                print(
+                    f"   Warning: the previous session could not be restored. "
+                    f"It is kept at {retired}."
+                )
+
+
+async def _login_into_fresh_profile(user_data_dir: Path, *, config: Any) -> bool:
+    """Drive the manual login against a freshly retired profile directory."""
     login_timeout_ms = int(config.browser.login_timeout_seconds * 1000)
 
     if config.browser.login_timeout_seconds:

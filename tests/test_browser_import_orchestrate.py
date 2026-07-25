@@ -6,7 +6,7 @@ import os
 import stat
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -409,8 +409,8 @@ async def test_import_retires_the_previous_profile_first(monkeypatch, tmp_path):
     monkeypatch.setattr(orchestrate, "synthesize_user_agent", lambda p: None)
     monkeypatch.setattr(
         orchestrate,
-        "rotate_source_profile",
-        lambda *_args: order.append("rotate"),
+        "rotate_shielded",
+        AsyncMock(side_effect=lambda *a: order.append("rotate")),
     )
     monkeypatch.setattr(
         "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
@@ -420,3 +420,37 @@ async def test_import_retires_the_previous_profile_first(monkeypatch, tmp_path):
     assert await import_session_from_browser("chrome", user_data_dir=user_data_dir)
 
     assert order[0] == "rotate", "the old profile must be retired before staging"
+
+
+@pytest.mark.asyncio
+async def test_import_restores_the_session_when_every_candidate_is_rejected(
+    monkeypatch, tmp_path
+):
+    """Retirement precedes the replacement, so an import that lands nothing must
+    not cost the user the session that was already working."""
+    user_data_dir = tmp_path / "profile"
+    profile = _profile("chrome", "Default")
+    retired = tmp_path / "invalid-state-x"
+    restore = MagicMock(return_value=True)
+
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
+    )
+    monkeypatch.setattr(orchestrate, "synthesize_user_agent", lambda p: None)
+    monkeypatch.setattr(orchestrate, "rotate_shielded", AsyncMock(return_value=retired))
+    monkeypatch.setattr(orchestrate, "restore_source_profile", restore)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(return_value=False),
+    )
+
+    assert (
+        await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+        is False
+    )
+
+    restore.assert_called_once_with(retired, user_data_dir)

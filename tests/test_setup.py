@@ -1,3 +1,5 @@
+import asyncio
+import pathlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -6,6 +8,8 @@ import pytest
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.session_state import portable_cookie_path
 from linkedin_mcp_server.setup import interactive_login
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 class _BrowserContextManager:
@@ -38,6 +42,7 @@ def _patch_login_deps(
     config: AppConfig | None = None,
     write_source_state: MagicMock | None = None,
     rotate_source_profile: MagicMock | None = None,
+    close_browser: AsyncMock | None = None,
 ) -> None:
     """Patch all interactive_login dependencies in one place."""
     monkeypatch.setattr(
@@ -55,11 +60,14 @@ def _patch_login_deps(
         or MagicMock(return_value=SimpleNamespace(login_generation="gen-1")),
     )
     monkeypatch.setattr("linkedin_mcp_server.setup.asyncio.sleep", AsyncMock())
+    rotate = rotate_source_profile or MagicMock(return_value=None)
     monkeypatch.setattr(
-        "linkedin_mcp_server.setup.rotate_source_profile",
-        rotate_source_profile or MagicMock(return_value=None),
+        "linkedin_mcp_server.setup.rotate_shielded",
+        AsyncMock(side_effect=lambda *a: rotate(*a)),
     )
-    monkeypatch.setattr("linkedin_mcp_server.setup.close_browser", AsyncMock())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.setup.close_browser", close_browser or AsyncMock()
+    )
 
 
 @pytest.mark.asyncio
@@ -322,9 +330,150 @@ async def test_interactive_login_retires_the_previous_profile(monkeypatch, tmp_p
             _BrowserContextManager(_make_browser(export_cookies=True)),
         )[1],
         rotate_source_profile=rotate,
+        close_browser=AsyncMock(side_effect=lambda: order.append("close")),
     )
 
     await interactive_login(profile_dir)
 
     rotate.assert_called_once_with(profile_dir)
-    assert order == ["rotate", "launch"], "rotation must precede the launch"
+    # close must come first: the singleton exports cookies on teardown, so a
+    # later close would write the retired session's cookies over the new ones.
+    assert order == ["close", "rotate", "launch"]
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_restores_the_session_when_login_fails(
+    monkeypatch, tmp_path
+):
+    """The old session is retired before the new one exists, so a failed login
+    must not leave the user logged out of a session that was working."""
+    retired = tmp_path / "invalid-state-x"
+    restore = MagicMock(return_value=True)
+
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=lambda **kwargs: _BrowserContextManager(
+            _make_browser(export_cookies=False)
+        ),
+        rotate_source_profile=MagicMock(return_value=retired),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.restore_source_profile", restore)
+
+    assert await interactive_login(tmp_path / "profile") is False
+
+    restore.assert_called_once_with(retired, tmp_path / "profile")
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_keeps_the_retired_session_on_success(
+    monkeypatch, tmp_path
+):
+    restore = MagicMock()
+
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=lambda **kwargs: _BrowserContextManager(
+            _make_browser(export_cookies=True)
+        ),
+        rotate_source_profile=MagicMock(return_value=tmp_path / "invalid-state-x"),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.restore_source_profile", restore)
+
+    assert await interactive_login(tmp_path / "profile") is True
+
+    restore.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rotate_shielded_restores_when_cancelled(tmp_path, monkeypatch):
+    """A bare await on the rotation thread is cancellable, and the cancel lands
+    after the move: the session is gone and its backup path with it."""
+    import threading
+
+    from linkedin_mcp_server import session_state
+
+    retired = tmp_path / "invalid-state-x"
+    released = threading.Event()
+    restore = MagicMock(return_value=True)
+
+    def slow_rotate(*_args):
+        released.wait(5)
+        return retired
+
+    monkeypatch.setattr(session_state, "rotate_source_profile", slow_rotate)
+    monkeypatch.setattr(session_state, "restore_source_profile", restore)
+
+    task = asyncio.ensure_future(session_state.rotate_shielded(tmp_path / "profile"))
+    await asyncio.sleep(0.05)  # let the worker thread enter slow_rotate
+    task.cancel()
+    released.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    restore.assert_called_once_with(retired, tmp_path / "profile")
+
+
+@pytest.mark.asyncio
+async def test_rotate_shielded_survives_overlapping_cancels(tmp_path, monkeypatch):
+    """A tool timeout racing a server shutdown cancels twice. The second must
+    not abandon the worker thread mid-rotation, or the session is stranded."""
+    import threading
+
+    from linkedin_mcp_server import session_state
+
+    retired = tmp_path / "invalid-state-x"
+    released = threading.Event()
+    restore = MagicMock(return_value=True)
+
+    def slow_rotate(*_args):
+        released.wait(5)
+        return retired
+
+    monkeypatch.setattr(session_state, "rotate_source_profile", slow_rotate)
+    monkeypatch.setattr(session_state, "restore_source_profile", restore)
+
+    task = asyncio.ensure_future(session_state.rotate_shielded(tmp_path / "profile"))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()  # second source of cancellation
+    released.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    restore.assert_called_once_with(retired, tmp_path / "profile")
+
+
+def test_rotate_shielded_does_not_wedge_event_loop_shutdown(tmp_path):
+    """asyncio.run cancels every pending task at teardown, and shielding an
+    already-cancelled task re-raises forever. Running the move on a bare
+    executor future keeps it out of that sweep, so the process can exit."""
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(f"""
+        import asyncio, pathlib, sys, time
+        sys.path.insert(0, {str(REPO_ROOT)!r})
+        from linkedin_mcp_server import session_state
+
+        session_state.rotate_source_profile = lambda *a: (
+            time.sleep(0.2), pathlib.Path("/tmp/backup-x")
+        )[1]
+        session_state.restore_source_profile = lambda *a: True
+
+        async def main():
+            # Detached, still running when main() returns: exactly the shape a
+            # server shutdown hits mid-login.
+            asyncio.ensure_future(session_state.rotate_shielded(pathlib.Path("/tmp/p")))
+            await asyncio.sleep(0.05)
+
+        asyncio.run(main())
+        print("SHUTDOWN COMPLETED")
+    """)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=20
+    )
+
+    assert "SHUTDOWN COMPLETED" in result.stdout

@@ -955,12 +955,27 @@ def _move_auth_state_aside(*, force: bool = False) -> None:
         force: If True, skip the ``_auth_ready()`` guard.  Used by
             ``invalidate_auth_and_trigger_relogin`` when the caller already
             knows the session is stale.
+
+    Raises:
+        AuthenticationBootstrapFailedError: The state could not be retired. The
+            caller must not go on to open a login browser: that login rotates
+            the same artifacts and would fail at the same point, after telling
+            the user a browser had opened.
     """
     if not force and _auth_ready():
         return
     # Quarantine creation lives in session_state so the routine rotation on a
     # new session and this stale-state path produce identically shaped backups.
-    rotate_source_profile(get_profile_dir())
+    try:
+        rotate_source_profile(get_profile_dir())
+    except RuntimeError as exc:
+        raise AuthenticationBootstrapFailedError(
+            f"{exc} No login was started."
+        ) from exc
+    except OSError as exc:
+        raise AuthenticationBootstrapFailedError(
+            f"Could not retire the stale session: {exc}. No login was started."
+        ) from exc
 
 
 def _force_move_auth_state_aside() -> None:
