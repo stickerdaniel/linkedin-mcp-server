@@ -65,8 +65,10 @@ _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 # list and yields nothing.
 _SAVED_JOBS_PAGE_SIZE = 10
 
-# Normalization maps for job search filters
-_DATE_POSTED_MAP = {
+# Normalization maps for job search filters. Job search encodes recency as
+# ``f_TPR=r<seconds>``; content search uses named tokens, hence the separate
+# ``_CONTENT_DATE_POSTED_MAP`` below.
+_JOB_DATE_POSTED_MAP = {
     "past_hour": "r3600",
     "past_24_hours": "r86400",
     "past_week": "r604800",
@@ -98,22 +100,26 @@ _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 
 # Content (post) search uses literal ``datePosted`` tokens inside a JSON-list
 # facet, e.g. ``datePosted=["past-week"]`` — unlike job search, which uses
-# ``f_TPR=r<seconds>`` codes. Human-friendly underscore aliases map onto
-# LinkedIn's exact tokens; the tokens themselves also pass through unchanged.
+# ``f_TPR=r<seconds>`` codes. The three hyphenated values are LinkedIn's
+# complete set, verified live: the filter dropdown offers exactly Past 24
+# hours / week / month, and anything else is ignored while still being echoed
+# back in the url, so a near-miss spelling returns unfiltered results that
+# look filtered. The underscore keys are this server's own spelling, carried
+# over so ``date_posted`` reads the same here as in ``search_jobs``
+# (``_JOB_DATE_POSTED_MAP``); ``past_hour`` has no content-search equivalent.
 _CONTENT_DATE_POSTED_MAP = {
     "past-24h": "past-24h",
     "past_24_hours": "past-24h",
-    "past-24-hours": "past-24h",
     "past-week": "past-week",
     "past_week": "past-week",
     "past-month": "past-month",
     "past_month": "past-month",
 }
 
-# Content search is an infinite scroll (no ``&start=`` pagination), so
-# ``search_posts`` expresses depth as result "pages" of roughly this many
-# scrolls each.
-_CONTENT_SCROLLS_PER_PAGE = 5
+# Content search is an infinite scroll with no ``&start=`` pagination, so
+# ``max_pages`` caps scroll depth instead of fetching discrete pages. One
+# nominal "page" is this many scrolls.
+_CONTENT_SCROLLS_PER_REQUESTED_PAGE = 5
 
 # Valid tokens for the people-search ``network`` facet.
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
@@ -3111,7 +3117,7 @@ class LinkedInExtractor:
             params += f"&location={quote_plus(location)}"
 
         if date_posted:
-            mapped = _DATE_POSTED_MAP.get(date_posted.strip(), date_posted)
+            mapped = _JOB_DATE_POSTED_MAP.get(date_posted.strip(), date_posted)
             params += f"&f_TPR={quote_plus(mapped)}"
         if job_type:
             params += f"&f_JT={_normalize_csv(job_type, _JOB_TYPE_MAP)}"
@@ -3616,10 +3622,11 @@ class LinkedInExtractor:
         ``/search/results/content/?keywords=Buscamos+Unity&origin=FACETED_SEARCH&datePosted=%5B%22past-week%22%5D``
 
         The ``datePosted`` facet is a one-element JSON list carrying a literal
-        token (``past-24h`` / ``past-week`` / ``past-month``), URL-encoded —
-        unlike job search, which uses ``f_TPR=r<seconds>``. Aliases are
-        normalized via ``_CONTENT_DATE_POSTED_MAP``; unknown values pass
-        through unchanged (callers validate first).
+        LinkedIn token, URL-encoded — unlike job search, which uses
+        ``f_TPR=r<seconds>``. The value is mapped through
+        ``_CONTENT_DATE_POSTED_MAP`` so the server's own underscore spelling
+        reaches LinkedIn in the form it recognizes. An unmapped value would be
+        ignored rather than rejected, so callers validate first.
         """
         params = f"keywords={quote_plus(keywords)}&origin=FACETED_SEARCH"
         if date_posted and date_posted.strip():
@@ -3643,15 +3650,16 @@ class LinkedInExtractor:
 
         Args:
             keywords: Free-text query (e.g. "Buscamos Unity", "estamos contratando").
-            date_posted: Optional recency filter. One of ``"past-24h"``,
-                ``"past-week"``, ``"past-month"`` (underscore aliases also
-                accepted). Invalid values raise ``FilterValidationError``
-                (a ``ValueError`` subclass).
+            date_posted: Optional recency filter, one of the keys of
+                ``_CONTENT_DATE_POSTED_MAP``. Invalid values raise
+                ``FilterValidationError`` (a ``ValueError`` subclass) rather
+                than reaching LinkedIn, which would ignore them silently and
+                return unfiltered results that look filtered.
             max_pages: Scroll depth, expressed in result "pages" of roughly
-                ``_CONTENT_SCROLLS_PER_PAGE`` scrolls each (default 3). Content
-                search is an infinite scroll with no per-page URL, so this caps
-                how far the page is scrolled rather than fetching discrete
-                ``&start=`` pages.
+                ``_CONTENT_SCROLLS_PER_REQUESTED_PAGE`` scrolls each (default
+                3). Content search is an infinite scroll with no per-page URL,
+                so this caps how far the page is scrolled rather than fetching
+                discrete ``&start=`` pages.
 
         Returns:
             {url, sections: {search_results: text}} plus optional ``references``
@@ -3668,11 +3676,11 @@ class LinkedInExtractor:
         ):
             raise FilterValidationError(
                 f"Invalid date_posted {date_posted!r}; expected one of "
-                "'past-24h', 'past-week', 'past-month'."
+                f"{list(_CONTENT_DATE_POSTED_MAP)!r}."
             )
 
         url = self._build_content_search_url(keywords, date_posted=date_posted)
-        max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_PAGE
+        max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_REQUESTED_PAGE
         extracted = await self.extract_page(
             url, section_name="search_results", max_scrolls=max_scrolls
         )

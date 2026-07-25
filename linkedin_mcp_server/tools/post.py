@@ -56,8 +56,9 @@ def register_post_tools(
             keywords: Search keywords (e.g., "Buscamos Unity", "AI automation hiring")
             ctx: FastMCP context for progress reporting
             date_posted: Optional recency filter. One of "past-24h",
-                "past-week", "past-month" (underscore aliases like
-                "past_week" also accepted). Omit for any time.
+                "past-week", "past-month"; the "past_24_hours" / "past_week" /
+                "past_month" spellings used by search_jobs are accepted too.
+                Omit for any time.
             max_pages: Scroll depth as result "pages" of ~5 scrolls each
                 (1-10, default 3). Content search is an infinite scroll, so
                 this caps how far the page is scrolled rather than fetching

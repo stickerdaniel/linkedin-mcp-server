@@ -16,6 +16,7 @@ from linkedin_mcp_server.scraping.connection import (
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
+    _CONTENT_DATE_POSTED_MAP,
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
@@ -3026,6 +3027,17 @@ class TestBuildContentSearchUrl:
             "python", date_posted="past_24_hours"
         )
         assert "datePosted=%5B%22past-24h%22%5D" in url
+
+    def test_every_accepted_date_posted_reaches_linkedin_as_a_real_token(self):
+        """LinkedIn ignores an unrecognized token instead of rejecting it, so
+        an accepted value that never maps to one of its three would return
+        unfiltered results while looking filtered."""
+        for accepted, expected in _CONTENT_DATE_POSTED_MAP.items():
+            url = LinkedInExtractor._build_content_search_url(
+                "python", date_posted=accepted
+            )
+            assert expected in ("past-24h", "past-week", "past-month")
+            assert f"%22{expected}%22" in url
 
     def test_no_date_posted_omits_facet(self):
         url = LinkedInExtractor._build_content_search_url("python")
