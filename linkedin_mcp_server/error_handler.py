@@ -14,7 +14,6 @@ from fastmcp.exceptions import ToolError
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     ElementNotFoundError,
-    LinkedInScraperException,
     NetworkError,
     ProfileNotFoundError,
     RateLimitError,
@@ -171,7 +170,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             context=context,
         )
 
-    elif isinstance(exception, (LinkedInScraperException, LinkedInMCPError)):
+    elif isinstance(exception, LinkedInMCPError):
         # Catch-all for base exception types and any future subclasses
         # without a dedicated handler above. Passes through str(exception).
         logger.warning("LinkedIn error%s: %s", ctx, exception)

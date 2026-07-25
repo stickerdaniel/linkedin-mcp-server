@@ -51,7 +51,7 @@ class BrowserConfig:
     # Note the non-loopback gate covers network-exposed HTTP only, not
     # stdio-over-SSH: a non-console session simply fails to read the local
     # user's keychain and degrades to manual login, and no cookie crosses the
-    # network.
+    # network. --allow-external-bind overrides the non-loopback gate.
     auto_import_from_browser: bool | None = None
     # Install full Chrome for Testing up front during background setup instead
     # of lazily on the first headed login. Off by default: the headless scrape +
@@ -132,6 +132,11 @@ class ServerConfig:
     port: int = 8000
     path: str = "/mcp"
     tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+    # Allow binding to all network interfaces (0.0.0.0 or ::). Off by default
+    # because the MCP endpoint has no authentication — anyone on the network
+    # could use your LinkedIn session. Set to True only when you understand
+    # the risk and have external access controls (firewall, VPN, etc.).
+    allow_external_bind: bool = False
 
     def validate(self) -> None:
         """Validate server configuration values."""
@@ -179,11 +184,19 @@ class AppConfig:
         if not self.server.port:
             raise ConfigurationError("HTTP transport requires a valid port")
         if self.server.host in ("0.0.0.0", "::"):
+            if not self.server.allow_external_bind:
+                raise ConfigurationError(
+                    f"HTTP transport is binding to {self.server.host}, which "
+                    "exposes the server to all network interfaces. The MCP "
+                    "endpoint has no authentication — anyone on your network "
+                    "can use your LinkedIn session. "
+                    "Use --host 127.0.0.1 (default) or set "
+                    "--allow-external-bind if you understand the risk."
+                )
             logger.warning(
                 "HTTP transport is binding to %s which exposes the server to "
                 "all network interfaces. The MCP endpoint has no authentication "
-                "— anyone on your network can use your LinkedIn session. "
-                "Use 127.0.0.1 (default) unless you understand the risk.",
+                "— anyone on your network can use your LinkedIn session.",
                 self.server.host,
             )
 

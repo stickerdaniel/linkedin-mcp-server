@@ -79,6 +79,7 @@ class EnvironmentKeys:
     IMPORT_FROM_BROWSER = "IMPORT_FROM_BROWSER"
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
+    ALLOW_EXTERNAL_BIND = "ALLOW_EXTERNAL_BIND"
 
 
 def is_interactive_environment() -> bool:
@@ -250,6 +251,14 @@ def load_from_env(config: AppConfig) -> AppConfig:
             config.browser.eager_full_chromium = False
         elif eager_full_value in TRUTHY_VALUES:
             config.browser.eager_full_chromium = True
+
+    # Allow binding to all network interfaces (0.0.0.0 or ::).
+    if external_bind_env := os.environ.get(EnvironmentKeys.ALLOW_EXTERNAL_BIND):
+        external_bind_value = _normalize_env(external_bind_env)
+        if external_bind_value in FALSY_VALUES:
+            config.server.allow_external_bind = False
+        elif external_bind_value in TRUTHY_VALUES:
+            config.server.allow_external_bind = True
 
     return config
 
@@ -455,6 +464,17 @@ def load_from_args(config: AppConfig) -> AppConfig:
         ),
     )
 
+    parser.add_argument(
+        "--allow-external-bind",
+        action="store_true",
+        default=None,
+        help=(
+            "Allow binding to 0.0.0.0 or :: (all network interfaces). "
+            "The MCP endpoint has no authentication — use only with "
+            "external access controls like a firewall or VPN."
+        ),
+    )
+
     args = parser.parse_args()
 
     # Update configuration with parsed arguments
@@ -532,6 +552,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.eager_full_chromium is not None:
         config.browser.eager_full_chromium = args.eager_full_chromium
+
+    if args.allow_external_bind is not None:
+        config.server.allow_external_bind = args.allow_external_bind
 
     return config
 
