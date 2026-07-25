@@ -1,0 +1,62 @@
+name: Label PR
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+# Release notes are generated from labels (see .github/release.yml), and GitHub
+# offers no way to filter them by title or author. Without a label, a docs or
+# chore PR lands in the changelog as user-facing noise. This derives the label
+# from the conventional-commit type in the PR title so the filtering works
+# without anyone remembering to label by hand.
+# pull_request_target is required so PRs from forks get a writable token.
+# It is safe here only because this job never checks out the PR branch and
+# never runs its code: the title is read into a variable and matched against
+# a fixed case list, so an untrusted title can at worst yield no label.
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Apply label for the conventional-commit type
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Read the type from the title via a parameter expansion rather than
+          # interpolating it into a pattern, so a crafted title cannot inject.
+          TYPE="${PR_TITLE%%[(:]*}"
+          TYPE="${TYPE// /}"
+
+          case "$TYPE" in
+            feat)           LABEL="enhancement" ;;
+            fix)            LABEL="bug" ;;
+            docs)           LABEL="documentation" ;;
+            refactor)       LABEL="refactoring" ;;
+            chore|ci|style|test|build|perf) LABEL="chore" ;;
+            *)              LABEL="" ;;
+          esac
+
+          if [ -n "$LABEL" ]; then
+            echo "Title type '$TYPE' -> label '$LABEL'"
+          else
+            echo "No conventional-commit type in title; clearing derived labels."
+          fi
+
+          # The cleanup runs even when the title yields no label: retitling away
+          # from docs: must not leave the documentation label attached, and one
+          # excluded label is enough to drop the PR from the release notes. The
+          # title is the single source of truth for these five, so any other one
+          # is cleared even if set by hand; labels outside this set
+          # (skip-changelog, upstream, ...) are untouched.
+          for stale in enhancement bug documentation refactoring chore; do
+            [ "$stale" = "$LABEL" ] && continue
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$stale" 2>/dev/null || true
+          done
+
+          if [ -n "$LABEL" ]; then
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "$LABEL"
+          fi
