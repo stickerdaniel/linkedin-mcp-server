@@ -261,10 +261,17 @@ async def _authenticate_existing_profile(
             )
         browser.is_authenticated = True
         return browser
-    except BaseException:
+    except BaseException as exc:
         # BaseException so a cancelled startup still tears Chromium down. Left
         # running it would hold the profile that the caller is about to release.
-        await browser.close()
+        if not await browser.close():
+            # The original failure is replaced deliberately: the caller's
+            # recovery for it releases the profile, which is unsafe while this
+            # browser may still be on it. Chained so the cause is not lost.
+            raise BrowserShutdownUnconfirmedError(
+                "The browser did not shut down cleanly after a failed startup, "
+                "so the profile is kept. Restart the server to recover."
+            ) from exc
         raise
 
 
@@ -431,8 +438,12 @@ async def _bridge_runtime_profile(
             logger.info("Derived runtime profile committed for %s", runtime_id)
             reopened.is_authenticated = True
             return reopened
-        except BaseException:
-            await reopened.close()
+        except BaseException as exc:
+            if not await reopened.close():
+                raise BrowserShutdownUnconfirmedError(
+                    "The reopened bridge browser did not shut down cleanly, so "
+                    "its profile is kept. Restart the server to recover."
+                ) from exc
             raise
     except BrowserShutdownUnconfirmedError:
         # Chromium may still be running on this runtime profile. Closing again
@@ -440,10 +451,16 @@ async def _bridge_runtime_profile(
         # and deleting the directory underneath a live browser is exactly what
         # this guard exists to prevent. Leave everything for the operator.
         raise
-    except BaseException:
+    except BaseException as exc:
         # BaseException so a cancelled bridge still closes Chromium before the
         # caller releases the profile, and before the runtime dir is removed.
-        await browser.close()
+        if not await browser.close():
+            # Deleting the runtime directory under a browser that may still be
+            # running is the corruption this guard exists for, so stop instead.
+            raise BrowserShutdownUnconfirmedError(
+                "The bridge browser did not shut down cleanly, so its runtime "
+                "profile is kept. Restart the server to recover."
+            ) from exc
         clear_runtime_profile(runtime_id, source_profile_dir)
         raise
 
