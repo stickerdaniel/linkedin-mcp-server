@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from collections.abc import Coroutine
 from typing import Any
 
 from patchright.async_api import (
@@ -29,6 +30,24 @@ logger = logging.getLogger(__name__)
 _DEFAULT_USER_DATA_DIR = Path.home() / ".linkedin-mcp" / "profile"
 _PRIVATE_FILE_MODE = 0o600
 _CLEANUP_TIMEOUT_SECONDS = 10
+
+
+async def _await_deferring_cancels(coro: Coroutine[Any, Any, bool]) -> bool:
+    """Await *coro* to completion, holding back cancels until it finishes.
+
+    Mirrors ``session_state.run_deferring_cancels``. A bare ``shield`` is not
+    enough: it re-raises on the *next* cancel, discarding the result. Here that
+    result decides whether a browser is provably gone, so losing it would let a
+    caller hand the profile on with Chromium possibly still running. The cancel
+    is not swallowed; the caller re-raises it.
+    """
+    task = asyncio.ensure_future(coro)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
 
 
 class BrowserManager:
@@ -125,9 +144,11 @@ class BrowserManager:
             # can prove a partially launched Chromium exited. A caller closing
             # again would get True from the already-cleared handles and could
             # then release or delete the profile with the browser still on it.
-            # Shielded because the cleanup itself must survive the cancellation
-            # that triggered it.
-            if not await asyncio.shield(asyncio.ensure_future(self.close())):
+            # Shielded, and retried on further cancels: overlapping cancels are
+            # real (a tool timeout racing server shutdown), and a second one
+            # landing on the shield would discard the very result that decides
+            # whether the profile may be handed on.
+            if not await _await_deferring_cancels(self.close()):
                 raise BrowserShutdownUnconfirmedError(
                     "The browser failed to start and did not shut down cleanly, "
                     "so the profile is kept. Restart the server to recover."
