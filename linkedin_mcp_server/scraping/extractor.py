@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import json
 import logging
@@ -20,6 +21,7 @@ from linkedin_mcp_server.core import (
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+    RateLimitError,
 )
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
@@ -27,6 +29,7 @@ from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
     detect_rate_limit,
     handle_modal_close,
+    scroll_connections_container,
     scroll_job_sidebar,
     scroll_to_bottom,
 )
@@ -673,6 +676,133 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
                 break
 
     return "\n".join(lines[start:end]).strip()
+
+
+_DEGREE_LINE = re.compile(r"^\d+(?:st|nd|rd|th) degree connection$")
+_SHORT_DEGREE = re.compile(r"^\d+(?:st|nd|rd|th)\+?$")
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_CONTACT_INFO_SUFFIX = "Contact info"
+
+
+def _parse_contact_record(
+    profile_text: str, contact_text: str
+) -> dict[str, str | None]:
+    """Parse raw innerText blobs into structured contact fields.
+
+    Profile page layout (cleaned innerText), anchored on the degree marker::
+
+        <First> has a {:badgeType} account   <- accessibility/badge noise
+        <Full Name>                           <- name (line above the marker)
+        <N>(st|nd|rd|th) degree connection    <- anchor
+        <N>st                                 <- short degree repeat (skipped)
+        <headline>
+        <company>                             <- top experience (best effort)
+        <location>  Contact info              <- location, "Contact info" suffix
+
+    Contact info overlay layout (label/value pairs, one per line)::
+
+        Website\\n<url> (Company)
+        Email\\n<email>
+        Phone\\n<phone>
+        Birthday\\n<date>
+
+    Locale note: the degree marker, the "Contact info" suffix, and the overlay
+    labels are English-UI strings, so the layout-derived fields (name, headline,
+    company, location) and the labelled overlay fields are best-effort and
+    populate only when the account language is English. Email is recovered
+    locale-independently via regex, and the original ``profile_raw`` /
+    ``contact_info_raw`` are always returned as a language-agnostic fallback.
+    """
+    result: dict[str, str | None] = {
+        "first_name": None,
+        "last_name": None,
+        "headline": None,
+        "location": None,
+        "company": None,
+        "email": None,
+        "phone": None,
+        "website": None,
+        "birthday": None,
+    }
+
+    # --- Parse profile text ---
+    if profile_text:
+        lines = [ln.strip() for ln in profile_text.split("\n")]
+
+        # Anchor on the "Nth degree connection" marker.
+        degree_idx = next(
+            (i for i, ln in enumerate(lines) if _DEGREE_LINE.match(ln)), None
+        )
+
+        # Name: nearest meaningful line above the marker (badge noise excepted).
+        name_candidates = (
+            range(degree_idx - 1, -1, -1)
+            if degree_idx is not None
+            else range(len(lines))
+        )
+        for j in name_candidates:
+            cand = lines[j]
+            if cand and "{:badgeType}" not in cand and cand != "test":
+                parts = cand.split(None, 1)
+                result["first_name"] = parts[0]
+                result["last_name"] = parts[1] if len(parts) > 1 else None
+                break
+
+        # Headline: first substantive line after the marker, skipping the
+        # short degree repeat ("1st", "2nd", ...).
+        headline_idx: int | None = None
+        if degree_idx is not None:
+            for j in range(degree_idx + 1, len(lines)):
+                cand = lines[j]
+                if cand and not _SHORT_DEGREE.match(cand):
+                    result["headline"] = cand
+                    headline_idx = j
+                    break
+
+        # Company: line right after the headline, unless that's the location.
+        if headline_idx is not None:
+            for j in range(headline_idx + 1, len(lines)):
+                cand = lines[j]
+                if not cand:
+                    continue
+                if not cand.endswith(_CONTACT_INFO_SUFFIX):
+                    result["company"] = cand
+                break
+
+        # Location: the line carrying the "Contact info" suffix.
+        for ln in lines:
+            if ln.endswith(_CONTACT_INFO_SUFFIX) and ln != _CONTACT_INFO_SUFFIX:
+                result["location"] = ln[: -len(_CONTACT_INFO_SUFFIX)].strip()
+                break
+
+    # --- Parse contact info overlay (label line, then value on the next) ---
+    if contact_text:
+        olines = [ln.strip() for ln in contact_text.split("\n")]
+
+        def _value_after(label: str) -> str | None:
+            for i, ln in enumerate(olines):
+                if ln == label:
+                    for nxt in olines[i + 1 :]:
+                        if nxt:
+                            return nxt
+            return None
+
+        result["email"] = _value_after("Email")
+        result["phone"] = _value_after("Phone")
+        result["birthday"] = _value_after("Birthday")
+
+        website = _value_after("Website")
+        if website:
+            # Drop the trailing type annotation, e.g. " (Company)" / " (Blog)".
+            result["website"] = re.sub(r"\s*\([^)]*\)\s*$", "", website).strip()
+
+        # Fallback: any email anywhere in the overlay if the label was absent.
+        if not result["email"]:
+            match = _EMAIL_RE.search(contact_text)
+            if match:
+                result["email"] = match.group(0)
+
+    return result
 
 
 class LinkedInExtractor:
@@ -4167,3 +4297,231 @@ class LinkedInExtractor:
             {"selectors": selectors},
         )
         return result
+
+    async def scrape_connections_list(
+        self,
+        limit: int = 0,
+        max_scrolls: int = 50,
+    ) -> dict[str, Any]:
+        """Scrape the authenticated user's connections list via infinite scroll.
+
+        Args:
+            limit: Maximum connections to return (0 = unlimited).
+            max_scrolls: Maximum scroll iterations (~1s pause each).
+
+        Returns:
+            {connections: [{username, name, headline}, ...], total, url, pages_visited}
+        """
+        url = "https://www.linkedin.com/mynetwork/invite-connect/connections/"
+
+        # Navigate — handle ERR_ABORTED (page already loaded / redirect race)
+        try:
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as nav_err:
+            if "ERR_ABORTED" in str(nav_err):
+                logger.info("Navigation aborted (page may already be loaded), retrying")
+                await asyncio.sleep(2.0)
+                await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            else:
+                raise
+
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element on connections page")
+
+        await handle_modal_close(self._page)
+
+        # Deep scroll the inner connections container (not the page body) to
+        # trigger infinite scroll. Stop early once `limit` cards are loaded.
+        await scroll_connections_container(
+            self._page,
+            pause_time=1.0,
+            max_scrolls=max_scrolls,
+            stop_after=limit,
+        )
+
+        # Stabilize — LinkedIn may trigger lazy navigations during scroll
+        await asyncio.sleep(1.0)
+
+        # Ensure we're still on the connections page; re-navigate if needed
+        current_url = self._page.url
+        if "/connections" not in current_url:
+            logger.warning(
+                "Page navigated away to %s during scroll, re-navigating",
+                current_url,
+            )
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2.0)
+            # Re-navigation may resolve to a challenge/checkpoint; surface it
+            # instead of silently returning zero connections.
+            await detect_rate_limit(self._page)
+
+        # Extract connection data from profile link elements
+        raw_connections: list[dict[str, str]] = await self._page.evaluate(
+            """() => {
+                const results = [];
+                const seen = new Set();
+                const links = document.querySelectorAll('main a[href*="/in/"]');
+                for (const a of links) {
+                    const href = a.getAttribute('href') || '';
+                    const match = href.match(/\\/in\\/([^/?#]+)/);
+                    if (!match) continue;
+                    const username = match[1];
+                    if (seen.has(username)) continue;
+                    seen.add(username);
+
+                    // Walk up to the connection card container (structural —
+                    // no layout class names, per the project scraping rules).
+                    const card = a.closest('li') || a.parentElement;
+                    const lines = card
+                        ? card.innerText.split('\\n').map(l => l.trim()).filter(Boolean)
+                        : [];
+
+                    // Name: the card renders the person's name as its first line.
+                    const name = lines.length ? lines[0] : '';
+
+                    // Headline: the longest of the remaining lines — descriptive
+                    // text wins over the short status/action lines ("Message",
+                    // "Connected on ..."). Structural heuristic, so it avoids
+                    // both layout classes and locale-specific text anchors.
+                    let headline = '';
+                    for (const line of lines.slice(1)) {
+                        if (line.length > headline.length) headline = line;
+                    }
+
+                    results.push({ username, name, headline });
+                }
+                return results;
+            }"""
+        )
+
+        # Apply limit
+        if limit > 0:
+            raw_connections = raw_connections[:limit]
+
+        return {
+            "connections": raw_connections,
+            "total": len(raw_connections),
+            "url": url,
+            "pages_visited": [url],
+        }
+
+    async def scrape_contact_batch(
+        self,
+        usernames: list[str],
+        chunk_size: int = 5,
+        chunk_delay: float = 30.0,
+        progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        """Enrich a list of profiles with contact details in chunked batches.
+
+        For each username: scrapes main profile + contact_info overlay.
+
+        Args:
+            usernames: List of LinkedIn usernames to enrich.
+            chunk_size: Profiles per chunk before a long pause.
+            chunk_delay: Seconds to pause between chunks.
+            progress_cb: Optional async callback(completed, total) for progress.
+
+        Returns:
+            {contacts: [{username, first_name, last_name, email, phone,
+             headline, location, company, website, birthday,
+             profile_raw, contact_info_raw}],
+             total, failed, rate_limited, pages_visited}
+        """
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be a positive integer, got {chunk_size}")
+
+        contacts: list[dict[str, Any]] = []
+        failed: list[str] = []
+        pages_visited: list[str] = []
+        total = len(usernames)
+        rate_limited = False
+
+        for chunk_idx in range(0, total, chunk_size):
+            chunk = usernames[chunk_idx : chunk_idx + chunk_size]
+
+            for username in chunk:
+                profile_url = f"https://www.linkedin.com/in/{username}/"
+                contact_url = (
+                    f"https://www.linkedin.com/in/{username}/overlay/contact-info/"
+                )
+
+                try:
+                    # Scrape main profile page
+                    profile_section = await self.extract_page(
+                        profile_url, section_name="profile"
+                    )
+                    profile_text = profile_section.text
+                    pages_visited.append(profile_url)
+
+                    if profile_text == _RATE_LIMITED_MSG:
+                        logger.warning(
+                            "Soft rate limit on profile %s, skipping", username
+                        )
+                        failed.append(username)
+                        await asyncio.sleep(_NAV_DELAY)
+                        continue
+
+                    # Scrape contact info overlay
+                    contact_section = await self._extract_overlay(
+                        contact_url, section_name="contact_info"
+                    )
+                    contact_text = contact_section.text
+                    pages_visited.append(contact_url)
+
+                    if contact_text == _RATE_LIMITED_MSG:
+                        contact_text = (
+                            ""  # fall back to empty; parsed fields will be None
+                        )
+
+                    parsed = _parse_contact_record(profile_text, contact_text)
+                    contacts.append(
+                        {
+                            "username": username,
+                            **parsed,
+                            "profile_raw": profile_text,
+                            "contact_info_raw": contact_text,
+                        }
+                    )
+
+                except RateLimitError:
+                    logger.warning("Rate limited during contact batch at %s", username)
+                    failed.append(username)
+                    rate_limited = True
+                    break
+                except Exception as e:
+                    logger.warning("Failed to scrape %s: %s", username, e)
+                    failed.append(username)
+
+                # Brief delay between individual profiles
+                await asyncio.sleep(_NAV_DELAY)
+
+            if rate_limited:
+                break
+
+            # Report progress after each chunk
+            completed = min(chunk_idx + len(chunk), total)
+            if progress_cb:
+                await progress_cb(completed, total)
+
+            # Pause between chunks (skip after last chunk)
+            if chunk_idx + chunk_size < total:
+                logger.info(
+                    "Chunk complete (%d/%d). Pausing %.0fs...",
+                    completed,
+                    total,
+                    chunk_delay,
+                )
+                await asyncio.sleep(chunk_delay)
+
+        return {
+            "contacts": contacts,
+            "total": len(contacts),
+            "failed": failed,
+            "rate_limited": rate_limited,
+            "pages_visited": pages_visited,
+        }

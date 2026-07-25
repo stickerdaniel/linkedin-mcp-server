@@ -150,6 +150,94 @@ async def scroll_job_sidebar(
         logger.debug("Job sidebar container found but no new content loaded")
 
 
+async def scroll_connections_container(
+    page: Page,
+    pause_time: float = 1.0,
+    max_scrolls: int = 50,
+    stop_after: int = 0,
+) -> None:
+    """Scroll the connections list to load all cards via infinite scroll.
+
+    LinkedIn renders the connections list inside a scrollable inner container
+    (``<main>``), not the page body — so ``scroll_to_bottom`` (which scrolls
+    ``document.body``) never triggers lazy loading. This finds the scrollable
+    ancestor of a connection card link and scrolls it iteratively.
+
+    Args:
+        page: Patchright page object
+        pause_time: Time to pause between scrolls (seconds)
+        max_scrolls: Maximum number of scroll attempts
+        stop_after: Stop once this many connection links are loaded
+            (0 = load everything).
+    """
+    try:
+        await page.wait_for_selector('main a[href*="/in/"]', timeout=5000)
+    except PlaywrightTimeoutError:
+        logger.debug("No connection card links found, skipping scroll")
+        return
+
+    scrolled = await page.evaluate(
+        """async ({pauseTime, maxScrolls, stopAfter}) => {
+            const link = document.querySelector('main a[href*="/in/"]');
+            if (!link) return -2;
+
+            let container = link.parentElement;
+            while (container && container !== document.body) {
+                const style = window.getComputedStyle(container);
+                const overflowY = style.overflowY;
+                if ((overflowY === 'auto' || overflowY === 'scroll')
+                    && container.scrollHeight > container.clientHeight) {
+                    break;
+                }
+                container = container.parentElement;
+            }
+
+            if (!container || container === document.body) {
+                return -1;
+            }
+
+            // Count UNIQUE profile usernames — each card has multiple /in/
+            // links (avatar + name), so a raw element count overstates ~2x.
+            const count = () => {
+                const seen = new Set();
+                for (const a of document.querySelectorAll('main a[href*="/in/"]')) {
+                    const m = (a.getAttribute('href') || '').match(/\\/in\\/([^/?#]+)/);
+                    if (m) seen.add(m[1]);
+                }
+                return seen.size;
+            };
+
+            let scrollCount = 0;
+            let idle = 0;  // consecutive iterations with no new content
+            for (let i = 0; i < maxScrolls; i++) {
+                if (stopAfter > 0 && count() >= stopAfter) break;
+                const prevHeight = container.scrollHeight;
+                const prevCount = count();
+                container.scrollTop = container.scrollHeight;
+                await new Promise(r => setTimeout(r, pauseTime * 1000));
+                scrollCount++;
+                // Neither the container nor the card count grew this round.
+                // Tolerate brief lazy-load latency before concluding we're done.
+                if (container.scrollHeight === prevHeight && count() === prevCount) {
+                    if (++idle >= 3) break;
+                } else {
+                    idle = 0;
+                }
+            }
+            return scrollCount;
+        }""",
+        {"pauseTime": pause_time, "maxScrolls": max_scrolls, "stopAfter": stop_after},
+    )
+    if scrolled == -2:
+        logger.debug("Connection card link disappeared before evaluate")
+    elif scrolled == -1:
+        logger.debug("No scrollable container found for connections list")
+    elif scrolled:
+        logger.debug("Scrolled connections container %d times", scrolled)
+    else:
+        logger.debug("Connections container found but no new content loaded")
+
+
 async def handle_modal_close(page: Page) -> bool:
     """Close any popup modals that might be blocking content.
 

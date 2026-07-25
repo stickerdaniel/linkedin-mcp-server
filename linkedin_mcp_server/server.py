@@ -25,6 +25,7 @@ from linkedin_mcp_server.sequential_tool_middleware import (
 )
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
+from linkedin_mcp_server.tools.connections import register_connections_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.messaging import register_messaging_tools
@@ -66,6 +67,7 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
     register_job_tools(mcp, tool_timeout=tool_timeout)
     register_messaging_tools(mcp, tool_timeout=tool_timeout)
     register_feed_tools(mcp, tool_timeout=tool_timeout)
+    register_connections_tools(mcp, tool_timeout=tool_timeout)
 
     # Register session management tool
     @mcp.tool(
