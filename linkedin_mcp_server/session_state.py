@@ -11,7 +11,11 @@ import shutil
 from typing import Any
 from uuid import uuid4
 
-from linkedin_mcp_server.common_utils import secure_write_text, utcnow_iso
+from linkedin_mcp_server.common_utils import (
+    secure_mkdir,
+    secure_write_text,
+    utcnow_iso,
+)
 from linkedin_mcp_server.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -19,6 +23,14 @@ logger = logging.getLogger(__name__)
 _SOURCE_STATE_FILE = "source-state.json"
 _RUNTIME_STATE_FILE = "runtime-state.json"
 _RUNTIME_PROFILES_DIR = "runtime-profiles"
+
+# Prefix of the timestamped directories retired auth state is moved into.
+QUARANTINE_PREFIX = "invalid-state-"
+
+# Chromium writes these into a profile it currently owns and removes them on a
+# clean exit. Their presence means another process — a second CLI run, a server,
+# or a container sharing the mounted auth root — is using the profile right now.
+_CHROMIUM_LOCK_NAMES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
 
 
 @dataclass
@@ -297,15 +309,98 @@ def clear_runtime_profile(
         return False
 
 
-def clear_auth_state(source_profile_dir: Path | None = None) -> bool:
-    """Remove source auth artifacts and all derived runtime profiles."""
-    profile_dir = (source_profile_dir or get_source_profile_dir()).expanduser()
-    targets = [
+def _auth_state_targets(profile_dir: Path) -> list[Path]:
+    """The four artifacts that together make up one source session."""
+    return [
         profile_dir,
         portable_cookie_path(profile_dir),
         source_state_path(profile_dir),
         runtime_profiles_root(profile_dir),
     ]
+
+
+def quarantine_dirs(source_profile_dir: Path | None = None) -> list[Path]:
+    """Existing quarantine directories, newest name last."""
+    root = auth_root_dir(source_profile_dir)
+    if not root.is_dir():
+        return []
+    return sorted(path for path in root.glob(f"{QUARANTINE_PREFIX}*") if path.is_dir())
+
+
+def profile_in_use_by(profile_dir: Path) -> Path | None:
+    """The Chromium lock file proving another process owns *profile_dir*.
+
+    Returns ``None`` when the profile is free. The lock is a symlink on Linux
+    and macOS and may dangle, so existence is probed via ``lstat`` rather than
+    ``exists()``, which follows the link and reports False for a stale target.
+    """
+    for name in _CHROMIUM_LOCK_NAMES:
+        candidate = profile_dir / name
+        try:
+            candidate.lstat()
+        except OSError:
+            continue
+        return candidate
+    return None
+
+
+def rotate_source_profile(source_profile_dir: Path | None = None) -> Path | None:
+    """Retire the current source session so the next one starts clean.
+
+    Chromium mints ``machine_id``, ``session_id_generator_last_value`` and
+    friends into ``Local State`` once and then keeps them for the life of the
+    profile. Reusing the directory for a different LinkedIn account hands
+    LinkedIn the same device identity twice, which is exactly the signal that
+    links accounts to one another. Every path that establishes a new source
+    session therefore rotates first.
+
+    The retired artifacts are moved, not deleted, so a session that turns out to
+    have been fine is still recoverable. ``--logout`` clears the quarantines.
+
+    Returns the quarantine directory, or ``None`` when there was nothing to
+    retire.
+
+    Raises:
+        RuntimeError: Another process holds the profile. Rotating underneath a
+            live Chromium corrupts both the old and the new session.
+        OSError: A move failed. Deliberately not swallowed: a half-rotated tree
+            would leave the next rotation splitting one session across two
+            quarantines.
+    """
+    profile_dir = (source_profile_dir or get_source_profile_dir()).expanduser()
+    existing = [
+        target for target in _auth_state_targets(profile_dir) if target.exists()
+    ]
+    if not existing:
+        return None
+
+    lock = profile_in_use_by(profile_dir)
+    if lock is not None:
+        raise RuntimeError(
+            f"The browser profile is in use by another process (found {lock.name}). "
+            "Stop the running server or container before creating a new session."
+        )
+
+    # utcnow_iso() is second-resolution and rotation is now routine rather than
+    # exceptional, so two rotations can land in the same second. The suffix keeps
+    # them from merging into one directory.
+    stamp = utcnow_iso().replace(":", "-")
+    backup_dir = (
+        auth_root_dir(profile_dir) / f"{QUARANTINE_PREFIX}{stamp}-{uuid4().hex[:8]}"
+    )
+    secure_mkdir(backup_dir)
+    for target in existing:
+        shutil.move(str(target), str(backup_dir / target.name))
+    logger.info("Retired previous session to %s", backup_dir)
+    return backup_dir
+
+
+def clear_auth_state(source_profile_dir: Path | None = None) -> bool:
+    """Remove source auth artifacts, derived runtime profiles and quarantines."""
+    profile_dir = (source_profile_dir or get_source_profile_dir()).expanduser()
+    # Quarantines hold previous sessions' cookies, so a logout that left them
+    # behind would not be the "clear all stored auth state" the CLI advertises.
+    targets = _auth_state_targets(profile_dir) + quarantine_dirs(profile_dir)
 
     success = True
     for target in targets:

@@ -1,10 +1,17 @@
 import json
 
+import pytest
+
 from linkedin_mcp_server.session_state import (
+    clear_auth_state,
     get_runtime_id,
     load_runtime_state,
     load_source_state,
+    portable_cookie_path,
+    quarantine_dirs,
+    rotate_source_profile,
     runtime_profile_dir,
+    runtime_profiles_root,
     runtime_state_path,
     runtime_storage_state_path,
     source_state_path,
@@ -236,3 +243,108 @@ def test_get_runtime_id_ignores_non_root_overlay_mounts(monkeypatch):
     )
 
     assert get_runtime_id() == "linux-amd64-host"
+
+
+def _seed_session(profile_dir, *, machine_id: str = "4663753") -> None:
+    """Write the four artifacts a live source session consists of."""
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Local State").write_text(
+        json.dumps({"user_experience_metrics": {"machine_id": machine_id}})
+    )
+    portable_cookie_path(profile_dir).write_text('[{"name": "li_at"}]')
+    source_state_path(profile_dir).write_text('{"version": 1}')
+    (runtime_profiles_root(profile_dir) / "macos-arm64-host").mkdir(parents=True)
+
+
+class TestRotateSourceProfile:
+    def test_retires_every_artifact(self, isolate_profile_dir):
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+
+        backup = rotate_source_profile(profile_dir)
+
+        assert backup is not None
+        assert not profile_dir.exists()
+        assert not portable_cookie_path(profile_dir).exists()
+        assert not source_state_path(profile_dir).exists()
+        assert not runtime_profiles_root(profile_dir).exists()
+        assert {path.name for path in backup.iterdir()} == {
+            "profile",
+            "cookies.json",
+            "source-state.json",
+            "runtime-profiles",
+        }
+
+    def test_new_profile_does_not_inherit_the_fingerprint(self, isolate_profile_dir):
+        """The point of rotating: Chromium mints machine_id once per profile
+        directory, so reusing the directory hands LinkedIn one device identity
+        for two accounts."""
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir, machine_id="4663753")
+
+        backup = rotate_source_profile(profile_dir)
+
+        assert backup is not None
+        assert "4663753" in (backup / "profile" / "Local State").read_text()
+        assert not (profile_dir / "Local State").exists()
+
+    def test_no_op_without_a_session(self, isolate_profile_dir):
+        assert rotate_source_profile(isolate_profile_dir) is None
+        assert quarantine_dirs(isolate_profile_dir) == []
+
+    def test_refuses_while_another_process_holds_the_profile(self, isolate_profile_dir):
+        """Rotating underneath a live Chromium — a second CLI run, or a
+        container sharing the mounted auth root — corrupts both sessions."""
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        (profile_dir / "SingletonLock").symlink_to("host-1234")
+
+        with pytest.raises(RuntimeError, match="in use by another process"):
+            rotate_source_profile(profile_dir)
+
+        assert profile_dir.exists()
+        assert quarantine_dirs(profile_dir) == []
+
+    def test_same_second_rotations_do_not_collide(self, isolate_profile_dir):
+        """utcnow_iso() is second-resolution and rotation is routine now, so
+        two rotations can share a timestamp without sharing a directory."""
+        profile_dir = isolate_profile_dir
+
+        _seed_session(profile_dir)
+        first = rotate_source_profile(profile_dir)
+        _seed_session(profile_dir)
+        second = rotate_source_profile(profile_dir)
+
+        assert first != second
+        assert len(quarantine_dirs(profile_dir)) == 2
+
+    def test_move_failure_raises_instead_of_half_rotating(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """A swallowed failure would leave one session split across two
+        quarantines the next time around."""
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+
+        def explode(src, dst):
+            raise OSError("device busy")
+
+        monkeypatch.setattr("linkedin_mcp_server.session_state.shutil.move", explode)
+
+        with pytest.raises(OSError):
+            rotate_source_profile(profile_dir)
+
+
+class TestClearAuthState:
+    def test_removes_quarantined_sessions_too(self, isolate_profile_dir):
+        """--logout advertises clearing all stored auth state, and a quarantine
+        holds a previous session's cookies."""
+        profile_dir = isolate_profile_dir
+        _seed_session(profile_dir)
+        rotate_source_profile(profile_dir)
+        _seed_session(profile_dir)
+
+        assert clear_auth_state(profile_dir) is True
+
+        assert quarantine_dirs(profile_dir) == []
+        assert not profile_dir.exists()

@@ -45,6 +45,7 @@ from linkedin_mcp_server.exceptions import (
 )
 from linkedin_mcp_server.session_state import (
     portable_cookie_path,
+    rotate_source_profile,
     write_source_state,
 )
 
@@ -215,6 +216,17 @@ async def import_session_from_browser(
         len(live),
     )
     cookie_path = portable_cookie_path(user_data_dir)
+
+    # An import seeds a session that may belong to a different account than the
+    # one already on disk, so the previous profile is retired rather than
+    # reused: Chromium keeps machine_id and friends for the life of a profile
+    # directory, which would present both accounts to LinkedIn as one device.
+    # Closing first so a later teardown cannot export the retired session's
+    # cookies over the freshly staged ones.
+    from linkedin_mcp_server.drivers.browser import close_browser
+
+    await close_browser()
+    await asyncio.to_thread(rotate_source_profile, user_data_dir)
 
     staged_any = False
     for profile, _meta in live:

@@ -385,3 +385,38 @@ async def test_import_app_bound_only_raises_decryption_error(
     with pytest.raises(CookieDecryptionError) as exc:
         await import_session_from_browser(None, user_data_dir=user_data_dir)
     assert "Brave" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_import_retires_the_previous_profile_first(monkeypatch, tmp_path):
+    """An import seeds a session that may belong to a different account, so the
+    profile on disk is retired rather than reused — Chromium keeps machine_id
+    for the life of a directory, which would present both accounts as one
+    device. Auto-import had no clearing at all before this."""
+    user_data_dir = tmp_path / "profile"
+    profile = _profile("chrome", "Default")
+    order: list[str] = []
+
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate,
+        "extract_linkedin_cookies",
+        lambda p: (order.append("stage"), [_cookie("li_at")])[1],
+    )
+    monkeypatch.setattr(orchestrate, "synthesize_user_agent", lambda p: None)
+    monkeypatch.setattr(
+        orchestrate,
+        "rotate_source_profile",
+        lambda *_args: order.append("rotate"),
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(return_value=True),
+    )
+
+    assert await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+
+    assert order[0] == "rotate", "the old profile must be retired before staging"

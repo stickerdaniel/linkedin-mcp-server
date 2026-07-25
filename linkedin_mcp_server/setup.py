@@ -15,9 +15,13 @@ from linkedin_mcp_server.core import (
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
-from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
+from linkedin_mcp_server.session_state import (
+    portable_cookie_path,
+    rotate_source_profile,
+    write_source_state,
+)
 
-from linkedin_mcp_server.drivers.browser import get_profile_dir
+from linkedin_mcp_server.drivers.browser import close_browser, get_profile_dir
 
 
 async def interactive_login(user_data_dir: Path | None = None) -> bool:
@@ -39,6 +43,14 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
     """
     if user_data_dir is None:
         user_data_dir = get_profile_dir()
+
+    # A manual login means a new session, possibly for a different account, so
+    # the previous profile must not be reused: Chromium would keep its existing
+    # machine_id and friends and hand LinkedIn the same device identity twice.
+    # Closing first so a later teardown cannot export the retired session's
+    # cookies over the new ones (drivers.browser exports on close).
+    await close_browser()
+    await asyncio.to_thread(rotate_source_profile, user_data_dir)
 
     config = get_config()
     login_timeout_ms = int(config.browser.login_timeout_seconds * 1000)

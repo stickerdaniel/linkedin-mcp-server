@@ -37,6 +37,7 @@ def _patch_login_deps(
     browser_factory,
     config: AppConfig | None = None,
     write_source_state: MagicMock | None = None,
+    rotate_source_profile: MagicMock | None = None,
 ) -> None:
     """Patch all interactive_login dependencies in one place."""
     monkeypatch.setattr(
@@ -54,6 +55,11 @@ def _patch_login_deps(
         or MagicMock(return_value=SimpleNamespace(login_generation="gen-1")),
     )
     monkeypatch.setattr("linkedin_mcp_server.setup.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.setup.rotate_source_profile",
+        rotate_source_profile or MagicMock(return_value=None),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.setup.close_browser", AsyncMock())
 
 
 @pytest.mark.asyncio
@@ -297,3 +303,28 @@ async def test_interactive_login_passes_viewport_to_browser_manager(
     await interactive_login(tmp_path / "profile")
 
     assert captured_kwargs.get("viewport") == {"width": 1920, "height": 1080}
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_retires_the_previous_profile(monkeypatch, tmp_path):
+    """A manual login may be for a different account, so the previous Chromium
+    profile must not be reused: it would carry the same machine_id into the new
+    session and present both accounts to LinkedIn as one device."""
+    profile_dir = tmp_path / "profile"
+    rotate = MagicMock(return_value=None)
+    order: list[str] = []
+    rotate.side_effect = lambda *_args: order.append("rotate")
+
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=lambda **kwargs: (
+            order.append("launch"),
+            _BrowserContextManager(_make_browser(export_cookies=True)),
+        )[1],
+        rotate_source_profile=rotate,
+    )
+
+    await interactive_login(profile_dir)
+
+    rotate.assert_called_once_with(profile_dir)
+    assert order == ["rotate", "launch"], "rotation must precede the launch"

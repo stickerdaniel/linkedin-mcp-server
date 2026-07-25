@@ -308,7 +308,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--host HOST` - HTTP server host (default: 127.0.0.1)
 - `--port PORT` - HTTP server port (default: 8000)
 - `--path PATH` - HTTP server path (default: /mcp)
-- `--logout` - Clear all stored LinkedIn auth state, including source and derived runtime profiles
+- `--logout` - Clear all stored LinkedIn auth state, including source and derived runtime profiles and any retired sessions
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in.

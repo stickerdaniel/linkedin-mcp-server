@@ -11,7 +11,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import shutil
 import sys
 from typing import NoReturn
 
@@ -39,7 +38,7 @@ from linkedin_mcp_server.session_state import (
     get_runtime_id,
     portable_cookie_path,
     profile_exists,
-    runtime_profiles_root,
+    rotate_source_profile,
     source_state_path,
 )
 from linkedin_mcp_server.setup import interactive_login
@@ -957,26 +956,11 @@ def _move_auth_state_aside(*, force: bool = False) -> None:
             ``invalidate_auth_and_trigger_relogin`` when the caller already
             knows the session is stale.
     """
-    profile_dir = get_profile_dir()
-    targets = [
-        profile_dir,
-        portable_cookie_path(profile_dir),
-        source_state_path(profile_dir),
-        runtime_profiles_root(profile_dir),
-    ]
-    existing = [target for target in targets if target.exists()]
-    if not existing:
-        return
     if not force and _auth_ready():
         return
-
-    backup_dir = (
-        auth_root_dir(profile_dir)
-        / f"{_INVALID_STATE_PREFIX}{utcnow_iso().replace(':', '-')}"
-    )
-    secure_mkdir(backup_dir)
-    for target in existing:
-        shutil.move(str(target), str(backup_dir / target.name))
+    # Quarantine creation lives in session_state so the routine rotation on a
+    # new session and this stale-state path produce identically shaped backups.
+    rotate_source_profile(get_profile_dir())
 
 
 def _force_move_auth_state_aside() -> None:
