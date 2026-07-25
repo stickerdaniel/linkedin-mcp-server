@@ -230,6 +230,7 @@ class ProfileLease:
         self._refs = 0
         self._owner_pid: int | None = None
         self._acquired_at: float | None = None
+        self._browser_open = False
 
     # -- state ------------------------------------------------------------- #
 
@@ -249,6 +250,25 @@ class ProfileLease:
             return 0.0
         return time.monotonic() - self._acquired_at
 
+    @property
+    def browser_open(self) -> bool:
+        """Whether a browser in *this* process currently uses the profile."""
+        self._reset_if_forked()
+        return self._browser_open
+
+    def mark_browser_open(self) -> None:
+        """Record that a browser in this process now uses the profile."""
+        self._browser_open = True
+
+    def mark_browser_closed(self) -> None:
+        """Record that this process's browser has released the profile.
+
+        Only call this once shutdown is *confirmed*. A browser whose cleanup
+        timed out may still be running, and the whole point of the flag is to
+        stop auth state being moved out from under it.
+        """
+        self._browser_open = False
+
     def _reset_if_forked(self) -> None:
         """Drop inherited state after a fork: the child does not own the lock."""
         if self._owner_pid is not None and self._owner_pid != os.getpid():
@@ -257,6 +277,7 @@ class ProfileLease:
             self._refs = 0
             self._owner_pid = None
             self._acquired_at = None
+            self._browser_open = False
 
     # -- acquisition ------------------------------------------------------- #
 

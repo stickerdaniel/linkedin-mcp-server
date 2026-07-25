@@ -467,6 +467,10 @@ async def _create_browser() -> BrowserManager:
 
     if took_lease:
         _browser_holds_lease = True
+    # Records that Chromium is live on the profile, which the reference count
+    # cannot express: destructive helpers ask for a reference and would simply
+    # get one from our own lease.
+    lease.mark_browser_open()
     return browser
 
 
@@ -613,10 +617,15 @@ async def close_browser() -> None:
             logger.debug("Cookie export on close skipped", exc_info=True)
     confirmed = await browser.close()
 
+    lease = get_profile_lease()
+    if confirmed:
+        # Only now is Chromium provably gone, so only now may auth state move.
+        lease.mark_browser_closed()
+
     if _browser_holds_lease:
         if confirmed:
             _browser_holds_lease = False
-            get_profile_lease().release()
+            lease.release()
         else:
             # Chromium may still be running: close() bounds its cleanup steps and
             # reports failure rather than hanging. Handing the profile to another

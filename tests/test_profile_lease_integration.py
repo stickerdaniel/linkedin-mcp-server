@@ -150,6 +150,51 @@ class TestDestructiveOperationsRefuse:
             holder.kill()
             holder.wait(timeout=10)
 
+    def test_rotate_refuses_while_this_process_has_a_browser_open(
+        self, tmp_path: Path
+    ) -> None:
+        """The reference count alone cannot answer "is our own Chromium live?".
+
+        A destructive helper asking our own lease for a reference simply gets
+        one, so without an explicit flag rotation would move the profile out
+        from under this process's running browser. That matters most after a
+        close whose shutdown could not be confirmed, where the lease is kept
+        precisely because Chromium may still be alive.
+        """
+        profile = tmp_path / "profile"
+        profile.mkdir(parents=True)
+        (profile / "Default").mkdir()
+        (profile / "Default" / "Cookies").write_text("x")
+
+        lease = get_profile_lease(profile)
+        assert lease.try_acquire()
+        lease.mark_browser_open()
+        try:
+            with pytest.raises(RuntimeError, match="browser open on the profile"):
+                rotate_source_profile(profile)
+            with pytest.raises(RuntimeError, match="browser open on the profile"):
+                clear_auth_state(profile)
+            assert (profile / "Default" / "Cookies").exists()
+        finally:
+            lease.mark_browser_closed()
+            lease.release()
+
+    def test_rotate_proceeds_once_our_browser_is_confirmed_closed(
+        self, tmp_path: Path
+    ) -> None:
+        profile = tmp_path / "profile"
+        profile.mkdir(parents=True)
+        (profile / "Default").mkdir()
+        (profile / "Default" / "Cookies").write_text("x")
+
+        lease = get_profile_lease(profile)
+        assert lease.try_acquire()
+        lease.mark_browser_open()
+        lease.mark_browser_closed()
+        lease.release()
+
+        assert rotate_source_profile(profile) is not None
+
     def test_rotate_succeeds_once_the_profile_is_free(self, tmp_path: Path) -> None:
         profile = tmp_path / "profile"
         profile.mkdir(parents=True)

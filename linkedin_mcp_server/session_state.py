@@ -442,10 +442,15 @@ def profile_in_use_by(profile_dir: Path) -> Path | None:
 def _require_exclusive_profile(profile_dir: Path, *, action: str) -> None:
     """Refuse to mutate auth state while any process is using the profile.
 
-    Two independent signals, because neither alone is sufficient:
+    Three independent signals, because none alone is sufficient:
 
-    * Our own profile lease, which every cooperating process takes before it
-      opens Chromium. Authoritative, but only among processes that know about it.
+    * This process's own browser. The lease is reference-counted, so asking it
+      for another reference would simply succeed and prove nothing about whether
+      our Chromium is still running — the flag is what answers that. It matters
+      most when a close could not be confirmed: the lease is deliberately kept in
+      that case because Chromium may still be alive.
+    * The lease itself, which every cooperating process takes before it opens
+      Chromium. Authoritative, but only among processes that know about it.
     * Chromium's ``SingletonLock``, which catches a foreign holder — an older
       version, a container, a human with a browser open on the directory. Note it
       is written only by full Chrome: the default ``chrome-headless-shell`` never
@@ -459,6 +464,11 @@ def _require_exclusive_profile(profile_dir: Path, *, action: str) -> None:
     from linkedin_mcp_server.profile_lease import get_profile_lease
 
     lease = get_profile_lease(profile_dir)
+    if lease.browser_open:
+        raise RuntimeError(
+            "This server still has a browser open on the profile. "
+            f"Close it before {action}."
+        )
     if not lease.try_acquire():
         raise RuntimeError(
             "The browser profile is in use by another process. "
