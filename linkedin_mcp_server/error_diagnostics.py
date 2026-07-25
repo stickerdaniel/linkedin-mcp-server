@@ -389,6 +389,7 @@ def _tool_name_for_context(payload: dict[str, Any]) -> str | None:
         "get_company_posts",
         "get_job_details",
         "search_jobs",
+        "get_saved_jobs",
         "search_people",
         "close_session",
     }:
@@ -404,6 +405,8 @@ def _tool_name_for_context(payload: dict[str, Any]) -> str | None:
             return "search_people"
         if "/jobs/search" in target_url:
             return "search_jobs"
+    if context == "extract_saved_jobs_page":
+        return "get_saved_jobs"
 
     return None
 

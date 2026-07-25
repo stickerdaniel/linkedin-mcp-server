@@ -6,6 +6,7 @@ context. Implements a singleton pattern for browser reuse across tool calls with
 automatic profile persistence.
 """
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -48,6 +49,11 @@ DEFAULT_PROFILE_DIR = Path.home() / ".linkedin-mcp" / "profile"
 _browser: BrowserManager | None = None
 _browser_cookie_export_path: Path | None = None
 _headless: bool = True
+# Serializes singleton creation: tool calls are serialized by the tool-call
+# middleware, but the background login flow started at startup can resume into
+# this path and race the first tool call, and an unguarded check-then-create
+# would launch two browsers against the same profile.
+_browser_create_lock = asyncio.Lock()
 
 
 def _debug_skip_checkpoint_restart() -> bool:
@@ -415,13 +421,24 @@ async def get_or_create_browser(
     Raises:
         AuthenticationError: If no valid authentication found
     """
-    global _browser, _browser_cookie_export_path, _headless
+    global _headless
 
     if headless is not None:
         _headless = headless
 
     if _browser is not None:
         return _browser
+
+    # Double-checked: only one concurrent caller may create the singleton.
+    async with _browser_create_lock:
+        if _browser is not None:
+            return _browser
+        return await _create_browser()
+
+
+async def _create_browser() -> BrowserManager:
+    """Create and initialize the singleton (caller holds _browser_create_lock)."""
+    global _browser, _browser_cookie_export_path
 
     launch_options, viewport = _launch_options()
     source_profile_dir = get_profile_dir()

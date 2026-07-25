@@ -149,3 +149,52 @@ def register_job_tools(
                 raise_tool_error(relogin_exc, "search_jobs")
         except Exception as e:
             raise_tool_error(e, "search_jobs")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Saved Jobs",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_saved_jobs(
+        ctx: Context,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List job postings saved by the authenticated LinkedIn user.
+
+        Returns job_ids that can be passed to get_job_details for full info.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            max_pages: Maximum number of saved-jobs pages to load (1-10, default 3)
+
+        Returns:
+            Dict with url, sections (name -> raw text), job_ids (list of
+            numeric job ID strings usable with get_job_details), and optional references.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_saved_jobs"
+            )
+            logger.info("Fetching saved jobs (max_pages=%d)", max_pages)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading saved jobs"
+            )
+
+            result = await extractor.get_saved_jobs(max_pages=max_pages)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_saved_jobs")
+        except Exception as e:
+            raise_tool_error(e, "get_saved_jobs")  # NoReturn
