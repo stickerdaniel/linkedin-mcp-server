@@ -1171,6 +1171,209 @@ class TestFeedTools:
             await mcp.call_tool("get_feed", {"num_posts": 51})
 
 
+class TestGetPostCommentsTool:
+    async def test_get_post_comments_success(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.get_post_comments = AsyncMock(
+            return_value=ExtractedSection(
+                text="Post body\nAlice: Great post!\nBob: Agreed",
+                references=[{"kind": "person", "url": "/in/alice/", "text": "Alice"}],
+            )
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        result = await tool_fn(
+            "urn:li:activity:123", mock_context, extractor=mock_extractor
+        )
+        assert (
+            result["url"] == "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+        )
+        assert (
+            result["sections"]["post"] == "Post body\nAlice: Great post!\nBob: Agreed"
+        )
+        assert result["references"]["post"][0]["url"] == "/in/alice/"
+        mock_extractor.get_post_comments.assert_awaited_once_with(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+            max_scrolls=None,
+        )
+
+    async def test_get_post_comments_accepts_full_permalink(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.get_post_comments = AsyncMock(
+            return_value=ExtractedSection(text="Post body", references=[])
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        result = await tool_fn(
+            "https://www.linkedin.com/posts/alice_x-activity-1-yy?utm_source=share",
+            mock_context,
+            max_scrolls=10,
+            extractor=mock_extractor,
+        )
+        assert result["url"] == "https://www.linkedin.com/posts/alice_x-activity-1-yy/"
+        mock_extractor.get_post_comments.assert_awaited_once_with(
+            "https://www.linkedin.com/posts/alice_x-activity-1-yy/",
+            max_scrolls=10,
+        )
+
+    async def test_get_post_comments_rejects_invalid_url(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        with pytest.raises(ToolError, match="post_url"):
+            await tool_fn(
+                "https://www.linkedin.com/in/alice/",
+                mock_context,
+                extractor=MagicMock(),
+            )
+
+    async def test_get_post_comments_rate_limited_surfaces_section_error(
+        self, mock_context
+    ):
+        mock_extractor = MagicMock()
+        mock_extractor.get_post_comments = AsyncMock(
+            return_value=ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        result = await tool_fn(
+            "urn:li:activity:123", mock_context, extractor=mock_extractor
+        )
+        assert result["sections"] == {}
+        assert result["section_errors"]["post"]["error_type"] == "rate_limit"
+
+    async def test_get_post_comments_returns_section_errors(self, mock_context):
+        mock_extractor = MagicMock()
+        mock_extractor.get_post_comments = AsyncMock(
+            return_value=ExtractedSection(
+                text="",
+                references=[],
+                error={"issue_template_path": "/tmp/post-issue.md"},
+            )
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        result = await tool_fn(
+            "urn:li:activity:123", mock_context, extractor=mock_extractor
+        )
+        assert result["sections"] == {}
+        assert "post" in result["section_errors"]
+
+
+class TestGetMyAnalyticsTool:
+    async def test_get_my_analytics_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/analytics/",
+            "sections": {"content": "21,182\nImpressions"},
+        }
+        mock_extractor = MagicMock()
+        mock_extractor.get_my_analytics = AsyncMock(return_value=expected)
+
+        from linkedin_mcp_server.tools.analytics import register_analytics_tools
+
+        mcp = FastMCP("test")
+        register_analytics_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_my_analytics")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+        assert result["url"] == "https://www.linkedin.com/analytics/"
+        assert "content" in result["sections"]
+        # Default (None) requests all sections
+        call_args = mock_extractor.get_my_analytics.call_args
+        assert call_args.args[0] == {
+            "content",
+            "audience",
+            "top_posts",
+            "profile_views",
+            "search_appearances",
+        }
+
+    async def test_get_my_analytics_passes_sections_and_time_range(self, mock_context):
+        expected = {"url": "https://www.linkedin.com/analytics/", "sections": {}}
+        mock_extractor = MagicMock()
+        mock_extractor.get_my_analytics = AsyncMock(return_value=expected)
+
+        from linkedin_mcp_server.tools.analytics import register_analytics_tools
+
+        mcp = FastMCP("test")
+        register_analytics_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_my_analytics")
+        await tool_fn(
+            mock_context,
+            sections="content,audience",
+            time_range="28d",
+            extractor=mock_extractor,
+        )
+        call_args = mock_extractor.get_my_analytics.call_args
+        assert call_args.args[0] == {"content", "audience"}
+        assert call_args.kwargs["time_range"] == "28d"
+
+    async def test_get_my_analytics_unknown_section(self, mock_context):
+        expected = {"url": "https://www.linkedin.com/analytics/", "sections": {}}
+        mock_extractor = MagicMock()
+        mock_extractor.get_my_analytics = AsyncMock(return_value=expected)
+
+        from linkedin_mcp_server.tools.analytics import register_analytics_tools
+
+        mcp = FastMCP("test")
+        register_analytics_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_my_analytics")
+        result = await tool_fn(
+            mock_context, sections="content,bogus", extractor=mock_extractor
+        )
+        assert result["unknown_sections"] == ["bogus"]
+
+    async def test_get_my_analytics_invalid_time_range_surfaces_tool_error(
+        self, mock_context
+    ):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.scraping.extractor import FilterValidationError
+
+        mock_extractor = MagicMock()
+        mock_extractor.get_my_analytics = AsyncMock(
+            side_effect=FilterValidationError(
+                "Invalid time_range '14d'. Valid values: 7d, 28d, 90d, 365d."
+            )
+        )
+
+        from linkedin_mcp_server.tools.analytics import register_analytics_tools
+
+        mcp = FastMCP("test")
+        register_analytics_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_my_analytics")
+        with pytest.raises(ToolError, match="time_range"):
+            await tool_fn(mock_context, time_range="14d", extractor=mock_extractor)
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.server import create_mcp_server
@@ -1193,6 +1396,8 @@ class TestToolTimeouts:
             "search_conversations",
             "send_message",
             "get_feed",
+            "get_post_comments",
+            "get_my_analytics",
             "close_session",
         )
 
@@ -1225,6 +1430,8 @@ class TestToolTimeouts:
             "search_conversations",
             "send_message",
             "get_feed",
+            "get_post_comments",
+            "get_my_analytics",
             "close_session",
         )
 

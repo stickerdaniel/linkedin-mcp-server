@@ -95,6 +95,11 @@ _REFERENCE_CAPS = {
     "honors": 12,
     "languages": 12,
     "posts": 12,
+    "comments": 12,
+    # A post permalink page carries one anchor per commenter plus the post
+    # author and attachments; headroom above the default keeps long comment
+    # threads' participants addressable.
+    "post": 30,
     "jobs": 8,
     "search_results": 15,
     "job_posting": 8,
@@ -383,6 +388,26 @@ def derive_context(
             return "post author"
         if kind == "feed_post":
             return "company post"
+        return "post attachment"
+
+    if section_name == "comments":
+        # Comments activity page: feed_post anchors are the posts the person
+        # commented on; person anchors are the authors of those posts (and
+        # the commenter themselves).
+        if kind == "feed_post":
+            return "commented post"
+        if kind == "person":
+            return "post author"
+        return "post attachment"
+
+    if section_name == "post":
+        # Post permalink page: person anchors mix the post author and
+        # commenters; the surrounding innerText carries the roles, so no
+        # context guess is made for them.
+        if kind == "person":
+            return None
+        if kind == "feed_post":
+            return "post"
         return "post attachment"
 
     if section_name in {"main_profile", "about"}:

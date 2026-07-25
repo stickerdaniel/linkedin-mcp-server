@@ -19,6 +19,7 @@ from linkedin_mcp_server.scraping.extractor import (
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
+    normalize_post_url,
     strip_conversation_chrome,
     strip_linkedin_noise,
 )
@@ -119,6 +120,79 @@ class TestBuildJobSearchUrl:
         assert "f_WT=2" in url
         assert "f_EA=true" in url
         assert "sortBy=DD" in url
+
+
+class TestNormalizePostUrl:
+    """Tests for normalize_post_url canonicalization and rejection."""
+
+    def test_bare_activity_urn(self):
+        assert (
+            normalize_post_url("urn:li:activity:7203847000000000000")
+            == "https://www.linkedin.com/feed/update/urn:li:activity:7203847000000000000/"
+        )
+
+    def test_bare_ugcpost_urn(self):
+        assert (
+            normalize_post_url("urn:li:ugcPost:12345")
+            == "https://www.linkedin.com/feed/update/urn:li:ugcPost:12345/"
+        )
+
+    def test_relative_feed_update_path(self):
+        assert (
+            normalize_post_url("/feed/update/urn:li:activity:123/")
+            == "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+        )
+
+    def test_relative_posts_slug_path(self):
+        assert (
+            normalize_post_url("/posts/johndoe_topic-activity-123-Ab_c")
+            == "https://www.linkedin.com/posts/johndoe_topic-activity-123-Ab_c/"
+        )
+
+    def test_full_url_with_query_stripped(self):
+        assert (
+            normalize_post_url(
+                "https://www.linkedin.com/feed/update/urn:li:activity:123/?utm_source=share"
+            )
+            == "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+        )
+
+    def test_percent_encoded_urn(self):
+        assert (
+            normalize_post_url(
+                "https://www.linkedin.com/feed/update/urn%3Ali%3Aactivity%3A123"
+            )
+            == "https://www.linkedin.com/feed/update/urn%3Ali%3Aactivity%3A123/"
+        )
+
+    def test_missing_trailing_slash_added(self):
+        assert (
+            normalize_post_url("/feed/update/urn:li:activity:123")
+            == "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+        )
+
+    def test_rejects_non_linkedin_host(self):
+        assert (
+            normalize_post_url(
+                "https://evil.example.com/feed/update/urn:li:activity:1/"
+            )
+            is None
+        )
+
+    def test_rejects_profile_path(self):
+        assert normalize_post_url("/in/johndoe/") is None
+
+    def test_rejects_arbitrary_linkedin_path(self):
+        assert normalize_post_url("https://www.linkedin.com/jobs/view/123/") is None
+
+    def test_rejects_non_numeric_urn(self):
+        assert normalize_post_url("urn:li:activity:abc") is None
+
+    def test_rejects_empty(self):
+        assert normalize_post_url("  ") is None
+
+    def test_rejects_plain_text(self):
+        assert normalize_post_url("check out my post") is None
 
 
 @pytest.fixture
@@ -669,6 +743,7 @@ class TestScrapePersonUrls:
             "projects",
             "contact_info",
             "posts",
+            "comments",
         }
         with (
             patch.object(
@@ -693,8 +768,8 @@ class TestScrapePersonUrls:
         page_urls = [call.args[0] for call in mock_extract.call_args_list]
         overlay_urls = [call.args[0] for call in mock_overlay.call_args_list]
         all_urls = page_urls + overlay_urls
-        # 10 full-page sections + 1 overlay (contact_info)
-        assert len(page_urls) == 10
+        # 11 full-page sections + 1 overlay (contact_info)
+        assert len(page_urls) == 11
         assert len(overlay_urls) == 1
         # Verify each expected suffix was navigated
         assert any(u.endswith("/in/testuser/") for u in all_urls)
@@ -708,6 +783,7 @@ class TestScrapePersonUrls:
         assert any("/details/projects/" in u for u in all_urls)
         assert any("/overlay/contact-info/" in u for u in overlay_urls)
         assert any("/recent-activity/all/" in u for u in all_urls)
+        assert any("/recent-activity/comments/" in u for u in all_urls)
         assert set(result["sections"]) == all_sections
 
     async def test_posts_visits_recent_activity(self, mock_page):
@@ -735,6 +811,32 @@ class TestScrapePersonUrls:
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/recent-activity/all/" in url for url in urls)
         assert "posts" in result["sections"]
+
+    async def test_comments_visits_recent_activity_comments(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Commented on a post\nGreat insight!"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("test-user", {"comments"})
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert any("/recent-activity/comments/" in url for url in urls)
+        assert "comments" in result["sections"]
 
     async def test_certifications_visits_details_page(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -5512,3 +5614,245 @@ class TestBuildFeedReferences:
             "/posts/alice_x-ugcPost-1-xx",
         ]
         assert kinds == {"feed_post"}
+
+
+class TestGetPostComments:
+    """Tests for the get_post_comments extractor method."""
+
+    async def test_navigates_expands_and_extracts(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        url = "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+        with (
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor, "_expand_post_comments", new_callable=AsyncMock
+            ) as mock_expand,
+            patch.object(
+                extractor,
+                "_extract_loaded_section",
+                new_callable=AsyncMock,
+                return_value=extracted("Post body\nGreat point!\nThanks!"),
+            ) as mock_section,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_post_comments(url)
+
+        mock_nav.assert_awaited_once_with(url)
+        mock_expand.assert_awaited_once_with(5)
+        assert mock_section.call_args.args[1] == "post"
+        assert result.text == "Post body\nGreat point!\nThanks!"
+
+    async def test_max_scrolls_bounds_pagination_clicks(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        url = "https://www.linkedin.com/posts/alice_x-activity-1-yy/"
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_expand_post_comments", new_callable=AsyncMock
+            ) as mock_expand,
+            patch.object(
+                extractor,
+                "_extract_loaded_section",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ) as mock_section,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.get_post_comments(url, max_scrolls=12)
+
+        mock_expand.assert_awaited_once_with(12)
+        assert mock_section.call_args.args[2] == 12
+
+    async def test_returns_error_diagnostics_on_failure(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "_navigate_to_page",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
+            result = await extractor.get_post_comments(
+                "https://www.linkedin.com/feed/update/urn:li:activity:1/"
+            )
+        assert result.text == ""
+        assert result.error is not None
+
+    @staticmethod
+    def _wire_scrollable_page(mock_page, text_lengths):
+        """Equip the mock page with mouse/viewport and innerText growth."""
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse = MagicMock()
+        mock_page.mouse.move = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
+        mock_page.evaluate = AsyncMock(side_effect=text_lengths)
+
+    async def test_expand_unknown_locale_still_wheel_scrolls(self, mock_page):
+        # Scroll-based pagination is locale-independent; only the button
+        # fallback needs the per-locale table.
+        self._wire_scrollable_page(mock_page, [100, 100, 100])
+        extractor = LinkedInExtractor(mock_page)
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            await extractor._expand_post_comments(5, locale="xx")
+        mock_page.locator.assert_not_called()
+        assert mock_page.mouse.wheel.await_count >= 1
+
+    async def test_expand_stops_after_two_stale_rounds(self, mock_page):
+        # innerText length never grows past the first measurement -> the
+        # loop exits after two stale rounds instead of burning the budget.
+        self._wire_scrollable_page(mock_page, [100, 100, 100, 100, 100])
+        extractor = LinkedInExtractor(mock_page)
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            await extractor._expand_post_comments(10)
+        # round 1: 100 > -1 (progress); rounds 2-3: stale -> stop
+        assert mock_page.mouse.wheel.await_count == 3
+
+    async def test_expand_keeps_scrolling_while_growing(self, mock_page):
+        self._wire_scrollable_page(mock_page, [100, 200, 300, 400])
+        extractor = LinkedInExtractor(mock_page)
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            await extractor._expand_post_comments(4)
+        assert mock_page.mouse.wheel.await_count == 4
+
+
+class TestGetMyAnalytics:
+    """Tests for the get_my_analytics extractor method."""
+
+    async def test_all_sections_visit_analytics_urls(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("21,182\nImpressions"),
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_my_analytics(
+                {
+                    "content",
+                    "audience",
+                    "top_posts",
+                    "profile_views",
+                    "search_appearances",
+                }
+            )
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert len(urls) == 5
+        assert any(u.endswith("/analytics/creator/content/") for u in urls)
+        assert any(u.endswith("/analytics/creator/audience/") for u in urls)
+        assert any(u.endswith("/analytics/creator/top-posts/") for u in urls)
+        assert any(u.endswith("/analytics/profile-views/") for u in urls)
+        assert any(u.endswith("/analytics/search-appearances/") for u in urls)
+        assert result["url"] == "https://www.linkedin.com/analytics/"
+        assert set(result["sections"]) == {
+            "content",
+            "audience",
+            "top_posts",
+            "profile_views",
+            "search_appearances",
+        }
+
+    async def test_time_range_applied_only_to_range_sections(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.get_my_analytics(
+                {"content", "audience", "profile_views"}, time_range="28d"
+            )
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        with_range = [u for u in urls if "timeRange=past_28_days" in u]
+        assert len(with_range) == 2
+        assert all(
+            "/creator/content/" in u or "/creator/audience/" in u for u in with_range
+        )
+        profile_views_url = next(u for u in urls if "/profile-views/" in u)
+        assert "timeRange" not in profile_views_url
+
+    async def test_time_range_accepts_canonical_form(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.get_my_analytics({"content"}, time_range="past_90_days")
+
+        url = mock_extract.call_args.args[0]
+        assert "timeRange=past_90_days" in url
+
+    async def test_invalid_time_range_raises(self, mock_page):
+        from linkedin_mcp_server.scraping.extractor import FilterValidationError
+
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(FilterValidationError, match="time_range"):
+            await extractor.get_my_analytics({"content"}, time_range="14d")
+
+    async def test_section_error_isolated(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[
+                    extracted("stats"),
+                    RuntimeError("boom"),
+                ],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_my_analytics({"content", "audience"})
+
+        assert len(result["sections"]) == 1
+        assert len(result["section_errors"]) == 1

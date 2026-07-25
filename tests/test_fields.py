@@ -1,8 +1,11 @@
 """Tests for scraping section config dicts and section parsers."""
 
 from linkedin_mcp_server.scraping.fields import (
+    ANALYTICS_SECTIONS,
+    ANALYTICS_TIME_RANGE_SECTIONS,
     COMPANY_SECTIONS,
     PERSON_SECTIONS,
+    parse_analytics_sections,
     parse_company_sections,
     parse_person_sections,
 )
@@ -22,6 +25,7 @@ class TestPersonSections:
             "projects",
             "contact_info",
             "posts",
+            "comments",
         }
         assert set(PERSON_SECTIONS) == expected
 
@@ -46,6 +50,61 @@ class TestCompanySections:
     def test_no_overlays(self):
         for name, (_suffix, is_overlay) in COMPANY_SECTIONS.items():
             assert is_overlay is False, f"{name} should not be an overlay"
+
+
+class TestAnalyticsSections:
+    def test_expected_keys(self):
+        assert set(ANALYTICS_SECTIONS) == {
+            "content",
+            "audience",
+            "top_posts",
+            "profile_views",
+            "search_appearances",
+        }
+
+    def test_all_suffixes_start_with_slash(self):
+        for name, suffix in ANALYTICS_SECTIONS.items():
+            assert suffix.startswith("/"), f"{name} suffix should start with /"
+
+    def test_time_range_sections_are_known(self):
+        assert ANALYTICS_TIME_RANGE_SECTIONS <= set(ANALYTICS_SECTIONS)
+
+
+class TestParseAnalyticsSections:
+    def test_none_returns_all_sections(self):
+        requested, unknown = parse_analytics_sections(None)
+        assert requested == set(ANALYTICS_SECTIONS)
+        assert unknown == []
+
+    def test_empty_string_returns_all_sections(self):
+        requested, unknown = parse_analytics_sections("")
+        assert requested == set(ANALYTICS_SECTIONS)
+        assert unknown == []
+
+    def test_single_section(self):
+        requested, unknown = parse_analytics_sections("content")
+        assert requested == {"content"}
+        assert unknown == []
+
+    def test_multiple_sections(self):
+        requested, unknown = parse_analytics_sections("content,audience")
+        assert requested == {"content", "audience"}
+        assert unknown == []
+
+    def test_invalid_names_returned(self):
+        requested, unknown = parse_analytics_sections("content,bogus")
+        assert requested == {"content"}
+        assert unknown == ["bogus"]
+
+    def test_only_invalid_names_falls_back_to_all(self):
+        requested, unknown = parse_analytics_sections("bogus")
+        assert requested == set(ANALYTICS_SECTIONS)
+        assert unknown == ["bogus"]
+
+    def test_whitespace_and_case_handling(self):
+        requested, unknown = parse_analytics_sections(" Content , AUDIENCE ")
+        assert requested == {"content", "audience"}
+        assert unknown == []
 
 
 class TestParsePersonSections:
@@ -91,7 +150,7 @@ class TestParsePersonSections:
 
     def test_all_sections(self):
         requested, unknown = parse_person_sections(
-            "experience,education,interests,honors,languages,certifications,skills,projects,contact_info,posts"
+            "experience,education,interests,honors,languages,certifications,skills,projects,contact_info,posts,comments"
         )
         assert requested == set(PERSON_SECTIONS)
         assert unknown == []
