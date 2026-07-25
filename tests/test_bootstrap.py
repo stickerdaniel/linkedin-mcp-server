@@ -1851,3 +1851,21 @@ class TestAutoLogin:
             login_task = get_bootstrap_state().login_task
             if login_task is not None:
                 login_task.cancel()
+
+
+def test_move_auth_state_aside_reports_a_held_profile(monkeypatch):
+    """Swallowing this would open a login browser whose own rotation fails at
+    the same point, after telling the user the browser had opened."""
+    from linkedin_mcp_server import bootstrap
+    from linkedin_mcp_server.exceptions import AuthenticationBootstrapFailedError
+
+    monkeypatch.setattr(
+        bootstrap,
+        "rotate_source_profile",
+        MagicMock(side_effect=RuntimeError("in use by another process")),
+    )
+
+    with pytest.raises(
+        AuthenticationBootstrapFailedError, match="No login was started"
+    ):
+        bootstrap._move_auth_state_aside(force=True)

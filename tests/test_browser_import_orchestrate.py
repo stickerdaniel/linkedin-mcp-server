@@ -6,7 +6,7 @@ import os
 import stat
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -385,3 +385,72 @@ async def test_import_app_bound_only_raises_decryption_error(
     with pytest.raises(CookieDecryptionError) as exc:
         await import_session_from_browser(None, user_data_dir=user_data_dir)
     assert "Brave" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_import_retires_the_previous_profile_first(monkeypatch, tmp_path):
+    """An import seeds a session that may belong to a different account, so the
+    profile on disk is retired rather than reused — Chromium keeps machine_id
+    for the life of a directory, which would present both accounts as one
+    device. Auto-import had no clearing at all before this."""
+    user_data_dir = tmp_path / "profile"
+    profile = _profile("chrome", "Default")
+    order: list[str] = []
+
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate,
+        "extract_linkedin_cookies",
+        lambda p: (order.append("stage"), [_cookie("li_at")])[1],
+    )
+    monkeypatch.setattr(orchestrate, "synthesize_user_agent", lambda p: None)
+    monkeypatch.setattr(
+        orchestrate,
+        "rotate_shielded",
+        AsyncMock(side_effect=lambda *a: order.append("rotate")),
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(return_value=True),
+    )
+
+    assert await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+
+    assert order[0] == "rotate", "the old profile must be retired before staging"
+
+
+@pytest.mark.asyncio
+async def test_import_restores_the_session_when_every_candidate_is_rejected(
+    monkeypatch, tmp_path
+):
+    """Retirement precedes the replacement, so an import that lands nothing must
+    not cost the user the session that was already working."""
+    user_data_dir = tmp_path / "profile"
+    profile = _profile("chrome", "Default")
+    retired = tmp_path / "invalid-state-x"
+    restore = MagicMock(return_value=True)
+
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
+    )
+    monkeypatch.setattr(orchestrate, "synthesize_user_agent", lambda p: None)
+    monkeypatch.setattr(orchestrate, "rotate_shielded", AsyncMock(return_value=retired))
+    monkeypatch.setattr(orchestrate, "restore_source_profile", restore)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(return_value=False),
+    )
+
+    assert (
+        await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+        is False
+    )
+
+    restore.assert_called_once_with(retired, user_data_dir)

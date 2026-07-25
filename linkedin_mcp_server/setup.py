@@ -15,9 +15,14 @@ from linkedin_mcp_server.core import (
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
-from linkedin_mcp_server.session_state import portable_cookie_path, write_source_state
+from linkedin_mcp_server.session_state import (
+    portable_cookie_path,
+    restore_source_profile,
+    rotate_shielded,
+    write_source_state,
+)
 
-from linkedin_mcp_server.drivers.browser import get_profile_dir
+from linkedin_mcp_server.drivers.browser import close_browser, get_profile_dir
 
 
 async def interactive_login(user_data_dir: Path | None = None) -> bool:
@@ -40,7 +45,34 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
     if user_data_dir is None:
         user_data_dir = get_profile_dir()
 
-    config = get_config()
+    # A manual login means a new session, possibly for a different account, so
+    # the previous profile must not be reused: Chromium would keep its existing
+    # machine_id and friends and hand LinkedIn the same device identity twice.
+    # Closing first so a later teardown cannot export the retired session's
+    # cookies over the new ones (drivers.browser exports on close).
+    await close_browser()
+    retired = await rotate_shielded(user_data_dir)
+
+    succeeded = False
+    try:
+        succeeded = await _login_into_fresh_profile(user_data_dir, config=get_config())
+        return succeeded
+    finally:
+        # The retirement happens before the replacement exists, so a login that
+        # is cancelled, times out, or fails to export its cookies would
+        # otherwise leave the user logged out of a session that was working.
+        if retired is not None and not succeeded:
+            if not await asyncio.to_thread(
+                restore_source_profile, retired, user_data_dir
+            ):
+                print(
+                    f"   Warning: the previous session could not be restored. "
+                    f"It is kept at {retired}."
+                )
+
+
+async def _login_into_fresh_profile(user_data_dir: Path, *, config: Any) -> bool:
+    """Drive the manual login against a freshly retired profile directory."""
     login_timeout_ms = int(config.browser.login_timeout_seconds * 1000)
 
     if config.browser.login_timeout_seconds:
