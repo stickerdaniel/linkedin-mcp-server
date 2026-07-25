@@ -149,18 +149,21 @@ async def _login_holding_the_profile(
                     f"login browser did not shut down cleanly. It is kept at "
                     f"{retired}."
                 )
-            # Cancellation is deferred rather than abandoning the worker: it
-            # is already moving the session back, and dropping its result mid
-            # move would leave the user logged out with the pieces split.
-            elif not (
-                await run_deferring_cancels(
+            else:
+                # Cancellation is deferred rather than abandoning the worker: it
+                # is already moving the session back, and dropping its result
+                # mid move would leave the user logged out with the pieces
+                # split. It is re-raised afterwards so the caller still sees it.
+                restored, cancelled = await run_deferring_cancels(
                     functools.partial(restore_source_profile, retired, user_data_dir)
                 )
-            )[0]:
-                print(
-                    f"   Warning: the previous session could not be restored. "
-                    f"It is kept at {retired}."
-                )
+                if not restored:
+                    print(
+                        f"   Warning: the previous session could not be restored. "
+                        f"It is kept at {retired}."
+                    )
+                if cancelled:
+                    raise asyncio.CancelledError
 
 
 async def _login_into_fresh_profile(

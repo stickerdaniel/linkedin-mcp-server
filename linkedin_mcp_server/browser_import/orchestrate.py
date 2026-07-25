@@ -290,17 +290,17 @@ async def _import_holding_the_profile(
             if retired is not None and not imported:
                 # Deferred cancellation: abandoning the worker mid move would
                 # leave the session split across quarantine and the live paths.
-                if not (
-                    await run_deferring_cancels(
-                        functools.partial(
-                            restore_source_profile, retired, user_data_dir
-                        )
-                    )
-                )[0]:
+                # Re-raised afterwards so the caller still sees the cancel.
+                restored, cancelled = await run_deferring_cancels(
+                    functools.partial(restore_source_profile, retired, user_data_dir)
+                )
+                if not restored:
                     logger.warning(
                         "Could not restore the previous session; it is kept at %s",
                         retired,
                     )
+                if cancelled:
+                    raise asyncio.CancelledError
         elif retired is not None:
             logger.warning(
                 "The previous session was not restored because a validation "
