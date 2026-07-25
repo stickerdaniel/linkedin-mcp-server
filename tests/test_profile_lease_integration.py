@@ -359,13 +359,77 @@ class TestPollerDoesNotInterruptWork:
                 assert not closed, "the poller closed a browser mid tool call"
                 fake_browser.close.assert_not_awaited()
 
-                # Once the call finishes, the handoff goes through.
+                # Once the call finishes and the hold window has passed, the
+                # handoff goes through.
                 browser_module.note_activity()
+                monkeypatch.setenv("BROWSER_MIN_HOLD", "0")
+                from linkedin_mcp_server.config import reset_config
+
+                reset_config()
                 assert await browser_module.release_profile_if_idle_or_requested()
                 fake_browser.close.assert_awaited()
         finally:
             waiter.kill()
             waiter.wait(timeout=10)
+
+
+class TestMinimumHoldWindow:
+    """The hold window bounds how often ownership can move.
+
+    Every handoff costs a browser reopen, and a reopen re-validates `/feed/`, so
+    two busy clients trading the browser on every call would multiply LinkedIn
+    requests. The window is measured from when the profile was taken, not from
+    idleness: by the time the check runs the call has already finished, so an
+    idle-based test would always pass and the window would silently never apply.
+    """
+
+    async def test_recent_owner_keeps_the_browser(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        monkeypatch.setenv("BROWSER_MIN_HOLD", "300")
+
+        lease = get_profile_lease(tmp_path / "profile")
+        assert lease.try_acquire()
+        lease.mark_browser_open()
+
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        waiter = subprocess.Popen(
+            [sys.executable, str(_WORKER), "announce", str(tmp_path), "5"],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert waiter.stdout is not None
+            while "ANNOUNCED" not in waiter.stdout.readline():
+                pass
+
+            with (
+                patch.multiple(
+                    browser_module,
+                    _browser=fake_browser,
+                    _browser_cookie_export_path=None,
+                    _browser_holds_lease=True,
+                ),
+                patch.object(browser_module, "get_profile_lease", return_value=lease),
+            ):
+                browser_module.note_activity()  # a call just finished
+                closed = await browser_module.release_profile_if_idle_or_requested()
+
+            assert not closed, (
+                "handed the browser over inside the hold window, so busy clients "
+                "would trade it on every call and multiply feed validations"
+            )
+            fake_browser.close.assert_not_awaited()
+        finally:
+            waiter.kill()
+            waiter.wait(timeout=10)
+            lease.mark_browser_closed()
+            lease.release()
 
 
 class TestConfirmedClose:

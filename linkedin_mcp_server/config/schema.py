@@ -30,7 +30,11 @@ MAX_BROWSER_WAIT_SECONDS: float = 45.0
 # Every handoff costs a reopen, and a reopen re-validates /feed/, so handing over
 # on literally every call would multiply LinkedIn requests. Matched to the wait
 # budget: a longer window would push waiters past their own timeout.
-DEFAULT_BROWSER_MIN_HOLD_SECONDS: float = 25.0
+DEFAULT_BROWSER_MIN_HOLD_SECONDS: float = 20.0
+# Slack between the end of the hold window and the waiter's deadline: the owner
+# notices on a one-second poll and then has to tear Chromium down (~0.7s
+# measured). Without it a waiter gives up moments before the handover lands.
+BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
 # Close an idle browser and release the profile after this long with no calls.
 # A backstop only — the handoff signal does the real work — so it is deliberately
 # long: a reopen costs one more LinkedIn request. 0 disables it.
@@ -144,15 +148,23 @@ class BrowserConfig:
                 MAX_BROWSER_WAIT_SECONDS,
             )
             self.browser_wait_seconds = MAX_BROWSER_WAIT_SECONDS
-        # A hold window longer than the wait budget means waiters routinely time
-        # out before the owner is willing to hand over.
-        if self.browser_min_hold_seconds > self.browser_wait_seconds:
+        # The hold window has to end far enough inside the wait budget that the
+        # owner still notices and finishes closing before the waiter gives up.
+        # Equal values are not enough: the owner polls on an interval and then
+        # has to tear Chromium down, so it would answer just after the deadline.
+        latest_useful_hold = max(
+            0.0, self.browser_wait_seconds - BROWSER_HANDOFF_MARGIN_SECONDS
+        )
+        if self.browser_min_hold_seconds > latest_useful_hold:
             logger.warning(
-                "browser_min_hold_seconds %.1f exceeds browser_wait_seconds "
-                "%.1f; waiters will time out before a handoff is honoured.",
+                "browser_min_hold_seconds %.1f leaves no room inside the %.1fs "
+                "wait budget for the owner to notice and close; clamping to "
+                "%.1f.",
                 self.browser_min_hold_seconds,
                 self.browser_wait_seconds,
+                latest_useful_hold,
             )
+            self.browser_min_hold_seconds = latest_useful_hold
         if self.chrome_path:
             chrome_path = Path(self.chrome_path)
             if not chrome_path.exists():

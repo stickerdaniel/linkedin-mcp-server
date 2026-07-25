@@ -40,9 +40,11 @@ from linkedin_mcp_server.browser_import.user_agent import synthesize_user_agent
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_write_text
 
 from linkedin_mcp_server.exceptions import (
+    BrowserBusyError,
     CookieDecryptionError,
     NoLinkedInSessionFoundError,
 )
+from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.session_state import (
     portable_cookie_path,
     restore_source_profile,
@@ -225,13 +227,43 @@ async def import_session_from_browser(
     from linkedin_mcp_server.drivers.browser import close_browser
 
     await close_browser()
+
+    # Validation launches Chromium on the source profile, so the import owns it
+    # for the whole rotate-validate-commit flow. Without this another process
+    # could launch against the profile the moment the staged cookies land.
+    lease = get_profile_lease(user_data_dir)
+    if not lease.try_acquire():
+        raise BrowserBusyError(
+            "Another LinkedIn MCP client is using the browser, so a session "
+            "cannot be imported. Close it and try again."
+        )
+    try:
+        return await _import_holding_the_profile(
+            live, cookie_path, user_data_dir, lease
+        )
+    finally:
+        lease.release()
+
+
+async def _import_holding_the_profile(
+    live: list[tuple[BrowserProfile, LiAtMeta]],
+    cookie_path: Path,
+    user_data_dir: Path,
+    lease: ProfileLease,
+) -> bool:
+    """Rotate, validate and commit; the caller owns the profile throughout."""
+    # Rotation comes before the browser is marked open: the exclusivity check
+    # treats an open browser as a reason to refuse, so marking first would stop
+    # every re-import from retiring the profile it replaces.
     retired = await rotate_shielded(user_data_dir)
 
     imported = False
+    lease.mark_browser_open()
     try:
         imported = await _import_first_accepted(live, cookie_path, user_data_dir)
         return imported
     finally:
+        lease.mark_browser_closed()
         # The retirement happens before a replacement exists, so an import where
         # every candidate is rejected — or that raises on undecryptable cookies —
         # would otherwise leave the user logged out of a working session.

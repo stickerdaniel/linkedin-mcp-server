@@ -168,10 +168,11 @@ def _open_lock_file(path: Path) -> int:
     """Open *path* for locking, creating it with owner-only permissions."""
     secure_mkdir(path.parent)
     harden_linkedin_tree(path.parent)
-    # O_CLOEXEC so a launched Chromium never inherits the descriptor and keeps
-    # the lease alive past our own exit.
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
-    return fd
+    # Keep the descriptor out of a launched Chromium, which would otherwise hold
+    # the lease alive past our own exit. Windows has no O_CLOEXEC — os.open is
+    # non-inheritable there by default — so it is looked up rather than assumed.
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    return os.open(path, os.O_RDWR | os.O_CREAT | cloexec, 0o600)
 
 
 def _acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:

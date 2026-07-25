@@ -65,6 +65,11 @@ _last_activity: float | None = None
 # Tool calls currently driving the browser. The background handoff poll must not
 # close a browser out from under a running call: the tool holds a Page from it.
 _calls_in_flight: int = 0
+# Serializes close against create. close_browser() clears _browser and then
+# awaits the cookie export and Chromium teardown; without this a tool call
+# arriving in that window would see no browser and launch a second Chromium on
+# the same profile, which is the very corruption this module prevents.
+_browser_lifecycle_lock = asyncio.Lock()
 
 
 def _debug_skip_checkpoint_restart() -> bool:
@@ -253,7 +258,9 @@ async def _authenticate_existing_profile(
             )
         browser.is_authenticated = True
         return browser
-    except Exception:
+    except BaseException:
+        # BaseException so a cancelled startup still tears Chromium down. Left
+        # running it would hold the profile that the caller is about to release.
         await browser.close()
         raise
 
@@ -405,10 +412,12 @@ async def _bridge_runtime_profile(
             logger.info("Derived runtime profile committed for %s", runtime_id)
             reopened.is_authenticated = True
             return reopened
-        except Exception:
+        except BaseException:
             await reopened.close()
             raise
-    except Exception:
+    except BaseException:
+        # BaseException so a cancelled bridge still closes Chromium before the
+        # caller releases the profile, and before the runtime dir is removed.
         await browser.close()
         clear_runtime_profile(runtime_id, source_profile_dir)
         raise
@@ -440,8 +449,10 @@ async def get_or_create_browser(
     if _browser is not None:
         return _browser
 
-    # Double-checked: only one concurrent caller may create the singleton.
-    async with _browser_create_lock:
+    # Double-checked: only one concurrent caller may create the singleton. The
+    # lifecycle lock additionally keeps creation out of an in-progress close,
+    # which clears _browser before it has finished tearing Chromium down.
+    async with _browser_create_lock, _browser_lifecycle_lock:
         if _browser is not None:
             return _browser
         return await _create_browser()
@@ -451,10 +462,20 @@ async def _create_browser() -> BrowserManager:
     """Create and initialize the singleton (caller holds _browser_create_lock)."""
     global _browser, _browser_cookie_export_path, _browser_holds_lease
 
+    lease = get_profile_lease()
+
+    # A previous close could not confirm Chromium had exited, so it may still be
+    # running on this profile. Launching a second one now is exactly the
+    # corruption this module exists to prevent, and the operator has to clear it.
+    if lease.browser_open:
+        raise BrowserBusyError(
+            "A previous browser on this profile did not shut down cleanly and "
+            "may still be running. Restart the server to recover."
+        )
+
     # Own the profile before Chromium touches it. The middleware normally holds a
     # reference already, so this is usually a cheap second reference; taking it
     # here as well keeps every launch path covered, including the CLI ones.
-    lease = get_profile_lease()
     took_lease = False
     if not _browser_holds_lease:
         if not lease.try_acquire():
@@ -463,7 +484,10 @@ async def _create_browser() -> BrowserManager:
 
     try:
         browser = await _create_browser_locked()
-    except Exception:
+    except BaseException:
+        # BaseException, not Exception: a cancelled startup would otherwise
+        # leave the reference held with nothing tracking it, wedging every other
+        # process until this one exits.
         if took_lease:
             lease.release()
         raise
@@ -600,7 +624,31 @@ async def _create_browser_locked() -> BrowserManager:
 
 
 async def close_browser() -> None:
-    """Close the browser, releasing the profile once Chromium is confirmed gone."""
+    """Close the browser, releasing the profile once Chromium is confirmed gone.
+
+    Cancellation is held back until teardown finishes, mirroring
+    ``session_state._off_loop_deferring_cancels``. Interrupting half way leaves a
+    Chromium nobody owns: ``_browser`` is already cleared, so a later call cannot
+    retry, and the lease can be neither confirmed nor released. Shielding alone
+    would not do: it protects the child but re-raises to the caller immediately,
+    releasing the lifecycle lock while teardown is still running, which is
+    exactly when a new launch must not start.
+    """
+    async with _browser_lifecycle_lock:
+        task = asyncio.create_task(_close_browser_locked())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+
+async def _close_browser_locked() -> None:
+    """Tear the browser down; the caller holds the lifecycle lock."""
     global _browser, _browser_cookie_export_path, _browser_holds_lease, _last_activity
 
     browser = _browser
@@ -764,23 +812,32 @@ async def release_profile_if_idle_or_requested() -> bool:
 
     config = get_config().browser
     lease = get_profile_lease()
-    # None means no tool call has run at all, which is idle in the strongest
-    # sense: there is no work in progress to protect.
+    # None means no tool call has ever run, which is idle in the strongest sense.
     idle_for = time.monotonic() - _last_activity if _last_activity is not None else None
 
     if lease.handoff_requested():
-        # Every handoff costs a reopen, and a reopen re-validates /feed/. The
-        # hold window stops a busy pair of clients from trading the browser back
-        # and forth on every single call. An idle owner has nothing to protect,
-        # so it hands over immediately.
+        # Every handoff costs a reopen, and a reopen re-validates /feed/, so a
+        # busy pair of clients trading the browser on every call would multiply
+        # LinkedIn requests. The hold window bounds how often ownership can move.
+        #
+        # It is measured from when we took the profile, not from idleness: by
+        # the time this runs the current call has already finished, so any
+        # idle-based test would always pass and the window would never apply.
         held = lease.held_seconds
-        if idle_for is None or idle_for > 0 or held >= config.browser_min_hold_seconds:
+        never_worked = idle_for is None
+        if never_worked or held >= config.browser_min_hold_seconds:
             logger.info(
                 "Another process is waiting for the browser; handing over (held %.1fs)",
                 held,
             )
             await close_browser()
             return True
+        logger.debug(
+            "Handoff requested but held for only %.1fs of %.1fs; keeping the "
+            "browser to avoid a reopen",
+            held,
+            config.browser_min_hold_seconds,
+        )
         return False
 
     timeout = config.browser_idle_timeout_seconds

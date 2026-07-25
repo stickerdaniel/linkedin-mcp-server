@@ -57,6 +57,9 @@ class BrowserManager:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._is_authenticated = False
+        # False until a teardown proves Chromium exited. Pessimistic by default:
+        # a launch that is cancelled before close runs must not read as clean.
+        self._close_confirmed = False
 
     async def __aenter__(self) -> "BrowserManager":
         await self.start()
@@ -65,7 +68,13 @@ class BrowserManager:
     async def __aexit__(
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> None:
-        await self.close()
+        # Recorded rather than returned: ``__aexit__`` cannot report it, and a
+        # caller that hands the profile on afterwards must be able to tell
+        # whether Chromium actually exited. See :attr:`close_confirmed`.
+        # Cleared first so a cancellation mid-teardown leaves it false rather
+        # than claiming a shutdown that never completed.
+        self._close_confirmed = False
+        self._close_confirmed = await self.close()
 
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
@@ -166,6 +175,15 @@ class BrowserManager:
 
         logger.info("Browser closed")
         return confirmed
+
+    @property
+    def close_confirmed(self) -> bool:
+        """Whether the last ``async with`` exit proved Chromium had gone.
+
+        False means cleanup timed out or failed and the browser may still be
+        running, so the profile must not be handed to anyone else.
+        """
+        return self._close_confirmed
 
     @property
     def page(self) -> Page:

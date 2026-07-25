@@ -113,10 +113,11 @@ class SequentialToolExecutionMiddleware(Middleware):
             raise ToolError(str(BrowserBusyError()))
 
         hold_started = time.perf_counter()
-        # Marks the browser as in use so the background handoff poll cannot close
-        # it out from under this call.
-        note_call_started()
         try:
+            # Marks the browser as in use so the background handoff poll cannot
+            # close it out from under this call. Inside the try so the finally
+            # always balances it, including if the call is cancelled.
+            note_call_started()
             return await call_next(context)
         finally:
             hold_seconds = time.perf_counter() - hold_started
