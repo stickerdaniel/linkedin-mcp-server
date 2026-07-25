@@ -1,8 +1,13 @@
+# Release notes are generated from PR labels only; GitHub cannot filter by
+# title or path. The label-pr workflow derives a label from the PR title's
+# conventional-commit type, so these rules apply without manual labelling.
 changelog:
   exclude:
     labels:
       - dependencies
       - chore
+      - documentation
+      - refactoring
       - skip-changelog
     authors:
       - renovate[bot]
