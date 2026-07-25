@@ -10,7 +10,9 @@ from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
     get_or_create_browser,
     reset_browser_for_testing,
+    validate_imported_cookies,
 )
+import linkedin_mcp_server.drivers.browser as browser_module
 from linkedin_mcp_server.session_state import (
     portable_cookie_path,
     runtime_profile_dir,
@@ -736,3 +738,161 @@ async def test_experimental_bridge_validation_failure_before_commit_clears_runti
     assert not runtime_profile_dir(
         "linux-amd64-container", tmp_path / "profile"
     ).exists()
+
+
+@pytest.mark.asyncio
+async def test_validate_imported_cookies_returns_feed_result(tmp_path, monkeypatch):
+    browser = _make_mock_browser()
+    browser.import_cookies = AsyncMock(return_value=True)
+    cookie_path = tmp_path / "cookies.json"
+    cookie_path.write_text(json.dumps([{"name": "li_at"}]))
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser._feed_auth_succeeds",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as feed_ok,
+    ):
+        result = await validate_imported_cookies(cookie_path, tmp_path / "profile")
+
+    assert result is True
+    feed_ok.assert_awaited_once()
+    browser.import_cookies.assert_awaited_once_with(
+        cookie_path, preset_name="bridge_core"
+    )
+    browser.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_validate_imported_cookies_returns_false_when_feed_auth_fails(
+    tmp_path,
+):
+    # Import succeeds but the session is expired -> feed auth fails. The common
+    # real-world case: importable-but-expired cookies.
+    browser = _make_mock_browser()
+    browser.import_cookies = AsyncMock(return_value=True)
+    cookie_path = tmp_path / "cookies.json"
+    cookie_path.write_text(json.dumps([{"name": "li_at"}]))
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser._feed_auth_succeeds",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as feed_ok,
+    ):
+        result = await validate_imported_cookies(cookie_path, tmp_path / "profile")
+
+    assert result is False
+    feed_ok.assert_awaited_once()
+    browser.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_validate_imported_cookies_short_circuits_on_import_failure(
+    tmp_path,
+):
+    browser = _make_mock_browser()
+    browser.import_cookies = AsyncMock(return_value=False)
+    cookie_path = tmp_path / "cookies.json"
+    cookie_path.write_text(json.dumps([{"name": "li_at"}]))
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser._feed_auth_succeeds",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as feed_ok,
+    ):
+        result = await validate_imported_cookies(cookie_path, tmp_path / "profile")
+
+    assert result is False
+    feed_ok.assert_not_awaited()  # short-circuits before the feed check
+    browser.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_validate_imported_cookies_closes_browser_on_error(tmp_path):
+    browser = _make_mock_browser()
+    browser.page.goto = AsyncMock(side_effect=RuntimeError("nav boom"))
+    cookie_path = tmp_path / "cookies.json"
+    cookie_path.write_text(json.dumps([{"name": "li_at"}]))
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=browser,
+        ),
+        pytest.raises(RuntimeError, match="nav boom"),
+    ):
+        await validate_imported_cookies(cookie_path, tmp_path / "profile")
+
+    browser.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_validate_uses_local_manager_not_singleton(tmp_path):
+    browser = _make_mock_browser()
+    browser.import_cookies = AsyncMock(return_value=True)
+    cookie_path = tmp_path / "cookies.json"
+    cookie_path.write_text(json.dumps([{"name": "li_at"}]))
+
+    reset_browser_for_testing()
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser._feed_auth_succeeds",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+    ):
+        await validate_imported_cookies(cookie_path, tmp_path / "profile")
+
+    # The singleton globals must remain untouched by the import validator.
+    assert browser_module._browser is None
+    assert browser_module._browser_cookie_export_path is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_get_or_create_creates_single_browser(monkeypatch):
+    """Two concurrent callers (a tool call and a background caller resuming at
+    startup) must not both launch a browser against the same profile."""
+    import asyncio
+    from typing import Any, cast
+
+    from linkedin_mcp_server.drivers import browser as browser_module
+
+    # Clean starting state regardless of test order; auto-restored at teardown.
+    monkeypatch.setattr(browser_module, "_browser", None)
+
+    calls = {"n": 0}
+    sentinel = cast(Any, object())
+
+    async def fake_create():
+        calls["n"] += 1
+        await asyncio.sleep(0.02)  # hold the lock so the second caller waits
+        browser_module._browser = sentinel
+        return sentinel
+
+    monkeypatch.setattr(browser_module, "_create_browser", fake_create)
+    first, second = await asyncio.gather(
+        get_or_create_browser(), get_or_create_browser()
+    )
+    assert first is sentinel and second is sentinel
+    assert calls["n"] == 1

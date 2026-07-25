@@ -40,12 +40,19 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
     if user_data_dir is None:
         user_data_dir = get_profile_dir()
 
+    config = get_config()
+    login_timeout_ms = int(config.browser.login_timeout_seconds * 1000)
+
+    if config.browser.login_timeout_seconds:
+        budget = f"{config.browser.login_timeout_seconds / 60:.0f} minutes"
+    else:
+        budget = "no time limit"
+
     print("Opening browser for LinkedIn login...")
-    print("   Please log in manually. You have 5 minutes to complete authentication.")
+    print(f"   Please log in manually. You have {budget} to complete authentication.")
     print("   (This handles 2FA, captcha, and any security challenges)")
 
     launch_options: dict[str, Any] = {}
-    config = get_config()
     if config.browser.chrome_path:
         launch_options["executable_path"] = config.browser.chrome_path
 
@@ -72,9 +79,9 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
             if await resolve_remember_me_prompt(browser.page):
                 break
 
-        # Wait for manual login completion
-        # 5 minute timeout (300000ms) allows time for 2FA, captcha, security challenges
-        await wait_for_manual_login(browser.page, timeout=300000)
+        # Wait for manual login completion. The budget comes from
+        # LOGIN_TIMEOUT (config.browser.login_timeout_seconds); 0 = unlimited.
+        await wait_for_manual_login(browser.page, timeout=login_timeout_ms)
 
         # Wait for persistent context to flush cookies to disk
         await asyncio.sleep(2)
@@ -92,7 +99,14 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
         # first successful /feed/ recovery instead of relying on browser teardown.
         if await browser.export_cookies(portable_cookie_path(user_data_dir)):
             print("   Cookies exported for Docker portability")
-            source_state = write_source_state(user_data_dir)
+            # Record the override UA the cookie was minted under (the login
+            # browser ran with config.browser.user_agent). Without this a later
+            # replay from a runtime that lacks the override would fall back to
+            # its default UA, a fingerprint mismatch. None when no override is
+            # set (the runtime default is stable across replays on that runtime).
+            source_state = write_source_state(
+                user_data_dir, user_agent=config.browser.user_agent
+            )
             print(f"   Source session generation: {source_state.login_generation}")
         else:
             print(

@@ -30,7 +30,7 @@ Optional additional keys:
 - `references: {section_name: [{kind, url, text?, context?, value?}]}` — LinkedIn URLs are relative paths; `value` carries non-URL identifiers (e.g. company URN id for `kind: "company_urn"`)
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
-- `job_ids: [id, ...]` (search_jobs only)
+- `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 
 ## Verifying Bug Reports
@@ -95,7 +95,7 @@ Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or worki
   3. Implement and test
   4. Update README.md and docs/docker-hub.md if relevant
   5. Create a draft PR; only convert to regular PR when ready to merge
-  6. Review with AI agents first, then manual review. Do not squash commits.
+  6. Review with AI agents first, then manual review. PRs are squash-merged into `main` (one commit per PR), so keep the PR title as the conventional-commit subject; commits within a PR are for review only.
 
 ## PR Reviews
 

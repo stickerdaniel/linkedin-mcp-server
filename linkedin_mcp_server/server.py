@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan
 
+from linkedin_mcp_server import __version__
 from linkedin_mcp_server.bootstrap import (
     get_runtime_policy,
     initialize_bootstrap,
@@ -22,6 +23,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
+from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
@@ -51,11 +53,13 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
 def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools."""
     mcp = FastMCP(
-        "linkedin_scraper",
+        "mcp-server-linkedin",
+        version=__version__,
         lifespan=browser_lifespan,
         mask_error_details=True,
     )
     mcp.add_middleware(SequentialToolExecutionMiddleware())
+    mcp.add_middleware(UpdateNoticeMiddleware())
 
     # Register all tools
     register_person_tools(mcp, tool_timeout=tool_timeout)

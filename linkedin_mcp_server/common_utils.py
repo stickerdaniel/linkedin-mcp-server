@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 import re
 import tempfile
+
+_PRIVATE_DIR_MODE = 0o700
 
 
 def slugify_fragment(value: str) -> str:
@@ -35,6 +38,26 @@ def secure_mkdir(path: Path, mode: int = 0o700) -> None:
         p = p.parent
     for part in reversed(missing):
         part.mkdir(mode=mode, exist_ok=True)
+
+
+def harden_linkedin_tree(path: Path) -> None:
+    """Ensure dirs from *path* up to ``.linkedin-mcp`` are owner-only (``0o700``).
+
+    Complements :func:`secure_mkdir` by hardening pre-existing directories that
+    may have been created with default umask permissions. No-op on Windows or
+    when *path* is not inside a ``.linkedin-mcp`` directory.
+    """
+    if os.name == "nt":
+        return
+    d = path if path.is_dir() else path.parent
+    # Bail out early when the path is not inside a .linkedin-mcp tree.
+    if not any(p.name == ".linkedin-mcp" for p in (d, *d.parents)):
+        return
+    for p in (d, *d.parents):
+        if p.is_dir() and stat.S_IMODE(p.stat().st_mode) != _PRIVATE_DIR_MODE:
+            p.chmod(_PRIVATE_DIR_MODE)
+        if p.name == ".linkedin-mcp":
+            return
 
 
 def secure_write_text(path: Path, content: str, mode: int = 0o600) -> None:

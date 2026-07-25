@@ -235,15 +235,30 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
 
     Args:
         page: Patchright page object
-        timeout: Timeout in milliseconds (default: 5 minutes)
+        timeout: Timeout in milliseconds. ``0`` waits with no time limit.
 
     Raises:
-        AuthenticationError: If timeout or login not completed
+        AuthenticationError: If the timeout elapses before login completes.
     """
-    logger.info(
-        "Please complete the login process manually in the browser. "
-        "Waiting up to 5 minutes..."
-    )
+    minutes = timeout / 60000
+    if timeout:
+        logger.info(
+            "Please complete the login process manually in the browser. "
+            "Waiting up to %.0f minutes...",
+            minutes,
+        )
+    else:
+        logger.info(
+            "Please complete the login process manually in the browser. "
+            "Waiting with no time limit (LOGIN_TIMEOUT=0)..."
+        )
+
+    def _timeout_error() -> AuthenticationError:
+        return AuthenticationError(
+            f"Manual login timeout: login was not completed within {minutes:.0f} "
+            "minutes. Increase the limit with LOGIN_TIMEOUT (seconds, 0 = no "
+            "limit) and run --login again."
+        )
 
     loop = asyncio.get_running_loop()
     start_time = loop.time()
@@ -252,10 +267,8 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
         if await resolve_remember_me_prompt(page):
             logger.info("Resolved saved-account chooser during manual login flow")
             elapsed = (loop.time() - start_time) * 1000
-            if elapsed > timeout:
-                raise AuthenticationError(
-                    "Manual login timeout. Please try again and complete login faster."
-                )
+            if timeout and elapsed > timeout:
+                raise _timeout_error()
             continue
 
         if await is_logged_in(page):
@@ -263,9 +276,7 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
             return
 
         elapsed = (loop.time() - start_time) * 1000
-        if elapsed > timeout:
-            raise AuthenticationError(
-                "Manual login timeout. Please try again and complete login faster."
-            )
+        if timeout and elapsed > timeout:
+            raise _timeout_error()
 
         await asyncio.sleep(1)

@@ -48,6 +48,16 @@ def positive_float(value: str) -> float:
     return fvalue
 
 
+def non_negative_float(value: str) -> float:
+    """Argparse type for non-negative finite floats (0 allowed as a sentinel)."""
+    fvalue = float(value)
+    if not (math.isfinite(fvalue) and fvalue >= 0):
+        raise argparse.ArgumentTypeError(
+            f"must be a non-negative finite number, got {value}"
+        )
+    return fvalue
+
+
 class EnvironmentKeys:
     """Environment variable names used by the application."""
 
@@ -64,6 +74,11 @@ class EnvironmentKeys:
     CHROME_PATH = "CHROME_PATH"
     USER_DATA_DIR = "USER_DATA_DIR"
     TOOL_TIMEOUT = "TOOL_TIMEOUT"
+    LOGIN_TIMEOUT = "LOGIN_TIMEOUT"
+    LOGIN_INLINE_WAIT = "LOGIN_INLINE_WAIT"
+    IMPORT_FROM_BROWSER = "IMPORT_FROM_BROWSER"
+    AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
+    EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
 
 
 def is_interactive_environment() -> bool:
@@ -138,6 +153,38 @@ def load_from_env(config: AppConfig) -> AppConfig:
             )
         config.server.tool_timeout_seconds = tool_timeout_value
 
+    # Manual-login wait timeout in seconds; 0 = no limit (validated in
+    # BrowserConfig.validate())
+    if login_timeout_env := os.environ.get(EnvironmentKeys.LOGIN_TIMEOUT):
+        try:
+            login_timeout_value = float(login_timeout_env)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid LOGIN_TIMEOUT: '{login_timeout_env}'. Must be a number."
+            )
+        if not (math.isfinite(login_timeout_value) and login_timeout_value >= 0):
+            raise ConfigurationError(
+                f"Invalid LOGIN_TIMEOUT: '{login_timeout_env}'. Must be a non-negative finite number (0 = no limit)."
+            )
+        config.browser.login_timeout_seconds = login_timeout_value
+
+    # Bounded inline wait before the pending signal; 0 = immediate return
+    # (validated and clamped in BrowserConfig.validate())
+    if login_inline_wait_env := os.environ.get(EnvironmentKeys.LOGIN_INLINE_WAIT):
+        try:
+            login_inline_wait_value = float(login_inline_wait_env)
+        except ValueError:
+            raise ConfigurationError(
+                f"Invalid LOGIN_INLINE_WAIT: '{login_inline_wait_env}'. Must be a number."
+            )
+        if not (
+            math.isfinite(login_inline_wait_value) and login_inline_wait_value >= 0
+        ):
+            raise ConfigurationError(
+                f"Invalid LOGIN_INLINE_WAIT: '{login_inline_wait_env}'. Must be a non-negative finite number (0 = no inline wait)."
+            )
+        config.browser.login_inline_wait_seconds = login_inline_wait_value
+
     # Custom user agent
     if user_agent_env := os.environ.get(EnvironmentKeys.USER_AGENT):
         config.browser.user_agent = user_agent_env
@@ -180,6 +227,29 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Custom Chrome/Chromium executable path
     if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
+
+    # Import a LinkedIn session from a locally logged-in browser (validated in
+    # ServerConfig.validate())
+    if import_browser_env := os.environ.get(EnvironmentKeys.IMPORT_FROM_BROWSER):
+        config.server.import_from_browser = _normalize_env(import_browser_env) or "auto"
+
+    # Auto-import a session from a logged-in browser on first no-session tool
+    # call. Unset = on by default (interactive and non-interactive desktop);
+    # false disables it. No effect under Docker or a non-loopback HTTP bind.
+    if auto_import_env := os.environ.get(EnvironmentKeys.AUTO_IMPORT_FROM_BROWSER):
+        auto_import_value = _normalize_env(auto_import_env)
+        if auto_import_value in FALSY_VALUES:
+            config.browser.auto_import_from_browser = False
+        elif auto_import_value in TRUTHY_VALUES:
+            config.browser.auto_import_from_browser = True
+
+    # Install full chromium up front instead of lazily on the first headed login.
+    if eager_full_env := os.environ.get(EnvironmentKeys.EAGER_FULL_CHROMIUM):
+        eager_full_value = _normalize_env(eager_full_env)
+        if eager_full_value in FALSY_VALUES:
+            config.browser.eager_full_chromium = False
+        elif eager_full_value in TRUTHY_VALUES:
+            config.browser.eager_full_chromium = True
 
     return config
 
@@ -271,6 +341,25 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
+        "--login-timeout",
+        type=non_negative_float,
+        default=None,
+        metavar="SECONDS",
+        help="Manual login wait timeout in seconds (default: 1800; 0 = no limit)",
+    )
+
+    parser.add_argument(
+        "--login-inline-wait",
+        type=non_negative_float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Bounded inline wait for a tool call to resume after login completes, "
+            "in seconds (default: 25, max 45; 0 = return immediately)"
+        ),
+    )
+
+    parser.add_argument(
         "--chrome-path",
         type=str,
         default=None,
@@ -303,6 +392,67 @@ def load_from_args(config: AppConfig) -> AppConfig:
         default=None,
         metavar="PATH",
         help="Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)",
+    )
+
+    parser.add_argument(
+        "--import-from-browser",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="BROWSER",
+        help=(
+            "Import a LinkedIn session from a locally logged-in Chromium browser "
+            "(chrome, chromium, brave, edge, arc, vivaldi, helium, yandex, whale, "
+            "coccoc, opera, opera_gx, or auto). Bare flag = auto (most recently "
+            "used live session). On macOS the OS keychain may prompt for access "
+            "to the browser's Safe Storage."
+        ),
+    )
+
+    auto_import_group = parser.add_mutually_exclusive_group()
+    auto_import_group.add_argument(
+        "--auto-import",
+        dest="auto_import",
+        action="store_true",
+        default=None,
+        help=(
+            "Auto-import a session from a locally logged-in browser on first "
+            "use (the default). Provided for explicitness; it cannot override "
+            "the Docker or non-loopback-HTTP gates."
+        ),
+    )
+    auto_import_group.add_argument(
+        "--no-auto-import",
+        dest="auto_import",
+        action="store_false",
+        default=None,
+        help=(
+            "Disable auto-import of a session from a browser on first use; "
+            "require --login or --import-from-browser instead."
+        ),
+    )
+
+    eager_full_group = parser.add_mutually_exclusive_group()
+    eager_full_group.add_argument(
+        "--eager-full-chromium",
+        dest="eager_full_chromium",
+        action="store_true",
+        default=None,
+        help=(
+            "Install full Chrome for Testing up front during browser setup "
+            "instead of lazily on the first headed login (pre-warms the headed "
+            "login fallback at the cost of a larger initial download)"
+        ),
+    )
+    eager_full_group.add_argument(
+        "--no-eager-full-chromium",
+        dest="eager_full_chromium",
+        action="store_false",
+        default=None,
+        help=(
+            "Install full Chrome for Testing lazily on the first headed login "
+            "(default; overrides EAGER_FULL_CHROMIUM=true)."
+        ),
     )
 
     args = parser.parse_args()
@@ -351,6 +501,12 @@ def load_from_args(config: AppConfig) -> AppConfig:
     if args.tool_timeout is not None:
         config.server.tool_timeout_seconds = args.tool_timeout
 
+    if args.login_timeout is not None:
+        config.browser.login_timeout_seconds = args.login_timeout
+
+    if args.login_inline_wait is not None:
+        config.browser.login_inline_wait_seconds = args.login_inline_wait
+
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path
 
@@ -366,6 +522,16 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.user_data_dir:
         config.browser.user_data_dir = args.user_data_dir
+
+    if args.import_from_browser is not None:
+        value = args.import_from_browser.strip().lower()
+        config.server.import_from_browser = value or "auto"
+
+    if args.auto_import is not None:
+        config.browser.auto_import_from_browser = args.auto_import
+
+    if args.eager_full_chromium is not None:
+        config.browser.eager_full_chromium = args.eager_full_chromium
 
     return config
 

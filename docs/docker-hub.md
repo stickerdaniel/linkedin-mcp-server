@@ -14,6 +14,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Company Search**: Search for companies by keyword
 - **Job Details**: Retrieve job posting information
 - **Job Search**: Search for jobs with keywords and location filters
+- **Saved Jobs**: List job postings saved by the authenticated user
 - **People Search**: Search for people by keywords and location
 - **Person Posts**: Get recent activity/posts from a person's profile
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
@@ -33,12 +34,14 @@ uvx mcp-server-linkedin@latest --login
 
 This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. For better stability, consider the [uvx setup](https://github.com/stickerdaniel/linkedin-mcp-server#-uvx-setup-recommended---universal).
 
+> **Already signed into LinkedIn in a browser on the host?** Run `uvx mcp-server-linkedin@latest --import-from-browser` on the host to reuse that session instead of `--login`. It supports Chrome, Chromium, Brave, Edge, Arc, Vivaldi, Helium, Yandex, and Naver Whale, auto-picks the most recently used browser with a live LinkedIn session (pass a browser name to target one), writes the same `~/.linkedin-mcp/` profile Docker mounts, and the Docker bridge still narrows to the minimal auth cookie subset it uses for a normal session. Cookies under Chrome 127+ app-bound encryption cannot be imported; use `--login` in that case.
+
 **Step 2: Configure Claude Desktop with Docker**
 
 ```json
 {
   "mcpServers": {
-    "linkedin": {
+    "mcp-server-linkedin": {
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
@@ -66,6 +69,9 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `LOG_LEVEL` | `WARNING` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
 | `TOOL_TIMEOUT` | `180` | Per-tool MCP execution timeout in seconds. Increase further for heavy scrapes (multi-section profiles, cold-start Chromium, slow networks/containers). |
+| `LOGIN_TIMEOUT` | `1800` | Manual login wait timeout in seconds (`0` = no limit). Applies to the host-side `--login` browser; the container itself never opens one. |
+| `LOGIN_INLINE_WAIT` | `25` | Bounded inline wait (seconds, max 45) for a tool call to resume after login completes. No effect in containers: the Docker runtime never opens a login window and raises a host-login-required error instead, so the session must be created on the host with `--login`. |
+| `AUTO_IMPORT_FROM_BROWSER` | on by default | Auto-import a LinkedIn session from a locally logged-in browser on the first no-session tool call, before falling back to manual login. On by default across interactive and non-interactive desktop runs; set `false` to require `--login` / `--import-from-browser`. No effect in containers (no host browser or keychain) or on a non-loopback HTTP bind. On macOS the OS keychain may prompt once for Safe Storage access. |
 | `USER_AGENT` | - | Custom browser user agent |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
@@ -82,7 +88,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```json
 {
   "mcpServers": {
-    "linkedin": {
+    "mcp-server-linkedin": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",

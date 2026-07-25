@@ -220,9 +220,10 @@ async def test_wait_for_manual_login_clicks_saved_account(monkeypatch):
 async def test_wait_for_manual_login_times_out_when_remember_me_repeats(monkeypatch):
     page = MagicMock()
 
+    # 120000ms = 2 minutes so the rendered "N minutes" is a clean integer.
     class _FakeLoop:
         def __init__(self):
-            self._times = iter([0.0, 1.1])
+            self._times = iter([0.0, 130.0])
 
         def time(self):
             return next(self._times)
@@ -236,5 +237,41 @@ async def test_wait_for_manual_login_times_out_when_remember_me_repeats(monkeypa
         lambda: _FakeLoop(),
     )
 
-    with pytest.raises(AuthenticationError, match="Manual login timeout"):
-        await wait_for_manual_login(page, timeout=1000)
+    with pytest.raises(AuthenticationError, match="Manual login timeout") as exc_info:
+        await wait_for_manual_login(page, timeout=120000)
+
+    message = str(exc_info.value)
+    assert "LOGIN_TIMEOUT" in message
+    assert "2 minutes" in message
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_unlimited_when_timeout_zero(monkeypatch):
+    page = MagicMock()
+    calls = {"value": 0}
+
+    async def fake_is_logged_in(_page):
+        calls["value"] += 1
+        return calls["value"] >= 2
+
+    class _FakeLoop:
+        """Time jumps far beyond any positive bound to prove 0 disables it."""
+
+        def time(self):
+            return 10**12
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.core.auth.is_logged_in", fake_is_logged_in)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.asyncio.get_running_loop",
+        lambda: _FakeLoop(),
+    )
+    monkeypatch.setattr("linkedin_mcp_server.core.auth.asyncio.sleep", AsyncMock())
+
+    # timeout=0 means unlimited: the elapsed check never fires even though the
+    # fake clock is enormous, so it returns once is_logged_in becomes True.
+    await wait_for_manual_login(page, timeout=0)
+    assert calls["value"] == 2

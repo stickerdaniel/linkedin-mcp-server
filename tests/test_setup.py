@@ -76,10 +76,36 @@ async def test_interactive_login_writes_source_state_when_cookie_export_succeeds
     browser.export_cookies.assert_awaited_once_with(
         portable_cookie_path(tmp_path / "profile")
     )
-    write_source_state.assert_called_once_with(tmp_path / "profile")
+    # No UA override configured -> record None (runtime default is stable).
+    write_source_state.assert_called_once_with(tmp_path / "profile", user_agent=None)
     captured = capsys.readouterr()
     assert "cookies exported for docker portability" in captured.out.lower()
     assert "source session generation: gen-123" in captured.out.lower()
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_records_override_user_agent(monkeypatch, tmp_path):
+    """A configured UA override is the fingerprint the manual-login cookie was
+    minted under, so it must be recorded in source-state (else a later replay
+    without the override falls back to a different UA)."""
+    browser = _make_browser(export_cookies=True)
+    write_source_state = MagicMock(
+        return_value=SimpleNamespace(login_generation="gen-1")
+    )
+    config = AppConfig()
+    config.browser.user_agent = "CustomAgent/1.0"
+
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=lambda **kwargs: _BrowserContextManager(browser),
+        config=config,
+        write_source_state=write_source_state,
+    )
+
+    assert await interactive_login(tmp_path / "profile") is True
+    write_source_state.assert_called_once_with(
+        tmp_path / "profile", user_agent="CustomAgent/1.0"
+    )
 
 
 @pytest.mark.asyncio
@@ -200,6 +226,54 @@ async def test_interactive_login_passes_user_agent_to_browser_manager(
     await interactive_login(tmp_path / "profile")
 
     assert captured_kwargs.get("user_agent") == "CustomAgent/1.0"
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_threads_login_timeout(monkeypatch, tmp_path):
+    """config.browser.login_timeout_seconds is converted to ms and passed through."""
+    browser = _make_browser(export_cookies=True)
+    config = AppConfig()
+    config.browser.login_timeout_seconds = 600
+
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=lambda **kwargs: _BrowserContextManager(browser),
+        config=config,
+    )
+    wait_mock = AsyncMock()
+    monkeypatch.setattr("linkedin_mcp_server.setup.wait_for_manual_login", wait_mock)
+
+    await interactive_login(tmp_path / "profile")
+
+    wait_mock.assert_awaited_once()
+    await_args = wait_mock.await_args
+    assert await_args is not None
+    assert await_args.kwargs["timeout"] == 600000
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_threads_login_timeout_zero_unlimited(
+    monkeypatch, tmp_path
+):
+    """login_timeout_seconds == 0 passes timeout=0 (unlimited) through."""
+    browser = _make_browser(export_cookies=True)
+    config = AppConfig()
+    config.browser.login_timeout_seconds = 0
+
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=lambda **kwargs: _BrowserContextManager(browser),
+        config=config,
+    )
+    wait_mock = AsyncMock()
+    monkeypatch.setattr("linkedin_mcp_server.setup.wait_for_manual_login", wait_mock)
+
+    await interactive_login(tmp_path / "profile")
+
+    wait_mock.assert_awaited_once()
+    await_args = wait_mock.await_args
+    assert await_args is not None
+    assert await_args.kwargs["timeout"] == 0
 
 
 @pytest.mark.asyncio

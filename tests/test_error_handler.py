@@ -9,6 +9,7 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
+    AuthenticationInProgressError,
     BrowserBinaryMissingError,
     CredentialsNotFoundError,
     LinkedInMCPError,
@@ -114,6 +115,23 @@ def test_raises_tool_error_for_element_not_found():
 
     with pytest.raises(ToolError, match="Element not found"):
         raise_tool_error(ElementNotFoundError("missing"))
+
+
+def test_authentication_in_progress_surfaces_poll_friendly_message_verbatim():
+    """The pending-login message passes through verbatim with no diagnostics block."""
+    message = (
+        "A LinkedIn login window is open and login is still in progress. "
+        "This is not a failure. Complete the sign-in in the browser, then "
+        "call this exact tool again in about 30 seconds to resume."
+    )
+    with pytest.raises(ToolError, match="not a failure") as exc_info:
+        raise_tool_error(AuthenticationInProgressError(message))
+
+    surfaced = str(exc_info.value)
+    assert surfaced == message
+    # Plain str() branch, not the LinkedInMCPError catch-all that appends an
+    # issue-template diagnostics block.
+    assert "issue" not in surfaced.lower()
 
 
 def test_reraises_unknown_exception():

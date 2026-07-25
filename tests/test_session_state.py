@@ -1,3 +1,5 @@
+import json
+
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
     load_runtime_state,
@@ -21,8 +23,41 @@ def test_write_source_state_creates_generation(monkeypatch, isolate_profile_dir)
 
     assert state.source_runtime_id == "macos-arm64-host"
     assert state.login_generation
+    assert state.user_agent is None  # manual-login default
     assert source_state_path(isolate_profile_dir).exists()
     assert load_source_state(isolate_profile_dir) == state
+
+
+def test_source_state_round_trips_user_agent(monkeypatch, isolate_profile_dir):
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.get_runtime_id",
+        lambda: "macos-arm64-host",
+    )
+    ua = "Mozilla/5.0 (test) Chrome/148.0.0.0"
+
+    state = write_source_state(isolate_profile_dir, user_agent=ua)
+
+    assert state.user_agent == ua
+    assert load_source_state(isolate_profile_dir) == state
+
+
+def test_load_source_state_defaults_user_agent_for_old_files(
+    monkeypatch, isolate_profile_dir
+):
+    """A pre-existing source-state.json without user_agent still loads."""
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.get_runtime_id",
+        lambda: "macos-arm64-host",
+    )
+    write_source_state(isolate_profile_dir, user_agent="Mozilla/5.0 (test)")
+    payload = source_state_path(isolate_profile_dir)
+    data = json.loads(payload.read_text())
+    del data["user_agent"]
+    payload.write_text(json.dumps(data))
+
+    loaded = load_source_state(isolate_profile_dir)
+    assert loaded is not None
+    assert loaded.user_agent is None
 
 
 def test_write_runtime_state_tracks_source_generation(monkeypatch, isolate_profile_dir):

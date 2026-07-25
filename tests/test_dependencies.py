@@ -56,6 +56,35 @@ class TestHandleAuthError:
 
 
 class TestGetReadyExtractor:
+    async def test_ready_resumes_to_scrape_path(self):
+        """When gating returns (login resolved in-budget), control falls through
+        to get_or_create_browser + ensure_authenticated and returns an extractor.
+        """
+        browser = MagicMock()
+        browser.page = MagicMock()
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.get_or_create_browser",
+                new_callable=AsyncMock,
+                return_value=browser,
+            ) as mock_get_browser,
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_authenticated",
+                new_callable=AsyncMock,
+            ) as mock_ensure_auth,
+        ):
+            from linkedin_mcp_server.scraping import LinkedInExtractor
+
+            extractor = await get_ready_extractor(ctx=None, tool_name="test_tool")
+
+            assert isinstance(extractor, LinkedInExtractor)
+            mock_get_browser.assert_awaited_once()
+            mock_ensure_auth.assert_awaited_once()
+
     async def test_auth_error_triggers_relogin(self):
         """AuthenticationError from ensure_authenticated triggers relogin."""
         with (
