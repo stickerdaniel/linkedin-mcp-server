@@ -117,17 +117,24 @@ class BrowserManager:
 
             logger.info("Browser context and page ready")
 
-        except Exception as e:
-            # Recorded, not discarded: this close is the only one that can prove
-            # a partially launched Chromium exited. A caller closing again would
-            # get True from the already-cleared handles and could then release
-            # or delete the profile with the browser still on it.
-            if not await self.close():
+        except BaseException as e:
+            # BaseException so a cancelled launch is cleaned up too: Chromium may
+            # already be running, and leaving it would hold the profile.
+            #
+            # The result is recorded, not discarded: this is the only close that
+            # can prove a partially launched Chromium exited. A caller closing
+            # again would get True from the already-cleared handles and could
+            # then release or delete the profile with the browser still on it.
+            # Shielded because the cleanup itself must survive the cancellation
+            # that triggered it.
+            if not await asyncio.shield(asyncio.ensure_future(self.close())):
                 raise BrowserShutdownUnconfirmedError(
                     "The browser failed to start and did not shut down cleanly, "
                     "so the profile is kept. Restart the server to recover."
                 ) from e
-            raise NetworkError(f"Failed to start browser: {e}") from e
+            if isinstance(e, Exception):
+                raise NetworkError(f"Failed to start browser: {e}") from e
+            raise
 
     async def close(self) -> bool:
         """Close persistent context and cleanup resources.

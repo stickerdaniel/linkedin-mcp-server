@@ -6,6 +6,7 @@ with persistent context. Profile state auto-persists to user_data_dir.
 """
 
 import asyncio
+import functools
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from linkedin_mcp_server.core import (
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.session_state import (
+    run_deferring_cancels,
     portable_cookie_path,
     restore_source_profile,
     rotate_shielded,
@@ -147,9 +149,14 @@ async def _login_holding_the_profile(
                     f"login browser did not shut down cleanly. It is kept at "
                     f"{retired}."
                 )
-            elif not await asyncio.to_thread(
-                restore_source_profile, retired, user_data_dir
-            ):
+            # Cancellation is deferred rather than abandoning the worker: it
+            # is already moving the session back, and dropping its result mid
+            # move would leave the user logged out with the pieces split.
+            elif not (
+                await run_deferring_cancels(
+                    functools.partial(restore_source_profile, retired, user_data_dir)
+                )
+            )[0]:
                 print(
                     f"   Warning: the previous session could not be restored. "
                     f"It is kept at {retired}."

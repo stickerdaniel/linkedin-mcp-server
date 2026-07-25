@@ -22,6 +22,7 @@ touched for the browser we actually import from:
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -47,6 +48,7 @@ from linkedin_mcp_server.exceptions import (
 )
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.session_state import (
+    run_deferring_cancels,
     portable_cookie_path,
     restore_source_profile,
     rotate_shielded,
@@ -286,9 +288,15 @@ async def _import_holding_the_profile(
             # undecryptable cookies — would otherwise leave the user logged out
             # of a working session.
             if retired is not None and not imported:
-                if not await asyncio.to_thread(
-                    restore_source_profile, retired, user_data_dir
-                ):
+                # Deferred cancellation: abandoning the worker mid move would
+                # leave the session split across quarantine and the live paths.
+                if not (
+                    await run_deferring_cancels(
+                        functools.partial(
+                            restore_source_profile, retired, user_data_dir
+                        )
+                    )
+                )[0]:
                     logger.warning(
                         "Could not restore the previous session; it is kept at %s",
                         retired,

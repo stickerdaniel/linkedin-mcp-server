@@ -688,7 +688,7 @@ async def close_browser() -> None:
     """Close the browser, releasing the profile once Chromium is confirmed gone.
 
     Cancellation is held back until teardown finishes, mirroring
-    ``session_state._off_loop_deferring_cancels``. Interrupting half way leaves a
+    ``session_state.run_deferring_cancels``. Interrupting half way leaves a
     Chromium nobody owns: ``_browser`` is already cleared, so a later call cannot
     retry, and the lease can be neither confirmed nor released. Shielding alone
     would not do: it protects the child but re-raises to the caller immediately,

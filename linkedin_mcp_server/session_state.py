@@ -335,7 +335,7 @@ def quarantine_dirs(source_profile_dir: Path | None = None) -> list[Path]:
     return sorted(path for path in root.glob(f"{QUARANTINE_PREFIX}*") if path.is_dir())
 
 
-async def _off_loop_deferring_cancels(
+async def run_deferring_cancels(
     work: Callable[[], Any],
 ) -> tuple[Any, bool]:
     """Run *work* in a worker thread, holding back cancels until it finishes.
@@ -369,14 +369,14 @@ async def rotate_shielded(source_profile_dir: Path) -> Path | None:
     are real here — a tool timeout racing a server shutdown — so every one of
     them is deferred until the session is safely accounted for.
     """
-    retired, cancelled = await _off_loop_deferring_cancels(
+    retired, cancelled = await run_deferring_cancels(
         functools.partial(rotate_source_profile, source_profile_dir)
     )
     if not cancelled:
         return retired
 
     if retired is not None:
-        restored, _ = await _off_loop_deferring_cancels(
+        restored, _ = await run_deferring_cancels(
             functools.partial(restore_source_profile, retired, source_profile_dir)
         )
         if not restored:
