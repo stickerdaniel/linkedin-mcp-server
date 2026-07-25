@@ -498,6 +498,57 @@ def _build_feed_references(
     return dedupe_references(refs, cap=50)
 
 
+async def probe_post_permalinks_in_main(page) -> list[str]:
+    """Return all per-post permalinks visible inside <main> on the current page.
+
+    LinkedIn's company posts page (and many other listing pages) renders each
+    post tile with at least one anchor whose href matches
+    ``/posts/<slug>-NNN-XXXX``. ``classify_link`` does not currently route
+    those paths to any reference kind, so they get dropped from the
+    ``references["posts"]`` array on ``get_company_posts``. Without permalinks,
+    downstream ``post_comment`` / ``react_to_post`` flows from the engagement
+    console artifact cannot reach the specific post and have to fall back to
+    the company page.
+
+    This helper probes the live DOM after extraction and returns the
+    permalinks in document order, deduped. Callers can promote the entries
+    into the ``references["posts"]`` array as ``feed_post`` kind so the
+    consumer treats them the same way as the SDUI-captured permalinks from
+    ``get_feed``.
+    """
+    try:
+        urls = await page.evaluate(
+            """() => {
+                const main = document.querySelector('main');
+                if (!main) return [];
+                // Match standard LinkedIn post permalinks. Two forms:
+                //   /posts/<slug>-<digits>-<suffix>
+                //   /feed/update/urn:li:activity:<digits>/
+                const anchors = Array.from(main.querySelectorAll('a[href]'));
+                const out = [];
+                const seen = new Set();
+                for (const a of anchors) {
+                    const href = a.getAttribute('href') || '';
+                    if (!href) continue;
+                    // Strip query string and trailing slash for dedup parity
+                    const noQuery = href.split('?')[0];
+                    const isPostPath =
+                        /^\\/posts\\/[^\\/]+-\\d+-\\w+\\/?$/.test(noQuery) ||
+                        /^\\/feed\\/update\\/urn:li:activity:\\d+\\/?$/.test(noQuery);
+                    if (!isPostPath) continue;
+                    if (seen.has(noQuery)) continue;
+                    seen.add(noQuery);
+                    out.push(noQuery);
+                }
+                return out;
+            }"""
+        )
+        return list(urls or [])
+    except Exception as exc:
+        logger.debug("probe_post_permalinks_in_main failed: %s", exc)
+        return []
+
+
 async def _drain_listener_tasks(pending: list[asyncio.Task[None]]) -> None:
     """Bounded teardown for fire-and-forget response listener tasks.
 
@@ -4167,3 +4218,878 @@ class LinkedInExtractor:
             {"selectors": selectors},
         )
         return result
+
+    @staticmethod
+    def _post_comment_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        composer_resolved: bool = False,
+        posted: bool = False,
+    ) -> dict[str, Any]:
+        """Build a structured response for the post_comment tool."""
+        return {
+            "url": url,
+            "status": status,
+            "message": message,
+            "composer_resolved": composer_resolved,
+            "posted": posted,
+        }
+
+    async def post_comment(
+        self,
+        post_url: str,
+        comment_text: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Post a comment on a LinkedIn post with explicit confirmation gating.
+
+        Navigates to the post, opens the comment composer if needed, types
+        the comment, and submits. Dry-runs the composer-reach step when
+        confirm_send is False so callers can validate addressability without
+        publishing.
+
+        Args:
+            post_url: Full LinkedIn activity URL.
+            comment_text: Body of the comment to post.
+            confirm_send: Must be True to actually submit the comment.
+        """
+        await self._navigate_to_page(post_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=15000)
+        except PlaywrightTimeoutError:
+            logger.debug("Post page did not load for %s", post_url)
+            return self._post_comment_result(
+                self._page.url,
+                "post_not_found",
+                "LinkedIn did not render the post page within 15s.",
+            )
+
+        await handle_modal_close(self._page)
+
+        # Open the comment composer. LinkedIn's posts may render the comment
+        # input inline (already visible below the post) OR require clicking
+        # the "Comment" action button to expand it. We try the inline path
+        # first, then click the Comment button as a fallback.
+        #
+        # Patchright actionability blocks click()/press_sequentially(), so
+        # interaction is via page.evaluate() for clicks and
+        # page.keyboard.type() for text input (same pattern as send_message).
+        composer_found = await self._page.evaluate(
+            """() => {
+                const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                          + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                          + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                const el = document.querySelector(sel);
+                return Boolean(el);
+            }"""
+        )
+        if not composer_found:
+            # Try clicking the Comment action button to expand the composer.
+            clicked = await self._page.evaluate(
+                """() => {
+                    const buttons = Array.from(document.querySelectorAll(
+                        'button[aria-label*="Comment" i], button[aria-label*="comment" i]'
+                    ));
+                    const btn = buttons.find(b =>
+                        /^comment/i.test((b.getAttribute('aria-label') || '').trim()) &&
+                        !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length)
+                    );
+                    if (!btn) return false;
+                    btn.click();
+                    return true;
+                }"""
+            )
+            if clicked:
+                await asyncio.sleep(0.8)
+                composer_found = await self._page.evaluate(
+                    """() => {
+                        const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                                  + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                                  + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                        return Boolean(document.querySelector(sel));
+                    }"""
+                )
+
+        if not composer_found:
+            return self._post_comment_result(
+                self._page.url,
+                "composer_unavailable",
+                "LinkedIn did not expose a usable comment composer on this post.",
+            )
+
+        if not confirm_send:
+            return self._post_comment_result(
+                self._page.url,
+                "confirmation_required",
+                "Set confirm_send=true to post the comment.",
+                composer_resolved=True,
+            )
+
+        # Focus the composer via JS (no actionability check) and type via
+        # keyboard so React sees real keydown/input/keyup events.
+        focused = await self._page.evaluate(
+            """() => {
+                const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                          + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                          + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                el.focus();
+                return true;
+            }"""
+        )
+        if not focused:
+            return self._post_comment_result(
+                self._page.url,
+                "composer_interact_failed",
+                "Could not focus comment composer via JavaScript.",
+                composer_resolved=True,
+            )
+
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(comment_text, delay=15)
+        await asyncio.sleep(0.5)
+
+        # Nudge React. Patchright's keyboard.type fires keydown/keypress/keyup
+        # events but LinkedIn's Quill-based comment editor sometimes needs an
+        # explicit `input` event on the contenteditable element before it
+        # marks the comment as non-empty and enables the submit button.
+        await self._page.evaluate(
+            """() => {
+                const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                          + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                          + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;
+            }"""
+        )
+        await asyncio.sleep(1.5)  # let React process and enable the submit button
+
+        # Submit. The submit button's visible text is typically "Comment"
+        # (LinkedIn renamed it from "Post" / "Post comment"). Search ALL
+        # Comment/Post-labeled buttons on the page, then pick the one
+        # closest to the input by vertical position — this handles cases
+        # where the composer's parent form doesn't wrap the submit button.
+        submitted = await self._page.evaluate(
+            """() => {
+                const inputSel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                               + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                               + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                const input = document.querySelector(inputSel);
+                if (!input) return { ok: false, reason: 'no_input' };
+                const inputRect = input.getBoundingClientRect();
+                const isVisible = (b) => (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                const isEnabled = (b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true' && isVisible(b);
+                const looksLikeSubmit = (b) => {
+                    const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    const aria = (b.getAttribute('aria-label') || '').trim().toLowerCase();
+                    return /^(comment|post|post comment)$/i.test(text)
+                        || /^(comment|post|post comment)$/i.test(aria);
+                };
+                const allButtons = Array.from(document.querySelectorAll('button'));
+                const candidates = allButtons.filter(b => looksLikeSubmit(b) && isVisible(b));
+                // Pick the closest candidate to the input by vertical distance.
+                candidates.sort((a, b) => {
+                    const aD = Math.abs(a.getBoundingClientRect().top - inputRect.bottom);
+                    const bD = Math.abs(b.getBoundingClientRect().top - inputRect.bottom);
+                    return aD - bD;
+                });
+                const enabled = candidates.find(isEnabled);
+                if (!enabled) {
+                    return {
+                        ok: false,
+                        reason: candidates.length ? 'no_enabled_submit' : 'no_candidates',
+                        candidates: candidates.length,
+                        states: candidates.slice(0, 6).map(b => ({
+                            disabled: b.disabled,
+                            aria_disabled: b.getAttribute('aria-disabled'),
+                            classes: b.className,
+                            text: (b.innerText || b.textContent || '').trim().slice(0, 40),
+                            aria_label: (b.getAttribute('aria-label') || '').slice(0, 40),
+                            top_diff: Math.round(b.getBoundingClientRect().top - inputRect.bottom)
+                        }))
+                    };
+                }
+                enabled.click();
+                return { ok: true, clicked_text: (enabled.innerText || enabled.textContent || '').trim().slice(0, 30) };
+            }"""
+        )
+        # Normalize and expose diagnostic info in the tool response so callers
+        # can see exactly what went wrong without grepping server logs.
+        submitted_ok = bool(submitted and submitted.get('ok'))
+        if not submitted_ok:
+            reason = (submitted or {}).get('reason') or 'unknown'
+            cand = (submitted or {}).get('candidates', 0)
+            states = (submitted or {}).get('states', [])
+            logger.info(
+                "post_comment submit failed: reason=%s candidates=%d states=%s",
+                reason,
+                cand,
+                states,
+            )
+            # Try Ctrl+Enter as a fallback — LinkedIn accepts it as the
+            # comment-submit keyboard shortcut on most layouts. The existing
+            # verification poll below will detect whether the comment actually
+            # landed; if it did, we report success regardless of the missing
+            # button click. If it didn't, the early return below surfaces the
+            # full diagnostic state to the caller.
+            await self._page.keyboard.press("Control+Enter")
+            await asyncio.sleep(0.8)
+            # We don't know yet whether Ctrl+Enter worked. Fall through to the
+            # verification poll. If it didn't, the verify-step will report
+            # `post_unconfirmed`. We embed the diagnostic states into the
+            # message so the caller can see them either way.
+            self._post_comment_last_diag = (
+                f"submit_unavailable reason={reason} candidates={cand} states={states}"
+            )
+        # Verify the submit landed. Two signals, polled in parallel:
+        # (a) Primary: the comment composer cleared. LinkedIn empties the
+        #     contenteditable on successful submit, so a now-empty composer
+        #     is strong evidence the comment was accepted.
+        # (b) Fallback: the comment text appears somewhere on the page that
+        #     looks like a comment item. Comment-item classes drift across
+        #     LinkedIn UI revisions, so this is a broad search.
+        verified = False
+        for _ in range(10):  # ~5s total
+            await asyncio.sleep(0.5)
+            verified = await self._page.evaluate(
+                """(needle) => {
+                    // Signal (a): composer cleared?
+                    const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="comment" i],'
+                              + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="comment" i],'
+                              + 'div.ql-editor[contenteditable="true"][aria-placeholder*="comment" i]';
+                    const composer = document.querySelector(sel);
+                    const composerEmpty = !composer
+                        || (composer.innerText || composer.textContent || '').trim() === ''
+                        || composer.classList.contains('ql-blank');
+
+                    // Signal (b): comment text appears in any candidate comment
+                    // container that is NOT the composer itself (the composer
+                    // contains the typed text until LinkedIn accepts the submit
+                    // and clears it, so we have to exclude it from the search).
+                    const containers = Array.from(document.querySelectorAll(
+                        '.comments-comments-list, .comments-comment-entity,'
+                        + ' .comments-comment-item, .comments-comment-item__main-content,'
+                        + ' .update-components-comment, [data-id^="urn:li:comment"],'
+                        + ' [class*="comment-entity"], [class*="comment-item"]'
+                    )).filter(el => !el.contains(composer) && el !== composer);
+                    const textVisible = containers.some(el => (el.innerText || '').includes(needle));
+
+                    // Posted if EITHER signal fires.
+                    return composerEmpty || textVisible;
+                }""",
+                comment_text.strip()[:80],
+            )
+            if verified:
+                break
+
+        if not verified:
+            # Surface the diagnostic from the JS submit attempt so the caller
+            # can see exactly what was on the page. This is the difference
+            # between "still guessing" and "next iteration knows what to do".
+            diag = getattr(self, '_post_comment_last_diag', None)
+            if submitted_ok:
+                msg = (
+                    "Button clicked but LinkedIn did not show the comment within 5s. "
+                    "It may still have posted; check the UI."
+                )
+            else:
+                msg = (
+                    f"No enabled submit button found and Ctrl+Enter fallback did not land. "
+                    f"Diagnostic: {diag}"
+                )
+            return self._post_comment_result(
+                self._page.url,
+                "post_unconfirmed" if submitted_ok else "submit_unavailable",
+                msg,
+                composer_resolved=True,
+            )
+
+        return self._post_comment_result(
+            self._page.url,
+            "posted",
+            "Comment posted successfully.",
+            composer_resolved=True,
+            posted=True,
+        )
+
+    # ------------------------------------------------------------------
+    # react_to_post
+    # ------------------------------------------------------------------
+
+    REACTION_ALIASES: dict[str, str] = {
+        "like": "like",
+        "celebrate": "celebrate",
+        "support": "support",
+        "love": "love",
+        "insightful": "insightful",
+        "funny": "funny",
+        # Common synonyms LinkedIn has used historically
+        "appreciation": "support",
+        "empathy": "love",
+        "interest": "insightful",
+        "entertainment": "funny",
+        "praise": "celebrate",
+    }
+
+    @staticmethod
+    def _react_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        reaction: str = "like",
+        applied: bool = False,
+    ) -> dict[str, Any]:
+        """Structured response for the react_to_post tool."""
+        return {
+            "url": url,
+            "status": status,
+            "message": message,
+            "reaction": reaction,
+            "applied": applied,
+        }
+
+    async def react_to_post(
+        self,
+        post_url: str,
+        *,
+        reaction: str = "like",
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """React to a LinkedIn post.
+
+        Navigates to the target post, locates the like/react button, and
+        applies the requested reaction. The "Like" reaction is a single
+        click on the action bar's Like button. Other reactions (celebrate,
+        support, love, insightful, funny) require hovering the Like button
+        until the reaction tray appears, then clicking the matching tray
+        button.
+
+        Args:
+            post_url: Full LinkedIn activity URL.
+            reaction: One of like, celebrate, support, love, insightful,
+                funny. Aliases (appreciation, empathy, interest,
+                entertainment, praise) are accepted and normalised.
+            confirm_send: Must be True to actually apply the reaction.
+
+        Returns:
+            Dict with url, status, message, reaction, applied. Status:
+            "reacted" (success), "already_reacted" (existing reaction
+            matches request), "confirmation_required" (dry-run reached
+            the button), "react_button_unavailable", "post_not_found",
+            "react_unconfirmed".
+        """
+        norm_reaction = (reaction or "like").strip().lower()
+        norm_reaction = self.REACTION_ALIASES.get(norm_reaction, norm_reaction)
+        if norm_reaction not in {
+            "like", "celebrate", "support", "love", "insightful", "funny"
+        }:
+            return self._react_result(
+                post_url,
+                "invalid_reaction",
+                f"Unknown reaction '{reaction}'. Valid: like, celebrate, "
+                "support, love, insightful, funny.",
+                reaction=norm_reaction,
+            )
+
+        await self._navigate_to_page(post_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=15000)
+        except PlaywrightTimeoutError:
+            return self._react_result(
+                self._page.url,
+                "post_not_found",
+                "LinkedIn did not render the post page within 15s.",
+                reaction=norm_reaction,
+            )
+
+        await handle_modal_close(self._page)
+
+        # Locate the Like/React action button for THIS post. Posts on a
+        # standalone-post URL render the social action bar inside the
+        # main article. To avoid hitting an unrelated post's button (which
+        # can show up in the related-posts module below), restrict to the
+        # first article on the page.
+        button_state = await self._page.evaluate(
+            """() => {
+                const article = document.querySelector('article, main [role="article"], main') || document.body;
+                const isVisible = (b) => (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                // LinkedIn's Like button has data-reaction="like" or aria-label starting with "React Like" / "Like"
+                const candidates = Array.from(article.querySelectorAll('button')).filter(b => {
+                    if (!isVisible(b)) return false;
+                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                    const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    return /^(react\\s+)?like$/.test(aria)
+                        || /^like$/.test(text)
+                        || /^like$/.test(aria.replace(/^react\\s+/, ''))
+                        || aria.startsWith('react like');
+                });
+                if (!candidates.length) return { ok: false, reason: 'no_like_button' };
+                // Pick the first candidate (top of the article = main post)
+                const btn = candidates[0];
+                const pressed = btn.getAttribute('aria-pressed') === 'true'
+                    || /react-active|reactions-react-button--active|active/i.test(btn.className);
+                const rect = btn.getBoundingClientRect();
+                return {
+                    ok: true,
+                    pressed,
+                    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+                    aria_label: btn.getAttribute('aria-label') || '',
+                    text: (btn.innerText || '').trim().slice(0, 40),
+                };
+            }"""
+        )
+
+        if not button_state or not button_state.get("ok"):
+            return self._react_result(
+                self._page.url,
+                "react_button_unavailable",
+                f"No Like button found on the post page. Reason: "
+                f"{(button_state or {}).get('reason', 'unknown')}",
+                reaction=norm_reaction,
+            )
+
+        already_pressed = bool(button_state.get("pressed"))
+        # If user has already reacted and the request is just "like", we
+        # treat that as already_reacted (a second click would un-like).
+        # If they want a different reaction, we let the tray flow change it.
+        if already_pressed and norm_reaction == "like":
+            return self._react_result(
+                self._page.url,
+                "already_reacted",
+                "Post already has the Like reaction applied. No change made.",
+                reaction=norm_reaction,
+                applied=True,
+            )
+
+        if not confirm_send:
+            return self._react_result(
+                self._page.url,
+                "confirmation_required",
+                "Set confirm_send=true to apply the reaction.",
+                reaction=norm_reaction,
+            )
+
+        if norm_reaction == "like":
+            # Single click on the Like button toggles like.
+            clicked = await self._page.evaluate(
+                """() => {
+                    const article = document.querySelector('article, main [role="article"], main') || document.body;
+                    const isVisible = (b) => (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                    const candidates = Array.from(article.querySelectorAll('button')).filter(b => {
+                        if (!isVisible(b)) return false;
+                        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                        const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                        return /^(react\\s+)?like$/.test(aria)
+                            || /^like$/.test(text)
+                            || aria.startsWith('react like');
+                    });
+                    if (!candidates.length) return false;
+                    candidates[0].click();
+                    return true;
+                }"""
+            )
+            if not clicked:
+                return self._react_result(
+                    self._page.url,
+                    "react_button_unavailable",
+                    "Like button vanished between probe and click.",
+                    reaction=norm_reaction,
+                )
+        else:
+            # Need to open the reaction tray. LinkedIn shows it on hover/
+            # long-press of the Like button. We dispatch pointer events
+            # to open the tray, then click the target reaction.
+            tray_opened = await self._page.evaluate(
+                """() => {
+                    const article = document.querySelector('article, main [role="article"], main') || document.body;
+                    const isVisible = (b) => (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                    const candidates = Array.from(article.querySelectorAll('button')).filter(b => {
+                        if (!isVisible(b)) return false;
+                        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                        const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+                        return /^(react\\s+)?like$/.test(aria)
+                            || /^like$/.test(text)
+                            || aria.startsWith('react like');
+                    });
+                    if (!candidates.length) return false;
+                    const btn = candidates[0];
+                    const rect = btn.getBoundingClientRect();
+                    const cx = rect.left + rect.width / 2;
+                    const cy = rect.top + rect.height / 2;
+                    const ev = (type) => new PointerEvent(type, {
+                        bubbles: true, cancelable: true, pointerType: 'mouse',
+                        clientX: cx, clientY: cy
+                    });
+                    btn.dispatchEvent(ev('pointerover'));
+                    btn.dispatchEvent(ev('pointerenter'));
+                    btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: cx, clientY: cy }));
+                    btn.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: cx, clientY: cy }));
+                    return true;
+                }"""
+            )
+            if not tray_opened:
+                return self._react_result(
+                    self._page.url,
+                    "react_button_unavailable",
+                    "Could not hover Like button to open reaction tray.",
+                    reaction=norm_reaction,
+                )
+
+            # Wait for the tray to render.
+            await asyncio.sleep(1.0)
+
+            tray_clicked = await self._page.evaluate(
+                """(target) => {
+                    const isVisible = (b) => (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                    // The reaction tray buttons have aria-label like "React Celebrate" / "Celebrate"
+                    const all = Array.from(document.querySelectorAll('button')).filter(isVisible);
+                    const norm = (s) => (s || '').toLowerCase();
+                    const target_lc = target.toLowerCase();
+                    const match = all.find(b => {
+                        const aria = norm(b.getAttribute('aria-label'));
+                        const text = norm(b.innerText || b.textContent);
+                        return aria === target_lc
+                            || aria === 'react ' + target_lc
+                            || text === target_lc
+                            || aria.startsWith('react ' + target_lc + ' ')
+                            || aria.startsWith(target_lc + ' ');
+                    });
+                    if (!match) {
+                        return {
+                            ok: false,
+                            candidates: all.slice(0, 12).map(b => ({
+                                aria: b.getAttribute('aria-label') || '',
+                                text: (b.innerText || '').trim().slice(0, 30)
+                            }))
+                        };
+                    }
+                    match.click();
+                    return { ok: true };
+                }""",
+                norm_reaction,
+            )
+            if not tray_clicked or not tray_clicked.get("ok"):
+                return self._react_result(
+                    self._page.url,
+                    "react_button_unavailable",
+                    f"Reaction tray opened but '{norm_reaction}' button not "
+                    f"found. Candidates: {tray_clicked}",
+                    reaction=norm_reaction,
+                )
+
+        # Verify the reaction landed. Poll for aria-pressed=true on the
+        # Like button (any reaction sets aria-pressed=true on it).
+        verified = False
+        for _ in range(8):  # ~4s
+            await asyncio.sleep(0.5)
+            state = await self._page.evaluate(
+                """() => {
+                    const article = document.querySelector('article, main [role="article"], main') || document.body;
+                    const isVisible = (b) => (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                    const candidates = Array.from(article.querySelectorAll('button')).filter(b => {
+                        if (!isVisible(b)) return false;
+                        const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                        return /^(react\\s+)?like$/.test(aria) || aria.startsWith('react like') || aria.startsWith('react ');
+                    });
+                    if (!candidates.length) return null;
+                    const btn = candidates[0];
+                    return {
+                        pressed: btn.getAttribute('aria-pressed') === 'true'
+                            || /react-active|reactions-react-button--active|active/i.test(btn.className),
+                        aria_label: btn.getAttribute('aria-label') || ''
+                    };
+                }"""
+            )
+            if state and state.get("pressed"):
+                verified = True
+                break
+
+        if not verified:
+            return self._react_result(
+                self._page.url,
+                "react_unconfirmed",
+                "Reaction click fired but LinkedIn did not confirm the "
+                "pressed state within 4s. It may still have applied; "
+                "check the post.",
+                reaction=norm_reaction,
+            )
+
+        return self._react_result(
+            self._page.url,
+            "reacted",
+            f"Reaction '{norm_reaction}' applied successfully.",
+            reaction=norm_reaction,
+            applied=True,
+        )
+
+    # ------------------------------------------------------------------
+    # create_post
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _create_post_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        composer_resolved: bool = False,
+        posted: bool = False,
+    ) -> dict[str, Any]:
+        """Structured response for the create_post tool."""
+        return {
+            "url": url,
+            "status": status,
+            "message": message,
+            "composer_resolved": composer_resolved,
+            "posted": posted,
+        }
+
+    async def create_post(
+        self,
+        text: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Create a new LinkedIn post.
+
+        Navigates to /feed/, opens the post composer modal, types the
+        text, and clicks Post. Dry-runs the composer-reach step when
+        confirm_send is False.
+
+        Args:
+            text: Body of the post.
+            confirm_send: Must be True to actually publish.
+
+        Returns:
+            Dict with url, status, message, composer_resolved, posted.
+            Status values: "posted", "confirmation_required",
+            "composer_unavailable", "submit_unavailable",
+            "post_unconfirmed".
+        """
+        if not text or not text.strip():
+            return self._create_post_result(
+                self._page.url if self._page else "",
+                "invalid_text",
+                "text is required and non-empty",
+            )
+
+        await self._navigate_to_page("https://www.linkedin.com/feed/")
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main", timeout=15000)
+        except PlaywrightTimeoutError:
+            return self._create_post_result(
+                self._page.url,
+                "post_not_found",
+                "LinkedIn feed did not render within 15s.",
+            )
+
+        await handle_modal_close(self._page)
+
+        # Click "Start a post" to open the composer modal.
+        opened = await self._page.evaluate(
+            """() => {
+                const isVisible = (b) => (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                const all = Array.from(document.querySelectorAll('button, div[role="button"]'))
+                    .filter(isVisible);
+                const norm = (s) => (s || '').toLowerCase();
+                const candidate = all.find(b => {
+                    const aria = norm(b.getAttribute('aria-label'));
+                    const text = norm(b.innerText || b.textContent);
+                    return aria.startsWith('start a post')
+                        || aria === 'create a post'
+                        || text === 'start a post'
+                        || text.startsWith('start a post');
+                });
+                if (!candidate) return false;
+                candidate.click();
+                return true;
+            }"""
+        )
+        if not opened:
+            return self._create_post_result(
+                self._page.url,
+                "composer_unavailable",
+                "Could not find or click the 'Start a post' button on the feed.",
+            )
+
+        # Wait for the composer modal to mount.
+        composer_ready = False
+        for _ in range(20):  # ~5s
+            await asyncio.sleep(0.25)
+            composer_ready = await self._page.evaluate(
+                """() => {
+                    const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="text" i],'
+                              + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="what" i],'
+                              + 'div.ql-editor[contenteditable="true"][aria-placeholder*="what" i],'
+                              + 'div.ql-editor[contenteditable="true"]';
+                    return Boolean(document.querySelector(sel));
+                }"""
+            )
+            if composer_ready:
+                break
+
+        if not composer_ready:
+            return self._create_post_result(
+                self._page.url,
+                "composer_unavailable",
+                "'Start a post' clicked but the composer textbox never mounted.",
+            )
+
+        if not confirm_send:
+            return self._create_post_result(
+                self._page.url,
+                "confirmation_required",
+                "Set confirm_send=true to publish the post.",
+                composer_resolved=True,
+            )
+
+        # Focus + type.
+        focused = await self._page.evaluate(
+            """() => {
+                const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="text" i],'
+                          + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="what" i],'
+                          + 'div.ql-editor[contenteditable="true"][aria-placeholder*="what" i],'
+                          + 'div.ql-editor[contenteditable="true"]';
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                el.focus();
+                return true;
+            }"""
+        )
+        if not focused:
+            return self._create_post_result(
+                self._page.url,
+                "composer_interact_failed",
+                "Could not focus the post composer.",
+                composer_resolved=True,
+            )
+
+        await asyncio.sleep(0.2)
+        await self._page.keyboard.type(text, delay=10)
+        await asyncio.sleep(0.5)
+
+        # Nudge React the same way post_comment does.
+        await self._page.evaluate(
+            """() => {
+                const sel = 'div[role="textbox"][contenteditable="true"][aria-label*="text" i],'
+                          + 'div[role="textbox"][contenteditable="true"][aria-placeholder*="what" i],'
+                          + 'div.ql-editor[contenteditable="true"][aria-placeholder*="what" i],'
+                          + 'div.ql-editor[contenteditable="true"]';
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;
+            }"""
+        )
+        await asyncio.sleep(1.5)
+
+        # Click the "Post" submit button. It usually lives inside the
+        # composer modal, often at the bottom right. We search globally
+        # for a button labeled "Post" that is NOT one of the feed-level
+        # buttons (which are labeled differently).
+        submitted = await self._page.evaluate(
+            """() => {
+                const isVisible = (b) => (b.offsetWidth || b.offsetHeight || b.getClientRects().length);
+                const isEnabled = (b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true' && isVisible(b);
+                const norm = (s) => (s || '').trim().toLowerCase();
+                const all = Array.from(document.querySelectorAll('button'));
+                const candidates = all.filter(b => {
+                    if (!isVisible(b)) return false;
+                    const aria = norm(b.getAttribute('aria-label'));
+                    const text = norm(b.innerText || b.textContent);
+                    return /^post$/.test(aria) || /^post$/.test(text);
+                });
+                // Prefer the candidate inside a dialog/modal.
+                const inModal = candidates.find(b => b.closest('[role="dialog"], .share-creation-state, .share-box-feed-entry__top-bar'));
+                const target = inModal || candidates[0];
+                if (!target) {
+                    return {
+                        ok: false,
+                        reason: 'no_candidates',
+                        all_post_buttons: all.filter(b => {
+                            const a = norm(b.getAttribute('aria-label')); const t = norm(b.innerText);
+                            return /post/.test(a) || /post/.test(t);
+                        }).slice(0, 8).map(b => ({
+                            aria: b.getAttribute('aria-label'), text: (b.innerText || '').trim().slice(0, 30)
+                        }))
+                    };
+                }
+                if (!isEnabled(target)) {
+                    return { ok: false, reason: 'disabled', target_aria: target.getAttribute('aria-label'), target_classes: target.className };
+                }
+                target.click();
+                return { ok: true };
+            }"""
+        )
+        if not submitted or not submitted.get("ok"):
+            logger.info(
+                "create_post submit failed: %s",
+                submitted,
+            )
+            # Ctrl+Enter fallback (LinkedIn accepts on most layouts).
+            await self._page.keyboard.press("Control+Enter")
+            await asyncio.sleep(0.8)
+            submitted_ok = False
+            diag_msg = f"submit reason={submitted}"
+        else:
+            submitted_ok = True
+            diag_msg = ""
+
+        # Verify the post was created by checking the composer closed and
+        # we're back on a feed-like view, or by sniffing for the new post
+        # appearing at the top of the feed.
+        verified = False
+        for _ in range(10):  # ~5s
+            await asyncio.sleep(0.5)
+            state = await self._page.evaluate(
+                """(needle) => {
+                    // Composer closed?
+                    const dialog = document.querySelector('[role="dialog"]');
+                    const composerOpen = Boolean(dialog && dialog.querySelector('div[role="textbox"][contenteditable="true"]'));
+                    if (composerOpen) return false;
+                    // Or: post appears in feed
+                    const articles = Array.from(document.querySelectorAll('main article, main [role="article"]'));
+                    return articles.some(a => (a.innerText || '').includes(needle));
+                }""",
+                text.strip()[:80],
+            )
+            if state:
+                verified = True
+                break
+
+        if not verified:
+            return self._create_post_result(
+                self._page.url,
+                "post_unconfirmed" if submitted_ok else "submit_unavailable",
+                (
+                    "Button clicked but LinkedIn did not confirm the post within 5s. "
+                    "It may still have published; check the feed."
+                ) if submitted_ok else (
+                    f"No enabled Post button found and Ctrl+Enter fallback did not land. "
+                    f"Diagnostic: {diag_msg}"
+                ),
+                composer_resolved=True,
+            )
+
+        return self._create_post_result(
+            self._page.url,
+            "posted",
+            "Post published successfully.",
+            composer_resolved=True,
+            posted=True,
+        )
