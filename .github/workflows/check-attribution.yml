@@ -4,6 +4,19 @@ on:
   pull_request:
     branches: [main]
 
+# Coding agents sign their work either with a Co-Authored-By trailer or by
+# claiming the author/committer field. Squash-merging collects the trailers of
+# every commit in the PR into the merge commit, so a single unnoticed trailer
+# reaches main permanently. Each identity below is a vendor-controlled address
+# or a known agent's GitHub App handle. Dependency bots (dependabot, renovate)
+# are deliberately allowed: they are maintenance automation, not authorship
+# claims.
+env:
+  # Bare identities, matched against a trailer address and against the
+  # author/committer fields. The optional digits cover GitHub's
+  # "<id>+<handle>@users.noreply.github.com" form, whose id varies per app.
+  AI_IDENTITY_RE: '(noreply@anthropic\.com|cursoragent@cursor\.com|(noreply|codex)@openai\.com|noreply@aider\.chat|openhands@all-hands\.dev|noreply@opencode\.ai|noreply@continue\.dev|clio-agent@sisyphuslabs\.ai|roomote@roocode\.com|copilot@github\.com|([0-9]+[+])?(Copilot|gemini-code-assist\[bot\]|greptile-apps\[bot\]|coderabbitai\[bot\]|ellipsis-dev\[bot\]|qodo-merge-pro\[bot\]|sweep-ai\[bot\]|bito-code-review\[bot\]|roomote\[bot\]|factory-droid\[bot\]|opencode-agent\[bot\]|google-labs-jules\[bot\])@users\.noreply\.github\.com)'
+
 jobs:
   check-bot-coauthors:
     if: ${{ !endsWith(github.actor, '[bot]') }}
@@ -25,12 +38,16 @@ jobs:
             exit 0
           fi
 
+          # Anchored to a full trailer line so a mention in prose does not fail.
+          TRAILER_RE="^[[:space:]]*co-authored-by:[[:space:]]+.*<${AI_IDENTITY_RE}>[[:space:]]*$"
+
           FOUND=0
           for sha in $COMMITS; do
             MSG=$(git log --format='%B' -1 "$sha")
-            if echo "$MSG" | grep -qi 'co-authored-by.*\(noreply@anthropic\.com\|Copilot@users\.noreply\.github\.com\|greptile-apps\[bot\]\)'; then
+            HITS=$(printf '%s\n' "$MSG" | grep -Ei "$TRAILER_RE" || true)
+            if [ -n "$HITS" ]; then
               echo "::error::Commit $sha contains a bot Co-Authored-By line. Remove it with: git rebase -i and edit the commit message."
-              echo "$MSG" | grep -i 'co-authored-by.*\(noreply@anthropic\|copilot\|greptile\)'
+              printf '%s\n' "$HITS"
               FOUND=1
             fi
           done
@@ -42,3 +59,33 @@ jobs:
           fi
 
           echo "All commits clean."
+
+      - name: Check for bot commit authors
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Some agents (Copilot's cloud agent, Jules, Devin) claim the author
+          # or committer field instead of adding a trailer, so the check above
+          # cannot see them. Written to a file rather than piped so the loop
+          # runs in this shell and its result survives.
+          git log --format='%H %ae %ce' "origin/${BASE_REF}..${HEAD_SHA}" > /tmp/authors.txt 2>/dev/null || true
+
+          FOUND=0
+          while read -r sha author committer; do
+            [ -z "$sha" ] && continue
+            for addr in "$author" "$committer"; do
+              if printf '%s\n' "$addr" | grep -Eqi "^${AI_IDENTITY_RE}$"; then
+                echo "::error::Commit $sha is authored or committed by a coding agent: $addr"
+                FOUND=1
+              fi
+            done
+          done < /tmp/authors.txt
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo ""
+            echo "To fix: rewrite the commit with 'git rebase -i origin/main', then 'git commit --amend --author=\"Your Name <you@example.com>\"'."
+            exit 1
+          fi
+
+          echo "All commit authors clean."
