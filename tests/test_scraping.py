@@ -16,6 +16,7 @@ from linkedin_mcp_server.scraping.connection import (
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
+    _CONTENT_DATE_POSTED_MAP,
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
@@ -3003,6 +3004,149 @@ class TestSearchPeople:
         assert "location=Seattle" in result["url"]
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
+
+
+class TestBuildContentSearchUrl:
+    """Tests for _build_content_search_url URL construction."""
+
+    def test_basic_keywords(self):
+        url = LinkedInExtractor._build_content_search_url("Buscamos Unity")
+        assert url == (
+            "https://www.linkedin.com/search/results/content/"
+            "?keywords=Buscamos+Unity&origin=FACETED_SEARCH"
+        )
+
+    def test_date_posted_past_week(self):
+        url = LinkedInExtractor._build_content_search_url(
+            "Buscamos Unity", date_posted="past-week"
+        )
+        assert "datePosted=%5B%22past-week%22%5D" in url
+
+    def test_date_posted_alias_normalized(self):
+        url = LinkedInExtractor._build_content_search_url(
+            "python", date_posted="past_24_hours"
+        )
+        assert "datePosted=%5B%22past-24h%22%5D" in url
+
+    def test_every_accepted_date_posted_reaches_linkedin_as_a_real_token(self):
+        """LinkedIn ignores an unrecognized token instead of rejecting it, so
+        an accepted value that never maps to one of its three would return
+        unfiltered results while looking filtered."""
+        for accepted, expected in _CONTENT_DATE_POSTED_MAP.items():
+            url = LinkedInExtractor._build_content_search_url(
+                "python", date_posted=accepted
+            )
+            assert expected in ("past-24h", "past-week", "past-month")
+            assert f"%22{expected}%22" in url
+
+    def test_no_date_posted_omits_facet(self):
+        url = LinkedInExtractor._build_content_search_url("python")
+        assert "datePosted" not in url
+
+    def test_whitespace_date_posted_omits_facet(self):
+        # Whitespace-only date_posted must be ignored, not appended as an
+        # invalid facet token (regression guard).
+        url = LinkedInExtractor._build_content_search_url("python", date_posted="   ")
+        assert "datePosted" not in url
+
+
+@pytest.mark.asyncio
+class TestSearchPosts:
+    async def test_returns_results_and_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("We're hiring a Unity dev"),
+        ) as mock_extract:
+            result = await extractor.search_posts("Buscamos Unity")
+
+        assert "/search/results/content/" in result["url"]
+        assert "origin=FACETED_SEARCH" in result["url"]
+        assert result["sections"]["search_results"] == "We're hiring a Unity dev"
+        # max_pages default (3) -> 15 scrolls
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="search_results", max_scrolls=15
+        )
+
+    async def test_date_posted_in_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ):
+            result = await extractor.search_posts(
+                "Buscamos Unity", date_posted="past-week"
+            )
+
+        assert "datePosted=%5B%22past-week%22%5D" in result["url"]
+
+    async def test_max_pages_controls_scroll_depth(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ) as mock_extract:
+            await extractor.search_posts("python", max_pages=2)
+
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="search_results", max_scrolls=10
+        )
+
+    async def test_invalid_date_posted_raises(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="Invalid date_posted"):
+            await extractor.search_posts("python", date_posted="last-year")
+
+    async def test_empty_results_omit_optional_keys(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(""),
+        ):
+            result = await extractor.search_posts("nothing matches this query")
+
+        assert result["sections"] == {}
+        assert "references" not in result
+        assert "section_errors" not in result
+
+    async def test_rate_limited_surfaces_section_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(_RATE_LIMITED_MSG),
+        ):
+            result = await extractor.search_posts("python")
+
+        assert result["sections"] == {}
+        assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
+
+    async def test_navigation_error_surfaces_section_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "", error={"error_type": "navigation_error", "error_message": "timeout"}
+            ),
+        ):
+            result = await extractor.search_posts("python")
+
+        assert result["sections"] == {}
+        assert result["section_errors"]["search_results"] == {
+            "error_type": "navigation_error",
+            "error_message": "timeout",
+        }
 
 
 class TestStripLinkedInNoise:
