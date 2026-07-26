@@ -40,11 +40,27 @@ _ACCEPT = {
 # What cli_main passes for a streamable-http server. Spelled out rather than
 # imported from it, so weakening the guard there has to be done here too and
 # cannot pass unnoticed.
-_HOST_ORIGIN_PROTECTION = "auto"
+_HOST_ORIGIN_PROTECTION = True
+
+# Every case runs against both, because the guard can behave differently
+# depending on which address the connection landed on — and it once did. The
+# "auto" setting validated only a loopback connection, so a server bound to
+# 0.0.0.0 and reached over its LAN address checked nothing, which is precisely
+# the exposed case. A suite that only ever connected to 127.0.0.1 could not see
+# that. 192.0.2.1 is the reserved documentation range, so it is never a real
+# host on the machine running these tests.
+_LOOPBACK_URL = "http://127.0.0.1:8000"
+_EXPOSED_URL = "http://192.0.2.1:8000"
+
+
+@pytest.fixture(params=[_LOOPBACK_URL, _EXPOSED_URL], ids=["loopback", "exposed"])
+def base_url(request: pytest.FixtureRequest) -> str:
+    """The address the server is reached at, loopback or not."""
+    return str(request.param)
 
 
 @pytest.fixture
-def post(monkeypatch: pytest.MonkeyPatch):
+def post(base_url: str, monkeypatch: pytest.MonkeyPatch):
     """POST an initialize request through the real app, returning the status."""
     # The lifespan starts browser setup and a handoff poller, neither of which
     # this file is about; stubbing them keeps the request path real while the
@@ -63,11 +79,15 @@ def post(monkeypatch: pytest.MonkeyPatch):
         app = create_mcp_server().http_app(
             path="/mcp", host_origin_protection=_HOST_ORIGIN_PROTECTION
         )
+        # base_url sets the ASGI scope's server address, which is what decides
+        # whether the connection looks local — not the Host header.
         # raise_server_exceptions=False so a rejection arrives as its status
         # rather than an exception, which is what a real client would see.
-        with TestClient(app, raise_server_exceptions=False) as client:
+        with TestClient(
+            app, base_url=base_url, raise_server_exceptions=False
+        ) as client:
             return client.post(
-                "http://127.0.0.1:8000/mcp",
+                f"{base_url}/mcp",
                 json=_INITIALIZE,
                 headers={**_ACCEPT, **headers},
             ).status_code
@@ -154,10 +174,23 @@ class TestLegitimateClientsStillWork:
             "LOCALHOST:8000",  # case is not part of a hostname
         ],
     )
-    def test_loopback_hosts_are_served(self, post, host: str) -> None:
-        """Including the documented Docker flow, which publishes a port and is
-        reached at localhost even though the container binds 0.0.0.0."""
+    def test_loopback_hosts_are_served_on_a_local_server(
+        self, request: pytest.FixtureRequest, post, host: str
+    ) -> None:
+        """Including the documented Docker flow: the container binds 0.0.0.0
+        but publishes a port, so clients reach it at localhost and the
+        connection itself is local."""
+        if "exposed" in request.node.name:
+            pytest.skip("a localhost Host is genuinely foreign to a remote server")
         assert post({"Host": host}) == 200
 
-    def test_a_loopback_origin_is_served(self, post) -> None:
-        assert post({"Origin": "http://localhost:8000"}) == 200
+    def test_the_servers_own_address_is_served(self, post, base_url: str) -> None:
+        """However the server is reached, its own address is a valid Host.
+
+        This is what keeps a deliberately exposed server usable: clients arrive
+        under the address it is bound to, and strict validation accepts it
+        without anything having to be configured.
+        """
+        host = base_url.removeprefix("http://")
+        assert post({"Host": host}) == 200
+        assert post({"Host": host, "Origin": base_url}) == 200

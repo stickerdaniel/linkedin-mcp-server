@@ -80,7 +80,7 @@ def test_main_interactive_prompts_when_transport_not_explicit(
         host=config.server.host,
         port=config.server.port,
         path=config.server.path,
-        host_origin_protection="auto",
+        host_origin_protection=True,
     )
 
 
@@ -132,7 +132,7 @@ def test_main_streamable_http_passes_host_port_path(
         host="0.0.0.0",
         port=8123,
         path="/custom-mcp",
-        host_origin_protection="auto",
+        host_origin_protection=True,
     )
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -143,10 +143,13 @@ def test_main_streamable_http_enables_host_and_origin_validation(
 ) -> None:
     """The guard is not optional and has no configuration switch.
 
-    Passing no ``allowed_hosts`` is the point rather than an omission: a
-    wildcard would accept an attacker's own domain as the Host and reopen the
-    hole this closes. See ``test_transport_security.py`` for what the resulting
-    server actually answers.
+    Two details here are load-bearing rather than incidental. ``True`` instead
+    of ``"auto"``: the latter validates only when the connection landed on a
+    loopback address, so an exposed server checked nothing over its own LAN
+    address. And no ``allowed_hosts``: a wildcard would accept an attacker's
+    domain as the Host and reopen the hole from the other side.
+
+    See ``test_transport_security.py`` for what the resulting server answers.
     """
     config = _make_config(
         is_interactive=False,
@@ -161,7 +164,7 @@ def test_main_streamable_http_enables_host_and_origin_validation(
 
     cli_main.main()
 
-    assert mcp.run.call_args.kwargs["host_origin_protection"] == "auto"
+    assert mcp.run.call_args.kwargs["host_origin_protection"] is True
     assert "allowed_hosts" not in mcp.run.call_args.kwargs
 
 

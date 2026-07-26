@@ -394,17 +394,24 @@ def main() -> None:
                 # name this server answers to. Requests carrying no Origin at
                 # all stay allowed, which is every non-browser client.
                 #
-                # Deliberately no wildcard on an exposed bind: it would accept
-                # any Host and reopen exactly this hole. A client reaching a
-                # container under localhost is unaffected, since that is a name
-                # the guard already accepts; anything else needs the host named
-                # explicitly, which is a decision for whoever exposes it.
+                # True rather than "auto": "auto" only validates when the
+                # accepted connection landed on a loopback address, so a server
+                # bound to 0.0.0.0 and reached over its LAN address checked
+                # nothing at all — the exposed case, where it matters most.
+                # Measured before this: an attacker Host and Origin over the LAN
+                # address were served, while the same request to 127.0.0.1 was
+                # refused. Strict validates either way and accepts the address
+                # it is actually bound to, so a deliberately exposed server
+                # keeps working.
+                #
+                # Deliberately no host wildcard: it would accept any Host and
+                # reopen the same hole from the other side.
                 mcp.run(
                     transport=transport,
                     host=config.server.host,
                     port=config.server.port,
                     path=config.server.path,
-                    host_origin_protection="auto",
+                    host_origin_protection=True,
                 )
             else:
                 mcp.run(transport=transport)
