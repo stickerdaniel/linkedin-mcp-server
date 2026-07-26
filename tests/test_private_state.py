@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,72 @@ class TestHardeningOnPosix:
         harden_directory(target)
 
         assert _mode(target) == 0o700
+
+
+class TestExtendedAcls:
+    """Access the permission bits do not describe.
+
+    On macOS an ACL sits alongside the mode rather than inside it, so a file
+    can report 0600 while another account still reads it. Checking only the
+    mode is not checking who has access.
+    """
+
+    @pytest.mark.skipif(
+        sys.platform != "darwin", reason="extended ACLs are a macOS mechanism here"
+    )
+    def test_an_inherited_acl_does_not_survive_hardening(self, tmp_path: Path):
+        # Measured before the fix: an auth root carrying an inheritable
+        # everyone entry produced a token reporting exactly 0600 that everyone
+        # could still read, and hardening returned without complaint.
+        subprocess.run(
+            [
+                "chmod",
+                "+a",
+                "everyone allow read,list,search,file_inherit,directory_inherit",
+                str(tmp_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        target = tmp_path / "daemon"
+        harden_directory(target)
+        token = target / "token"
+        token.touch()
+        harden_file(token)
+
+        for path in (target, token):
+            listing = subprocess.run(
+                ["ls", "-lde", str(path)], capture_output=True, text=True, check=True
+            ).stdout
+            entries = [
+                line
+                for line in listing.splitlines()[1:]
+                if line.strip() and line.strip()[0].isdigit()
+            ]
+            assert entries == [], f"{path} still grants access outside its mode"
+
+    @pytest.mark.skipif(
+        sys.platform != "darwin", reason="extended ACLs are a macOS mechanism here"
+    )
+    def test_an_acl_that_cannot_be_cleared_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Fails closed. If the entries cannot be removed, the caller must not
+        # go on to write a secret into a file other accounts can read.
+        target = tmp_path / "daemon"
+        target.mkdir()
+        subprocess.run(
+            ["chmod", "+a", "everyone allow read", str(target)],
+            check=True,
+            capture_output=True,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.private_state._drop_extended_acl", lambda path: None
+        )
+
+        with pytest.raises(PrivateStateError, match="access control list"):
+            harden_directory(target)
 
 
 class TestRefusals:

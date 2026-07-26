@@ -22,11 +22,15 @@ keeps out root or an administrator, and no file permission ever has.
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
+import subprocess
 from pathlib import Path
 
 from linkedin_mcp_server.common_utils import secure_mkdir
+
+logger = logging.getLogger(__name__)
 
 _PRIVATE_DIR_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
@@ -62,8 +66,7 @@ def harden_directory(path: Path) -> None:
         restrict_to_current_user(path, directory=True)
         return
 
-    path.chmod(_PRIVATE_DIR_MODE)
-    _verify_posix_mode(path, _PRIVATE_DIR_MODE)
+    _harden_posix(path, _PRIVATE_DIR_MODE)
 
 
 def harden_file(path: Path) -> None:
@@ -82,8 +85,72 @@ def harden_file(path: Path) -> None:
         restrict_to_current_user(path, directory=False)
         return
 
-    path.chmod(_PRIVATE_FILE_MODE)
-    _verify_posix_mode(path, _PRIVATE_FILE_MODE)
+    _harden_posix(path, _PRIVATE_FILE_MODE)
+
+
+def _harden_posix(path: Path, mode: int) -> None:
+    """Apply *mode*, drop any extended ACL, and check the result."""
+    path.chmod(mode)
+    _drop_extended_acl(path)
+    _verify_posix_mode(path, mode)
+    _verify_no_extended_acl(path)
+
+
+def _drop_extended_acl(path: Path) -> None:
+    """Remove an extended ACL, which the mode bits do not describe.
+
+    On macOS an ACL sits alongside the mode rather than inside it, and
+    ``chmod`` leaves it untouched. Measured: an auth root carrying an
+    inheritable ``everyone`` entry produced a token file reporting exactly
+    ``0600`` while ``everyone`` could still read it. Verifying only the mode
+    is therefore not verifying anything about who has access.
+
+    Linux ACLs behave the same way in principle, but ``chmod`` there already
+    clamps the mask so the extra entries grant nothing.
+    """
+    if not hasattr(os, "O_NOFOLLOW"):  # pragma: no cover - POSIX only
+        return
+    try:
+        subprocess.run(
+            ["chmod", "-N", str(path)],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Absence of the tool is not a failure by itself: the verification
+        # below decides, and it fails closed if an ACL is still there.
+        logger.debug("Could not clear an extended ACL on %s", path, exc_info=True)
+
+
+def _verify_no_extended_acl(path: Path) -> None:
+    """Refuse when an extended ACL still grants access the mode does not show."""
+    try:
+        listing = subprocess.run(
+            ["ls", "-lde", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - no ls
+        return
+
+    # An ACL entry is printed as a numbered line under the mode. The mode line
+    # itself also ends in "@" or "+" when one is present, but reading the
+    # entries is the part that cannot be misread.
+    entries = [
+        line
+        for line in listing.stdout.splitlines()[1:]
+        if line.strip() and line.strip()[0].isdigit()
+    ]
+    if entries:
+        raise PrivateStateError(
+            f"{path} carries an access control list that the permission bits "
+            f"do not describe, so it may still be readable by other accounts:\n"
+            f"{chr(10).join(entries)}\n"
+            f"Clear it with: chmod -N {path}"
+        )
 
 
 def _verify_posix_mode(path: Path, expected: int) -> None:
