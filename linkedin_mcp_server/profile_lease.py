@@ -86,7 +86,7 @@ if not _HAS_FCNTL:  # pragma: no cover - Windows
         # Probed here rather than assumed: the block below binds kernel32 at
         # import time, and an ImportError or a missing symbol there would take
         # the whole server down with an obscure message instead of the explicit
-        # "no usable file locking" refusal that _try_lock raises.
+        # "no usable file locking" refusal that try_lock raises.
         _HAS_WINDOWS_LOCKS = hasattr(ctypes, "WinDLL")
     except ImportError:
         _HAS_WINDOWS_LOCKS = False
@@ -94,7 +94,7 @@ else:  # pragma: no cover - POSIX
     _HAS_WINDOWS_LOCKS = False
 
 
-def _try_lock(fd: int, *, exclusive: bool) -> bool:
+def try_lock(fd: int, *, exclusive: bool) -> bool:
     """Take a non-blocking lock on *fd*. Return whether it was granted.
 
     ``msvcrt.locking`` is deliberately not used on Windows: it offers only
@@ -244,7 +244,7 @@ if not _HAS_FCNTL and _HAS_WINDOWS_LOCKS:  # pragma: no cover - Windows
 # --------------------------------------------------------------------------- #
 
 
-def _open_lock_file(path: Path) -> int:
+def open_lock_file(path: Path) -> int:
     """Open *path* for locking, creating it with owner-only permissions."""
     secure_mkdir(path.parent)
     harden_linkedin_tree(path.parent)
@@ -255,7 +255,7 @@ def _open_lock_file(path: Path) -> int:
     return os.open(path, os.O_RDWR | os.O_CREAT | cloexec, 0o600)
 
 
-def _acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
+def acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
     """Open *path* and lock it, or return ``None`` if it is already held.
 
     Re-opens when the path was unlinked between open and lock. Without that
@@ -264,10 +264,10 @@ def _acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
     against with the same ``st_nlink`` test.
     """
     for _ in range(3):
-        fd = _open_lock_file(path)
+        fd = open_lock_file(path)
         locked = False
         try:
-            if not _try_lock(fd, exclusive=exclusive):
+            if not try_lock(fd, exclusive=exclusive):
                 return None
             locked = True
             if os.fstat(fd).st_nlink > 0:
@@ -421,7 +421,7 @@ class ProfileLease:
             self._refs += 1
             return True
 
-        fd = _acquire_locked_fd(self._lease_path, exclusive=True)
+        fd = acquire_locked_fd(self._lease_path, exclusive=True)
         if fd is None:
             return False
 
@@ -492,7 +492,7 @@ class ProfileLease:
         waiter holds its shared lock.
         """
         try:
-            fd = _acquire_locked_fd(self._handoff_path, exclusive=True)
+            fd = acquire_locked_fd(self._handoff_path, exclusive=True)
         except ProfileLeaseUnavailableError:
             # A path that keeps being replaced tells us nothing; do not hand over
             # on the strength of a broken signal.
@@ -547,7 +547,7 @@ class _Announcement:
 
     def __enter__(self) -> _Announcement:
         try:
-            self._fd = _acquire_locked_fd(self._path, exclusive=False)
+            self._fd = acquire_locked_fd(self._path, exclusive=False)
         except ProfileLeaseUnavailableError:
             # Failing to announce only costs us a prompt handoff, so degrade to
             # waiting quietly rather than failing the caller's tool call.
