@@ -5789,3 +5789,48 @@ class TestProxyNavigationFailures:
             )
 
         assert not isinstance(excinfo.value, ProxyConnectionError)
+
+
+class TestNavigationFailureLogRedaction:
+    """The navigation-failure log must not carry proxy credentials.
+
+    It reaches the log even for errors the marker check does not recognise as
+    proxy faults, and that log is what users paste into issue reports.
+    """
+
+    async def test_credentials_are_redacted_from_the_log(
+        self, mock_page, monkeypatch, caplog
+    ):
+        import logging
+
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_username = "acctzone9"
+        config.browser.proxy_password = "s3cr3t"
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        extractor = LinkedInExtractor(mock_page)
+        # No proxy marker, so it is not converted and reaches the logger.
+        mock_page.goto = AsyncMock(
+            side_effect=Exception(
+                "failed via http://acctzone9:s3cr3t@gate.example:7000"
+            )
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            caplog.at_level(logging.WARNING),
+            pytest.raises(Exception),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert "s3cr3t" not in caplog.text
+        assert "acctzone9" not in caplog.text

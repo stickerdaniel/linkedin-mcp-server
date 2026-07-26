@@ -785,7 +785,11 @@ class LinkedInExtractor:
             "current_url=%s title=%r auth_barrier=%s remember_me=%s hops=%s body_marker=%r",
             target_url,
             wait_until,
-            navigation_error,
+            # Redacted like the traces above: a driver error can quote the
+            # proxy URL, and this log is what users paste into issue reports.
+            redact_proxy_credentials(
+                f"{type(navigation_error).__name__}: {navigation_error}"
+            ),
             self._page.url,
             title,
             auth_barrier,
