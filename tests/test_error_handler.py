@@ -180,7 +180,7 @@ def test_unknown_exception_log_is_redacted(monkeypatch, caplog):
     config.browser.proxy_password = "s3cr3t"
     monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
 
-    with caplog.at_level(logging.DEBUG), pytest.raises(Exception):
+    with caplog.at_level(logging.DEBUG), pytest.raises(Exception) as excinfo:
         raise_tool_error(
             Exception("failed via http://acctzone9:s3cr3t@gate.example:7000"),
             "get_person_profile",
@@ -188,3 +188,60 @@ def test_unknown_exception_log_is_redacted(monkeypatch, caplog):
 
     assert "s3cr3t" not in caplog.text
     assert "acctzone9" not in caplog.text
+    # The exception that leaves this function must be clean too: FastMCP calls
+    # logger.exception on it (server.py:1343), writing the message and the
+    # whole traceback again before the client-facing reply is masked.
+    assert "s3cr3t" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+
+
+async def test_fastmcp_boundary_logging_stays_clean(monkeypatch):
+    """The real boundary: FastMCP logs whatever leaves raise_tool_error.
+
+    `mask_error_details` only sanitises the reply to the client. The server
+    still writes the raw exception and its traceback to its own log first, so
+    the exception itself has to be clean by the time it gets there.
+
+    Asserted against the rendered output rather than caplog: FastMCP logs via
+    logger.exception through a Rich handler, so the credentials live in the
+    traceback rather than the message. A caplog.text assertion passes while the
+    rendered traceback still leaks -- verified by reintroducing the bug.
+    """
+    import contextlib
+    import io
+
+    from fastmcp import FastMCP
+
+    from linkedin_mcp_server.config.schema import AppConfig
+
+    # Built rather than written literally: Rich renders the failing source line
+    # inside its traceback, so a literal here would appear in the captured
+    # output and fail the assertion for the wrong reason.
+    user = "acct" + "zone9"
+    secret = "s3" + "cr3t"
+
+    config = AppConfig()
+    config.browser.proxy_server = "http://gate.example:7000"
+    config.browser.proxy_username = user
+    config.browser.proxy_password = secret
+    monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+    mcp = FastMCP("test", mask_error_details=True)
+
+    @mcp.tool
+    async def failing_tool() -> str:
+        raise_tool_error(
+            Exception(f"failed via http://{user}:{secret}@gate.example:7000"),
+            "failing_tool",
+        )
+
+    rendered = io.StringIO()
+    with contextlib.redirect_stderr(rendered), contextlib.redirect_stdout(rendered):
+        with pytest.raises(Exception):
+            # call_tool, not _call_tool: the logging boundary lives in the
+            # public wrapper, and the private one never reaches it.
+            await mcp.call_tool("failing_tool", {})
+
+    output = rendered.getvalue()
+    assert secret not in output
+    assert user not in output
