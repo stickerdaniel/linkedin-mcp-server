@@ -1,0 +1,214 @@
+"""Storage that only the current account can read.
+
+The Windows tests here run only on Windows and are the reason the CI matrix
+covers it: the ACL path cannot be exercised anywhere else, and mocking it would
+only assert that the mock was called.
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from linkedin_mcp_server.private_state import (
+    PrivateStateError,
+    harden_directory,
+    harden_file,
+)
+
+posix_only = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX permission bits do not exist on Windows"
+)
+windows_only = pytest.mark.skipif(
+    os.name != "nt", reason="Windows ACLs cannot be set or read on POSIX"
+)
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+class TestHardeningOnPosix:
+    @posix_only
+    def test_a_new_directory_is_owner_only(self, tmp_path: Path):
+        target = tmp_path / "auth-root" / "daemon"
+
+        harden_directory(target)
+
+        assert _mode(target) == 0o700
+
+    @posix_only
+    def test_an_existing_wide_directory_is_narrowed(self, tmp_path: Path):
+        # The case that actually happens: the auth root predates this code, or
+        # the user made it, and it carries whatever the umask gave it. Creating
+        # the token inside it with 0600 would look right while the directory
+        # let anyone list and open it.
+        target = tmp_path / "daemon"
+        target.mkdir(mode=0o755)
+
+        harden_directory(target)
+
+        assert _mode(target) == 0o700
+
+    @posix_only
+    def test_hardening_works_outside_a_linkedin_mcp_tree(self, tmp_path: Path):
+        # USER_DATA_DIR can point anywhere, and the older tree-hardening helper
+        # deliberately does nothing outside a .linkedin-mcp directory. A token
+        # stored under a custom root has to be protected just the same.
+        target = tmp_path / "somewhere-else" / "daemon"
+        target.parent.mkdir(mode=0o755)
+        target.mkdir(mode=0o755)
+
+        harden_directory(target)
+
+        assert _mode(target) == 0o700
+
+    @posix_only
+    def test_a_file_is_owner_only(self, tmp_path: Path):
+        target = tmp_path / "token"
+        target.touch(mode=0o644)
+
+        harden_file(target)
+
+        assert _mode(target) == 0o600
+
+    @posix_only
+    def test_repeated_hardening_is_stable(self, tmp_path: Path):
+        # Called on every daemon start, so it has to be safe to repeat.
+        target = tmp_path / "daemon"
+
+        harden_directory(target)
+        harden_directory(target)
+
+        assert _mode(target) == 0o700
+
+
+class TestRefusals:
+    def test_hardening_a_missing_file_refuses(self, tmp_path: Path):
+        # Hardening has to happen before the secret is written. Being asked to
+        # harden something that does not exist means the caller has the order
+        # wrong, and staying quiet would hide it until the file was readable.
+        with pytest.raises(PrivateStateError, match="does not exist"):
+            harden_file(tmp_path / "absent")
+
+    def test_a_file_where_a_directory_belongs_refuses(self, tmp_path: Path):
+        occupied = tmp_path / "daemon"
+        occupied.write_text("not a directory")
+
+        with pytest.raises(PrivateStateError, match="Not a directory"):
+            harden_directory(occupied)
+
+    @posix_only
+    def test_a_filesystem_that_ignores_chmod_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A share or a FAT volume accepts chmod and keeps the old mode. Without
+        # reading the mode back, the secret lands on disk readable and nothing
+        # says so. Simulated, since neither can be mounted in a test run.
+        target = tmp_path / "token"
+        target.touch(mode=0o644)
+        monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
+
+        with pytest.raises(PrivateStateError, match="owner-only"):
+            harden_file(target)
+
+
+class TestWindowsAcl:
+    """Only meaningful on Windows, where a DACL rather than a mode decides."""
+
+    @windows_only
+    def test_a_directory_grants_only_this_account(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import (
+            CONTAINER_INHERITANCE,
+            current_user_sid,
+            describe_dacl,
+            _sid_to_string,
+        )
+
+        target = tmp_path / "daemon"
+        harden_directory(target)
+
+        sid, buffer = current_user_sid()
+        try:
+            expected = _sid_to_string(sid)
+        finally:
+            del buffer
+
+        described = describe_dacl(target)
+        assert described.protected is True
+        assert len(described.entries) == 1
+        assert described.entries[0].sid == expected
+        # Inheritable, so a file created inside is owner-only from the start
+        # rather than from whenever it gets hardened.
+        assert described.entries[0].flags == CONTAINER_INHERITANCE
+
+    @windows_only
+    def test_a_file_grants_only_this_account_and_inherits_nothing(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        target = tmp_path / "token"
+        target.touch()
+        harden_file(target)
+
+        described = describe_dacl(target)
+        assert described.protected is True
+        assert len(described.entries) == 1
+        assert described.entries[0].flags == 0
+
+    @windows_only
+    def test_a_permissive_parent_does_not_leak_in(self, tmp_path: Path):
+        # The reason the DACL is replaced and marked protected rather than
+        # merged: a parent granting Everyone would otherwise pass that straight
+        # down to the token file.
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        parent = tmp_path / "wide"
+        parent.mkdir()
+        # Argument list rather than a shell string: the path comes from a
+        # fixture and could carry spaces or shell metacharacters.
+        subprocess.run(
+            ["icacls", str(parent), "/grant", "*S-1-1-0:(OI)(CI)F"],
+            check=True,
+            capture_output=True,
+        )
+
+        target = parent / "daemon"
+        harden_directory(target)
+
+        described = describe_dacl(target)
+        granted = {entry.sid for entry in described.entries}
+        assert "S-1-1-0" not in granted  # Everyone
+        assert "S-1-5-32-545" not in granted  # BUILTIN\Users
+        assert "S-1-5-11" not in granted  # Authenticated Users
+
+    @windows_only
+    def test_the_struct_layouts_match_the_windows_headers(self):
+        # ctypes sizes a struct from its declared fields, so a wrong field type
+        # produces a struct Windows reads at the wrong offsets and reports as
+        # an unrelated error. These are the documented sizes on 64-bit.
+        import ctypes
+
+        from linkedin_mcp_server import windows_acl as acl
+
+        assert ctypes.sizeof(acl._ACL) == 8
+        assert ctypes.sizeof(acl._ACE_HEADER) == 4
+        assert ctypes.sizeof(acl._ACCESS_ALLOWED_ACE) == 12
+        assert ctypes.sizeof(acl._SID_AND_ATTRIBUTES) == 16
+        assert ctypes.sizeof(acl._TRUSTEE_W) == 32
+        assert ctypes.sizeof(acl._EXPLICIT_ACCESS_W) == 48
+
+
+class TestWindowsAclOffWindows:
+    @posix_only
+    def test_the_windows_helpers_refuse_rather_than_pretend(self, tmp_path: Path):
+        # Importable everywhere so the module can be reasoned about and typed on
+        # any platform, but every entry point refuses off Windows rather than
+        # failing somewhere inside a DLL that is not there.
+        from linkedin_mcp_server.windows_acl import current_user_sid
+
+        with pytest.raises(PrivateStateError, match="off Windows"):
+            current_user_sid()
