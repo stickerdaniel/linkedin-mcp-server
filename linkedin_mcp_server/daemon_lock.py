@@ -13,10 +13,11 @@ one holder, no reference counting, released only on exit.
 
 Two things it must never do, both of which cost the lock silently:
 
-* It must not unlock before closing. The lock belongs to the open file
-  description, which every copy shares, so unlocking releases it for anything
-  else holding one. Measured on both POSIX and Windows: unlock-then-close left
-  the lock free while a live process believed it held it.
+* It must not unlock before closing. A duplicate of the descriptor shares the
+  lock rather than holding one of its own, so unlocking through any of them
+  releases it for all. Measured on both POSIX and Windows: unlock-then-close
+  left the lock free while a live process believed it held it. The kernel
+  bookkeeping behind that differs by platform, but the rule does not.
 * It must not treat a free lock as proof that nothing is running. Chromium
   outlives the process that started it, measured at over twenty seconds after a
   kill, and the kernel frees the lock at the instant of death. The two facts are
@@ -24,9 +25,9 @@ Two things it must never do, both of which cost the lock silently:
 
 Handing a held lock to another process works only on POSIX. Measured on
 Windows: a child that inherited the handle through the documented mechanism did
-not hold the lock once the parent closed its own, in 20 of 20 runs. The two
-platforms genuinely differ here, so startup has to differ with them rather than
-share one path that is only true on one of them.
+not hold the lock once the parent had closed its handles and exited, in 20 of 20
+runs. The two platforms genuinely differ here, so startup has to differ with
+them rather than share one path that is only true on one of them.
 """
 
 from __future__ import annotations
@@ -55,10 +56,16 @@ _DAEMON_LOCK_FILE = "daemon.lock"
 #: False on Windows, and this is measured rather than assumed. On a Windows
 #: runner, a child that received the handle through the documented
 #: ``STARTUPINFO`` handle list and kept it open did not hold the lock once the
-#: parent closed its own: a third process acquired the byte range in 20 of 20
-#: runs. Within one process a duplicate does keep the lock alive, which is why
-#: this is easy to get wrong from a single-process test. Ownership there has to
-#: be taken by the supervisor itself rather than passed to it.
+#: parent had closed its handles and exited: a third process acquired the byte
+#: range in 20 of 20 runs. Within one process a duplicate does keep the lock
+#: alive, which is why this is easy to get wrong from a single-process test.
+#: Ownership here has to be taken by the supervisor itself rather than passed
+#: to it.
+#:
+#: The measurement closed and exited together, so it does not say which of the
+#: two released the region. That distinction would matter for a design that
+#: kept the electing process alive as a lock broker; it does not matter for
+#: this one, where the elector always exits.
 _INHERITED_LOCKS_TRANSFER = os.name != "nt"
 
 
