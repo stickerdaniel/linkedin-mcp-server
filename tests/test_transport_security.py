@@ -174,15 +174,22 @@ class TestLegitimateClientsStillWork:
             "LOCALHOST:8000",  # case is not part of a hostname
         ],
     )
-    def test_loopback_hosts_are_served_on_a_local_server(
-        self, request: pytest.FixtureRequest, post, host: str
-    ) -> None:
-        """Including the documented Docker flow: the container binds 0.0.0.0
-        but publishes a port, so clients reach it at localhost and the
-        connection itself is local."""
-        if "exposed" in request.node.name:
-            pytest.skip("a localhost Host is genuinely foreign to a remote server")
+    def test_loopback_hosts_are_always_served(self, post, host: str) -> None:
+        """This is the documented Docker flow, and it needs both parameters.
+
+        A published container port is reached at ``localhost``, but inside the
+        container the connection lands on the container's own address — a
+        non-loopback scope. So the case that actually ships is a localhost Host
+        arriving on a non-loopback server, and only running this against both
+        scopes covers it.
+        """
         assert post({"Host": host}) == 200
+
+    def test_the_docker_flow_survives_a_matching_origin(self, post) -> None:
+        """A browser client at the published port sends an Origin too."""
+        assert (
+            post({"Host": "localhost:8000", "Origin": "http://localhost:8000"}) == 200
+        )
 
     def test_a_hostname_the_server_does_not_know_is_refused(self, post) -> None:
         """The documented cost of strict validation, recorded deliberately.

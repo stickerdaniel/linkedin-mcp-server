@@ -400,9 +400,15 @@ def main() -> None:
                 # nothing at all — the exposed case, where it matters most.
                 # Measured before this: an attacker Host and Origin over the LAN
                 # address were served, while the same request to 127.0.0.1 was
-                # refused. Strict validates either way and accepts the address
-                # it is actually bound to, so a deliberately exposed server
-                # keeps working.
+                # refused.
+                #
+                # Strict accepts localhost and the address the connection
+                # arrived on, which covers the documented flows. It does not
+                # accept a DNS name — a machine name, or a public name in front
+                # of a proxy — so those need the proxy to rewrite the upstream
+                # Host, or the name listed explicitly. The README says so next
+                # to the exposed-bind example, because a 421 nobody can explain
+                # is how a guard like this ends up switched off.
                 #
                 # Deliberately no host wildcard: it would accept any Host and
                 # reopen the same hole from the other side.
