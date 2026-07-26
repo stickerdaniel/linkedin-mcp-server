@@ -116,7 +116,6 @@ class TestExposedBindWarning:
             "::",
             "192.168.1.5",  # a LAN address warned about nothing before
             "10.0.0.7",
-            "::ffff:127.0.0.1",  # IPv4-mapped loopback: not in the allowlist
             "example.internal",
         ],
     )
@@ -138,18 +137,30 @@ class TestExposedBindWarning:
     @pytest.mark.parametrize(
         ("host", "expected"),
         [
+            # Reachable only from this machine, however it was spelled.
             ("127.0.0.1", True),
             ("::1", True),
             ("localhost", True),
+            ("LOCALHOST", True),  # case is not part of a hostname
+            ("  localhost  ", True),
+            ("localhost.", True),  # the root dot is the same name
+            ("127.0.0.2", True),  # the whole 127/8 range is loopback
+            ("127.255.255.254", True),
+            ("::ffff:127.0.0.1", True),  # IPv4-mapped loopback
+            ("[::1]", True),  # bracketed, as it appears in a URL
+            # Reachable from elsewhere, or not decidable without DNS.
             ("0.0.0.0", False),
             ("::", False),
             ("192.168.1.5", False),
-            ("::ffff:127.0.0.1", False),
+            ("10.0.0.7", False),
+            ("example.internal", False),
+            ("localhost.evil.example", False),  # a name DNS points anywhere
             ("", False),
+            ("   ", False),
         ],
     )
     def test_is_loopback_host_fails_closed(self, host, expected):
-        """Anything unrecognised counts as reachable, never the other way."""
+        """Anything not positively loopback counts as reachable."""
         assert is_loopback_host(host) is expected
 
 

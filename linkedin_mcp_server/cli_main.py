@@ -14,6 +14,7 @@ from linkedin_mcp_server.bootstrap import (
 from linkedin_mcp_server.core import AuthenticationError
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.schema import is_loopback_host
 from linkedin_mcp_server.drivers.browser import (
     experimental_persist_derived_runtime,
     close_browser,
@@ -387,15 +388,25 @@ def main() -> None:
                 # specification requires validating Origin for exactly this
                 # reason, and the protection is off unless asked for.
                 #
-                # "auto" allows the bound host and loopback origins, and keeps
-                # allowing requests that carry no Origin at all, which is every
-                # non-browser client.
+                # Requests carrying no Origin at all stay allowed, which is
+                # every non-browser client.
                 mcp.run(
                     transport=transport,
                     host=config.server.host,
                     port=config.server.port,
                     path=config.server.path,
                     host_origin_protection="auto",
+                    # A deliberately exposed bind is reached under a Host header
+                    # this server cannot predict — a LAN address, a hostname, a
+                    # reverse proxy's name — and the Host check would answer 421
+                    # to all of them. Origin validation is what stops rebinding;
+                    # the Host check only adds depth on a loopback bind, where
+                    # the accepted names are knowable. Wildcarding it off an
+                    # exposed bind keeps that server usable without weakening
+                    # the guard that matters.
+                    allowed_hosts=(
+                        None if is_loopback_host(config.server.host) else ["*"]
+                    ),
                 )
             else:
                 mcp.run(transport=transport)

@@ -5,6 +5,7 @@ Defines the dataclass schemas that represent the application's configuration
 structure with type-safe configuration objects and default values.
 """
 
+import ipaddress
 import logging
 import math
 from dataclasses import dataclass, field
@@ -41,16 +42,40 @@ BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
 DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS: float = 600.0
 
 
-# Hosts that only this machine can reach. An exact-match allowlist that fails
-# closed: anything unrecognised — 0.0.0.0, ::, a LAN address, an IPv4-mapped
-# loopback — counts as reachable from elsewhere. Erring towards "exposed" costs
-# a warning; erring the other way would hand a logged-in session to the network.
-LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
+# Names that resolve only on this machine. Compared case-insensitively and
+# without a trailing root dot, both of which are the same name to a resolver.
+LOOPBACK_HOSTNAMES: frozenset[str] = frozenset({"localhost"})
 
 
 def is_loopback_host(host: str) -> bool:
-    """Whether *host* is reachable only from this machine."""
-    return host in LOOPBACK_HOSTS
+    """Whether *host* is reachable only from this machine.
+
+    Fails closed: anything this cannot positively identify as loopback — a
+    wildcard bind, a LAN address, a name that needs DNS to answer — counts as
+    reachable from elsewhere. Erring that way costs a warning and a skipped
+    cookie import; erring the other way would hand a logged-in session to the
+    network.
+
+    Address literals go through :mod:`ipaddress` rather than a spelling list,
+    so the whole 127/8 range and IPv4-mapped forms are recognised for what they
+    are instead of being judged on how they were typed.
+    """
+    name = host.strip().rstrip(".").lower()
+    if not name:
+        return False
+    if name in LOOPBACK_HOSTNAMES:
+        return True
+
+    literal = name
+    if literal.startswith("[") and literal.endswith("]"):
+        literal = literal[1:-1]  # bracketed IPv6, as it appears in a URL
+    try:
+        address = ipaddress.ip_address(literal)
+    except ValueError:
+        # A name only DNS can resolve, and DNS can point anywhere.
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return address.is_loopback or bool(mapped and mapped.is_loopback)
 
 
 class ConfigurationError(Exception):

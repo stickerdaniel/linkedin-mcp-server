@@ -81,6 +81,7 @@ def test_main_interactive_prompts_when_transport_not_explicit(
         port=config.server.port,
         path=config.server.path,
         host_origin_protection="auto",
+        allowed_hosts=None,
     )
 
 
@@ -133,6 +134,7 @@ def test_main_streamable_http_passes_host_port_path(
         port=8123,
         path="/custom-mcp",
         host_origin_protection="auto",
+        allowed_hosts=["*"],  # 0.0.0.0: see test_main_keeps_an_exposed_bind_reachable
     )
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -160,6 +162,57 @@ def test_main_streamable_http_always_rejects_foreign_origins(
 
     cli_main.main()
 
+    assert mcp.run.call_args.kwargs["host_origin_protection"] == "auto"
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_main_checks_the_host_header_on_a_loopback_bind(
+    monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """On loopback the acceptable Host values are knowable, so check them."""
+    config = _make_config(
+        is_interactive=False,
+        transport="streamable-http",
+        transport_explicitly_set=True,
+    )
+    config.server.host = host
+    _patch_main_dependencies(monkeypatch, config)
+    mcp = MagicMock()
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
+    )
+
+    cli_main.main()
+
+    assert mcp.run.call_args.kwargs["allowed_hosts"] is None
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.5", "::"])
+def test_main_keeps_an_exposed_bind_reachable(
+    monkeypatch: pytest.MonkeyPatch, host: str
+) -> None:
+    """A deliberately exposed server must still answer its own clients.
+
+    Those clients arrive under a Host this server cannot predict — a LAN
+    address, a hostname, a reverse proxy's name — and checking it would answer
+    421 to every one of them. Origin validation is what stops rebinding, and it
+    stays on regardless.
+    """
+    config = _make_config(
+        is_interactive=False,
+        transport="streamable-http",
+        transport_explicitly_set=True,
+    )
+    config.server.host = host
+    _patch_main_dependencies(monkeypatch, config)
+    mcp = MagicMock()
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
+    )
+
+    cli_main.main()
+
+    assert mcp.run.call_args.kwargs["allowed_hosts"] == ["*"]
     assert mcp.run.call_args.kwargs["host_origin_protection"] == "auto"
 
 
