@@ -171,3 +171,30 @@ class _FakePage:
         if self._error:
             raise self._error
         return "ok"
+
+
+class TestUsernameIsTreatedAsSecret:
+    """Provider usernames carry account, zone and session identity."""
+
+    USERNAME = "brd-customer-acct1-zone-resi"
+
+    def _config(self, monkeypatch):
+        config = AppConfig()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_username = self.USERNAME
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+        return config
+
+    def test_username_is_masked(self, monkeypatch):
+        self._config(monkeypatch)
+        redacted = redact_proxy_credentials(f"http://{self.USERNAME}:pw@gate:7000")
+        assert self.USERNAME not in redacted
+
+    def test_username_absent_from_the_config_repr(self, monkeypatch):
+        # cli_main logs the whole config at DEBUG level.
+        config = self._config(monkeypatch)
+        assert self.USERNAME not in repr(config)
+
+    def test_hint_still_names_the_server(self, proxy_config):
+        # The server holds no secret and is what you need to diagnose.
+        assert "gate.example" in proxy_hint()

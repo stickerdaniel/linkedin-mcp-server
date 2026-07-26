@@ -72,17 +72,19 @@ def is_proxy_error(error: BaseException) -> bool:
 
 
 def redact_proxy_credentials(message: str) -> str:
-    """Strip the configured proxy password from *message*.
+    """Strip the configured proxy credentials from *message*.
 
     Error text from the driver can quote the proxy URL, and the top-level
-    handlers log exceptions with their full cause chain. The percent-encoded
-    form is covered too, since that is how a password appears inside a URL.
+    handlers log exceptions with their full cause chain. The username is masked
+    alongside the password because residential providers encode the account,
+    zone and session in it. Percent-encoded forms are covered too, since that is
+    how credentials appear inside a URL.
     """
-    password = _browser_config().proxy_password
-    if not password:
-        return message
-    for variant in (password, quote(password, safe="")):
-        if variant:
+    config = _browser_config()
+    for secret in (config.proxy_password, config.proxy_username):
+        if not secret:
+            continue
+        for variant in (secret, quote(secret, safe="")):
             message = message.replace(variant, "***")
     return message
 

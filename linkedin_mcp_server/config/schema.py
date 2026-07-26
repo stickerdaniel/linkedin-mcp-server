@@ -107,8 +107,13 @@ class BrowserConfig:
     # the environment only, a provider string carrying credentials; validate()
     # splits those out so the stored value never holds a password.
     proxy_server: str | None = None
-    proxy_username: str | None = None
-    # Excluded from repr: cli_main logs the whole config at DEBUG level.
+    # Both credentials are kept out of the repr, because cli_main logs the whole
+    # config at DEBUG level and users paste those logs into issue reports. The
+    # username is not merely a name: residential providers encode the account,
+    # zone and session in it. The server stays visible; it holds no secret once
+    # validate() has split the credentials off, and it is the field you need to
+    # diagnose a proxy problem.
+    proxy_username: str | None = field(default=None, repr=False)
     proxy_password: str | None = field(default=None, repr=False)
     proxy_bypass: str | None = None  # Comma-separated hosts to bypass
     # Manual-login wait timeout in seconds; 0 = unlimited
