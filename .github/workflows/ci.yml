@@ -47,3 +47,30 @@ jobs:
         run: uv run pytest --cov --cov-report=term-missing -n auto -v -s
 
       - run: uv cache prune --ci
+
+  # The lease coordinates server processes through kernel file locks, and the
+  # Windows backend is a different implementation from the POSIX one
+  # (LockFileEx rather than flock). The Ubuntu job above never executes it, so
+  # these two files run on every platform we ship on. Serial by choice: the
+  # tests spawn their own competing processes, and xdist would only add
+  # scheduling noise on top of that.
+  profile-lease-platforms:
+    name: Profile lease (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+
+      - run: uv sync --group dev
+
+      - name: Run profile lease tests
+        run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py
+
+      - run: uv cache prune --ci

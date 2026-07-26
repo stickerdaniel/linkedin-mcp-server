@@ -7,7 +7,6 @@ person profiles, company data, job information, and session management capabilit
 
 import asyncio
 import logging
-from contextlib import suppress
 from typing import Any, AsyncIterator
 
 from fastmcp import FastMCP
@@ -61,9 +60,30 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
     finally:
         logger.info("LinkedIn MCP Server shutting down...")
         handoff_watch.cancel()
-        with suppress(asyncio.CancelledError):
-            await handoff_watch
-        await close_browser()
+        try:
+            try:
+                await handoff_watch
+            except asyncio.CancelledError:
+                # Only the cancellation we just asked for is ours to absorb.
+                # While the watcher winds down, one aimed at this task arrives
+                # as the same exception, and a bare pass would swallow it,
+                # leaving whoever asked us to stop with a teardown that
+                # reported success. cancelling() counts the requests made
+                # against *this* task, which is what tells the two apart.
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+            except Exception:
+                # A poller that already died re-raises here. Swallowing it keeps
+                # shutdown on course; leaving Chromium running on the shared
+                # profile is the corruption this whole mechanism exists to
+                # prevent, and it matters more than the reason the poll failed.
+                logger.warning("Profile handoff watcher failed", exc_info=True)
+        finally:
+            # In a finally, not after the except, so a BaseException the poller
+            # raised still closes the browser on its way out. Those are not ours
+            # to swallow, but they are also no reason to abandon the profile.
+            await close_browser()
 
 
 def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> FastMCP:

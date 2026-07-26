@@ -54,6 +54,19 @@ class ProfileLeaseUnavailableError(RuntimeError):
     """Raised when the profile lease could not be acquired in time."""
 
 
+# The single Windows error meaning "someone else holds it". Anything else,
+# whether a bad handle, access denied or an invalid parameter, is a real
+# failure, and reporting it as contention would leave the lease permanently
+# and silently busy. Defined outside the Windows-only block so the classification can be
+# tested on any platform; the branch itself only ever runs on Windows.
+_ERROR_LOCK_VIOLATION = 33
+
+
+def _windows_failure_is_contention(error_code: int) -> bool:
+    """Whether a failed ``LockFileEx`` call means the lock is simply held."""
+    return error_code == _ERROR_LOCK_VIOLATION
+
+
 # --------------------------------------------------------------------------- #
 # Platform backends
 # --------------------------------------------------------------------------- #
@@ -70,7 +83,11 @@ if not _HAS_FCNTL:  # pragma: no cover - Windows
         import ctypes
         from ctypes import wintypes
 
-        _HAS_WINDOWS_LOCKS = True
+        # Probed here rather than assumed: the block below binds kernel32 at
+        # import time, and an ImportError or a missing symbol there would take
+        # the whole server down with an obscure message instead of the explicit
+        # "no usable file locking" refusal that _try_lock raises.
+        _HAS_WINDOWS_LOCKS = hasattr(ctypes, "WinDLL")
     except ImportError:
         _HAS_WINDOWS_LOCKS = False
 else:  # pragma: no cover - POSIX
@@ -99,8 +116,9 @@ def _try_lock(fd: int, *, exclusive: bool) -> bool:
 
     raise ProfileLeaseUnavailableError(
         "This platform provides no usable file locking, so concurrent server "
-        "processes cannot be prevented from corrupting the LinkedIn profile. "
-        "Run only one server process against this profile directory."
+        "processes cannot be prevented from corrupting the shared Chromium "
+        "profile directory that holds your logged-in session. Run only one "
+        "server process against this profile directory."
     )
 
 
@@ -114,7 +132,13 @@ def _unlock(fd: int) -> None:
         return
 
     if _HAS_WINDOWS_LOCKS:  # pragma: no cover - Windows
-        _windows_unlock(fd)
+        try:
+            _windows_unlock(fd)
+        except OSError:
+            # Same tolerance as the POSIX branch above. Release runs from
+            # teardown paths where the descriptor may already be closed, and
+            # ``msvcrt.get_osfhandle`` raises OSError for a closed one.
+            logger.debug("Unlock failed (ignored)", exc_info=True)
 
 
 if not _HAS_FCNTL and _HAS_WINDOWS_LOCKS:  # pragma: no cover - Windows
@@ -123,13 +147,63 @@ if not _HAS_FCNTL and _HAS_WINDOWS_LOCKS:  # pragma: no cover - Windows
     _LOCK_BYTES = 1
 
     class _Overlapped(ctypes.Structure):
+        # Internal/InternalHigh are ULONG_PTR, so pointer-sized on both 32- and
+        # 64-bit. c_size_t matches; a plain c_ulong would not.
         _fields_ = [
-            ("Internal", wintypes.LPVOID),
-            ("InternalHigh", wintypes.LPVOID),
+            ("Internal", ctypes.c_size_t),
+            ("InternalHigh", ctypes.c_size_t),
             ("Offset", wintypes.DWORD),
             ("OffsetHigh", wintypes.DWORD),
             ("hEvent", wintypes.HANDLE),
         ]
+
+    # ``WinDLL``, ``get_last_error`` and ``WinError`` exist only on Windows, so
+    # they are resolved dynamically: a type checker running on another platform
+    # cannot see them and would report the module as having no such member.
+    _win_dll = getattr(ctypes, "WinDLL")
+    _get_last_error = getattr(ctypes, "get_last_error")
+    _win_error = getattr(ctypes, "WinError")
+
+    # use_last_error keeps GetLastError from being clobbered between the call
+    # and our read of it.
+    _kernel32 = _win_dll("kernel32", use_last_error=True)
+
+    # ``ctypes`` raises AttributeError for a symbol the DLL does not export, and
+    # this runs at import time. Both have existed since Windows XP, so a failure
+    # here means something is badly wrong, but it must surface as our own
+    # refusal rather than as an unexplained import error on server startup.
+    if not hasattr(_kernel32, "LockFileEx") or not hasattr(_kernel32, "UnlockFileEx"):
+        raise ProfileLeaseUnavailableError(
+            "kernel32 does not export LockFileEx/UnlockFileEx, so concurrent "
+            "server processes cannot be prevented from corrupting the shared "
+            "Chromium profile directory that holds your logged-in session. Run "
+            "only one server process against this profile directory."
+        )
+
+    # Without explicit argtypes ctypes passes Python ints as C int, truncating
+    # a pointer-sized HANDLE on 64-bit. Windows guarantees handle values fit in
+    # 32 bits, so this happens to survive, but the prototype is still wrong,
+    # and nothing about that guarantee covers the OVERLAPPED pointer.
+    _lock_file_ex = _kernel32.LockFileEx
+    _lock_file_ex.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(_Overlapped),
+    ]
+    _lock_file_ex.restype = wintypes.BOOL
+
+    _unlock_file_ex = _kernel32.UnlockFileEx
+    _unlock_file_ex.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(_Overlapped),
+    ]
+    _unlock_file_ex.restype = wintypes.BOOL
 
     def _handle(fd: int) -> int:
         import msvcrt
@@ -138,25 +212,31 @@ if not _HAS_FCNTL and _HAS_WINDOWS_LOCKS:  # pragma: no cover - Windows
         # checker running on another platform cannot see it.
         return getattr(msvcrt, "get_osfhandle")(fd)
 
-    def _kernel32():  # type: ignore[no-untyped-def]
-        return getattr(ctypes, "windll").kernel32
-
     def _windows_try_lock(fd: int, *, exclusive: bool) -> bool:
         flags = _LOCKFILE_FAIL_IMMEDIATELY
         if exclusive:
             flags |= _LOCKFILE_EXCLUSIVE_LOCK
+        # Zero-initialised by ctypes, so the lock starts at offset 0 and hEvent
+        # is NULL, which LockFileEx accepts for a synchronous call.
         overlapped = _Overlapped()
-        return bool(
-            _kernel32().LockFileEx(
-                _handle(fd), flags, 0, _LOCK_BYTES, 0, ctypes.byref(overlapped)
-            )
-        )
+        if _lock_file_ex(
+            _handle(fd), flags, 0, _LOCK_BYTES, 0, ctypes.byref(overlapped)
+        ):
+            return True
+        error = _get_last_error()
+        if _windows_failure_is_contention(error):
+            return False
+        cause = _win_error(error)
+        raise ProfileLeaseUnavailableError(
+            f"LockFileEx failed for descriptor {fd}: {cause}"
+        ) from cause
 
     def _windows_unlock(fd: int) -> None:
         overlapped = _Overlapped()
-        _kernel32().UnlockFileEx(
+        if not _unlock_file_ex(
             _handle(fd), 0, _LOCK_BYTES, 0, ctypes.byref(overlapped)
-        )
+        ):
+            raise _win_error(_get_last_error())
 
 
 # --------------------------------------------------------------------------- #
@@ -185,26 +265,45 @@ def _acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
     """
     for _ in range(3):
         fd = _open_lock_file(path)
-        if not _try_lock(fd, exclusive=exclusive):
-            os.close(fd)
-            return None
-        if os.fstat(fd).st_nlink > 0:
-            return fd
-        # The path was unlinked while we locked it: our inode is orphaned and
-        # protects nothing. Drop it and retry against the live path.
-        _unlock(fd)
-        os.close(fd)
+        locked = False
+        try:
+            if not _try_lock(fd, exclusive=exclusive):
+                return None
+            locked = True
+            if os.fstat(fd).st_nlink > 0:
+                keep = fd
+                fd = -1  # handed to the caller; not ours to close below
+                return keep
+        finally:
+            # The lock backend raises for a genuine failure, such as a bad
+            # handle or a platform with no locking, and the handoff probe
+            # swallows that so a broken signal cannot make an owner give up its
+            # browser. Without this the descriptor would escape on every poll.
+            if fd != -1:
+                if locked:
+                    _unlock(fd)
+                try:
+                    os.close(fd)
+                except OSError:
+                    logger.debug("Closing lock descriptor failed", exc_info=True)
+        # The path was unlinked while we held the lock: our inode is orphaned
+        # and protects nothing. Retry against the live path.
     raise ProfileLeaseUnavailableError(
         f"The lock file {path} keeps being replaced; refusing to continue."
     )
 
 
 def _release_locked_fd(fd: int) -> None:
-    _unlock(fd)
+    # The close is in a finally so an unexpected unlock failure cannot leak the
+    # descriptor. Closing it releases the lock regardless, which is the outcome
+    # that matters; leaking it would hold the profile until the process exits.
     try:
-        os.close(fd)
-    except OSError:
-        logger.debug("Closing lock descriptor failed (ignored)", exc_info=True)
+        _unlock(fd)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            logger.debug("Closing lock descriptor failed (ignored)", exc_info=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -246,12 +345,24 @@ class ProfileLease:
 
     @property
     def held(self) -> bool:
-        """Whether this process currently holds the lease."""
+        """Whether this process currently holds the lease.
+
+        Runs the fork reset rather than merely reporting ``False`` for a foreign
+        owner: a child that only *asked* whether it held the lease would keep the
+        inherited descriptor open, and with it the parent's kernel lock.
+        """
+        self._reset_if_forked()
         return self._fd is not None and self._owner_pid == os.getpid()
 
     @property
     def held_seconds(self) -> float:
-        """How long the lease has been held, or 0.0 when it is not."""
+        """How long the lease has been held, or 0.0 when it is not.
+
+        Also resets after a fork; without it a child would report the parent's
+        hold time, and the min-hold window would decide against a duration this
+        process never spent holding anything.
+        """
+        self._reset_if_forked()
         if self._acquired_at is None:
             return 0.0
         return time.monotonic() - self._acquired_at
@@ -279,11 +390,27 @@ class ProfileLease:
         """Drop inherited state after a fork: the child does not own the lock."""
         if self._owner_pid is not None and self._owner_pid != os.getpid():
             logger.debug("Discarding profile lease state inherited across fork")
+            inherited_fd = self._fd
             self._fd = None
             self._refs = 0
             self._owner_pid = None
             self._acquired_at = None
             self._browser_open = False
+            if inherited_fd is not None:
+                # Close it, do not merely forget it. fork duplicates the
+                # descriptor, and the kernel lock lives as long as *any* copy is
+                # open. A child that only cleared its bookkeeping would keep the
+                # parent's lease alive after the parent died, locking every
+                # other process out until the child happened to exit.
+                # Never unlock first: that would drop the lock the parent still
+                # believes it holds, both descriptions being the same one.
+                try:
+                    os.close(inherited_fd)
+                except OSError:
+                    logger.debug(
+                        "Closing the inherited lock descriptor failed (ignored)",
+                        exc_info=True,
+                    )
 
     # -- acquisition ------------------------------------------------------- #
 
@@ -409,6 +536,15 @@ class _Announcement:
         self._path = path
         self._fd: int | None = None
 
+    @property
+    def holds_lock(self) -> bool:
+        """Whether the shared lock was actually taken.
+
+        Announcing degrades to a no-op rather than failing a tool call, so this
+        distinguishes "waiting, and the owner can see it" from "waiting quietly".
+        """
+        return self._fd is not None
+
     def __enter__(self) -> _Announcement:
         try:
             self._fd = _acquire_locked_fd(self._path, exclusive=False)
@@ -435,6 +571,26 @@ class _Announcement:
 # --------------------------------------------------------------------------- #
 
 _leases: dict[Path, ProfileLease] = {}
+
+
+def _discard_inherited_leases() -> None:
+    """Drop every lease the child inherited, immediately after a fork.
+
+    Waiting for the child to touch a lease is not enough, and no amount of
+    checking inside individual methods would be: a child that never mentions
+    the lease still inherited the descriptor, and the kernel lock lives as long
+    as any copy of it is open. Such a child silently holds its parent's lease,
+    locking every other process out until it happens to exit, with nothing in
+    its own state to explain why.
+
+    Registered rather than polled, so it also covers a child that forks again.
+    """
+    for lease in _leases.values():
+        lease._reset_if_forked()
+
+
+if hasattr(os, "register_at_fork"):  # pragma: no branch - POSIX
+    os.register_at_fork(after_in_child=_discard_inherited_leases)
 
 
 def get_profile_lease(source_profile_dir: Path | None = None) -> ProfileLease:

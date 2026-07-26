@@ -26,6 +26,27 @@ from linkedin_mcp_server.session_state import clear_auth_state, rotate_source_pr
 _WORKER = Path(__file__).parent / "helpers" / "profile_lease_worker.py"
 
 
+def _await_line(process: subprocess.Popen[str], expected: str) -> None:
+    """Block until *process* prints a line containing *expected*.
+
+    Fails rather than hangs when the worker dies early: ``readline`` returns
+    ``""`` forever at EOF, so a loop that only checked its content would spin
+    until the CI job's own timeout with no explanation.
+    """
+    assert process.stdout is not None
+    while True:
+        line = process.stdout.readline()
+        if expected in line:
+            return
+        if line == "":  # EOF: the worker will never say anything more
+            break
+    stderr = process.stderr.read() if process.stderr else ""
+    raise AssertionError(
+        f"worker exited (status {process.poll()}) without reporting "
+        f"{expected!r}: {stderr}"
+    )
+
+
 def _hold_profile(auth_root: Path, seconds: float) -> subprocess.Popen[str]:
     """Spawn a process that owns *auth_root*'s lease, and wait until it does."""
     process = subprocess.Popen(
@@ -34,13 +55,12 @@ def _hold_profile(auth_root: Path, seconds: float) -> subprocess.Popen[str]:
         stderr=subprocess.PIPE,
         text=True,
     )
-    assert process.stdout is not None
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        if "HELD" in process.stdout.readline():
-            return process
-    process.kill()
-    raise AssertionError("helper never acquired the lease")
+    try:
+        _await_line(process, "HELD")
+    except AssertionError:
+        process.kill()
+        raise
+    return process
 
 
 def _call_context(tool_name: str = "get_person_profile") -> MagicMock:
@@ -290,16 +310,18 @@ class TestIdleOwnerHandsOver:
                     sys.executable,
                     str(_WORKER),
                     "announce",
-                    str(tmp_path / "profile").rsplit("/profile", 1)[0],
+                    # The auth root is the profile's *parent*, which is tmp_path
+                    # itself. Deriving it by trimming the "/profile" suffix off
+                    # the string worked only on POSIX separators.
+                    str(tmp_path),
                     "5",
                 ],
                 stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
             )
             try:
-                assert waiter.stdout is not None
-                while "ANNOUNCED" not in waiter.stdout.readline():
-                    pass
+                _await_line(waiter, "ANNOUNCED")
 
                 # No tool call happens here: only the poller can notice.
                 deadline = time.monotonic() + 5
@@ -338,12 +360,11 @@ class TestPollerDoesNotInterruptWork:
         waiter = subprocess.Popen(
             [sys.executable, str(_WORKER), "announce", str(tmp_path), "5"],
             stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
         )
         try:
-            assert waiter.stdout is not None
-            while "ANNOUNCED" not in waiter.stdout.readline():
-                pass
+            _await_line(waiter, "ANNOUNCED")
 
             with (
                 patch.multiple(
@@ -401,12 +422,11 @@ class TestMinimumHoldWindow:
         waiter = subprocess.Popen(
             [sys.executable, str(_WORKER), "announce", str(tmp_path), "5"],
             stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
         )
         try:
-            assert waiter.stdout is not None
-            while "ANNOUNCED" not in waiter.stdout.readline():
-                pass
+            _await_line(waiter, "ANNOUNCED")
 
             with (
                 patch.multiple(
