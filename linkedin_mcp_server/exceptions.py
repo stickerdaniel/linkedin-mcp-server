@@ -77,3 +77,42 @@ class V20EncryptedError(CookieDecryptionError):
 
 class NoLinkedInSessionFoundError(LinkedInMCPError):
     """No discoverable local browser profile has a decryptable LinkedIn (li_at) session."""
+
+
+class BrowserShutdownUnconfirmedError(LinkedInMCPError):
+    """A browser's teardown did not complete, so it may still hold the profile.
+
+    Distinct from an ordinary failure because the recovery differs: the profile
+    must be left exactly as it is. Resetting it, restoring over it, or trying
+    the next candidate would all write underneath a Chromium that may still be
+    running.
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message
+            or (
+                "A browser on this profile did not shut down cleanly and may "
+                "still be running. Restart the server to recover."
+            )
+        )
+
+
+class BrowserBusyError(LinkedInMCPError):
+    """Another server process holds the shared browser profile.
+
+    Deliberately not an ``AuthenticationError``: that class is routed into
+    ``invalidate_auth_and_trigger_relogin``, which force-retires the shared
+    profile. Classifying contention as an auth failure would let a process that
+    merely lost a race destroy every other process's session.
+    """
+
+    def __init__(self, message: str | None = None):
+        super().__init__(
+            message
+            or (
+                "Another LinkedIn MCP client is currently using the browser. "
+                "This is not a failure and your saved session was not changed. "
+                "Wait a moment and call this exact tool again."
+            )
+        )

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from collections.abc import Coroutine
 from typing import Any
 
 from patchright.async_api import (
@@ -20,6 +21,8 @@ from linkedin_mcp_server.common_utils import (
     secure_write_text,
 )
 
+from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+
 from .exceptions import NetworkError
 
 logger = logging.getLogger(__name__)
@@ -27,6 +30,24 @@ logger = logging.getLogger(__name__)
 _DEFAULT_USER_DATA_DIR = Path.home() / ".linkedin-mcp" / "profile"
 _PRIVATE_FILE_MODE = 0o600
 _CLEANUP_TIMEOUT_SECONDS = 10
+
+
+async def _await_deferring_cancels(coro: Coroutine[Any, Any, bool]) -> bool:
+    """Await *coro* to completion, holding back cancels until it finishes.
+
+    Mirrors ``session_state.run_deferring_cancels``. A bare ``shield`` is not
+    enough: it re-raises on the *next* cancel, discarding the result. Here that
+    result decides whether a browser is provably gone, so losing it would let a
+    caller hand the profile on with Chromium possibly still running. The cancel
+    is not swallowed; the caller re-raises it.
+    """
+    task = asyncio.ensure_future(coro)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
 
 
 class BrowserManager:
@@ -57,6 +78,9 @@ class BrowserManager:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._is_authenticated = False
+        # False until a teardown proves Chromium exited. Pessimistic by default:
+        # a launch that is cancelled before close runs must not read as clean.
+        self._close_confirmed = False
 
     async def __aenter__(self) -> "BrowserManager":
         await self.start()
@@ -65,7 +89,13 @@ class BrowserManager:
     async def __aexit__(
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> None:
-        await self.close()
+        # Recorded rather than returned: ``__aexit__`` cannot report it, and a
+        # caller that hands the profile on afterwards must be able to tell
+        # whether Chromium actually exited. See :attr:`close_confirmed`.
+        # Cleared first so a cancellation mid-teardown leaves it false rather
+        # than claiming a shutdown that never completed.
+        self._close_confirmed = False
+        self._close_confirmed = await self.close()
 
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
@@ -106,20 +136,45 @@ class BrowserManager:
 
             logger.info("Browser context and page ready")
 
-        except Exception as e:
-            await self.close()
-            raise NetworkError(f"Failed to start browser: {e}") from e
+        except BaseException as e:
+            # BaseException so a cancelled launch is cleaned up too: Chromium may
+            # already be running, and leaving it would hold the profile.
+            #
+            # The result is recorded, not discarded: this is the only close that
+            # can prove a partially launched Chromium exited. A caller closing
+            # again would get True from the already-cleared handles and could
+            # then release or delete the profile with the browser still on it.
+            # Shielded, and retried on further cancels: overlapping cancels are
+            # real (a tool timeout racing server shutdown), and a second one
+            # landing on the shield would discard the very result that decides
+            # whether the profile may be handed on.
+            if not await _await_deferring_cancels(self.close()):
+                raise BrowserShutdownUnconfirmedError(
+                    "The browser failed to start and did not shut down cleanly, "
+                    "so the profile is kept. Restart the server to recover."
+                ) from e
+            if isinstance(e, Exception):
+                raise NetworkError(f"Failed to start browser: {e}") from e
+            raise
 
-    async def close(self) -> None:
-        """Close persistent context and cleanup resources."""
+    async def close(self) -> bool:
+        """Close persistent context and cleanup resources.
+
+        Returns whether shutdown was *confirmed*. Both cleanup steps are bounded
+        and their failures swallowed, so a wedged Chromium can still be running
+        when this returns. Callers that hand the profile to another process on
+        the strength of a close must check this: releasing it while Chromium is
+        alive reintroduces the concurrent-profile corruption.
+        """
         context = self._context
         playwright = self._playwright
         self._context = None
         self._page = None
         self._playwright = None
+        confirmed = True
 
         if context is None and playwright is None:
-            return
+            return True
 
         # Bound each cleanup step. A wedged Chromium (stale SingletonLock,
         # sandbox stall, X-less host) can hang context.close() / playwright.stop()
@@ -132,11 +187,13 @@ class BrowserManager:
                     context.close(), timeout=_CLEANUP_TIMEOUT_SECONDS
                 )
             except TimeoutError:
+                confirmed = False
                 logger.error(
                     "Timed out closing browser context after %ss",
                     _CLEANUP_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
+                confirmed = False
                 logger.error("Error closing browser context: %s", exc)
 
         if playwright is not None:
@@ -145,14 +202,26 @@ class BrowserManager:
                     playwright.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS
                 )
             except TimeoutError:
+                confirmed = False
                 logger.error(
                     "Timed out stopping playwright after %ss",
                     _CLEANUP_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
+                confirmed = False
                 logger.error("Error stopping playwright: %s", exc)
 
         logger.info("Browser closed")
+        return confirmed
+
+    @property
+    def close_confirmed(self) -> bool:
+        """Whether the last ``async with`` exit proved Chromium had gone.
+
+        False means cleanup timed out or failed and the browser may still be
+        running, so the profile must not be handed to anyone else.
+        """
+        return self._close_confirmed
 
     @property
     def page(self) -> Page:

@@ -22,6 +22,7 @@ touched for the browser we actually import from:
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -40,10 +41,14 @@ from linkedin_mcp_server.browser_import.user_agent import synthesize_user_agent
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_write_text
 
 from linkedin_mcp_server.exceptions import (
+    BrowserBusyError,
+    BrowserShutdownUnconfirmedError,
     CookieDecryptionError,
     NoLinkedInSessionFoundError,
 )
+from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.session_state import (
+    run_deferring_cancels,
     portable_cookie_path,
     restore_source_profile,
     rotate_shielded,
@@ -225,24 +230,83 @@ async def import_session_from_browser(
     from linkedin_mcp_server.drivers.browser import close_browser
 
     await close_browser()
+
+    # Validation launches Chromium on the source profile, so the import owns it
+    # for the whole rotate-validate-commit flow. Without this another process
+    # could launch against the profile the moment the staged cookies land.
+    lease = get_profile_lease(user_data_dir)
+    if not lease.try_acquire():
+        raise BrowserBusyError(
+            "Another LinkedIn MCP client is using the browser, so a session "
+            "cannot be imported. Close it and try again."
+        )
+    release_profile = True
+    try:
+        return await _import_holding_the_profile(
+            live, cookie_path, user_data_dir, lease
+        )
+    except BrowserShutdownUnconfirmedError:
+        # A validation browser may still hold the profile, so keep the lease
+        # rather than letting the next process launch on top of it. The kernel
+        # frees the lock when this process exits.
+        release_profile = False
+        raise
+    finally:
+        if release_profile:
+            lease.release()
+
+
+async def _import_holding_the_profile(
+    live: list[tuple[BrowserProfile, LiAtMeta]],
+    cookie_path: Path,
+    user_data_dir: Path,
+    lease: ProfileLease,
+) -> bool:
+    """Rotate, validate and commit; the caller owns the profile throughout."""
+    # Rotation comes before the browser is marked open: the exclusivity check
+    # treats an open browser as a reason to refuse, so marking first would stop
+    # every re-import from retiring the profile it replaces.
     retired = await rotate_shielded(user_data_dir)
 
     imported = False
+    shutdown_confirmed = True
+    lease.mark_browser_open()
     try:
         imported = await _import_first_accepted(live, cookie_path, user_data_dir)
         return imported
+    except BrowserShutdownUnconfirmedError:
+        # A validation browser may still be running on this profile. Leave
+        # everything exactly as it is: the lease stays held and the retired
+        # session stays in quarantine until the operator restarts.
+        shutdown_confirmed = False
+        raise
     finally:
-        # The retirement happens before a replacement exists, so an import where
-        # every candidate is rejected — or that raises on undecryptable cookies —
-        # would otherwise leave the user logged out of a working session.
-        if retired is not None and not imported:
-            if not await asyncio.to_thread(
-                restore_source_profile, retired, user_data_dir
-            ):
-                logger.warning(
-                    "Could not restore the previous session; it is kept at %s",
-                    retired,
+        if shutdown_confirmed:
+            lease.mark_browser_closed()
+            # The retirement happens before a replacement exists, so an import
+            # where every candidate is rejected — or that raises on
+            # undecryptable cookies — would otherwise leave the user logged out
+            # of a working session.
+            if retired is not None and not imported:
+                # Deferred cancellation: abandoning the worker mid move would
+                # leave the session split across quarantine and the live paths.
+                # Re-raised afterwards so the caller still sees the cancel.
+                restored, cancelled = await run_deferring_cancels(
+                    functools.partial(restore_source_profile, retired, user_data_dir)
                 )
+                if not restored:
+                    logger.warning(
+                        "Could not restore the previous session; it is kept at %s",
+                        retired,
+                    )
+                if cancelled:
+                    raise asyncio.CancelledError
+        elif retired is not None:
+            logger.warning(
+                "The previous session was not restored because a validation "
+                "browser did not shut down cleanly; it is kept at %s",
+                retired,
+            )
 
 
 async def _import_first_accepted(

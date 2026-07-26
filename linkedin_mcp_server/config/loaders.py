@@ -76,6 +76,9 @@ class EnvironmentKeys:
     TOOL_TIMEOUT = "TOOL_TIMEOUT"
     LOGIN_TIMEOUT = "LOGIN_TIMEOUT"
     LOGIN_INLINE_WAIT = "LOGIN_INLINE_WAIT"
+    BROWSER_WAIT = "BROWSER_WAIT"
+    BROWSER_MIN_HOLD = "BROWSER_MIN_HOLD"
+    BROWSER_IDLE_TIMEOUT = "BROWSER_IDLE_TIMEOUT"
     IMPORT_FROM_BROWSER = "IMPORT_FROM_BROWSER"
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
@@ -184,6 +187,26 @@ def load_from_env(config: AppConfig) -> AppConfig:
                 f"Invalid LOGIN_INLINE_WAIT: '{login_inline_wait_env}'. Must be a non-negative finite number (0 = no inline wait)."
             )
         config.browser.login_inline_wait_seconds = login_inline_wait_value
+
+    # Shared-browser coordination between concurrent server processes
+    # (validated and clamped in BrowserConfig.validate())
+    for env_key, attribute in (
+        (EnvironmentKeys.BROWSER_WAIT, "browser_wait_seconds"),
+        (EnvironmentKeys.BROWSER_MIN_HOLD, "browser_min_hold_seconds"),
+        (EnvironmentKeys.BROWSER_IDLE_TIMEOUT, "browser_idle_timeout_seconds"),
+    ):
+        raw = os.environ.get(env_key)
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ConfigurationError(f"Invalid {env_key}: '{raw}'. Must be a number.")
+        if not (math.isfinite(value) and value >= 0):
+            raise ConfigurationError(
+                f"Invalid {env_key}: '{raw}'. Must be a non-negative finite number."
+            )
+        setattr(config.browser, attribute, value)
 
     # Custom user agent
     if user_agent_env := os.environ.get(EnvironmentKeys.USER_AGENT):
@@ -358,6 +381,37 @@ def load_from_args(config: AppConfig) -> AppConfig:
             "in seconds (default: 25, max 45; 0 = return immediately)"
         ),
     )
+    parser.add_argument(
+        "--browser-wait",
+        type=non_negative_float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "How long to wait for another server process to hand over the shared "
+            "browser, in seconds (default: 25, max 45; 0 = report busy at once)"
+        ),
+    )
+    parser.add_argument(
+        "--browser-min-hold",
+        type=non_negative_float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Shortest time this process keeps the shared browser before honouring "
+            "a handoff request, in seconds (default: 20, clamped below "
+            "--browser-wait; 0 = hand over after every tool call)"
+        ),
+    )
+    parser.add_argument(
+        "--browser-idle-timeout",
+        type=non_negative_float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Close an idle browser and release the shared profile after this many "
+            "seconds without a tool call (default: 600; 0 = keep it open)"
+        ),
+    )
 
     parser.add_argument(
         "--chrome-path",
@@ -506,6 +560,15 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.login_inline_wait is not None:
         config.browser.login_inline_wait_seconds = args.login_inline_wait
+
+    if args.browser_wait is not None:
+        config.browser.browser_wait_seconds = args.browser_wait
+
+    if args.browser_min_hold is not None:
+        config.browser.browser_min_hold_seconds = args.browser_min_hold
+
+    if args.browser_idle_timeout is not None:
+        config.browser.browser_idle_timeout_seconds = args.browser_idle_timeout
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path

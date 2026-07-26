@@ -26,6 +26,7 @@ from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
     AuthenticationStartedError,
     BrowserBinaryMissingError,
+    BrowserBusyError,
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
     CredentialsNotFoundError,
@@ -104,6 +105,11 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     elif isinstance(exception, AuthenticationBootstrapFailedError):
         logger.warning("Authentication bootstrap failed%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    # Contention, not a bug: no issue diagnostics, following RateLimitError.
+    elif isinstance(exception, BrowserBusyError):
+        logger.info("Shared browser busy%s: %s", ctx, exception)
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, DockerHostLoginRequiredError):

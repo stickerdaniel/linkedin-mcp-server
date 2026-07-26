@@ -57,9 +57,15 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
-> **Note:** Tool calls are serialized within one server process to protect the
-> shared LinkedIn browser session. Concurrent client requests queue instead of
-> running in parallel. Use `LOG_LEVEL=DEBUG` to see scraper lock logs.
+> **Note:** Tool calls are serialized to protect the shared LinkedIn browser
+> session, both within one server process and between separate ones. Only one
+> process uses the browser at a time; others wait briefly and take over when it
+> finishes a call. Use `LOG_LEVEL=DEBUG` to see the lock logs.
+>
+> **Note:** That coordination works between processes in the same runtime, but
+> not between the host and a container sharing the mounted `~/.linkedin-mcp`
+> directory. Do not run `--login` or `--logout` on the host while a container is
+> running.
 
 ## Environment Variables
 
@@ -71,6 +77,9 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `TOOL_TIMEOUT` | `180` | Per-tool MCP execution timeout in seconds. Increase further for heavy scrapes (multi-section profiles, cold-start Chromium, slow networks/containers). |
 | `LOGIN_TIMEOUT` | `1800` | Manual login wait timeout in seconds (`0` = no limit). Applies to the host-side `--login` browser; the container itself never opens one. |
 | `LOGIN_INLINE_WAIT` | `25` | Bounded inline wait (seconds, max 45) for a tool call to resume after login completes. No effect in containers: the Docker runtime never opens a login window and raises a host-login-required error instead, so the session must be created on the host with `--login`. |
+| `BROWSER_WAIT` | `25` | How long (seconds, max 45) to wait for another server process to hand over the shared browser before reporting that it is busy. `0` reports busy immediately. |
+| `BROWSER_MIN_HOLD` | `20` | Shortest time (seconds) a process keeps the shared browser before handing it to a waiting process. Higher means fewer browser restarts but longer waits for other clients; clamped below `BROWSER_WAIT` so a waiting client is served before its own timeout. `0` hands over after every tool call. |
+| `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the shared profile after this many seconds without a tool call. `0` keeps it open until the server exits. |
 | `AUTO_IMPORT_FROM_BROWSER` | on by default | Auto-import a LinkedIn session from a locally logged-in browser on the first no-session tool call, before falling back to manual login. On by default across interactive and non-interactive desktop runs; set `false` to require `--login` / `--import-from-browser`. No effect in containers (no host browser or keychain) or on a non-loopback HTTP bind. On macOS the OS keychain may prompt once for Safe Storage access. |
 | `USER_AGENT` | - | Custom browser user agent |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |

@@ -119,6 +119,9 @@ When you set up or maintain this server, verify its entry in the MCP client conf
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in.
 - `--login-inline-wait SECONDS` - Bounded inline wait for a tool call to resume after login completes, in seconds (default: 25, max 45; 0 = return immediately).
+- `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters when several MCP clients run at the same time.
+- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it to a waiting process (default: 20, clamped below `--browser-wait` so a waiting client is served before its own timeout; 0 = hand over after every tool call). Raising it means fewer browser restarts but longer waits for other clients.
+- `--browser-idle-timeout SECONDS` - Close an idle browser and release the shared profile after this long without a tool call (default: 600; 0 = keep it open until the server exits).
 - `--auto-import` / `--no-auto-import` - Enable or disable auto-import of a session from a locally logged-in browser on the first no-session tool call (before falling back to manual login). Auto-import is on by default across interactive and non-interactive desktop runs; pass `--no-auto-import` (or `AUTO_IMPORT_FROM_BROWSER=false`) to require `--login` / `--import-from-browser` instead. No effect under Docker or on a non-loopback HTTP bind. On macOS the keychain may prompt once for Safe Storage access.
 - `--eager-full-chromium` / `--no-eager-full-chromium` - Download full Chrome for Testing in the background right after the headless shell (`EAGER_FULL_CHROMIUM=true`), instead of lazily on the first headed login (the default). Headless setup is usable as soon as the shell is installed; this only pre-warms the headed login fallback. Pass `--no-eager-full-chromium` to override `EAGER_FULL_CHROMIUM=true` for a single run.
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
@@ -157,9 +160,18 @@ uvx mcp-server-linkedin@latest --transport streamable-http --host 127.0.0.1 --po
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
-Tool calls are serialized within a single server process to protect the shared
-LinkedIn browser session. Concurrent client requests queue instead of running in
-parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
+Tool calls are serialized to protect the shared LinkedIn browser session, both
+within one server process and across separate ones. If you run several MCP
+clients at once, each starts its own server process, and only one of them uses
+the browser at a time; the others wait briefly and take over as soon as it
+finishes a call. A client that waits too long gets a "browser is busy" message
+and can simply retry. Use `--log-level DEBUG` to see the wait/acquire/release
+logs.
+
+This covers processes on the same machine and in the same runtime. It does not
+extend between the host and a Docker container sharing the same
+`~/.linkedin-mcp` directory, so do not run `--login` or `--logout` on the host
+while a container is running.
 
 **Test with mcp inspector:**
 
@@ -313,6 +325,9 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
 - `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in.
 - `--login-inline-wait SECONDS` - Bounded inline wait for a tool call to resume after login completes, in seconds (default: 25, max 45; 0 = return immediately).
+- `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters when several MCP clients run at the same time.
+- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it to a waiting process (default: 20, clamped below `--browser-wait` so a waiting client is served before its own timeout; 0 = hand over after every tool call). Raising it means fewer browser restarts but longer waits for other clients.
+- `--browser-idle-timeout SECONDS` - Close an idle browser and release the shared profile after this long without a tool call (default: 600; 0 = keep it open until the server exits).
 - `--auto-import` / `--no-auto-import` - Enable or disable auto-import of a session from a locally logged-in browser on the first no-session tool call (before falling back to manual login). Auto-import is on by default across interactive and non-interactive desktop runs; pass `--no-auto-import` (or `AUTO_IMPORT_FROM_BROWSER=false`) to require `--login` / `--import-from-browser` instead. No effect under Docker or on a non-loopback HTTP bind. On macOS the keychain may prompt once for Safe Storage access.
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (rarely needed in Docker)

@@ -21,6 +21,25 @@ DEFAULT_LOGIN_INLINE_WAIT_SECONDS: float = 25.0  # bounded inline wait
 # well under that floor.
 MAX_LOGIN_INLINE_WAIT_SECONDS: float = 45.0
 
+# How long a tool call waits for another process to hand over the browser. Same
+# budget and ceiling as the login inline wait, for the same reason: the wait is
+# spent inside one tool call, ahead of the scrape itself.
+DEFAULT_BROWSER_WAIT_SECONDS: float = 25.0
+MAX_BROWSER_WAIT_SECONDS: float = 45.0
+# Shortest time an owner keeps the browser before honouring a handoff request.
+# Every handoff costs a reopen, and a reopen re-validates /feed/, so handing over
+# on literally every call would multiply LinkedIn requests. Matched to the wait
+# budget: a longer window would push waiters past their own timeout.
+DEFAULT_BROWSER_MIN_HOLD_SECONDS: float = 20.0
+# Slack between the end of the hold window and the waiter's deadline: the owner
+# notices on a one-second poll and then has to tear Chromium down (~0.7s
+# measured). Without it a waiter gives up moments before the handover lands.
+BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
+# Close an idle browser and release the profile after this long with no calls.
+# A backstop only — the handoff signal does the real work — so it is deliberately
+# long: a reopen costs one more LinkedIn request. 0 disables it.
+DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS: float = 600.0
+
 
 class ConfigurationError(Exception):
     """Raised when configuration validation fails."""
@@ -42,6 +61,13 @@ class BrowserConfig:
     login_timeout_seconds: float = DEFAULT_LOGIN_TIMEOUT_SECONDS
     # Bounded inline wait before the pending signal; 0 = immediate return
     login_inline_wait_seconds: float = DEFAULT_LOGIN_INLINE_WAIT_SECONDS
+    # Wait for another process to hand over the browser; 0 = report busy at once
+    browser_wait_seconds: float = DEFAULT_BROWSER_WAIT_SECONDS
+    # Shortest ownership before a handoff request is honoured; 0 = hand over
+    # after every call
+    browser_min_hold_seconds: float = DEFAULT_BROWSER_MIN_HOLD_SECONDS
+    # Close an idle browser after this long; 0 = keep it until the process exits
+    browser_idle_timeout_seconds: float = DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS
     # Auto-import a LinkedIn session from a locally logged-in browser on the
     # first no-session tool call, before falling back to manual login. On by
     # default: None ("auto") and True both enable it across interactive and
@@ -103,6 +129,42 @@ class BrowserConfig:
                 MAX_LOGIN_INLINE_WAIT_SECONDS,
             )
             self.login_inline_wait_seconds = MAX_LOGIN_INLINE_WAIT_SECONDS
+        for name in (
+            "browser_wait_seconds",
+            "browser_min_hold_seconds",
+            "browser_idle_timeout_seconds",
+        ):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and value >= 0):
+                raise ConfigurationError(
+                    f"{name} must be a non-negative finite number, got {value}"
+                )
+        # Clamped for the same reason as the login inline wait: the wait happens
+        # inside a tool call, ahead of the scrape.
+        if self.browser_wait_seconds > MAX_BROWSER_WAIT_SECONDS:
+            logger.warning(
+                "browser_wait_seconds %.1f exceeds the %.1fs ceiling; clamping.",
+                self.browser_wait_seconds,
+                MAX_BROWSER_WAIT_SECONDS,
+            )
+            self.browser_wait_seconds = MAX_BROWSER_WAIT_SECONDS
+        # The hold window has to end far enough inside the wait budget that the
+        # owner still notices and finishes closing before the waiter gives up.
+        # Equal values are not enough: the owner polls on an interval and then
+        # has to tear Chromium down, so it would answer just after the deadline.
+        latest_useful_hold = max(
+            0.0, self.browser_wait_seconds - BROWSER_HANDOFF_MARGIN_SECONDS
+        )
+        if self.browser_min_hold_seconds > latest_useful_hold:
+            logger.warning(
+                "browser_min_hold_seconds %.1f leaves no room inside the %.1fs "
+                "wait budget for the owner to notice and close; clamping to "
+                "%.1f.",
+                self.browser_min_hold_seconds,
+                self.browser_wait_seconds,
+                latest_useful_hold,
+            )
+            self.browser_min_hold_seconds = latest_useful_hold
         if self.chrome_path:
             chrome_path = Path(self.chrome_path)
             if not chrome_path.exists():
