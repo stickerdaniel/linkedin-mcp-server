@@ -276,7 +276,7 @@ class TestAsyncAcquire:
         afterwards would pass either way. What actually matters is that the
         handoff file is never touched, because announcing and withdrawing around
         every acquisition is what an owner's own next probe would misread as a
-        waiter — and hand the browser straight back to nobody.
+        waiter, and hand the browser straight back to nobody.
         """
         lease = ProfileLease(tmp_path)
         announcements = 0
@@ -501,8 +501,22 @@ class TestRegistry:
             "lease.held",
             "lease.held_seconds",
             "lease.browser_open",
+            # Public methods that have no reason to check for a fork, and the
+            # case that decides the design: a child touching the lease at all is
+            # a coincidence, not something to rely on.
+            "lease.handoff_requested()",
+            "lease.mark_browser_closed()",
+            "pass  # touches nothing",
         ],
-        ids=["explicit", "held", "held_seconds", "browser_open"],
+        ids=[
+            "explicit",
+            "held",
+            "held_seconds",
+            "browser_open",
+            "handoff_requested",
+            "mark_browser_closed",
+            "no_touch",
+        ],
     )
     def test_a_forked_child_does_not_keep_the_lease_alive(
         self, tmp_path: Path, trigger: str
@@ -512,8 +526,13 @@ class TestRegistry:
         ``fork`` duplicates the descriptor, and the kernel lock survives as long
         as *any* copy is open. A child that only forgot it had inherited one
         would keep the parent's lease held after the parent died, locking every
-        other process out until the child happened to exit — with nothing in the
-        child's own state to explain why.
+        other process out until the child happened to exit, with nothing in
+        the child's own state to explain why.
+
+        The ``no_touch`` case is why this is handled at ``fork`` time rather
+        than inside the accessors: a child that never mentions the lease has
+        still inherited it, so no amount of checking on entry could ever cover
+        every path.
 
         Every accessor a child could plausibly touch first is covered, not just
         the private reset: reading ``held`` and getting an honest ``False`` is
@@ -522,13 +541,15 @@ class TestRegistry:
         The child outlives the parent here, which is the shape of a server that
         spawns a helper and then exits.
         """
+        # Through the registry, which is how every caller in the server obtains
+        # a lease and the only place that can know what a fork must discard.
         script = textwrap.dedent(f"""
             import os, sys, time
             sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
             from pathlib import Path
-            from linkedin_mcp_server.profile_lease import ProfileLease
+            from linkedin_mcp_server.profile_lease import get_profile_lease
 
-            lease = ProfileLease(Path({str(tmp_path)!r}))
+            lease = get_profile_lease(Path({str(tmp_path)!r}) / "profile")
             assert lease.try_acquire()
             lease.mark_browser_open()
             if os.fork() == 0:
@@ -704,6 +725,82 @@ class TestDegradedSignals:
         monkeypatch.setattr(module, "_open_lock_file", always_unlink)
         with pytest.raises(ProfileLeaseUnavailableError, match="keeps being"):
             ProfileLease(tmp_path).try_acquire()
+
+    @pytest.mark.parametrize(
+        ("error_code", "is_contention"),
+        [
+            (33, True),  # ERROR_LOCK_VIOLATION: someone else holds it
+            (6, False),  # ERROR_INVALID_HANDLE
+            (5, False),  # ERROR_ACCESS_DENIED
+            (87, False),  # ERROR_INVALID_PARAMETER
+            (997, False),  # ERROR_IO_PENDING: async only, not our call
+            (0, False),
+        ],
+    )
+    def test_only_a_lock_violation_counts_as_contention(
+        self, error_code: int, is_contention: bool
+    ) -> None:
+        """Windows reports "held" and "the call was wrong" the same way.
+
+        Treating every failure as contention would make the lease report a
+        permanently busy profile no client could ever use, and would make the
+        handoff probe close a working browser on the strength of an error. The
+        matrix job cannot catch a regression here, because a healthy run never
+        produces anything but 33, so the classification is pinned directly.
+        """
+        from linkedin_mcp_server.profile_lease import _windows_failure_is_contention
+
+        assert _windows_failure_is_contention(error_code) is is_contention
+
+    def test_a_failing_backend_does_not_leak_descriptors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A lock backend that raises must not leave the file open.
+
+        The handoff probe swallows that failure so a broken signal cannot make
+        an owner give up a working browser, and the poller runs every second,
+        so a descriptor escaping here accumulates one per poll for the life of
+        the process.
+        """
+        from linkedin_mcp_server import profile_lease as module
+
+        opened: list[int] = []
+        real_open = module._open_lock_file
+
+        def spy(path: Path) -> int:
+            fd = real_open(path)
+            opened.append(fd)
+            return fd
+
+        def refuse(fd: int, *, exclusive: bool) -> bool:
+            raise ProfileLeaseUnavailableError("backend unavailable")
+
+        monkeypatch.setattr(module, "_open_lock_file", spy)
+        monkeypatch.setattr(module, "_try_lock", refuse)
+
+        for _ in range(3):
+            with pytest.raises(ProfileLeaseUnavailableError):
+                module._acquire_locked_fd(tmp_path / "probe.lock", exclusive=True)
+
+        assert opened, "the spy never ran, so this proves nothing"
+        for fd in set(opened):
+            with pytest.raises(OSError):
+                os.fstat(fd)  # a live descriptor would not raise
+
+    def test_cleanup_tolerates_an_already_closed_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cleanup must not raise on top of the failure that triggered it."""
+        from linkedin_mcp_server import profile_lease as module
+
+        def close_then_refuse(fd: int, *, exclusive: bool) -> bool:
+            os.close(fd)  # as if something else had already reclaimed it
+            raise ProfileLeaseUnavailableError("backend unavailable")
+
+        monkeypatch.setattr(module, "_try_lock", close_then_refuse)
+
+        with pytest.raises(ProfileLeaseUnavailableError, match="backend unavailable"):
+            module._acquire_locked_fd(tmp_path / "probe.lock", exclusive=True)
 
     def test_an_inconclusive_probe_does_not_hand_the_profile_over(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
