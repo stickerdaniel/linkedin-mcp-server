@@ -4,8 +4,13 @@ import pytest
 
 from linkedin_mcp_server.config.schema import (
     AppConfig,
+    BROWSER_HANDOFF_MARGIN_SECONDS,
     BrowserConfig,
     ConfigurationError,
+    DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_BROWSER_MIN_HOLD_SECONDS,
+    DEFAULT_BROWSER_WAIT_SECONDS,
+    MAX_BROWSER_WAIT_SECONDS,
     MAX_LOGIN_INLINE_WAIT_SECONDS,
     ServerConfig,
     is_loopback_host,
@@ -58,6 +63,127 @@ class TestBrowserConfig:
         config = BrowserConfig(login_inline_wait_seconds=120)
         config.validate()  # Clamps, does not raise
         assert config.login_inline_wait_seconds == MAX_LOGIN_INLINE_WAIT_SECONDS
+
+
+class TestProfileSharingConfig:
+    """The wait/hold/idle values that govern cross-process browser handoff.
+
+    The clamping here is not cosmetic. A hold window that outlasts the waiter's
+    budget produces spurious busy errors, and a wait budget above the ceiling
+    eats into the client's own request timeout.
+    """
+
+    def test_defaults(self):
+        config = BrowserConfig()
+        assert config.browser_wait_seconds == DEFAULT_BROWSER_WAIT_SECONDS
+        assert config.browser_min_hold_seconds == DEFAULT_BROWSER_MIN_HOLD_SECONDS
+        assert (
+            config.browser_idle_timeout_seconds == DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS
+        )
+
+    def test_defaults_leave_room_for_a_handover(self):
+        """The shipped defaults must satisfy their own clamp, unchanged."""
+        config = BrowserConfig()
+        config.validate()
+
+        assert config.browser_wait_seconds == DEFAULT_BROWSER_WAIT_SECONDS
+        assert config.browser_min_hold_seconds == DEFAULT_BROWSER_MIN_HOLD_SECONDS
+        assert (
+            config.browser_min_hold_seconds
+            <= config.browser_wait_seconds - BROWSER_HANDOFF_MARGIN_SECONDS
+        )
+
+    def test_zero_is_allowed(self):
+        """0 is a meaningful sentinel for all three, not a missing value.
+
+        Wait 0 reports busy at once, hold 0 hands over after every call, idle 0
+        keeps the browser until the process exits.
+        """
+        BrowserConfig(
+            browser_wait_seconds=0,
+            browser_min_hold_seconds=0,
+            browser_idle_timeout_seconds=0,
+        ).validate()  # No error
+
+    @pytest.mark.parametrize(
+        "bad_value", [-1.0, float("nan"), float("inf"), float("-inf")]
+    )
+    def test_rejects_a_negative_or_non_finite_wait(self, bad_value):
+        with pytest.raises(ConfigurationError, match="browser_wait_seconds"):
+            BrowserConfig(browser_wait_seconds=bad_value).validate()
+
+    @pytest.mark.parametrize(
+        "bad_value", [-1.0, float("nan"), float("inf"), float("-inf")]
+    )
+    def test_rejects_a_negative_or_non_finite_hold(self, bad_value):
+        with pytest.raises(ConfigurationError, match="browser_min_hold_seconds"):
+            BrowserConfig(browser_min_hold_seconds=bad_value).validate()
+
+    @pytest.mark.parametrize(
+        "bad_value", [-1.0, float("nan"), float("inf"), float("-inf")]
+    )
+    def test_rejects_a_negative_or_non_finite_idle_timeout(self, bad_value):
+        with pytest.raises(ConfigurationError, match="browser_idle_timeout_seconds"):
+            BrowserConfig(browser_idle_timeout_seconds=bad_value).validate()
+
+    def test_clamps_wait_to_the_ceiling(self):
+        config = BrowserConfig(browser_wait_seconds=120, browser_min_hold_seconds=0)
+        config.validate()  # Clamps, does not raise
+        assert config.browser_wait_seconds == MAX_BROWSER_WAIT_SECONDS
+
+    def test_clamps_hold_below_the_wait_budget(self):
+        """A hold window as long as the wait budget would time every waiter out.
+
+        The owner notices on a one-second poll and then has to tear Chromium
+        down, so the window has to end a margin *before* the waiter's deadline,
+        not at it.
+        """
+        config = BrowserConfig(browser_wait_seconds=10, browser_min_hold_seconds=10)
+        config.validate()
+
+        assert config.browser_min_hold_seconds == 10 - BROWSER_HANDOFF_MARGIN_SECONDS
+
+    def test_clamping_the_wait_also_reins_in_the_hold(self):
+        """The hold clamp reads the wait *after* it was itself clamped.
+
+        Ordering matters: against the raw 600s the hold would look fine, and a
+        180s hold would survive a 45s budget.
+        """
+        config = BrowserConfig(browser_wait_seconds=600, browser_min_hold_seconds=180)
+        config.validate()
+
+        assert config.browser_wait_seconds == MAX_BROWSER_WAIT_SECONDS
+        assert (
+            config.browser_min_hold_seconds
+            == MAX_BROWSER_WAIT_SECONDS - BROWSER_HANDOFF_MARGIN_SECONDS
+        )
+
+    def test_hold_never_clamps_below_zero(self):
+        """A wait budget under the margin must not produce a negative window."""
+        config = BrowserConfig(browser_wait_seconds=1, browser_min_hold_seconds=30)
+        config.validate()
+
+        assert config.browser_min_hold_seconds == 0.0
+
+    def test_zero_wait_disables_the_hold_window(self):
+        """Reporting busy immediately leaves nothing for a hold window to buy."""
+        config = BrowserConfig(browser_wait_seconds=0, browser_min_hold_seconds=25)
+        config.validate()
+
+        assert config.browser_min_hold_seconds == 0.0
+
+    def test_hold_inside_the_budget_is_left_alone(self):
+        config = BrowserConfig(browser_wait_seconds=45, browser_min_hold_seconds=5)
+        config.validate()
+
+        assert config.browser_min_hold_seconds == 5
+
+    def test_a_long_idle_timeout_is_not_clamped(self):
+        """The idle timer is a backstop, not part of the request path."""
+        config = BrowserConfig(browser_idle_timeout_seconds=86_400)
+        config.validate()
+
+        assert config.browser_idle_timeout_seconds == 86_400
 
 
 class TestServerConfig:
@@ -430,6 +556,82 @@ class TestLoaders:
         # validate() clamps in one place for both env and CLI paths.
         config.validate()
         assert config.browser.login_inline_wait_seconds == MAX_LOGIN_INLINE_WAIT_SECONDS
+
+    @pytest.mark.parametrize(
+        ("env_key", "attribute"),
+        [
+            ("BROWSER_WAIT", "browser_wait_seconds"),
+            ("BROWSER_MIN_HOLD", "browser_min_hold_seconds"),
+            ("BROWSER_IDLE_TIMEOUT", "browser_idle_timeout_seconds"),
+        ],
+    )
+    def test_load_from_env_profile_sharing(self, monkeypatch, env_key, attribute):
+        monkeypatch.setenv(env_key, "12.5")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert getattr(config.browser, attribute) == 12.5
+
+    @pytest.mark.parametrize(
+        ("env_key", "attribute"),
+        [
+            ("BROWSER_WAIT", "browser_wait_seconds"),
+            ("BROWSER_MIN_HOLD", "browser_min_hold_seconds"),
+            ("BROWSER_IDLE_TIMEOUT", "browser_idle_timeout_seconds"),
+        ],
+    )
+    def test_load_from_env_profile_sharing_zero(self, monkeypatch, env_key, attribute):
+        """0 has to survive the loader: it is a sentinel, not an empty value."""
+        monkeypatch.setenv(env_key, "0")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert getattr(config.browser, attribute) == 0.0
+
+    @pytest.mark.parametrize(
+        "env_key", ["BROWSER_WAIT", "BROWSER_MIN_HOLD", "BROWSER_IDLE_TIMEOUT"]
+    )
+    @pytest.mark.parametrize("bad_value", ["abc", "-5", "nan", "inf", "-inf"])
+    def test_load_from_env_invalid_profile_sharing(
+        self, monkeypatch, env_key, bad_value
+    ):
+        monkeypatch.setenv(env_key, bad_value)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match=f"Invalid {env_key}"):
+            load_from_env(AppConfig())
+
+    @pytest.mark.parametrize(
+        ("flag", "attribute"),
+        [
+            ("--browser-wait", "browser_wait_seconds"),
+            ("--browser-min-hold", "browser_min_hold_seconds"),
+            ("--browser-idle-timeout", "browser_idle_timeout_seconds"),
+        ],
+    )
+    def test_load_from_args_profile_sharing(self, monkeypatch, flag, attribute):
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", flag, "8"])
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert getattr(config.browser, attribute) == 8.0
+
+    def test_profile_sharing_clamped_at_validate_not_in_the_loader(self, monkeypatch):
+        """One clamp, applied after both loaders, so CLI and env agree."""
+        monkeypatch.setenv("BROWSER_WAIT", "99")
+        monkeypatch.setenv("BROWSER_MIN_HOLD", "99")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.browser_wait_seconds == 99.0
+        assert config.browser.browser_min_hold_seconds == 99.0
+
+        config.validate()
+        assert config.browser.browser_wait_seconds == MAX_BROWSER_WAIT_SECONDS
+        assert (
+            config.browser.browser_min_hold_seconds
+            == MAX_BROWSER_WAIT_SECONDS - BROWSER_HANDOFF_MARGIN_SECONDS
+        )
 
     @pytest.mark.parametrize(
         ("value", "expected"),
