@@ -270,7 +270,14 @@ class DaemonDescriptor:
 
     @property
     def url(self) -> str:
-        return f"http://{self.host}:{self.port}{self.path}"
+        # An IPv6 literal has to be bracketed, or the colons in the address run
+        # into the one before the port and the whole thing parses as a bad
+        # port. Measured: a valid ::1 endpoint produced a URL no client could
+        # use. Bracketed already, or a name, it is left alone.
+        host = self.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"http://{host}:{self.port}{self.path}"
 
     def to_json(self) -> str:
         return json.dumps(self.__dict__, indent=2, sort_keys=True) + "\n"
@@ -376,6 +383,22 @@ def read(auth_root: Path) -> DaemonDescriptor | None:
     it would strand every other client attached to that daemon.
     """
     path = descriptor_path(auth_root)
+    # Checked without following, before anything is read. A symlink here is
+    # never something this wrote, and the two ways of getting it wrong both
+    # matter: a dangling one reads as absence, so a client elects a second owner
+    # while the first is still running, and a live one aims the read somewhere
+    # this never published.
+    try:
+        if path.is_symlink():
+            raise DescriptorError(
+                f"{path} is a symbolic link rather than a descriptor this "
+                f"daemon wrote. Remove it and start the server again."
+            )
+    except OSError as exc:
+        raise DescriptorError(
+            f"The daemon descriptor could not be read: {exc}"
+        ) from exc
+
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
