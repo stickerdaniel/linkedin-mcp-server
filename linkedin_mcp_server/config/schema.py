@@ -41,6 +41,18 @@ BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
 DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS: float = 600.0
 
 
+# Hosts that only this machine can reach. An exact-match allowlist that fails
+# closed: anything unrecognised — 0.0.0.0, ::, a LAN address, an IPv4-mapped
+# loopback — counts as reachable from elsewhere. Erring towards "exposed" costs
+# a warning; erring the other way would hand a logged-in session to the network.
+LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether *host* is reachable only from this machine."""
+    return host in LOOPBACK_HOSTS
+
+
 class ConfigurationError(Exception):
     """Raised when configuration validation fails."""
 
@@ -240,12 +252,13 @@ class AppConfig:
             raise ConfigurationError("HTTP transport requires a valid host")
         if not self.server.port:
             raise ConfigurationError("HTTP transport requires a valid port")
-        if self.server.host in ("0.0.0.0", "::"):
+        if not is_loopback_host(self.server.host):
             logger.warning(
-                "HTTP transport is binding to %s which exposes the server to "
-                "all network interfaces. The MCP endpoint has no authentication "
-                "— anyone on your network can use your LinkedIn session. "
-                "Use 127.0.0.1 (default) unless you understand the risk.",
+                "HTTP transport is binding to %s, which is reachable from "
+                "outside this machine. The MCP endpoint has no authentication "
+                "— anyone who can reach that address can use your LinkedIn "
+                "session. Use 127.0.0.1 (default) unless you understand the "
+                "risk.",
                 self.server.host,
             )
 

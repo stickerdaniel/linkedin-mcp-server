@@ -80,6 +80,7 @@ def test_main_interactive_prompts_when_transport_not_explicit(
         host=config.server.host,
         port=config.server.port,
         path=config.server.path,
+        host_origin_protection="auto",
     )
 
 
@@ -131,9 +132,35 @@ def test_main_streamable_http_passes_host_port_path(
         host="0.0.0.0",
         port=8123,
         path="/custom-mcp",
+        host_origin_protection="auto",
     )
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+def test_main_streamable_http_always_rejects_foreign_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Origin validation is not optional and has no configuration switch.
+
+    Without it a site the user merely visits can reach this server by DNS
+    rebinding — the request comes from the user's own browser, so binding to
+    loopback does not help — and drive tools with the logged-in session.
+    """
+    config = _make_config(
+        is_interactive=False,
+        transport="streamable-http",
+        transport_explicitly_set=True,
+    )
+    _patch_main_dependencies(monkeypatch, config)
+    mcp = MagicMock()
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
+    )
+
+    cli_main.main()
+
+    assert mcp.run.call_args.kwargs["host_origin_protection"] == "auto"
 
 
 def test_main_passes_configured_tool_timeout_to_factory(

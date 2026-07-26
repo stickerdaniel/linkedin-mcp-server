@@ -380,11 +380,22 @@ def main() -> None:
             mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
 
             if transport == "streamable-http":
+                # Reject cross-origin requests. Without this a website the user
+                # merely visits can reach a loopback server by DNS rebinding —
+                # the browser sends the request, so a firewall does not help —
+                # and drive tools with the logged-in LinkedIn session. The MCP
+                # specification requires validating Origin for exactly this
+                # reason, and the protection is off unless asked for.
+                #
+                # "auto" allows the bound host and loopback origins, and keeps
+                # allowing requests that carry no Origin at all, which is every
+                # non-browser client.
                 mcp.run(
                     transport=transport,
                     host=config.server.host,
                     port=config.server.port,
                     path=config.server.path,
+                    host_origin_protection="auto",
                 )
             else:
                 mcp.run(transport=transport)

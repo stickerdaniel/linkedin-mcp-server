@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from linkedin_mcp_server.config.schema import (
@@ -6,6 +8,7 @@ from linkedin_mcp_server.config.schema import (
     ConfigurationError,
     MAX_LOGIN_INLINE_WAIT_SECONDS,
     ServerConfig,
+    is_loopback_host,
 )
 
 
@@ -81,6 +84,73 @@ class TestAppConfig:
         config.server.port = 99999
         with pytest.raises(ConfigurationError):
             config.validate()
+
+
+class TestExposedBindWarning:
+    """The endpoint has no authentication, so the bind address is the guard.
+
+    The warning used to fire only for a literal 0.0.0.0 or ::, which meant the
+    most likely way to expose a session by accident — naming a LAN address
+    outright — happened in silence.
+    """
+
+    @staticmethod
+    def _validate_with_host(host, caplog):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.host = host
+        with caplog.at_level(
+            logging.WARNING, logger="linkedin_mcp_server.config.schema"
+        ):
+            config.validate()
+        return caplog.text
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+    def test_loopback_binds_are_silent(self, host, caplog):
+        assert self._validate_with_host(host, caplog) == ""
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "0.0.0.0",
+            "::",
+            "192.168.1.5",  # a LAN address warned about nothing before
+            "10.0.0.7",
+            "::ffff:127.0.0.1",  # IPv4-mapped loopback: not in the allowlist
+            "example.internal",
+        ],
+    )
+    def test_reachable_binds_warn(self, host, caplog):
+        text = self._validate_with_host(host, caplog)
+        assert host in text
+        assert "no authentication" in text
+
+    def test_stdio_never_warns_about_the_host(self, caplog):
+        """The host field is meaningless without an HTTP listener."""
+        config = AppConfig()
+        config.server.transport = "stdio"
+        config.server.host = "0.0.0.0"
+        with caplog.at_level(logging.WARNING):
+            config.validate()
+
+        assert "no authentication" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("host", "expected"),
+        [
+            ("127.0.0.1", True),
+            ("::1", True),
+            ("localhost", True),
+            ("0.0.0.0", False),
+            ("::", False),
+            ("192.168.1.5", False),
+            ("::ffff:127.0.0.1", False),
+            ("", False),
+        ],
+    )
+    def test_is_loopback_host_fails_closed(self, host, expected):
+        """Anything unrecognised counts as reachable, never the other way."""
+        assert is_loopback_host(host) is expected
 
 
 class TestConfigSingleton:
