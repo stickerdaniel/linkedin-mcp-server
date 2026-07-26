@@ -198,6 +198,33 @@ class TestFork:
             os.waitpid(pid, 0)
 
 
+class TestAdoptedDescriptors:
+    def test_an_adopted_lock_does_not_leak_to_later_children(self, tmp_path: Path):
+        # The descriptor is marked inheritable for exactly one launch. Measured
+        # before the fix: it stayed that way, so an unrelated child launched
+        # afterwards inherited the lock and kept it held after the owner exited,
+        # leaving every client looking at a daemon that was no longer there.
+        original = DaemonLock(tmp_path)
+        assert original.try_acquire()
+        inherited = original.inheritable_copy()
+        original.release()
+
+        adopter = DaemonLock(tmp_path)
+        adopter.adopt(inherited)
+
+        # Launched the way a browser would be, inheriting open descriptors.
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(3)"], close_fds=False
+        )
+        try:
+            adopter.release()
+
+            assert not daemon_is_running(tmp_path)
+        finally:
+            child.kill()
+            child.wait()
+
+
 class TestReleaseSemantics:
     def test_releasing_closes_rather_than_unlocks(self, tmp_path: Path):
         # The measured trap. flock belongs to the open file description, which

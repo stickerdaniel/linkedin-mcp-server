@@ -283,6 +283,23 @@ class TestConfigFingerprint:
             indirect, key=token
         )
 
+    def test_an_empty_proxy_password_is_not_an_absent_one(self):
+        # proxy_settings compares the password against None precisely so an
+        # empty one is still sent to Chromium. Measured before the fix: the two
+        # produced different launch options and an identical fingerprint, so a
+        # client would have been served a browser configured differently from
+        # what it asked for.
+        token = new_token()
+        absent = _config(proxy_server="http://p.example:1", proxy_username="u")
+        empty = _config(
+            proxy_server="http://p.example:1", proxy_username="u", proxy_password=""
+        )
+
+        assert absent.browser.proxy_settings() != empty.browser.proxy_settings()
+        assert config_fingerprint(absent, key=token) != config_fingerprint(
+            empty, key=token
+        )
+
     def test_reordered_proxy_bypass_hosts_match(self):
         # The same hosts bypass the proxy either way, so the order is not a
         # difference worth refusing over.
