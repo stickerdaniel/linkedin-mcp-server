@@ -56,9 +56,10 @@ class ServerRole(enum.Enum):
     #: Never speaks to an end client, so nothing user-facing belongs here.
     OWNER = "owner"
 
-    #: Speaks to an end client and forwards to an owner. Never touches
-    #: Chromium, so it must not participate in profile ownership at all.
-    PROXY = "proxy"
+    # A forwarding role belongs here too, but only once something actually
+    # forwards. Adding it now would mean a server that registers the local
+    # browser-backed tools and then declines to serialize them, which is a
+    # worse starting point than not having the role at all.
 
     @property
     def drives_browser(self) -> bool:
@@ -68,7 +69,7 @@ class ServerRole(enum.Enum):
     @property
     def faces_a_client(self) -> bool:
         """Whether an end user reads this server's tool results."""
-        return self in (ServerRole.DIRECT, ServerRole.PROXY)
+        return self is ServerRole.DIRECT
 
 
 @lifespan

@@ -36,45 +36,35 @@ class TestServerRoles:
             assert _has_middleware(mcp, SequentialToolExecutionMiddleware)
             assert _has_middleware(mcp, UpdateNoticeMiddleware)
 
-    def test_a_proxy_never_competes_for_the_profile(self):
-        # A proxy forwards to whoever owns the browser. Taking the profile
-        # lease here would make it wait for a lease it will never use, and the
-        # owner it forwards to would then wait for the lease the proxy holds.
-        mcp = create_mcp_server(role=ServerRole.PROXY)
+    def test_every_role_that_drives_a_browser_serializes_its_calls(self):
+        # The invariant the shared profile depends on: any server that can
+        # reach Chromium takes the lease first. A role added later that skips
+        # this would corrupt the session rather than merely run slowly.
+        for role in ServerRole:
+            mcp = create_mcp_server(role=role)
 
-        assert not _has_middleware(mcp, SequentialToolExecutionMiddleware)
+            assert role.drives_browser
+            assert _has_middleware(mcp, SequentialToolExecutionMiddleware), role
 
-    def test_an_owner_still_serializes_calls(self):
-        # The owner is the process that actually drives Chromium, so it keeps
-        # the serialization the shared profile depends on.
-        mcp = create_mcp_server(role=ServerRole.OWNER)
-
-        assert _has_middleware(mcp, SequentialToolExecutionMiddleware)
-
-    def test_the_update_notice_follows_the_client_not_the_browser(self):
-        # The notice is appended once per process. On a shared owner that means
-        # one client sees it and every later one never does, however long the
-        # owner lives, so it belongs on the processes clients talk to.
+    def test_the_update_notice_goes_only_where_a_user_reads_it(self):
+        # Appended to one tool result per process. On a server shared by many
+        # clients that means the first caller sees it and nobody afterwards
+        # does, however long that server lives.
         owner = create_mcp_server(role=ServerRole.OWNER)
-        proxy = create_mcp_server(role=ServerRole.PROXY)
 
         assert not _has_middleware(owner, UpdateNoticeMiddleware)
-        assert _has_middleware(proxy, UpdateNoticeMiddleware)
 
     def test_every_role_serves_the_same_tools(self):
-        # The proxy advertises what it forwards, so a tool missing from one
-        # role would silently disappear from a client's list.
+        # A tool present in one role and missing from another would disappear
+        # from a client's list depending on how its server happened to start.
         async def tool_names(role: ServerRole) -> set[str]:
             tools = await create_mcp_server(role=role).list_tools()
             return {tool.name for tool in tools}
 
-        direct, owner, proxy = (
-            asyncio.run(tool_names(role))
-            for role in (ServerRole.DIRECT, ServerRole.OWNER, ServerRole.PROXY)
-        )
+        served = {role: asyncio.run(tool_names(role)) for role in ServerRole}
 
-        assert direct == owner == proxy
-        assert "get_person_profile" in direct
+        assert len(set(map(frozenset, served.values()))) == 1
+        assert "get_person_profile" in served[ServerRole.DIRECT]
 
 
 class TestSequentialToolExecutionMiddleware:
