@@ -1,8 +1,10 @@
 name: Check Attribution
 
 on:
+  # Every pull request, not only those targeting main: a stacked pull request
+  # is based on the branch below it, and a trailer that slips through there
+  # reaches main when the stack merges.
   pull_request:
-    branches: [main]
 
 # Coding agents sign their work either with a Co-Authored-By trailer or by
 # claiming the author/committer field. Squash-merging collects the trailers of
