@@ -180,11 +180,11 @@ class TestPlatformDifference:
         os.name != "nt", reason="the refusal only applies where handoff cannot work"
     )
     def test_windows_refuses_to_hand_a_lock_over(self, tmp_path: Path):
-        # Measured on a Windows runner: a child holding the inherited handle
-        # did not hold the lock once the parent closed its own, in 20 of 20
-        # runs, while a third process took the byte range. Returning a
-        # descriptor that looks like a transferred lock and is not would put a
-        # second owner on a live browser, so it refuses instead.
+        # Measured on a Windows runner: a child holding the inherited handle did
+        # not hold the lock once the parent had closed its handles and exited,
+        # in 20 of 20 runs, while a third process took the byte range.
+        # Returning a descriptor that looks like a transferred lock and is not
+        # would put a second owner on a live browser, so it refuses instead.
         lock = DaemonLock(tmp_path)
         assert lock.try_acquire()
         try:
