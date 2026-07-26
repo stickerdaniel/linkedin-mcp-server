@@ -5,6 +5,7 @@ Defines the dataclass schemas that represent the application's configuration
 structure with type-safe configuration objects and default values.
 """
 
+import ipaddress
 import logging
 import math
 from dataclasses import dataclass, field
@@ -39,6 +40,42 @@ BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
 # A backstop only — the handoff signal does the real work — so it is deliberately
 # long: a reopen costs one more LinkedIn request. 0 disables it.
 DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS: float = 600.0
+
+
+# Names that resolve only on this machine. Compared case-insensitively and
+# without a trailing root dot, both of which are the same name to a resolver.
+LOOPBACK_HOSTNAMES: frozenset[str] = frozenset({"localhost"})
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether *host* is reachable only from this machine.
+
+    Fails closed: anything this cannot positively identify as loopback counts
+    as reachable from elsewhere, whether that is a wildcard bind, a LAN
+    address, or a name that needs DNS to answer. Erring that way costs a
+    warning and a skipped cookie import; erring the other way would hand a
+    logged-in session to the network.
+
+    Address literals go through :mod:`ipaddress` rather than a spelling list,
+    so the whole 127/8 range and IPv4-mapped forms are recognised for what they
+    are instead of being judged on how they were typed.
+    """
+    name = host.strip().rstrip(".").lower()
+    if not name:
+        return False
+    if name in LOOPBACK_HOSTNAMES:
+        return True
+
+    literal = name
+    if literal.startswith("[") and literal.endswith("]"):
+        literal = literal[1:-1]  # bracketed IPv6, as it appears in a URL
+    try:
+        address = ipaddress.ip_address(literal)
+    except ValueError:
+        # A name only DNS can resolve, and DNS can point anywhere.
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return address.is_loopback or bool(mapped and mapped.is_loopback)
 
 
 class ConfigurationError(Exception):
@@ -240,12 +277,13 @@ class AppConfig:
             raise ConfigurationError("HTTP transport requires a valid host")
         if not self.server.port:
             raise ConfigurationError("HTTP transport requires a valid port")
-        if self.server.host in ("0.0.0.0", "::"):
+        if not is_loopback_host(self.server.host):
             logger.warning(
-                "HTTP transport is binding to %s which exposes the server to "
-                "all network interfaces. The MCP endpoint has no authentication "
-                "— anyone on your network can use your LinkedIn session. "
-                "Use 127.0.0.1 (default) unless you understand the risk.",
+                "HTTP transport is binding to %s, which is reachable from "
+                "outside this machine. The MCP endpoint has no authentication, "
+                "so anyone who can reach that address can use your LinkedIn "
+                "session. Use 127.0.0.1 (default) unless you understand the "
+                "risk.",
                 self.server.host,
             )
 

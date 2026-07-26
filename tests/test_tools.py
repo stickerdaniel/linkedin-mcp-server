@@ -145,7 +145,9 @@ class TestPersonTool:
 
     async def test_get_person_profile_rejects_invalid_max_scrolls(self, mock_context):
         """Verify max_scrolls=0 is rejected by Field(ge=1) validation."""
-        from pydantic import ValidationError
+        # FastMCP wraps the pydantic error raised by Field() constraints in
+        # its own ValidationError, which does not subclass pydantic's.
+        from fastmcp.exceptions import ValidationError
 
         from linkedin_mcp_server.tools.person import register_person_tools
 
@@ -1149,7 +1151,9 @@ class TestFeedTools:
 
     async def test_get_feed_rejects_zero_num_posts(self, mock_context):
         """Verify num_posts=0 is rejected by Field(ge=1) validation."""
-        from pydantic import ValidationError
+        # FastMCP wraps the pydantic error raised by Field() constraints in
+        # its own ValidationError, which does not subclass pydantic's.
+        from fastmcp.exceptions import ValidationError
 
         from linkedin_mcp_server.tools.feed import register_feed_tools
 
@@ -1161,7 +1165,9 @@ class TestFeedTools:
 
     async def test_get_feed_rejects_excessive_num_posts(self, mock_context):
         """Verify num_posts=51 is rejected by Field(le=50) validation."""
-        from pydantic import ValidationError
+        # FastMCP wraps the pydantic error raised by Field() constraints in
+        # its own ValidationError, which does not subclass pydantic's.
+        from fastmcp.exceptions import ValidationError
 
         from linkedin_mcp_server.tools.feed import register_feed_tools
 
@@ -1231,7 +1237,9 @@ class TestPostTools:
 
     async def test_search_posts_rejects_zero_max_pages(self, mock_context):
         """Verify max_pages=0 is rejected by Field(ge=1) validation."""
-        from pydantic import ValidationError
+        # FastMCP wraps the pydantic error raised by Field() constraints in
+        # its own ValidationError, which does not subclass pydantic's.
+        from fastmcp.exceptions import ValidationError
 
         from linkedin_mcp_server.tools.post import register_post_tools
 

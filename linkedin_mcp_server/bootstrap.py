@@ -19,6 +19,7 @@ from fastmcp import Context
 from linkedin_mcp_server.authentication import get_authentication_source
 from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.schema import is_loopback_host
 from linkedin_mcp_server.drivers.browser import (
     close_browser,
     current_headless,
@@ -654,13 +655,9 @@ def _auto_import_allowed() -> bool:
     # request from a remote client. Gate on the BIND ADDRESS, not the transport
     # type: a streamable-http server on a loopback host is the documented local
     # dev / verify flow and IS a desktop case; only a non-loopback bind is the
-    # service case. This is an exact-match loopback allowlist that fails closed:
-    # any unrecognized host (0.0.0.0, ::, a LAN IP, an IPv4-mapped loopback)
-    # is treated as non-loopback and gated OFF.
-    if config.server.transport == "streamable-http" and config.server.host not in (
-        "127.0.0.1",
-        "::1",
-        "localhost",
+    # service case.
+    if config.server.transport == "streamable-http" and not is_loopback_host(
+        config.server.host
     ):
         return False
     return True

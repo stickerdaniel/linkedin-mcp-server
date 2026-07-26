@@ -4,8 +4,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, not only those targeting main. A stacked pull request
+  # is based on the branch below it, so filtering by base branch skipped CI
+  # entirely for the stacks this repository's workflow produces.
   pull_request:
-    branches: [main]
 
 jobs:
   lint-and-check:

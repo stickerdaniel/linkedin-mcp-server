@@ -375,16 +375,58 @@ def main() -> None:
             if config.is_interactive and not config.server.transport_explicitly_set:
                 print("\n🚀 Server ready! Choose transport mode:")
                 transport = choose_transport_interactive()
+                # Record the answer rather than keeping it in a local. Two
+                # checks read the stored transport to decide how exposed this
+                # process is: the bind-address warning, and the gate that
+                # decides whether reading the local browser's LinkedIn cookie
+                # is safe. Leaving it at stdio told them a listening HTTP
+                # server was a private one. Re-validating applies the HTTP
+                # rules that were skipped when the value said stdio.
+                config.server.transport = transport
+                config.validate()
 
             # Create and run the MCP server
             mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
 
             if transport == "streamable-http":
+                # Validate Host and Origin. Without this a website the user
+                # merely visits can point a hostname at this server's address
+                # and have the user's own browser drive tools with the
+                # logged-in LinkedIn session. The request comes from inside, so
+                # a firewall does not help. The MCP specification requires this
+                # for local HTTP servers, and it is off unless asked for.
+                #
+                # Both checks are needed, and the Host one carries most of the
+                # weight. A rebinding attack sends its own domain as *both*
+                # Host and Origin, so those agree and origin validation alone
+                # lets it through; what gives it away is that the Host is not a
+                # name this server answers to. Requests carrying no Origin at
+                # all stay allowed, which is every non-browser client.
+                #
+                # True rather than "auto": "auto" only validates when the
+                # accepted connection landed on a loopback address, so a server
+                # bound to 0.0.0.0 and reached over its LAN address checked
+                # nothing at all, which is the exposed case where it matters
+                # most. Measured before this: an attacker Host and Origin over
+                # the LAN address were served, while the same request to
+                # 127.0.0.1 was refused.
+                #
+                # Strict accepts localhost and the address the connection
+                # arrived on, which covers the documented flows. It does not
+                # accept a DNS name such as a machine name or a public name in
+                # front of a proxy, so those need the proxy to rewrite the
+                # upstream Host, or the name listed explicitly. The README says
+                # so next to the exposed-bind example, because a 421 nobody can
+                # explain is how a guard like this ends up switched off.
+                #
+                # Deliberately no host wildcard: it would accept any Host and
+                # reopen the same hole from the other side.
                 mcp.run(
                     transport=transport,
                     host=config.server.host,
                     port=config.server.port,
                     path=config.server.path,
+                    host_origin_protection=True,
                 )
             else:
                 mcp.run(transport=transport)

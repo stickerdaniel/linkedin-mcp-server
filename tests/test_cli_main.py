@@ -2,6 +2,7 @@
 
 import importlib.metadata
 import json
+import logging
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -80,7 +81,64 @@ def test_main_interactive_prompts_when_transport_not_explicit(
         host=config.server.host,
         port=config.server.port,
         path=config.server.path,
+        host_origin_protection=True,
     )
+    assert config.server.transport == "streamable-http"
+
+
+def test_choosing_http_at_the_prompt_warns_about_an_exposed_bind(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Answering the prompt has to update the stored transport, not a local.
+
+    Several checks read it to decide how exposed this process is. Leaving it at
+    stdio told the bind-address warning there was no listener to warn about,
+    and told the cookie-import gate that a server listening on every interface
+    was a private one.
+    """
+    config = _make_config(
+        is_interactive=True, transport="stdio", transport_explicitly_set=False
+    )
+    config.server.host = "0.0.0.0"
+    _patch_main_dependencies(monkeypatch, config)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.choose_transport_interactive",
+        lambda: "streamable-http",
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: MagicMock()
+    )
+
+    with caplog.at_level(logging.WARNING):
+        cli_main.main()
+
+    assert config.server.transport == "streamable-http"
+    assert "no authentication" in caplog.text
+
+
+def test_choosing_stdio_at_the_prompt_leaves_no_listener_recorded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The host is meaningless without a listener, so it must not warn."""
+    config = _make_config(
+        is_interactive=True, transport="streamable-http", transport_explicitly_set=False
+    )
+    config.server.host = "0.0.0.0"
+    _patch_main_dependencies(monkeypatch, config)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.choose_transport_interactive", lambda: "stdio"
+    )
+    mcp = MagicMock()
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
+    )
+
+    with caplog.at_level(logging.WARNING):
+        cli_main.main()
+
+    assert config.server.transport == "stdio"
+    assert "no authentication" not in caplog.text
+    mcp.run.assert_called_once_with(transport="stdio")
 
 
 def test_main_explicit_transport_skips_prompt(
@@ -131,9 +189,40 @@ def test_main_streamable_http_passes_host_port_path(
         host="0.0.0.0",
         port=8123,
         path="/custom-mcp",
+        host_origin_protection=True,
     )
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+def test_main_streamable_http_enables_host_and_origin_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard is not optional and has no configuration switch.
+
+    Two details here are load-bearing rather than incidental. ``True`` instead
+    of ``"auto"``: the latter validates only when the connection landed on a
+    loopback address, so an exposed server checked nothing over its own LAN
+    address. And no ``allowed_hosts``: a wildcard would accept an attacker's
+    domain as the Host and reopen the hole from the other side.
+
+    See ``test_transport_security.py`` for what the resulting server answers.
+    """
+    config = _make_config(
+        is_interactive=False,
+        transport="streamable-http",
+        transport_explicitly_set=True,
+    )
+    _patch_main_dependencies(monkeypatch, config)
+    mcp = MagicMock()
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
+    )
+
+    cli_main.main()
+
+    assert mcp.run.call_args.kwargs["host_origin_protection"] is True
+    assert "allowed_hosts" not in mcp.run.call_args.kwargs
 
 
 def test_main_passes_configured_tool_timeout_to_factory(
