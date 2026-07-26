@@ -186,6 +186,13 @@ class DaemonLock:
         self._discard_if_forked()
         if self._fd is not None:
             raise DaemonLockError("This process already holds the daemon lock")
+        # Made non-inheritable again straight away. It was marked inheritable
+        # for exactly one launch, and leaving it that way would let any later
+        # child that inherits descriptors, a Chromium among them, keep the lock
+        # alive after this process exits. Measured: an unrelated child did
+        # exactly that, and every client afterwards saw a daemon that was no
+        # longer there.
+        os.set_inheritable(fd, False)
         self._fd = fd
         self._owner_pid = os.getpid()
         logger.debug("Adopted an inherited daemon lock for %s", self._auth_root)

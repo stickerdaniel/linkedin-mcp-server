@@ -175,12 +175,22 @@ def _canonical(value: object) -> str:
     )
 
 
+#: Fields where an empty string is a value rather than an absence. The proxy
+#: credentials are the case that matters: ``proxy_settings`` compares the
+#: password against None precisely so an empty one is still sent, so folding it
+#: into "unset" would report a match between two clients whose browsers launch
+#: with different options.
+_EMPTY_IS_MEANINGFUL = frozenset({"proxy_username", "proxy_password"})
+
+
 def _normalize(name: str, value: Any) -> Any:
     """Reduce a field to the form two processes should agree on.
 
     Only differences that would actually make the owner's browser wrong for a
-    client should count. Two spellings of the same path are the same profile,
-    and an unset optional string is the same as an empty one.
+    client should count. Two spellings of the same path are the same profile.
+    Erring towards a false difference is safe here: it costs a refusal that
+    names the field. Erring the other way hands a client a browser configured
+    differently from what it asked for.
     """
     if value is None:
         return None
@@ -194,7 +204,7 @@ def _normalize(name: str, value: Any) -> Any:
         # spacing changes which hosts bypass the proxy.
         hosts = sorted({host.strip().lower() for host in str(value).split(",")} - {""})
         return ",".join(hosts)
-    if isinstance(value, str) and not value:
+    if isinstance(value, str) and not value and name not in _EMPTY_IS_MEANINGFUL:
         return None
     return value
 
