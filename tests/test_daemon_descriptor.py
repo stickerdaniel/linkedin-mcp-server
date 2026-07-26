@@ -171,6 +171,36 @@ class TestRefusals:
         with pytest.raises(DescriptorError, match="different daemon generations"):
             read_token(tmp_path, loaded)
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="symlinks need a privilege this test cannot assume"
+    )
+    def test_a_dangling_descriptor_symlink_is_not_read_as_absence(self, tmp_path: Path):
+        # Measured: a dead symlink made read() return None, so a client would
+        # have taken it for a first start and elected a second owner while the
+        # first was still running. Absence and untrustworthy have to stay
+        # distinguishable, because only one of them means "go ahead".
+        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        descriptor_path(tmp_path).symlink_to(tmp_path / "nowhere")
+
+        with pytest.raises(DescriptorError, match="symbolic link"):
+            read(tmp_path)
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="symlinks need a privilege this test cannot assume"
+    )
+    def test_a_descriptor_symlink_pointing_somewhere_real_is_refused(
+        self, tmp_path: Path
+    ):
+        # Following it would read a file this never published, chosen by
+        # whoever could write the link.
+        elsewhere = tmp_path / "planted.json"
+        elsewhere.write_text("{}")
+        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        descriptor_path(tmp_path).symlink_to(elsewhere)
+
+        with pytest.raises(DescriptorError, match="symbolic link"):
+            read(tmp_path)
+
     def test_a_descriptor_with_no_token_beside_it_is_refused(self, tmp_path: Path):
         token = new_token()
         publish(tmp_path, _descriptor(tmp_path, token), token)
@@ -180,6 +210,32 @@ class TestRefusals:
 
         with pytest.raises(DescriptorError, match="no token beside it"):
             read_token(tmp_path, loaded)
+
+
+class TestEndpointUrl:
+    @pytest.mark.parametrize(
+        "host,expected",
+        [
+            ("127.0.0.1", "http://127.0.0.1:49152/mcp"),
+            ("localhost", "http://localhost:49152/mcp"),
+            ("::1", "http://[::1]:49152/mcp"),
+            ("::ffff:127.0.0.1", "http://[::ffff:127.0.0.1]:49152/mcp"),
+            ("[::1]", "http://[::1]:49152/mcp"),
+        ],
+    )
+    def test_every_accepted_host_produces_a_usable_url(
+        self, tmp_path: Path, host: str, expected: str
+    ):
+        # An IPv6 literal that is accepted but unbracketed parses as a bad
+        # port. Measured: a valid ::1 endpoint produced a URL no client could
+        # use, so the daemon was unreachable through its own descriptor.
+        import httpx
+
+        descriptor = _descriptor(tmp_path, new_token(), host=host)
+        descriptor.check_endpoint_is_local()
+
+        assert descriptor.url == expected
+        httpx.URL(descriptor.url)  # raises if a client could not use it
 
 
 class TestInstanceIdentity:
