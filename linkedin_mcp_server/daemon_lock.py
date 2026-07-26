@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import weakref
 from pathlib import Path
 from types import TracebackType
 
@@ -44,6 +45,27 @@ _DAEMON_LOCK_FILE = "daemon.lock"
 
 class DaemonLockError(RuntimeError):
     """The daemon lock could not be used, so ownership cannot be decided."""
+
+
+#: Every lock this process has built, so a fork can be cleaned up in the child.
+#: Weak, so holding a lock here never keeps a discarded one alive.
+_live_locks: weakref.WeakSet[DaemonLock] = weakref.WeakSet()
+
+
+def _discard_inherited_locks() -> None:
+    """Drop every lock the child inherited, immediately after a fork.
+
+    Waiting until the child touches a lock is not enough, and no check inside
+    an individual method could be: a child that never mentions the lock still
+    inherited the descriptor, and the kernel lock lives as long as any copy of
+    it is open. Measured: after the owner released and exited, an untouched
+    fork child kept the lock held, so every other process saw a daemon that was
+    no longer there and none of them could elect a replacement.
+
+    Registered rather than polled, so it also covers a child that forks again.
+    """
+    for lock in list(_live_locks):
+        lock._discard_if_forked()
 
 
 def daemon_lock_path(auth_root: Path) -> Path:
@@ -73,6 +95,7 @@ class DaemonLock:
         self._path = daemon_lock_path(self._auth_root)
         self._fd: int | None = None
         self._owner_pid: int | None = None
+        _live_locks.add(self)
 
     @property
     def path(self) -> Path:
@@ -139,6 +162,13 @@ class DaemonLock:
         and elect a second owner.
 
         The caller closes the copy once the supervisor confirms it has it.
+
+        How the copy reaches the child differs by platform, and the difference
+        is not small: ``subprocess`` passes descriptors through ``pass_fds`` on
+        POSIX and asserts outright that it is unsupported on Windows, where
+        inheriting a handle means naming it in the startup information instead.
+        Whoever launches the supervisor owns that difference; this returns a
+        descriptor that is merely eligible to be inherited.
         """
         if self._fd is None:
             raise DaemonLockError("Cannot hand over a lock this process does not hold")
@@ -196,6 +226,10 @@ class _DaemonLockScope:
         tb: TracebackType | None,
     ) -> None:
         self._lock.release()
+
+
+if hasattr(os, "register_at_fork"):  # pragma: no branch - POSIX
+    os.register_at_fork(after_in_child=_discard_inherited_locks)
 
 
 def daemon_is_running(auth_root: Path) -> bool:

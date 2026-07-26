@@ -35,6 +35,7 @@ import hmac
 import json
 import os
 import secrets
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -127,8 +128,31 @@ def token_path(auth_root: Path, instance_id: str) -> Path:
     different generations. With one shared name, a client that read the old
     descriptor and then the new token would find a digest that does not match
     and, following the discovery rules, call it corruption instead of a restart.
+
+    The identifier is checked to be a UUID before it becomes part of a path.
+    It arrives from a file anything with write access to the auth root can
+    edit, and building a filename from it unchecked would let ``..`` walk out
+    of the daemon directory and turn any readable file into what this client
+    sends to the endpoint as its bearer token.
     """
-    return daemon_dir(auth_root) / f"token-{instance_id}"
+    return daemon_dir(auth_root) / f"token-{_checked_instance_id(instance_id)}"
+
+
+def _checked_instance_id(instance_id: str) -> str:
+    """Return *instance_id* if it is a UUID, and refuse otherwise."""
+    try:
+        # str() of the parsed value, not the input: it rejects the separators
+        # and casing that would otherwise give one instance several filenames.
+        return str(uuid.UUID(instance_id))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise DescriptorError(
+            "The daemon descriptor carries an instance id that is not a UUID"
+        ) from exc
+
+
+def new_instance_id() -> str:
+    """A fresh identity for one daemon run."""
+    return str(uuid.uuid4())
 
 
 def new_token() -> str:
@@ -254,7 +278,10 @@ class DaemonDescriptor:
             raise DescriptorError("The daemon descriptor is not an object")
 
         descriptor = cls(
-            instance_id=_text(raw, "instance_id"),
+            # Checked here as well as where it becomes a path, so a descriptor
+            # is rejected on the way in rather than at whichever call site
+            # happens to touch the identifier first.
+            instance_id=_checked_instance_id(_text(raw, "instance_id")),
             schema_version=_number(raw, "schema_version"),
             protocol_version=_number(raw, "protocol_version"),
             package_version=_text(raw, "package_version"),
