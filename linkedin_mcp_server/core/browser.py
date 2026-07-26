@@ -279,9 +279,55 @@ class BrowserManager:
         domain, but Chromium's internal store uses ``.linkedin.com``.
         """
         domain = cookie.get("domain", "")
-        if domain in (".www.linkedin.com", "www.linkedin.com"):
+        if isinstance(domain, str) and domain.lstrip(".").lower() == "www.linkedin.com":
             cookie = {**cookie, "domain": ".linkedin.com"}
         return cookie
+
+    @staticmethod
+    def _is_linkedin_cookie(cookie: Any) -> bool:
+        if not isinstance(cookie, dict):
+            return False
+        domain = cookie.get("domain")
+        if not isinstance(domain, str):
+            return False
+        domain = domain.lstrip(".").lower()
+        return domain == "linkedin.com" or domain.endswith(".linkedin.com")
+
+    @classmethod
+    def _portable_linkedin_cookies(
+        cls,
+        all_cookies: list[Any],
+        allowed_names: frozenset[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Normalize and deduplicate cookies safe for portable persistence."""
+        cookies_by_identity: dict[tuple[Any, Any, Any, Any], dict[str, Any]] = {}
+        for raw_cookie in all_cookies:
+            if not cls._is_linkedin_cookie(raw_cookie):
+                continue
+            cookie = cls._normalize_cookie_domain(raw_cookie)
+            name = cookie.get("name")
+            if allowed_names is not None and name not in allowed_names:
+                continue
+            value = cookie.get("value")
+            if name == "li_at" and (not isinstance(value, str) or not value.strip()):
+                continue
+            identity = (
+                name,
+                cookie.get("domain"),
+                cookie.get("path", "/"),
+                cookie.get("partitionKey"),
+            )
+            cookies_by_identity[identity] = cookie
+        return list(cookies_by_identity.values())
+
+    @staticmethod
+    def _has_usable_li_at(cookies: list[dict[str, Any]]) -> bool:
+        return any(
+            cookie.get("name") == "li_at"
+            and isinstance(cookie.get("value"), str)
+            and bool(cookie["value"].strip())
+            for cookie in cookies
+        )
 
     async def export_cookies(self, cookie_path: str | Path | None = None) -> bool:
         """Export LinkedIn cookies to a portable JSON file."""
@@ -302,11 +348,13 @@ class BrowserManager:
             all_cookies = await asyncio.wait_for(
                 self._context.cookies(), timeout=_CLEANUP_TIMEOUT_SECONDS
             )
-            cookies = [
-                self._normalize_cookie_domain(c)
-                for c in all_cookies
-                if "linkedin.com" in c.get("domain", "")
-            ]
+            cookies = self._portable_linkedin_cookies(all_cookies)
+            if not self._has_usable_li_at(cookies):
+                logger.warning(
+                    "Cannot export cookies: LinkedIn session cookie li_at is missing "
+                    "or empty"
+                )
+                return False
             secure_mkdir(path.parent)
             harden_linkedin_tree(path.parent)
             secure_write_text(
@@ -427,16 +475,13 @@ class BrowserManager:
                 preset_name
             )
 
-            cookies = [
-                self._normalize_cookie_domain(c)
-                for c in all_cookies
-                if "linkedin.com" in c.get("domain", "")
-                and c.get("name") in bridge_cookie_names
-            ]
-
-            has_li_at = any(c.get("name") == "li_at" for c in cookies)
+            cookies = self._portable_linkedin_cookies(
+                all_cookies,
+                allowed_names=bridge_cookie_names,
+            )
+            has_li_at = self._has_usable_li_at(cookies)
             if not has_li_at:
-                logger.warning("No li_at cookie found in %s", path)
+                logger.warning("No non-empty li_at cookie found in %s", path)
                 return False
 
             await self._context.add_cookies(

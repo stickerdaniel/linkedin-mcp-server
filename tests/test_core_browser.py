@@ -25,6 +25,7 @@ def _make_cookie(
 def _make_browser_manager(tmp_path) -> tuple[BrowserManager, MagicMock]:
     browser = BrowserManager(user_data_dir=tmp_path / "profile")
     context = MagicMock()
+    context.cookies = AsyncMock()
     context.clear_cookies = AsyncMock()
     context.add_cookies = AsyncMock()
     context.storage_state = AsyncMock()
@@ -117,6 +118,120 @@ async def test_import_cookies_preserves_existing_cookies(tmp_path):
     assert imported is True
     context.clear_cookies.assert_not_awaited()
     context.add_cookies.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cookies",
+    [
+        [_make_cookie("JSESSIONID")],
+        [_make_cookie("li_at", ""), _make_cookie("JSESSIONID")],
+        [_make_cookie("li_at", "   "), _make_cookie("JSESSIONID")],
+        [_make_cookie("li_at", "wrong-domain", domain=".notlinkedin.com")],
+    ],
+    ids=["missing-li-at", "empty-li-at", "blank-li-at", "wrong-domain-li-at"],
+)
+async def test_export_cookies_rejects_unusable_session(
+    tmp_path, cookies: list[dict[str, str]], caplog
+):
+    browser, context = _make_browser_manager(tmp_path)
+    context.cookies.return_value = cookies
+    cookie_path = tmp_path / "cookies.json"
+    cookie_path.write_text("last-known-good")
+
+    exported = await browser.export_cookies(cookie_path)
+
+    assert exported is False
+    assert cookie_path.read_text() == "last-known-good"
+    assert "li_at is missing or empty" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_export_cookies_writes_usable_linkedin_session(tmp_path):
+    browser, context = _make_browser_manager(tmp_path)
+    context.cookies.return_value = [
+        _make_cookie("li_at", "session-token", domain=".www.linkedin.com"),
+        _make_cookie("JSESSIONID"),
+        _make_cookie("unrelated", domain=".example.com"),
+    ]
+    cookie_path = tmp_path / "cookies.json"
+
+    exported = await browser.export_cookies(cookie_path)
+
+    assert exported is True
+    assert json.loads(cookie_path.read_text()) == [
+        _make_cookie("li_at", "session-token"),
+        _make_cookie("JSESSIONID"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_first", [True, False])
+async def test_export_cookies_drops_empty_duplicate_li_at(tmp_path, valid_first):
+    browser, context = _make_browser_manager(tmp_path)
+    valid = _make_cookie("li_at", "session-token")
+    empty = _make_cookie("li_at", "", domain=".www.linkedin.com")
+    context.cookies.return_value = [valid, empty] if valid_first else [empty, valid]
+    cookie_path = tmp_path / "cookies.json"
+
+    exported = await browser.export_cookies(cookie_path)
+
+    assert exported is True
+    assert json.loads(cookie_path.read_text()) == [valid]
+
+
+@pytest.mark.asyncio
+async def test_export_cookies_preserves_partitioned_cookie_identity(tmp_path):
+    browser, context = _make_browser_manager(tmp_path)
+    partitioned = {
+        **_make_cookie("bcookie", "partitioned"),
+        "partitionKey": "https://example.com",
+    }
+    context.cookies.return_value = [
+        _make_cookie("li_at", "session-token"),
+        _make_cookie("bcookie", "unpartitioned"),
+        partitioned,
+    ]
+    cookie_path = tmp_path / "cookies.json"
+
+    exported = await browser.export_cookies(cookie_path)
+
+    assert exported is True
+    assert json.loads(cookie_path.read_text()) == [
+        _make_cookie("li_at", "session-token"),
+        _make_cookie("bcookie", "unpartitioned"),
+        partitioned,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["", "   "], ids=["empty", "blank"])
+async def test_import_cookies_rejects_empty_li_at(tmp_path, value, caplog):
+    browser, context = _make_browser_manager(tmp_path)
+    cookie_path = tmp_path / "cookies.json"
+    cookie_path.write_text(
+        json.dumps([_make_cookie("li_at", value), _make_cookie("JSESSIONID")])
+    )
+
+    imported = await browser.import_cookies(cookie_path)
+
+    assert imported is False
+    context.add_cookies.assert_not_awaited()
+    assert "No non-empty li_at cookie found" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_import_cookies_ignores_non_linkedin_li_at(tmp_path):
+    browser, context = _make_browser_manager(tmp_path)
+    cookie_path = tmp_path / "cookies.json"
+    cookie_path.write_text(
+        json.dumps([_make_cookie("li_at", "wrong", domain=".notlinkedin.com")])
+    )
+
+    imported = await browser.import_cookies(cookie_path)
+
+    assert imported is False
+    context.add_cookies.assert_not_awaited()
 
 
 @pytest.mark.asyncio
