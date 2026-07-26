@@ -100,6 +100,43 @@ class TestDnsRebinding:
     def test_an_attacker_host_is_refused_even_without_an_origin(self, post) -> None:
         assert post({"Host": "attacker.example"}) == 421
 
+    @pytest.mark.parametrize(
+        ("label", "host"),
+        [
+            ("a subdomain of a trusted name", "localhost.attacker.example"),
+            ("a trusted name as a prefix", "127.0.0.1.attacker.example"),
+        ],
+    )
+    def test_a_host_that_merely_contains_a_trusted_name_is_refused(
+        self, post, label: str, host: str
+    ) -> None:
+        """The Host must be a trusted name, not merely contain one.
+
+        Both of these are domains an attacker can register and point anywhere,
+        and a substring check would wave them through.
+        """
+        assert post({"Host": host}) == 421
+
+    @pytest.mark.parametrize(
+        "spoof",
+        [{"X-Forwarded-Host": "127.0.0.1"}, {"Forwarded": "host=127.0.0.1"}],
+        ids=["x-forwarded-host", "forwarded"],
+    )
+    def test_a_forwarded_header_cannot_vouch_for_an_attacker_host(
+        self, post, spoof: dict[str, str]
+    ) -> None:
+        """Proxy headers are attacker-supplied here; only the real Host counts.
+
+        Nothing trustworthy sits in front of this server by default, so a guard
+        that believed these would accept any request that claimed to have come
+        through a proxy.
+        """
+        assert post({"Host": "attacker.example", **spoof}) == 421
+
+    def test_a_null_origin_is_refused(self, post) -> None:
+        """What a sandboxed iframe or a redirected form sends."""
+        assert post({"Origin": "null"}) == 403
+
 
 class TestLegitimateClientsStillWork:
     """A guard that breaks the documented flows would simply be turned off."""
@@ -108,7 +145,15 @@ class TestLegitimateClientsStillWork:
         """Every non-browser client: curl, the MCP inspector, an SDK."""
         assert post({}) == 200
 
-    @pytest.mark.parametrize("host", ["127.0.0.1:8000", "localhost:8000", "[::1]:8000"])
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "127.0.0.1:8000",
+            "localhost:8000",
+            "[::1]:8000",  # IPv6 literal, bracketed as a URL carries it
+            "LOCALHOST:8000",  # case is not part of a hostname
+        ],
+    )
     def test_loopback_hosts_are_served(self, post, host: str) -> None:
         """Including the documented Docker flow, which publishes a port and is
         reached at localhost even though the container binds 0.0.0.0."""
