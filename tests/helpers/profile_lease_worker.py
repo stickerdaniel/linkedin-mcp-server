@@ -70,10 +70,35 @@ def _critical(auth_root: str, log_path: str, rounds: int) -> int:
 
 
 def _announce(auth_root: str, seconds: float) -> int:
+    """Hold a shared lock on the handoff file, reporting whether it was taken.
+
+    Retries briefly first. An owner probing the same file exclusively holds it
+    for a few microseconds at a time, and losing that race is transient and
+    expected — unlike a platform whose shared locks do not coexist at all, which
+    is the failure this reports.
+    """
     lease = _lease(auth_root)
-    with lease.announce():
+    deadline = time.monotonic() + 5
+    while True:
+        announcement = lease.announce()
+        announcement.__enter__()
+        # Reported rather than assumed: announcing degrades to a silent no-op
+        # when the lock cannot be had, so a caller waiting only for "ANNOUNCED"
+        # would be satisfied by a backend whose shared locks are really
+        # exclusive, and every handoff test would pass proving nothing.
+        if announcement.holds_lock:
+            break
+        announcement.__exit__(None, None, None)
+        if time.monotonic() >= deadline:
+            print("ANNOUNCE_FAILED", flush=True)
+            return 1
+        time.sleep(0.01)
+
+    try:
         print("ANNOUNCED", flush=True)
         time.sleep(seconds)
+    finally:
+        announcement.__exit__(None, None, None)
     print("WITHDRAWN", flush=True)
     return 0
 
