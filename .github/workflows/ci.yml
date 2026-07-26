@@ -72,6 +72,6 @@ jobs:
       - run: uv sync --group dev
 
       - name: Run platform behaviour tests
-        run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py
+        run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py tests/test_daemon_lock.py
 
       - run: uv cache prune --ci
