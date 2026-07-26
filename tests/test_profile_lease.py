@@ -685,7 +685,7 @@ class TestDegradedSignals:
 
         lease = ProfileLease(tmp_path)
         lock_path = tmp_path / "profile.lock"
-        real_open = module._open_lock_file
+        real_open = module.open_lock_file
         attempts: list[int] = []
 
         def unlink_once(path: Path) -> int:
@@ -699,7 +699,7 @@ class TestDegradedSignals:
         # would also revert the autouse profile-directory patches in conftest,
         # silently unpinning this test from its tmp_path for the rest of the run.
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(module, "_open_lock_file", unlink_once)
+            patch.setattr(module, "open_lock_file", unlink_once)
             assert lease.try_acquire()
 
         assert len(attempts) == 2, "the orphaned inode was accepted"
@@ -715,14 +715,14 @@ class TestDegradedSignals:
         """Retrying forever would hang a tool call; refuse instead."""
         from linkedin_mcp_server import profile_lease as module
 
-        real_open = module._open_lock_file
+        real_open = module.open_lock_file
 
         def always_unlink(path: Path) -> int:
             fd = real_open(path)
             path.unlink()
             return fd
 
-        monkeypatch.setattr(module, "_open_lock_file", always_unlink)
+        monkeypatch.setattr(module, "open_lock_file", always_unlink)
         with pytest.raises(ProfileLeaseUnavailableError, match="keeps being"):
             ProfileLease(tmp_path).try_acquire()
 
@@ -765,7 +765,7 @@ class TestDegradedSignals:
         from linkedin_mcp_server import profile_lease as module
 
         opened: list[int] = []
-        real_open = module._open_lock_file
+        real_open = module.open_lock_file
 
         def spy(path: Path) -> int:
             fd = real_open(path)
@@ -775,12 +775,12 @@ class TestDegradedSignals:
         def refuse(fd: int, *, exclusive: bool) -> bool:
             raise ProfileLeaseUnavailableError("backend unavailable")
 
-        monkeypatch.setattr(module, "_open_lock_file", spy)
-        monkeypatch.setattr(module, "_try_lock", refuse)
+        monkeypatch.setattr(module, "open_lock_file", spy)
+        monkeypatch.setattr(module, "try_lock", refuse)
 
         for _ in range(3):
             with pytest.raises(ProfileLeaseUnavailableError):
-                module._acquire_locked_fd(tmp_path / "probe.lock", exclusive=True)
+                module.acquire_locked_fd(tmp_path / "probe.lock", exclusive=True)
 
         assert opened, "the spy never ran, so this proves nothing"
         for fd in set(opened):
@@ -797,10 +797,10 @@ class TestDegradedSignals:
             os.close(fd)  # as if something else had already reclaimed it
             raise ProfileLeaseUnavailableError("backend unavailable")
 
-        monkeypatch.setattr(module, "_try_lock", close_then_refuse)
+        monkeypatch.setattr(module, "try_lock", close_then_refuse)
 
         with pytest.raises(ProfileLeaseUnavailableError, match="backend unavailable"):
-            module._acquire_locked_fd(tmp_path / "probe.lock", exclusive=True)
+            module.acquire_locked_fd(tmp_path / "probe.lock", exclusive=True)
 
     def test_an_inconclusive_probe_does_not_hand_the_profile_over(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -817,7 +817,7 @@ class TestDegradedSignals:
         def refuse(path: Path, *, exclusive: bool) -> int | None:
             raise ProfileLeaseUnavailableError("signal unreadable")
 
-        monkeypatch.setattr(module, "_acquire_locked_fd", refuse)
+        monkeypatch.setattr(module, "acquire_locked_fd", refuse)
         assert lease.handoff_requested() is False
 
     def test_a_failed_announcement_degrades_to_waiting_quietly(
@@ -831,7 +831,7 @@ class TestDegradedSignals:
         def refuse(path: Path, *, exclusive: bool) -> int | None:
             raise ProfileLeaseUnavailableError("signal unreadable")
 
-        monkeypatch.setattr(module, "_acquire_locked_fd", refuse)
+        monkeypatch.setattr(module, "acquire_locked_fd", refuse)
         with lease.announce() as announcement:
             assert announcement.holds_lock is False
 
@@ -852,7 +852,7 @@ class TestDegradedSignals:
             with pytest.raises(
                 ProfileLeaseUnavailableError, match="no usable file locking"
             ):
-                module._try_lock(fd, exclusive=True)
+                module.try_lock(fd, exclusive=True)
             # Unlocking has nothing to undo and must stay silent, or a cleanup
             # path would raise on top of the original failure.
             module._unlock(fd)
