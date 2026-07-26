@@ -1869,3 +1869,23 @@ def test_move_auth_state_aside_reports_a_held_profile(monkeypatch):
         AuthenticationBootstrapFailedError, match="No login was started"
     ):
         bootstrap._move_auth_state_aside(force=True)
+
+
+class TestAutoImportSkippedForProxy:
+    """A configured proxy turns auto-import off by default.
+
+    The imported session was created in a local browser on the real address.
+    Driving it through the proxy afterwards is exactly the IP change that
+    triggers a LinkedIn checkpoint, so the automatic path defers to --login.
+    """
+
+    def test_predicate_skips_when_a_proxy_is_configured(self, monkeypatch):
+        config = _auto_import_config(flag=True, is_interactive=True)
+        config.browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        assert _auto_import_allowed() is False
+
+    def test_predicate_still_allows_it_without_a_proxy(self, monkeypatch):
+        config = _auto_import_config(flag=True, is_interactive=True)
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        assert _auto_import_allowed() is True

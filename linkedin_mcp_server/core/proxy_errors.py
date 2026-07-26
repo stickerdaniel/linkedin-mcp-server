@@ -7,6 +7,7 @@ two apart before they draw that conclusion.
 """
 
 import logging
+from typing import Any
 from urllib.parse import quote
 
 from linkedin_mcp_server.config.schema import BrowserConfig
@@ -49,7 +50,13 @@ PROXY_ERROR_MARKERS = (
     "err_socks_connection_host_unreachable",
     "err_no_supported_proxies",
     "err_mandatory_proxy_configuration_failed",
+    "err_proxy_unable_to_connect_to_destination",
 )
+
+# Rejected credentials. Kept apart because the code does not name the proxy:
+# it can equally mean a site's own HTTP auth failed, so it only counts when a
+# proxy is actually configured.
+AMBIGUOUS_AUTH_MARKERS = ("err_invalid_auth_credentials",)
 
 
 def is_proxy_error(error: BaseException) -> bool:
@@ -57,7 +64,11 @@ def is_proxy_error(error: BaseException) -> bool:
     if isinstance(error, ProxyConnectionError):
         return True
     message = str(error).lower()
-    return any(marker in message for marker in PROXY_ERROR_MARKERS)
+    if any(marker in message for marker in PROXY_ERROR_MARKERS):
+        return True
+    return bool(_browser_config().proxy_server) and any(
+        marker in message for marker in AMBIGUOUS_AUTH_MARKERS
+    )
 
 
 def redact_proxy_credentials(message: str) -> str:
@@ -99,6 +110,21 @@ def raise_if_proxy_error(error: BaseException) -> None:
     """Re-raise *error* as a :class:`ProxyConnectionError` when it is one."""
     if is_proxy_error(error):
         raise as_proxy_error(error) from None
+
+
+async def goto_reporting_proxy_errors(page: Any, url: str, **kwargs: Any) -> Any:
+    """``page.goto(url)``, reporting a proxy fault as :class:`ProxyConnectionError`.
+
+    A shared wrapper rather than a check at each call site: the navigations that
+    happen before any auth check (manual login, cookie-import validation, the
+    runtime bridge) would otherwise surface the raw driver error, which reads
+    like a LinkedIn problem and can carry the proxy URL into a log.
+    """
+    try:
+        return await page.goto(url, **kwargs)
+    except Exception as exc:
+        raise_if_proxy_error(exc)
+        raise
 
 
 def proxy_hint() -> str:

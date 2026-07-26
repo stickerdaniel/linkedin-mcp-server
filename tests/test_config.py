@@ -895,8 +895,8 @@ class TestProxyConfig:
             ({"proxy_server": "http://host:8080/path"}, "path, query or fragment"),
             ({"proxy_server": "http://host:8080?a=1"}, "path, query or fragment"),
             (
-                {"proxy_server": "http://host:8080", "proxy_username": "u"},
-                "both a username and a password",
+                {"proxy_server": "http://host:8080", "proxy_password": "p"},
+                "without a username",
             ),
             (
                 {
@@ -1015,3 +1015,29 @@ class TestProxyLoaders:
         with pytest.raises(SystemExit):
             load_from_args(AppConfig())
         assert self.SECRET not in capsys.readouterr().err
+
+
+class TestProxyEmptyPassword:
+    """A username with an empty password is a legitimate proxy credential.
+
+    Playwright supports it explicitly for key-style accounts, so it must not be
+    rejected, and proxy_settings() must still send it rather than dropping it
+    on truthiness.
+    """
+
+    def test_username_without_a_password_is_allowed(self):
+        config = BrowserConfig(proxy_server="http://host:8080", proxy_username="user")
+        config.validate()
+        assert config.proxy_settings() == {
+            "server": "http://host:8080",
+            "username": "user",
+        }
+
+    def test_empty_password_is_preserved(self):
+        config = BrowserConfig(
+            proxy_server="http://host:8080", proxy_username="user", proxy_password=""
+        )
+        config.validate()
+        settings = config.proxy_settings()
+        assert settings is not None
+        assert settings["password"] == ""

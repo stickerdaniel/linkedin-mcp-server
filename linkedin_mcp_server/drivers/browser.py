@@ -19,6 +19,7 @@ from linkedin_mcp_server.core import (
     BrowserManager,
     detect_auth_barrier_quick,
     detect_rate_limit,
+    goto_reporting_proxy_errors,
     is_logged_in,
     proxy_hint,
     raise_if_proxy_error,
@@ -160,7 +161,8 @@ async def _feed_auth_succeeds(
 ) -> bool:
     """Validate that /feed/ loads without an auth barrier."""
     try:
-        await browser.page.goto(
+        await goto_reporting_proxy_errors(
+            browser.page,
             "https://www.linkedin.com/feed/",
             wait_until="domcontentloaded",
         )
@@ -321,8 +323,10 @@ async def validate_imported_cookies(
     )
     try:
         await browser.start()
-        await browser.page.goto(
-            "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
+        await goto_reporting_proxy_errors(
+            browser.page,
+            "https://www.linkedin.com/feed/",
+            wait_until="domcontentloaded",
         )
         await stabilize_navigation("import pre-validate feed navigation", logger)
         if not await browser.import_cookies(cookie_path, preset_name="bridge_core"):
@@ -381,8 +385,10 @@ async def _bridge_runtime_profile(
             "bridge-browser-started",
             extra={"profile_dir": str(profile_dir)},
         )
-        await browser.page.goto(
-            "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
+        await goto_reporting_proxy_errors(
+            browser.page,
+            "https://www.linkedin.com/feed/",
+            wait_until="domcontentloaded",
         )
         await stabilize_navigation("pre-import feed navigation", logger)
         await record_page_trace(browser.page, "bridge-after-pre-import-feed")

@@ -6,6 +6,7 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import NetworkError, ProxyConnectionError
 from linkedin_mcp_server.core.proxy_errors import (
     as_proxy_error,
+    goto_reporting_proxy_errors,
     is_proxy_error,
     proxy_hint,
     raise_if_proxy_error,
@@ -127,3 +128,46 @@ class TestProxyHint:
             "linkedin_mcp_server.config.get_config", lambda: AppConfig()
         )
         assert proxy_hint() == ""
+
+
+class TestAmbiguousAuthMarker:
+    """Rejected proxy credentials, which Chromium reports without naming a proxy."""
+
+    def test_counted_when_a_proxy_is_configured(self, proxy_config):
+        assert is_proxy_error(Exception("net::ERR_INVALID_AUTH_CREDENTIALS")) is True
+
+    def test_ignored_without_a_proxy(self, monkeypatch):
+        # The same code covers a site's own HTTP auth, so claiming it with no
+        # proxy configured would misreport an ordinary failure.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", lambda: AppConfig()
+        )
+        assert is_proxy_error(Exception("net::ERR_INVALID_AUTH_CREDENTIALS")) is False
+
+
+class TestGotoWrapper:
+    """The navigations that run before any auth check are covered too."""
+
+    async def test_proxy_failure_is_converted(self, proxy_config):
+        page = _FakePage(Exception("net::ERR_PROXY_CONNECTION_FAILED"))
+        with pytest.raises(ProxyConnectionError):
+            await goto_reporting_proxy_errors(page, "https://www.linkedin.com/login")
+
+    async def test_other_failures_propagate_unchanged(self, proxy_config):
+        page = _FakePage(RuntimeError("net::ERR_ABORTED"))
+        with pytest.raises(RuntimeError):
+            await goto_reporting_proxy_errors(page, "https://www.linkedin.com/login")
+
+    async def test_success_returns_the_response(self, proxy_config):
+        page = _FakePage(None)
+        assert await goto_reporting_proxy_errors(page, "https://example.com") == "ok"
+
+
+class _FakePage:
+    def __init__(self, error):
+        self._error = error
+
+    async def goto(self, url, **kwargs):
+        if self._error:
+            raise self._error
+        return "ok"

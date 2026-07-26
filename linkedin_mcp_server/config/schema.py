@@ -302,10 +302,13 @@ class BrowserConfig:
         host = f"[{hostname}]" if ":" in hostname else hostname
         self.proxy_server = f"{parsed.scheme}://{host}:{port}"
 
-        if bool(self.proxy_username) != bool(self.proxy_password):
+        # A username with an empty password is legitimate -- Playwright supports
+        # it explicitly for key-style proxy accounts -- so only the reverse is
+        # rejected: a password alone can never be sent.
+        if self.proxy_password is not None and not self.proxy_username:
             raise ConfigurationError(
-                "Proxy authentication needs both a username and a password; "
-                "only one of them is set."
+                "A proxy password is set without a username. "
+                "Set the username too, or unset the password."
             )
         if self.proxy_username and parsed.scheme in SOCKS_PROXY_SCHEMES:
             # Chromium cannot answer a SOCKS auth challenge, and Patchright
@@ -328,8 +331,10 @@ class BrowserConfig:
         settings: dict[str, Any] = {"server": self.proxy_server}
         if self.proxy_username:
             settings["username"] = self.proxy_username
-        if self.proxy_password:
-            settings["password"] = self.proxy_password
+            # Compared against None, not truthiness: an empty password is a
+            # valid credential and must still be sent.
+            if self.proxy_password is not None:
+                settings["password"] = self.proxy_password
         if self.proxy_bypass:
             settings["bypass"] = self.proxy_bypass
         return settings
