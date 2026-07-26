@@ -22,8 +22,10 @@ from linkedin_mcp_server.daemon_descriptor import (
     DescriptorError,
     build,
     config_fingerprint,
+    daemon_dir,
     descriptor_path,
     mismatched_fields,
+    new_instance_id,
     new_token,
     publish,
     read,
@@ -178,6 +180,31 @@ class TestRefusals:
 
         with pytest.raises(DescriptorError, match="no token beside it"):
             read_token(tmp_path, loaded)
+
+
+class TestInstanceIdentity:
+    def test_an_instance_id_cannot_escape_the_daemon_directory(self, tmp_path: Path):
+        # The identifier becomes part of a filename, and it arrives from a file
+        # anything with write access to the auth root can edit. Unchecked, a
+        # descriptor naming ".." would turn some other readable file into what
+        # this client sends to the endpoint as its bearer token.
+        with pytest.raises(DescriptorError, match="not a UUID"):
+            token_path(tmp_path, "../../../../etc/hosts")
+
+    def test_a_descriptor_with_a_forged_instance_id_is_refused(self, tmp_path: Path):
+        token = new_token()
+        publish(tmp_path, _descriptor(tmp_path, token), token)
+        raw = json.loads(descriptor_path(tmp_path).read_text())
+        raw["instance_id"] = "../../secrets"
+        descriptor_path(tmp_path).write_text(json.dumps(raw))
+
+        with pytest.raises(DescriptorError, match="not a UUID"):
+            read(tmp_path)
+
+    def test_a_generated_instance_id_is_accepted(self, tmp_path: Path):
+        # The identity the daemon actually publishes has to survive its own
+        # validation, which is easy to break by tightening the check.
+        assert token_path(tmp_path, new_instance_id()).parent == daemon_dir(tmp_path)
 
 
 class TestProfileIdentity:

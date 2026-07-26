@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -158,6 +159,43 @@ class TestHandoff:
             supervisor.release()
 
         assert not daemon_is_running(tmp_path)
+
+
+class TestFork:
+    @pytest.mark.skipif(
+        not hasattr(os, "fork"), reason="fork does not exist on Windows"
+    )
+    def test_a_child_that_never_touches_the_lock_does_not_hold_it(self, tmp_path: Path):
+        # Measured before the fix: an untouched fork child kept the lock held
+        # after the owner released, so every other process saw a daemon that
+        # was no longer there and none could elect a replacement. Checking
+        # inside the lock's own methods cannot catch this, because the child
+        # never calls one.
+        lock = DaemonLock(tmp_path)
+        assert lock.try_acquire()
+
+        # The child reports what it inherited rather than sleeping, so the
+        # assertion below cannot run before the child has finished discarding
+        # it. Timing the two against each other would make this flaky in
+        # whichever direction the scheduler happened to go.
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # pragma: no cover - runs in the forked child
+            os.close(read_fd)
+            os.write(write_fd, b"x")
+            os.close(write_fd)
+            time.sleep(2)
+            os._exit(0)
+
+        os.close(write_fd)
+        try:
+            os.read(read_fd, 1)
+            lock.release()
+
+            assert not daemon_is_running(tmp_path)
+        finally:
+            os.close(read_fd)
+            os.waitpid(pid, 0)
 
 
 class TestReleaseSemantics:
