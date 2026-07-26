@@ -74,7 +74,7 @@ def _announce(auth_root: str, seconds: float) -> int:
 
     Retries briefly first. An owner probing the same file exclusively holds it
     for a few microseconds at a time, and losing that race is transient and
-    expected — unlike a platform whose shared locks do not coexist at all, which
+    expected, unlike a platform whose shared locks do not coexist at all, which
     is the failure this reports.
     """
     lease = _lease(auth_root)

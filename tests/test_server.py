@@ -143,7 +143,7 @@ class TestBrowserLifespan:
 
         Awaiting a task that already failed re-raises its exception. If that
         propagated out of the teardown, ``close_browser`` would be skipped and
-        Chromium would stay on the shared profile past shutdown — exactly the
+        Chromium would stay on the shared profile past shutdown, which is the
         corruption the lease exists to prevent.
         """
         from linkedin_mcp_server.server import browser_lifespan
