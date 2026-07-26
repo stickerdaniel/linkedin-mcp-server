@@ -282,6 +282,18 @@ class BrowserConfig:
                 "proxy_server needs a host and an explicit port, "
                 "for example http://proxy.example:8080."
             )
+        if "@" in unquote(hostname):
+            # A percent-encoded userinfo separator, as in
+            # "http://user%3Apass%40host:7000". urlsplit reads that as a plain
+            # hostname, so the credentials would neither be split out nor hidden
+            # from the logs, while still being trivially decodable. Patchright
+            # cannot parse it either and falls back to a nonsense host, so the
+            # browser would not even reach the intended proxy.
+            raise ConfigurationError(
+                "proxy_server contains a percent-encoded '@'. Pass the "
+                "credentials as PROXY_USERNAME and PROXY_PASSWORD instead of "
+                "encoding them into the address."
+            )
         if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
             # Chromium takes only scheme, host and port; anything else would be
             # dropped silently and the user would never learn it was ignored.

@@ -1041,3 +1041,43 @@ class TestProxyEmptyPassword:
         settings = config.proxy_settings()
         assert settings is not None
         assert settings["password"] == ""
+
+
+class TestProxyEncodedUserinfo:
+    """A percent-encoded '@' hides credentials from the URL parser.
+
+    urlsplit reads "user%3Apass%40host" as a plain hostname, so the credentials
+    are neither split out nor hidden from the logs while staying trivially
+    decodable. Patchright cannot parse it either and falls back to a nonsense
+    host, so the browser would not reach the intended proxy anyway.
+    """
+
+    ENCODED = "http://user%3Apass%40gate.example:7000"
+
+    def test_schema_rejects_it(self):
+        with pytest.raises(ConfigurationError, match="percent-encoded"):
+            BrowserConfig(proxy_server=self.ENCODED).validate()
+
+    def test_schema_rejects_the_scheme_less_form(self):
+        with pytest.raises(ConfigurationError, match="percent-encoded"):
+            BrowserConfig(proxy_server="user%3Apass%40gate.example:7000").validate()
+
+    def test_the_rejection_does_not_echo_the_value(self):
+        with pytest.raises(ConfigurationError) as excinfo:
+            BrowserConfig(proxy_server=self.ENCODED).validate()
+        assert "user%3Apass" not in str(excinfo.value)
+
+    def test_cli_rejects_it(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "sys.argv", ["linkedin-mcp-server", "--proxy-server", self.ENCODED]
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(SystemExit):
+            load_from_args(AppConfig())
+        assert "user%3Apass" not in capsys.readouterr().err
+
+    def test_an_ordinary_address_is_unaffected(self):
+        config = BrowserConfig(proxy_server="http://gate.example:7000")
+        config.validate()
+        assert config.proxy_server == "http://gate.example:7000"

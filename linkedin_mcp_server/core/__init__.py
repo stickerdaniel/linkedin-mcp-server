@@ -23,6 +23,7 @@ from .proxy_errors import (
     goto_reporting_proxy_errors,
     is_proxy_error,
     proxy_hint,
+    raise_if_proxy_configured,
     raise_if_proxy_error,
 )
 from .utils import detect_rate_limit, handle_modal_close, scroll_to_bottom
@@ -43,6 +44,7 @@ __all__ = [
     "goto_reporting_proxy_errors",
     "is_proxy_error",
     "proxy_hint",
+    "raise_if_proxy_configured",
     "raise_if_proxy_error",
     "detect_rate_limit",
     "handle_modal_close",

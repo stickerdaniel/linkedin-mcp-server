@@ -986,8 +986,12 @@ class TestProxyFailureIsNotAnAuthFailure:
             browser_module.get_config,
         )
         browser = _make_mock_browser()
+        # The first navigation must succeed so the remember-me branch is taken
+        # and _feed_auth_succeeds calls itself; only the retry hits the proxy
+        # fault. Failing on the first call would never reach the recursion and
+        # would silently duplicate the test above.
         browser.page.goto = AsyncMock(
-            side_effect=Exception("net::ERR_TUNNEL_CONNECTION_FAILED")
+            side_effect=[None, Exception("net::ERR_TUNNEL_CONNECTION_FAILED")]
         )
 
         with (
@@ -995,10 +999,13 @@ class TestProxyFailureIsNotAnAuthFailure:
                 "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
                 new_callable=AsyncMock,
                 return_value=True,
-            ),
+            ) as resolver,
             pytest.raises(ProxyConnectionError),
         ):
             await _feed_auth_succeeds(browser)
+
+        assert browser.page.goto.await_count == 2
+        resolver.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_proxy_password_is_not_in_the_message(self, monkeypatch):
@@ -1033,5 +1040,81 @@ class TestProxyFailureIsNotAnAuthFailure:
             "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
             new_callable=AsyncMock,
             return_value=False,
+        ):
+            assert await _feed_auth_succeeds(browser) is False
+
+
+class TestAmbiguousProxyFailureKeepsTheSession:
+    """A navigation that fails outright under a proxy is not a dead session.
+
+    Wrong proxy credentials produce no proxy error code: Chromium retries the
+    challenge until the page times out. Reading that as an invalid session
+    hands the caller an AuthenticationError, whose recovery moves the stored
+    profile aside and reruns login through the same broken proxy.
+    """
+
+    @pytest.mark.asyncio
+    async def test_timeout_under_a_proxy_raises_instead_of_false(self, monkeypatch):
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(ProxyConnectionError, match="gate.example"),
+        ):
+            await _feed_auth_succeeds(browser)
+
+    @pytest.mark.asyncio
+    async def test_the_same_timeout_without_a_proxy_still_returns_false(
+        self, monkeypatch
+    ):
+        # Unchanged behaviour when no proxy is configured: a broken session
+        # must still be reported as one.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
+        )
+
+        with patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            assert await _feed_auth_succeeds(browser) is False
+
+    @pytest.mark.asyncio
+    async def test_an_auth_barrier_under_a_proxy_still_reports_false(self, monkeypatch):
+        # A barrier means a page loaded and LinkedIn refused it, which is real
+        # evidence about the session, so the proxy must not mask it.
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value="login_wall",
+            ),
         ):
             assert await _feed_auth_succeeds(browser) is False

@@ -114,6 +114,31 @@ def raise_if_proxy_error(error: BaseException) -> None:
         raise as_proxy_error(error) from None
 
 
+def raise_if_proxy_configured(error: BaseException) -> None:
+    """Re-raise a failed navigation as a proxy fault when a proxy is in use.
+
+    For callers that would otherwise read a navigation failure as a dead
+    session. Not every proxy failure identifies itself: wrong credentials
+    produce a plain timeout, because Chromium retries the 407 challenge until
+    the navigation expires. Attributing an unexplained failure to the proxy is
+    the safe reading -- it leaves the stored session alone, where the opposite
+    mistake discards a working profile and reruns login through the same broken
+    proxy.
+    """
+    if not _browser_config().proxy_server:
+        return
+    if is_proxy_error(error):
+        raise as_proxy_error(error) from None
+    server = _browser_config().proxy_server
+    detail = redact_proxy_credentials(str(error))
+    raise ProxyConnectionError(
+        f"LinkedIn could not be reached through proxy {server}: {detail}. "
+        "Wrong proxy credentials look exactly like this, because the browser "
+        "retries the challenge until the page times out. Check the proxy "
+        "address and credentials. The saved LinkedIn session was not changed."
+    ) from None
+
+
 async def goto_reporting_proxy_errors(page: Any, url: str, **kwargs: Any) -> Any:
     """``page.goto(url)``, reporting a proxy fault as :class:`ProxyConnectionError`.
 

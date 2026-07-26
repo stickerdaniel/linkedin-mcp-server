@@ -1889,3 +1889,35 @@ class TestAutoImportSkippedForProxy:
         config = _auto_import_config(flag=True, is_interactive=True)
         monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
         assert _auto_import_allowed() is True
+
+
+class TestProxyErrorSurvivesTheImportTask:
+    """The auto-import task must not swallow a proxy fault.
+
+    _try_auto_import_session re-raises ProxyConnectionError instead of
+    reporting "no session found". The outer await has to honour that: catching
+    it with the broad handler would send the user into a manual login that has
+    to fail through the same proxy, hiding the real cause.
+    """
+
+    async def test_proxy_error_propagates_out_of_the_awaited_task(
+        self, isolate_profile_dir, monkeypatch, _stub_import_env
+    ):
+        from linkedin_mcp_server.core.exceptions import ProxyConnectionError
+
+        config = _auto_import_config(flag=True, is_interactive=True)
+        config.browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+
+        async def failing_import(_ctx=None):
+            raise ProxyConnectionError("proxy gate.example:7000 is unreachable")
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._try_auto_import_session", failing_import
+        )
+
+        with pytest.raises(ProxyConnectionError, match="gate.example"):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        # No login task started: the proxy has to be fixed first.
+        assert get_bootstrap_state().login_task is None

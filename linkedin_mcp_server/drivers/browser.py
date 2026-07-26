@@ -22,6 +22,7 @@ from linkedin_mcp_server.core import (
     goto_reporting_proxy_errors,
     is_logged_in,
     proxy_hint,
+    raise_if_proxy_configured,
     raise_if_proxy_error,
     resolve_remember_me_prompt,
 )
@@ -215,6 +216,16 @@ async def _feed_auth_succeeds(
             extra={"error": f"{type(exc).__name__}: {exc}"},
         )
         await _log_feed_failure_context(browser, str(exc), exc)
+        # Nothing loaded, so nothing proves the session is dead -- and with a
+        # proxy in front, the most likely cause is the proxy. Wrong credentials
+        # in particular produce no proxy error code at all: Chromium retries the
+        # 407 challenge until the navigation times out (verified against a local
+        # authenticating relay), so the marker check above cannot catch it.
+        # Reporting False here would hand the caller an AuthenticationError,
+        # whose recovery moves the stored profile aside and starts a login
+        # through the same broken proxy. Only a recognized auth barrier, which
+        # requires a page to have loaded, may conclude the session is invalid.
+        raise_if_proxy_configured(exc)
         return False
 
 

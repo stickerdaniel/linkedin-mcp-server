@@ -10,7 +10,7 @@ import math
 import os
 import sys
 from typing import Literal, cast
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 
@@ -71,7 +71,11 @@ def credential_free_url(value: str) -> str:
     candidate = value if "://" in value else f"http://{value}"
     try:
         parsed = urlsplit(candidate)
-        has_credentials = bool(parsed.username or parsed.password)
+        # The encoded form counts too: "user%3Apass%40host" parses as a plain
+        # hostname, so the credentials would survive in the visible address.
+        has_credentials = bool(parsed.username or parsed.password) or (
+            "@" in unquote(parsed.hostname or "")
+        )
     except ValueError:
         # Leave the shape of the URL to BrowserConfig.validate(), which can
         # explain the problem properly.
