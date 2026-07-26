@@ -23,6 +23,7 @@ from linkedin_mcp_server.core import (
     is_logged_in,
     proxy_hint,
     raise_if_proxy_configured,
+    redact_proxy_credentials,
     raise_if_proxy_error,
     resolve_remember_me_prompt,
 )
@@ -121,9 +122,13 @@ def _apply_browser_settings(browser: BrowserManager) -> None:
 async def _log_feed_failure_context(
     browser: BrowserManager,
     reason: str,
-    exc: Exception | None = None,
 ) -> None:
-    """Log the page state when /feed/ validation fails."""
+    """Log the page state when /feed/ validation fails.
+
+    *reason* must already be redacted. The exception itself is deliberately not
+    logged: a driver error can quote the proxy URL, and this log is what users
+    paste into issue reports.
+    """
     page = browser.page
 
     try:
@@ -151,7 +156,6 @@ async def _log_feed_failure_context(
         title,
         remember_me,
         " ".join(body_text.split())[:200],
-        exc_info=exc,
     )
 
 
@@ -207,25 +211,36 @@ async def _feed_auth_succeeds(
             await record_page_trace(
                 browser.page,
                 "feed-after-remember-me-error-recovery",
-                extra={"error": f"{type(exc).__name__}: {exc}"},
+                extra={
+                    "error": redact_proxy_credentials(f"{type(exc).__name__}: {exc}")
+                },
             )
             return await _feed_auth_succeeds(browser, allow_remember_me=False)
+        # A failed navigation still leaves a URL and a title behind, and the
+        # quick check reads only those. LinkedIn may have committed a redirect
+        # to /login and merely missed the load event, which is real evidence
+        # about the session and must outrank the proxy explanation below.
+        barrier = await detect_auth_barrier_quick(browser.page)
+        detail = redact_proxy_credentials(f"{type(exc).__name__}: {exc}")
         await record_page_trace(
             browser.page,
             "feed-navigation-error",
-            extra={"error": f"{type(exc).__name__}: {exc}"},
+            extra={"error": detail, "barrier": barrier},
         )
-        await _log_feed_failure_context(browser, str(exc), exc)
-        # Nothing loaded, so nothing proves the session is dead -- and with a
-        # proxy in front, the most likely cause is the proxy. Wrong credentials
-        # in particular produce no proxy error code at all: Chromium retries the
-        # 407 challenge until the navigation times out (verified against a local
-        # authenticating relay), so the marker check above cannot catch it.
-        # Reporting False here would hand the caller an AuthenticationError,
-        # whose recovery moves the stored profile aside and starts a login
-        # through the same broken proxy. Only a recognized auth barrier, which
-        # requires a page to have loaded, may conclude the session is invalid.
-        raise_if_proxy_configured(exc)
+        # Redacted, and without exc_info: driver errors can quote the proxy URL,
+        # and both destinations here outlive the call -- the trace is written to
+        # disk and the log is what users paste into issue reports.
+        await _log_feed_failure_context(browser, detail)
+        if barrier is None:
+            # Nothing loaded and no barrier, so nothing proves the session is
+            # dead -- and with a proxy in front, the most likely cause is the
+            # proxy. Wrong credentials in particular produce no proxy error code
+            # at all: Chromium retries the 407 challenge until the navigation
+            # times out (verified against a local authenticating relay), so the
+            # marker check above cannot catch it. Reporting False would hand the
+            # caller an AuthenticationError, whose recovery moves the stored
+            # profile aside and starts a login through the same broken proxy.
+            raise_if_proxy_configured(exc)
         return False
 
 

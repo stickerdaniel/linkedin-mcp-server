@@ -1118,3 +1118,91 @@ class TestAmbiguousProxyFailureKeepsTheSession:
             ),
         ):
             assert await _feed_auth_succeeds(browser) is False
+
+    @pytest.mark.asyncio
+    async def test_a_barrier_behind_a_failed_navigation_still_reports_false(
+        self, monkeypatch
+    ):
+        # The sharp case: an expired session redirects /feed/ to /login and the
+        # load event then times out. A URL and title survive that, so the
+        # barrier is real evidence and must outrank the proxy explanation --
+        # otherwise the derived-runtime re-bridge, which only catches
+        # AuthenticationError, is skipped for a genuinely dead session.
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
+        )
+        browser.page.url = "https://www.linkedin.com/login"
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value="auth blocker URL: /login",
+            ),
+        ):
+            assert await _feed_auth_succeeds(browser) is False
+
+
+class TestFeedFailureDoesNotLeakCredentials:
+    """The trace and the log outlive the call, so both must be redacted.
+
+    A driver error can quote the proxy URL. The trace is written to disk and
+    the log is what users paste into issue reports, so redacting only the
+    user-facing exception message is not enough.
+    """
+
+    @pytest.mark.asyncio
+    async def test_trace_and_log_are_redacted(self, monkeypatch, caplog):
+        config = browser_module.get_config()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_username = "acctzone9"
+        config.browser.proxy_password = "s3cr3t"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        # No proxy marker, so it reaches the trace and log below rather than
+        # being converted straight away.
+        browser.page.goto = AsyncMock(
+            side_effect=Exception(
+                "failed via http://acctzone9:s3cr3t@gate.example:7000"
+            )
+        )
+
+        traces: list[str] = []
+
+        async def capture_trace(_page, _step, extra=None):
+            traces.append(str(extra))
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.record_page_trace", capture_trace
+            ),
+            caplog.at_level(logging.WARNING),
+            pytest.raises(ProxyConnectionError),
+        ):
+            await _feed_auth_succeeds(browser)
+
+        assert not any("s3cr3t" in trace for trace in traces)
+        assert "s3cr3t" not in caplog.text
+        assert "acctzone9" not in caplog.text

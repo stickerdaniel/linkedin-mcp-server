@@ -16,6 +16,7 @@ from linkedin_mcp_server.core import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
     raise_if_proxy_error,
+    redact_proxy_credentials,
     resolve_remember_me_prompt,
 )
 from linkedin_mcp_server.core.exceptions import (
@@ -870,7 +871,9 @@ class LinkedInExtractor:
                         extra={
                             "target_url": url,
                             "wait_until": wait_until,
-                            "error": f"{type(exc).__name__}: {exc}",
+                            "error": redact_proxy_credentials(
+                                f"{type(exc).__name__}: {exc}"
+                            ),
                             "hops": hops,
                         },
                     )
@@ -879,7 +882,9 @@ class LinkedInExtractor:
                         "extractor-after-remember-me",
                         extra={
                             "target_url": url,
-                            "error": f"{type(exc).__name__}: {exc}",
+                            "error": redact_proxy_credentials(
+                                f"{type(exc).__name__}: {exc}"
+                            ),
                         },
                     )
                     unregister_navigation_listener()
@@ -895,7 +900,9 @@ class LinkedInExtractor:
                     extra={
                         "target_url": url,
                         "wait_until": wait_until,
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": redact_proxy_credentials(
+                            f"{type(exc).__name__}: {exc}"
+                        ),
                         "hops": hops,
                     },
                 )
