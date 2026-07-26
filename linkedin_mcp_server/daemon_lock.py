@@ -13,14 +13,20 @@ one holder, no reference counting, released only on exit.
 
 Two things it must never do, both of which cost the lock silently:
 
-* It must not unlock before closing. ``flock`` belongs to the open file
-  description, which every inherited copy shares, so unlocking releases it for
-  the supervisor that inherited it too. Measured: unlock-then-close left the
-  lock free while the holder was alive and believed it held it.
+* It must not unlock before closing. The lock belongs to the open file
+  description, which every copy shares, so unlocking releases it for anything
+  else holding one. Measured on both POSIX and Windows: unlock-then-close left
+  the lock free while a live process believed it held it.
 * It must not treat a free lock as proof that nothing is running. Chromium
   outlives the process that started it, measured at over twenty seconds after a
   kill, and the kernel frees the lock at the instant of death. The two facts are
   true at the same time.
+
+Handing a held lock to another process works only on POSIX. Measured on
+Windows: a child that inherited the handle through the documented mechanism did
+not hold the lock once the parent closed its own, in 20 of 20 runs. The two
+platforms genuinely differ here, so startup has to differ with them rather than
+share one path that is only true on one of them.
 """
 
 from __future__ import annotations
@@ -41,6 +47,19 @@ from linkedin_mcp_server.profile_lease import (
 logger = logging.getLogger(__name__)
 
 _DAEMON_LOCK_FILE = "daemon.lock"
+
+#: Whether a held lock can be handed to another process by letting it inherit
+#: the descriptor. True on POSIX, where the lock belongs to the open file
+#: description that every copy shares.
+#:
+#: False on Windows, and this is measured rather than assumed. On a Windows
+#: runner, a child that received the handle through the documented
+#: ``STARTUPINFO`` handle list and kept it open did not hold the lock once the
+#: parent closed its own: a third process acquired the byte range in 20 of 20
+#: runs. Within one process a duplicate does keep the lock alive, which is why
+#: this is easy to get wrong from a single-process test. Ownership there has to
+#: be taken by the supervisor itself rather than passed to it.
+_INHERITED_LOCKS_TRANSFER = os.name != "nt"
 
 
 class DaemonLockError(RuntimeError):
@@ -155,6 +174,9 @@ class DaemonLock:
     def inheritable_copy(self) -> int:
         """Duplicate the descriptor so a launched supervisor can inherit it.
 
+        POSIX only, and refused elsewhere rather than quietly returning
+        something that does not mean what it says.
+
         The original is opened close-on-exec, so it would not survive the exec
         that starts the supervisor. Handing over a duplicate rather than
         releasing and letting the supervisor take the lock itself is what closes
@@ -162,14 +184,12 @@ class DaemonLock:
         and elect a second owner.
 
         The caller closes the copy once the supervisor confirms it has it.
-
-        How the copy reaches the child differs by platform, and the difference
-        is not small: ``subprocess`` passes descriptors through ``pass_fds`` on
-        POSIX and asserts outright that it is unsupported on Windows, where
-        inheriting a handle means naming it in the startup information instead.
-        Whoever launches the supervisor owns that difference; this returns a
-        descriptor that is merely eligible to be inherited.
         """
+        if not _INHERITED_LOCKS_TRANSFER:
+            raise DaemonLockError(
+                "Handing a held lock to another process is a POSIX mechanism. "
+                "On this platform the supervisor has to take the lock itself."
+            )
         if self._fd is None:
             raise DaemonLockError("Cannot hand over a lock this process does not hold")
         duplicate = os.dup(self._fd)
@@ -179,10 +199,16 @@ class DaemonLock:
     def adopt(self, fd: int) -> None:
         """Take ownership of an inherited locked descriptor.
 
+        POSIX only, like its counterpart, and for the measured reason above.
         Called by a supervisor that was launched holding a copy. It does not
         acquire anything: the lock is already held, and re-acquiring it against
-        our own copy would fail on POSIX and mean nothing on Windows.
+        our own copy would fail.
         """
+        if not _INHERITED_LOCKS_TRANSFER:
+            raise DaemonLockError(
+                "An inherited lock cannot be adopted on this platform. "
+                "The supervisor has to take the lock itself."
+            )
         self._discard_if_forked()
         if self._fd is not None:
             raise DaemonLockError("This process already holds the daemon lock")
