@@ -33,6 +33,10 @@ def _run_child(source: str, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+        # The child's working directory outranks PYTHONPATH on its import path,
+        # so running the suite from another checkout would have these children
+        # mix modules from both. Pinning it keeps them on the tree under test.
+        cwd=_REPO_ROOT,
         timeout=30,
     )
 
@@ -105,7 +109,14 @@ class TestScope:
             lock.release()
 
 
+posix_handoff = pytest.mark.skipif(
+    os.name == "nt",
+    reason="Measured on Windows: an inherited handle does not carry the lock",
+)
+
+
 class TestHandoff:
+    @posix_handoff
     def test_a_duplicate_survives_the_original_being_closed(self, tmp_path: Path):
         # How a supervisor is launched: it inherits a copy, and the process that
         # elected it lets go. If the lock did not survive that, another client
@@ -122,6 +133,7 @@ class TestHandoff:
 
         assert not daemon_is_running(tmp_path)
 
+    @posix_handoff
     def test_the_copy_is_inheritable(self, tmp_path: Path):
         # The original is opened close-on-exec so a launched Chromium cannot
         # hold the lock open. That same flag would stop a supervisor inheriting
@@ -137,10 +149,12 @@ class TestHandoff:
         finally:
             lock.release()
 
+    @posix_handoff
     def test_handing_over_a_lock_we_do_not_hold_refuses(self, tmp_path: Path):
         with pytest.raises(DaemonLockError, match="does not hold"):
             DaemonLock(tmp_path).inheritable_copy()
 
+    @posix_handoff
     def test_an_adopted_lock_is_held_without_reacquiring(self, tmp_path: Path):
         # A supervisor is launched already holding a copy. Acquiring again would
         # fail on POSIX, where the process already holds it, so adoption records
@@ -159,6 +173,25 @@ class TestHandoff:
             supervisor.release()
 
         assert not daemon_is_running(tmp_path)
+
+
+class TestPlatformDifference:
+    @pytest.mark.skipif(
+        os.name != "nt", reason="the refusal only applies where handoff cannot work"
+    )
+    def test_windows_refuses_to_hand_a_lock_over(self, tmp_path: Path):
+        # Measured on a Windows runner: a child holding the inherited handle
+        # did not hold the lock once the parent closed its own, in 20 of 20
+        # runs, while a third process took the byte range. Returning a
+        # descriptor that looks like a transferred lock and is not would put a
+        # second owner on a live browser, so it refuses instead.
+        lock = DaemonLock(tmp_path)
+        assert lock.try_acquire()
+        try:
+            with pytest.raises(DaemonLockError, match="POSIX mechanism"):
+                lock.inheritable_copy()
+        finally:
+            lock.release()
 
 
 class TestFork:
@@ -199,6 +232,7 @@ class TestFork:
 
 
 class TestAdoptedDescriptors:
+    @posix_handoff
     def test_an_adopted_lock_does_not_leak_to_later_children(self, tmp_path: Path):
         # The descriptor is marked inheritable for exactly one launch. Measured
         # before the fix: it stayed that way, so an unrelated child launched
@@ -226,6 +260,7 @@ class TestAdoptedDescriptors:
 
 
 class TestReleaseSemantics:
+    @posix_handoff
     def test_releasing_closes_rather_than_unlocks(self, tmp_path: Path):
         # The measured trap. flock belongs to the open file description, which
         # every inherited copy shares, so unlocking would release the lock for
