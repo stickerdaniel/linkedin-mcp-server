@@ -14,7 +14,6 @@ from linkedin_mcp_server.bootstrap import (
 from linkedin_mcp_server.core import AuthenticationError
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.schema import is_loopback_host
 from linkedin_mcp_server.drivers.browser import (
     experimental_persist_derived_runtime,
     close_browser,
@@ -381,32 +380,31 @@ def main() -> None:
             mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
 
             if transport == "streamable-http":
-                # Reject cross-origin requests. Without this a website the user
-                # merely visits can reach a loopback server by DNS rebinding —
-                # the browser sends the request, so a firewall does not help —
-                # and drive tools with the logged-in LinkedIn session. The MCP
-                # specification requires validating Origin for exactly this
-                # reason, and the protection is off unless asked for.
+                # Validate Host and Origin. Without this a website the user
+                # merely visits can point a hostname at this server's address
+                # and have the user's own browser drive tools with the
+                # logged-in LinkedIn session — the request comes from inside,
+                # so a firewall does not help. The MCP specification requires
+                # this for local HTTP servers, and it is off unless asked for.
                 #
-                # Requests carrying no Origin at all stay allowed, which is
-                # every non-browser client.
+                # Both checks are needed, and the Host one carries most of the
+                # weight. A rebinding attack sends its own domain as *both*
+                # Host and Origin, so those agree and origin validation alone
+                # lets it through; what gives it away is that the Host is not a
+                # name this server answers to. Requests carrying no Origin at
+                # all stay allowed, which is every non-browser client.
+                #
+                # Deliberately no wildcard on an exposed bind: it would accept
+                # any Host and reopen exactly this hole. A client reaching a
+                # container under localhost is unaffected, since that is a name
+                # the guard already accepts; anything else needs the host named
+                # explicitly, which is a decision for whoever exposes it.
                 mcp.run(
                     transport=transport,
                     host=config.server.host,
                     port=config.server.port,
                     path=config.server.path,
                     host_origin_protection="auto",
-                    # A deliberately exposed bind is reached under a Host header
-                    # this server cannot predict — a LAN address, a hostname, a
-                    # reverse proxy's name — and the Host check would answer 421
-                    # to all of them. Origin validation is what stops rebinding;
-                    # the Host check only adds depth on a loopback bind, where
-                    # the accepted names are knowable. Wildcarding it off an
-                    # exposed bind keeps that server usable without weakening
-                    # the guard that matters.
-                    allowed_hosts=(
-                        None if is_loopback_host(config.server.host) else ["*"]
-                    ),
                 )
             else:
                 mcp.run(transport=transport)
