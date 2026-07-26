@@ -64,7 +64,15 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
             try:
                 await handoff_watch
             except asyncio.CancelledError:
-                pass
+                # Only the cancellation we just asked for is ours to absorb.
+                # While the watcher winds down, one aimed at this task arrives
+                # as the same exception, and a bare pass would swallow it,
+                # leaving whoever asked us to stop with a teardown that
+                # reported success. cancelling() counts the requests made
+                # against *this* task, which is what tells the two apart.
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
             except Exception:
                 # A poller that already died re-raises here. Swallowing it keeps
                 # shutdown on course; leaving Chromium running on the shared

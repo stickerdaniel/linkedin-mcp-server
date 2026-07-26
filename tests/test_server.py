@@ -184,6 +184,55 @@ class TestBrowserLifespan:
 
         close_browser.assert_awaited_once()
 
+    async def test_cancelling_the_lifespan_itself_is_not_swallowed(self, monkeypatch):
+        """Shutdown must not report success after being told to stop.
+
+        Cancelling the watcher and being cancelled ourselves surface as the
+        same exception in the same handler, because a watcher takes a moment to
+        wind down and a cancellation aimed at the teardown lands during exactly
+        that window. Absorbing it would leave whoever asked us to stop waiting
+        on a teardown that claimed to have finished normally.
+        """
+        from linkedin_mcp_server.server import browser_lifespan
+
+        async def watcher():
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                # Stands in for a poller mid-probe: cancellation is requested,
+                # but the task does not finish until it has unwound.
+                await asyncio.sleep(0.5)
+                raise
+
+        close_browser = self._patched(monkeypatch, watcher)
+
+        async def run_server() -> None:
+            # Entered and exited by hand so the cancellation lands *during*
+            # teardown. Cancelling an `async with` body is a different path: it
+            # interrupts the yield and never reaches this handler.
+            lifespan = browser_lifespan(MagicMock())
+            await lifespan.__aenter__()
+            await asyncio.sleep(0.05)  # let the watcher reach its sleep
+
+            task = asyncio.current_task()
+            assert task is not None
+
+            async def cancel_during_teardown() -> None:
+                await asyncio.sleep(0.1)
+                task.cancel()
+
+            asyncio.create_task(cancel_during_teardown())
+            await lifespan.__aexit__(None, None, None)
+
+        server = asyncio.create_task(run_server())
+
+        with pytest.raises(asyncio.CancelledError):
+            await server
+
+        # Still closed: a cancelled shutdown is no reason to leave a browser
+        # running on the shared profile.
+        close_browser.assert_awaited_once()
+
     async def test_teardown_closes_the_browser_when_the_body_raises(self, monkeypatch):
         from linkedin_mcp_server.server import browser_lifespan
 
