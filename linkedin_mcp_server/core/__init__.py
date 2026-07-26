@@ -14,8 +14,15 @@ from .exceptions import (
     LinkedInScraperException,
     NetworkError,
     ProfileNotFoundError,
+    ProxyConnectionError,
     RateLimitError,
     ScrapingError,
+)
+from .proxy_errors import (
+    as_proxy_error,
+    is_proxy_error,
+    proxy_hint,
+    raise_if_proxy_error,
 )
 from .utils import detect_rate_limit, handle_modal_close, scroll_to_bottom
 
@@ -28,8 +35,13 @@ __all__ = [
     "LinkedInScraperException",
     "NetworkError",
     "ProfileNotFoundError",
+    "ProxyConnectionError",
     "RateLimitError",
     "ScrapingError",
+    "as_proxy_error",
+    "is_proxy_error",
+    "proxy_hint",
+    "raise_if_proxy_error",
     "detect_rate_limit",
     "handle_modal_close",
     "is_logged_in",

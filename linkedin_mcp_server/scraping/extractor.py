@@ -15,6 +15,7 @@ from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 from linkedin_mcp_server.core import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
+    raise_if_proxy_error,
     resolve_remember_me_prompt,
 )
 from linkedin_mcp_server.core.exceptions import (
@@ -854,6 +855,11 @@ class LinkedInExtractor:
                     extra={"target_url": url, "wait_until": wait_until},
                 )
             except Exception as exc:
+                # Ahead of the traces below: they record the raw exception text,
+                # which for a proxy failure can quote the proxy URL and land a
+                # password in trace.jsonl. Converting here also keeps a proxy
+                # outage from being reported as a LinkedIn navigation problem.
+                raise_if_proxy_error(exc)
                 if allow_remember_me and await resolve_remember_me_prompt(self._page):
                     await stabilize_navigation(
                         f"remember-me resolution for {url}", logger

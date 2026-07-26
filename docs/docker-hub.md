@@ -89,6 +89,10 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
+| `PROXY_SERVER` | - | Route the browser through a proxy, as `scheme://host:port` (`http`, `https`, `socks4`, `socks5`). May also carry credentials directly (`http://user:pass@host:port`), which is how most providers hand them out. Inside a container `127.0.0.1` is the container itself: for a relay running on the host use `host.docker.internal` (on native Linux Docker, add `--add-host=host.docker.internal:host-gateway`). Only browser traffic is routed, not the MCP transport. |
+| `PROXY_USERNAME` | - | Username for the proxy |
+| `PROXY_PASSWORD` | - | Password for the proxy. Env-only by design: there is no CLI flag, because command-line arguments are readable by every user on the machine. Chromium cannot authenticate to a SOCKS proxy, so credentials require an `http(s)` endpoint. |
+| `PROXY_BYPASS` | - | Comma-separated hosts to reach directly instead of through the proxy |
 | `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: reuse checkpointed derived Linux runtime profiles across Docker restarts instead of fresh-bridging each startup |
 | `LINKEDIN_TRACE_MODE` | `on_error` | Trace/log retention mode: `on_error` keeps ephemeral artifacts only when a failure occurs, `always` keeps every run, `off` disables trace persistence |
 

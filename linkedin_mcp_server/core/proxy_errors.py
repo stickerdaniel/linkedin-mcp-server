@@ -1,0 +1,120 @@
+"""Recognition and safe reporting of proxy failures.
+
+A misconfigured or unreachable proxy does not fail at browser launch. Chromium
+starts normally and the failure lands on the first navigation, where the auth
+checks read it as a dead session. These helpers let those call sites tell the
+two apart before they draw that conclusion.
+"""
+
+import logging
+from urllib.parse import quote
+
+from linkedin_mcp_server.config.schema import BrowserConfig
+
+from .exceptions import ProxyConnectionError
+
+logger = logging.getLogger(__name__)
+
+
+def _browser_config() -> BrowserConfig:
+    """Return the active browser config, or defaults if it cannot be read.
+
+    These helpers run on the failure path, so they must never raise on their
+    own. Falling back to an unconfigured instance costs only the proxy address
+    in the message; it keeps the original error from being replaced by whatever
+    went wrong while reporting it.
+
+    ``SystemExit`` is caught alongside ``Exception`` deliberately: loading the
+    configuration parses the command line, and argparse exits the process on a
+    bad argument. Reporting a proxy failure must not be able to do that.
+    """
+    try:
+        from linkedin_mcp_server.config import get_config
+
+        return get_config().browser
+    except (Exception, SystemExit):
+        return BrowserConfig()
+
+
+# Chromium network-stack errors that mean the proxy itself is the problem, not
+# LinkedIn and not the stored session. Matched case-insensitively as substrings,
+# mirroring the marker-list helpers in linkedin_mcp_server.dependencies.
+PROXY_ERROR_MARKERS = (
+    "err_proxy_connection_failed",
+    "err_tunnel_connection_failed",
+    "err_proxy_auth_requested",
+    "err_proxy_certificate_invalid",
+    "err_unexpected_proxy_auth",
+    "err_socks_connection_failed",
+    "err_socks_connection_host_unreachable",
+    "err_no_supported_proxies",
+    "err_mandatory_proxy_configuration_failed",
+)
+
+
+def is_proxy_error(error: BaseException) -> bool:
+    """Return whether *error* reports a failure of the configured proxy."""
+    if isinstance(error, ProxyConnectionError):
+        return True
+    message = str(error).lower()
+    return any(marker in message for marker in PROXY_ERROR_MARKERS)
+
+
+def redact_proxy_credentials(message: str) -> str:
+    """Strip the configured proxy password from *message*.
+
+    Error text from the driver can quote the proxy URL, and the top-level
+    handlers log exceptions with their full cause chain. The percent-encoded
+    form is covered too, since that is how a password appears inside a URL.
+    """
+    password = _browser_config().proxy_password
+    if not password:
+        return message
+    for variant in (password, quote(password, safe="")):
+        if variant:
+            message = message.replace(variant, "***")
+    return message
+
+
+def as_proxy_error(error: BaseException) -> ProxyConnectionError:
+    """Convert *error* into a credential-free :class:`ProxyConnectionError`.
+
+    The original exception is deliberately not chained: the top-level handlers
+    call ``logger.exception``, which prints the whole cause chain and would put
+    the raw driver message -- possibly including the proxy URL -- back into the
+    log this redaction exists to keep clean.
+    """
+    if isinstance(error, ProxyConnectionError):
+        return error
+    server = _browser_config().proxy_server or "the configured proxy"
+    detail = redact_proxy_credentials(str(error))
+    return ProxyConnectionError(
+        f"Could not reach LinkedIn through proxy {server}: {detail}. "
+        "Check that the proxy is running and that its address and credentials "
+        "are correct. The saved LinkedIn session was not changed."
+    )
+
+
+def raise_if_proxy_error(error: BaseException) -> None:
+    """Re-raise *error* as a :class:`ProxyConnectionError` when it is one."""
+    if is_proxy_error(error):
+        raise as_proxy_error(error) from None
+
+
+def proxy_hint() -> str:
+    """Return a suffix naming the proxy as a possible cause, or an empty string.
+
+    Not every proxy failure is identifiable. A wrong password in particular
+    produces no proxy error code at all: Chromium retries the 407 challenge
+    until the navigation times out, which is indistinguishable from a slow page
+    (verified against a local authenticating relay). Auth failures therefore
+    mention the proxy whenever one is configured, so the advice to log in again
+    does not send someone chasing a session problem that is not there.
+    """
+    server = _browser_config().proxy_server
+    if not server:
+        return ""
+    return (
+        f" Traffic is routed through proxy {server}; if it is unreachable or "
+        "its credentials are wrong, that looks the same as a failed sign-in."
+    )

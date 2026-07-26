@@ -17,6 +17,7 @@ from linkedin_mcp_server.core.exceptions import (
     LinkedInScraperException,
     NetworkError,
     ProfileNotFoundError,
+    ProxyConnectionError,
     RateLimitError,
     ScrapingError,
 )
@@ -160,6 +161,12 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             "Element not found. LinkedIn page structure may have changed.",
             context=context,
         )
+
+    elif isinstance(exception, ProxyConnectionError):
+        # Ahead of NetworkError, which it subclasses. No issue diagnostics: a
+        # proxy that is down or misconfigured is not a bug worth reporting.
+        logger.warning("Proxy error%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, NetworkError):
         logger.warning("Network error%s: %s", ctx, exception)

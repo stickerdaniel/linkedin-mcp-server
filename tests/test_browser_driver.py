@@ -1,11 +1,13 @@
 """Tests for linkedin_mcp_server.drivers.browser runtime-aware auth startup."""
 
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.core.exceptions import ProxyConnectionError
 from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
     get_or_create_browser,
@@ -896,3 +898,140 @@ async def test_concurrent_get_or_create_creates_single_browser(monkeypatch):
     )
     assert first is sentinel and second is sentinel
     assert calls["n"] == 1
+
+
+class TestProxyLaunchOptions:
+    """The proxy must reach every browser this module launches."""
+
+    def test_no_proxy_omits_the_key(self):
+        launch_options, _ = browser_module._launch_options()
+        assert "proxy" not in launch_options
+
+    def test_configured_proxy_is_passed_through(self):
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        browser_module.get_config().browser.proxy_username = "user"
+        browser_module.get_config().browser.proxy_password = "pw"
+        launch_options, _ = browser_module._launch_options()
+        assert launch_options["proxy"] == {
+            "server": "http://gate.example:7000",
+            "username": "user",
+            "password": "pw",
+        }
+
+    def test_credentials_are_not_logged(self, caplog):
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        browser_module.get_config().browser.proxy_username = "user"
+        browser_module.get_config().browser.proxy_password = "s3cr3t"
+        with caplog.at_level(logging.INFO):
+            browser_module._launch_options()
+        assert "gate.example" in caplog.text
+        assert "s3cr3t" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_proxy_reaches_the_browser_manager(self, tmp_path):
+        _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        source_browser = _make_mock_browser()
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.get_runtime_id",
+                return_value="macos-arm64-host",
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.BrowserManager",
+                return_value=source_browser,
+            ) as ctor,
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await get_or_create_browser()
+
+        assert ctor.call_args.kwargs["proxy"] == {"server": "http://gate.example:7000"}
+
+
+class TestProxyFailureIsNotAnAuthFailure:
+    """A dead proxy must not be reported as an expired LinkedIn session.
+
+    Without this the feed check swallows the navigation error, the caller
+    concludes the stored profile is invalid, and the user is told to run
+    --login: advice that cannot fix a proxy and that retires a good profile.
+    """
+
+    @pytest.mark.asyncio
+    async def test_proxy_navigation_error_raises_proxy_error(self, monkeypatch):
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config",
+            browser_module.get_config,
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_PROXY_CONNECTION_FAILED at …")
+        )
+
+        with pytest.raises(ProxyConnectionError, match="gate.example"):
+            await _feed_auth_succeeds(browser)
+
+    @pytest.mark.asyncio
+    async def test_proxy_error_survives_the_remember_me_retry(self, monkeypatch):
+        # The recursive retries run inside the same try, so an inner
+        # ProxyConnectionError would otherwise be caught by the outer except.
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config",
+            browser_module.get_config,
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_TUNNEL_CONNECTION_FAILED")
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            pytest.raises(ProxyConnectionError),
+        ):
+            await _feed_auth_succeeds(browser)
+
+    @pytest.mark.asyncio
+    async def test_proxy_password_is_not_in_the_message(self, monkeypatch):
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        browser_module.get_config().browser.proxy_password = "s3cr3t"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config",
+            browser_module.get_config,
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_PROXY_CONNECTION_FAILED user:s3cr3t@gate")
+        )
+
+        with pytest.raises(ProxyConnectionError) as excinfo:
+            await _feed_auth_succeeds(browser)
+        assert "s3cr3t" not in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_ordinary_navigation_error_still_returns_false(self, monkeypatch):
+        # The existing behaviour for a genuinely broken session is unchanged.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config",
+            browser_module.get_config,
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS")
+        )
+
+        with patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            assert await _feed_auth_succeeds(browser) is False

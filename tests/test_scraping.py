@@ -8,6 +8,7 @@ from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+    ProxyConnectionError,
 )
 from linkedin_mcp_server.scraping.connection import (
     ActionSignals,
@@ -5733,3 +5734,58 @@ class TestBuildFeedReferences:
             "/posts/alice_x-ugcPost-1-xx",
         ]
         assert kinds == {"feed_post"}
+
+
+class TestProxyNavigationFailures:
+    """A proxy outage during an ordinary tool call is reported as itself."""
+
+    async def test_proxy_error_is_raised_instead_of_a_scraping_failure(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_PROXY_CONNECTION_FAILED at …")
+        )
+
+        with pytest.raises(ProxyConnectionError):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+    async def test_proxy_error_is_converted_before_it_reaches_a_trace(self, mock_page):
+        # The trace records the raw exception text, which for a proxy failure
+        # can quote the proxy URL and put a password into trace.jsonl.
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_TUNNEL_CONNECTION_FAILED")
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.record_page_trace",
+                new_callable=AsyncMock,
+            ) as mock_trace,
+            pytest.raises(ProxyConnectionError),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        recorded = [call.args[1] for call in mock_trace.await_args_list]
+        assert "extractor-navigation-error" not in recorded
+
+    async def test_ordinary_navigation_failure_is_unaffected(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_ABORTED"))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(Exception) as excinfo,
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert not isinstance(excinfo.value, ProxyConnectionError)

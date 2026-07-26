@@ -477,3 +477,52 @@ def test_rotate_shielded_does_not_wedge_event_loop_shutdown(tmp_path):
     )
 
     assert "SHUTDOWN COMPLETED" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_forwards_the_proxy(monkeypatch, tmp_path):
+    """The login browser must use the same proxy as later scrapes.
+
+    A session created from one address and then used from another is exactly
+    what triggers LinkedIn's security checkpoint, so --login cannot be allowed
+    to bypass the configured proxy.
+    """
+    browser = _make_browser(export_cookies=True)
+    captured_kwargs: dict = {}
+
+    def fake_browser_manager(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _BrowserContextManager(browser)
+
+    config = AppConfig()
+    config.browser.proxy_server = "http://gate.example:7000"
+    config.browser.proxy_username = "user"
+    config.browser.proxy_password = "pw"
+
+    _patch_login_deps(monkeypatch, browser_factory=fake_browser_manager, config=config)
+
+    await interactive_login(tmp_path / "profile")
+
+    assert captured_kwargs["proxy"] == {
+        "server": "http://gate.example:7000",
+        "username": "user",
+        "password": "pw",
+    }
+
+
+@pytest.mark.asyncio
+async def test_interactive_login_without_proxy_omits_the_key(monkeypatch, tmp_path):
+    browser = _make_browser(export_cookies=True)
+    captured_kwargs: dict = {}
+
+    def fake_browser_manager(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _BrowserContextManager(browser)
+
+    _patch_login_deps(
+        monkeypatch, browser_factory=fake_browser_manager, config=AppConfig()
+    )
+
+    await interactive_login(tmp_path / "profile")
+
+    assert "proxy" not in captured_kwargs

@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
@@ -19,6 +20,8 @@ from linkedin_mcp_server.core import (
     detect_auth_barrier_quick,
     detect_rate_limit,
     is_logged_in,
+    proxy_hint,
+    raise_if_proxy_error,
     resolve_remember_me_prompt,
 )
 
@@ -187,6 +190,13 @@ async def _feed_auth_succeeds(
             return False
         return True
     except Exception as exc:
+        # Before anything else: a proxy fault is not a dead session. Returning
+        # False here would have the caller retire a valid profile and tell the
+        # user to log in again, which cannot fix an unreachable proxy. Checked
+        # first because no page loaded, so there is no remember-me prompt to
+        # resolve, and it also catches a ProxyConnectionError raised by the
+        # recursive retries above, which run inside this try.
+        raise_if_proxy_error(exc)
         if allow_remember_me and await resolve_remember_me_prompt(browser.page):
             await stabilize_navigation(
                 "remember-me resolution after feed failure", logger
@@ -206,23 +216,28 @@ async def _feed_auth_succeeds(
         return False
 
 
-def _launch_options() -> tuple[dict[str, str], dict[str, int]]:
+def _launch_options() -> tuple[dict[str, Any], dict[str, int]]:
     config = get_config()
     viewport = {
         "width": config.browser.viewport_width,
         "height": config.browser.viewport_height,
     }
-    launch_options: dict[str, str] = {}
+    launch_options: dict[str, Any] = {}
     if config.browser.chrome_path:
         launch_options["executable_path"] = config.browser.chrome_path
         logger.info("Using custom Chrome path: %s", config.browser.chrome_path)
+    proxy = config.browser.proxy_settings()
+    if proxy:
+        launch_options["proxy"] = proxy
+        # Only the server: the credentials must not reach the log.
+        logger.info("Routing browser traffic through proxy %s", proxy["server"])
     return launch_options, viewport
 
 
 def _make_browser(
     profile_dir: Path,
     *,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     user_agent: str | None = None,
 ) -> BrowserManager:
@@ -243,7 +258,7 @@ def _make_browser(
 async def _authenticate_existing_profile(
     profile_dir: Path,
     *,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     user_agent: str | None = None,
 ) -> BrowserManager:
@@ -257,7 +272,8 @@ async def _authenticate_existing_profile(
         await browser.start()
         if not await _feed_auth_succeeds(browser):
             raise AuthenticationError(
-                f"Stored runtime profile is invalid: {profile_dir}. Run with --login to refresh the source session."
+                f"Stored runtime profile is invalid: {profile_dir}. "
+                f"Run with --login to refresh the source session.{proxy_hint()}"
             )
         browser.is_authenticated = True
         return browser
@@ -343,7 +359,7 @@ async def _bridge_runtime_profile(
     cookie_path: Path,
     source_state: SourceState,
     runtime_id: str,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     persist_runtime: bool,
 ) -> BrowserManager:
@@ -382,7 +398,8 @@ async def _bridge_runtime_profile(
         )
         if not await _feed_auth_succeeds(browser):
             raise AuthenticationError(
-                "No authentication found. Run with --login to create a profile."
+                "No authentication found. "
+                f"Run with --login to create a profile.{proxy_hint()}"
             )
         await stabilize_navigation("post-import feed validation", logger)
         await record_page_trace(browser.page, "bridge-after-feed-validation")

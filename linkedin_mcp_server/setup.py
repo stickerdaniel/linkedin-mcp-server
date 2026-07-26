@@ -190,6 +190,13 @@ async def _login_into_fresh_profile(
     if config.browser.chrome_path:
         launch_options["executable_path"] = config.browser.chrome_path
 
+    # The login browser must leave from the same address as later scrapes: a
+    # session created on one IP and used from another is what trips LinkedIn's
+    # security checkpoint.
+    proxy = config.browser.proxy_settings()
+    if proxy:
+        launch_options["proxy"] = proxy
+
     viewport = {
         "width": config.browser.viewport_width,
         "height": config.browser.viewport_height,

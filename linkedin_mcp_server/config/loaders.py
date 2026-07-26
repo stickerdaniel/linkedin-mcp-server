@@ -10,6 +10,7 @@ import math
 import os
 import sys
 from typing import Literal, cast
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -58,6 +59,32 @@ def non_negative_float(value: str) -> float:
     return fvalue
 
 
+def credential_free_url(value: str) -> str:
+    """Argparse type for a proxy URL that carries no credentials.
+
+    A password in a command-line argument is readable by every user on the
+    machine through the process list, which is the whole reason there is no
+    ``--proxy-password`` flag. Accepting it inside ``--proxy-server`` would give
+    the secret back the same exposure, so it is refused here rather than split
+    out later. The value is never echoed, since it is the secret itself.
+    """
+    candidate = value if "://" in value else f"http://{value}"
+    try:
+        parsed = urlsplit(candidate)
+        has_credentials = bool(parsed.username or parsed.password)
+    except ValueError:
+        # Leave the shape of the URL to BrowserConfig.validate(), which can
+        # explain the problem properly.
+        return value
+    if has_credentials:
+        raise argparse.ArgumentTypeError(
+            "must not contain credentials. Pass the bare scheme://host:port "
+            "here and supply the password via the PROXY_PASSWORD environment "
+            "variable, so it is not exposed in the process list."
+        )
+    return value
+
+
 class EnvironmentKeys:
     """Environment variable names used by the application."""
 
@@ -72,6 +99,10 @@ class EnvironmentKeys:
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
+    PROXY_SERVER = "PROXY_SERVER"
+    PROXY_USERNAME = "PROXY_USERNAME"
+    PROXY_PASSWORD = "PROXY_PASSWORD"
+    PROXY_BYPASS = "PROXY_BYPASS"
     USER_DATA_DIR = "USER_DATA_DIR"
     TOOL_TIMEOUT = "TOOL_TIMEOUT"
     LOGIN_TIMEOUT = "LOGIN_TIMEOUT"
@@ -251,6 +282,21 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
 
+    # Browser proxy (validated and split in BrowserConfig.validate()). Unlike
+    # the CLI flag, PROXY_SERVER may carry the credentials a provider hands out:
+    # the environment is not world-readable the way a process argument list is.
+    if proxy_server_env := os.environ.get(EnvironmentKeys.PROXY_SERVER):
+        config.browser.proxy_server = proxy_server_env
+
+    if proxy_username_env := os.environ.get(EnvironmentKeys.PROXY_USERNAME):
+        config.browser.proxy_username = proxy_username_env
+
+    if proxy_password_env := os.environ.get(EnvironmentKeys.PROXY_PASSWORD):
+        config.browser.proxy_password = proxy_password_env
+
+    if proxy_bypass_env := os.environ.get(EnvironmentKeys.PROXY_BYPASS):
+        config.browser.proxy_bypass = proxy_bypass_env
+
     # Import a LinkedIn session from a locally logged-in browser (validated in
     # ServerConfig.validate())
     if import_browser_env := os.environ.get(EnvironmentKeys.IMPORT_FROM_BROWSER):
@@ -421,6 +467,37 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Path to Chrome/Chromium executable (for custom browser installations)",
     )
 
+    parser.add_argument(
+        "--proxy-server",
+        type=credential_free_url,
+        default=None,
+        metavar="URL",
+        help=(
+            "Route the browser through a proxy, as scheme://host:port "
+            "(http, https, socks4 or socks5). Chromium cannot authenticate to "
+            "a SOCKS proxy, so credentials require an http(s) endpoint"
+        ),
+    )
+
+    parser.add_argument(
+        "--proxy-username",
+        type=str,
+        default=None,
+        metavar="USER",
+        help=(
+            "Username for the proxy. The password has no flag on purpose; set "
+            "PROXY_PASSWORD instead, so it stays out of the process list"
+        ),
+    )
+
+    parser.add_argument(
+        "--proxy-bypass",
+        type=str,
+        default=None,
+        metavar="HOSTS",
+        help="Comma-separated hosts to reach directly instead of via the proxy",
+    )
+
     # Session management
     parser.add_argument(
         "--login",
@@ -572,6 +649,16 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path
+
+    # Proxy (validated and normalized in BrowserConfig.validate())
+    if args.proxy_server:
+        config.browser.proxy_server = args.proxy_server
+
+    if args.proxy_username:
+        config.browser.proxy_username = args.proxy_username
+
+    if args.proxy_bypass:
+        config.browser.proxy_bypass = args.proxy_bypass
 
     # Session management
     if args.login:

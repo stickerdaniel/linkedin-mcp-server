@@ -818,3 +818,200 @@ class TestImportFromBrowserValidation:
     def test_invalid_value_raises(self):
         with pytest.raises(ConfigurationError, match="not supported"):
             ServerConfig(import_from_browser="firefox").validate()
+
+
+class TestProxyConfig:
+    """Proxy parsing, validation and the guarantee that no secret escapes."""
+
+    SECRET = "s3cr3t-p@ss"
+
+    def test_defaults_are_unset(self):
+        config = BrowserConfig()
+        assert config.proxy_server is None
+        assert config.proxy_username is None
+        assert config.proxy_password is None
+        assert config.proxy_bypass is None
+        assert config.proxy_settings() is None
+
+    def test_server_only(self):
+        config = BrowserConfig(proxy_server="http://proxy.example:8080")
+        config.validate()
+        assert config.proxy_settings() == {"server": "http://proxy.example:8080"}
+
+    def test_scheme_less_server_means_http(self):
+        config = BrowserConfig(proxy_server="proxy.example:8080")
+        config.validate()
+        assert config.proxy_server == "http://proxy.example:8080"
+
+    def test_ipv6_server_keeps_brackets(self):
+        config = BrowserConfig(proxy_server="http://[::1]:8080")
+        config.validate()
+        assert config.proxy_server == "http://[::1]:8080"
+
+    def test_separate_credentials_and_bypass(self):
+        config = BrowserConfig(
+            proxy_server="https://proxy.example:443",
+            proxy_username="user",
+            proxy_password=self.SECRET,
+            proxy_bypass=".internal,localhost",
+        )
+        config.validate()
+        assert config.proxy_settings() == {
+            "server": "https://proxy.example:443",
+            "username": "user",
+            "password": self.SECRET,
+            "bypass": ".internal,localhost",
+        }
+
+    def test_embedded_credentials_are_split_out(self):
+        # Patchright drops userinfo from the server URL, so leaving it embedded
+        # would authenticate with nothing.
+        config = BrowserConfig(proxy_server=f"http://user:{self.SECRET}@gate:7000")
+        config.validate()
+        assert config.proxy_server == "http://gate:7000"
+        assert config.proxy_settings() == {
+            "server": "http://gate:7000",
+            "username": "user",
+            "password": self.SECRET,
+        }
+
+    def test_embedded_credentials_are_percent_decoded(self):
+        config = BrowserConfig(proxy_server="http://user:p%40ss@gate:7000")
+        config.validate()
+        assert config.proxy_password == "p@ss"
+
+    def test_socks_without_credentials_is_allowed(self):
+        config = BrowserConfig(proxy_server="socks5://127.0.0.1:1080")
+        config.validate()
+        assert config.proxy_settings() == {"server": "socks5://127.0.0.1:1080"}
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"proxy_username": "u"}, "without proxy_server"),
+            ({"proxy_bypass": ".internal"}, "without proxy_server"),
+            ({"proxy_server": "ftp://host:21"}, "is not supported"),
+            ({"proxy_server": "http://host"}, "explicit port"),
+            ({"proxy_server": "http://host:8080/path"}, "path, query or fragment"),
+            ({"proxy_server": "http://host:8080?a=1"}, "path, query or fragment"),
+            (
+                {"proxy_server": "http://host:8080", "proxy_username": "u"},
+                "both a username and a password",
+            ),
+            (
+                {
+                    "proxy_server": "http://u:p@host:8080",
+                    "proxy_username": "other",
+                    "proxy_password": "other",
+                },
+                "one or the other",
+            ),
+            (
+                {
+                    "proxy_server": "socks5://host:1080",
+                    "proxy_username": "u",
+                    "proxy_password": "p",
+                },
+                "cannot authenticate",
+            ),
+        ],
+    )
+    def test_invalid_configurations_are_rejected(self, kwargs, match):
+        with pytest.raises(ConfigurationError, match=match):
+            BrowserConfig(**kwargs).validate()
+
+    def test_rejection_never_echoes_the_secret(self):
+        # Validation errors reach the console, so they must not quote the value.
+        with pytest.raises(ConfigurationError) as excinfo:
+            BrowserConfig(
+                proxy_server=f"socks5://user:{self.SECRET}@host:1080"
+            ).validate()
+        assert self.SECRET not in str(excinfo.value)
+
+    def test_password_never_appears_in_repr(self):
+        # cli_main logs the whole config at DEBUG level, and users paste those
+        # logs into issue reports.
+        config = BrowserConfig(
+            proxy_server="http://proxy.example:8080",
+            proxy_username="user",
+            proxy_password=self.SECRET,
+        )
+        assert self.SECRET not in repr(config)
+        assert self.SECRET not in repr(AppConfig(browser=config))
+
+    def test_server_stays_visible_in_repr(self):
+        # It carries no secret after normalization and is the field you need to
+        # diagnose a proxy problem.
+        config = BrowserConfig(proxy_server="http://proxy.example:8080")
+        assert "proxy.example" in repr(config)
+
+
+class TestProxyLoaders:
+    SECRET = "env-s3cr3t"
+
+    def test_load_from_env_all_fields(self, monkeypatch):
+        monkeypatch.setenv("PROXY_SERVER", "http://gate.example:7000")
+        monkeypatch.setenv("PROXY_USERNAME", "envuser")
+        monkeypatch.setenv("PROXY_PASSWORD", self.SECRET)
+        monkeypatch.setenv("PROXY_BYPASS", ".internal")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.browser.proxy_server == "http://gate.example:7000"
+        assert config.browser.proxy_username == "envuser"
+        assert config.browser.proxy_password == self.SECRET
+        assert config.browser.proxy_bypass == ".internal"
+
+    def test_env_accepts_a_provider_url_with_credentials(self, monkeypatch):
+        # The environment is not world-readable the way argv is, so the
+        # convenience form providers hand out is accepted here.
+        monkeypatch.setenv("PROXY_SERVER", f"http://envuser:{self.SECRET}@gate:7000")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        config.validate()
+        assert config.browser.proxy_server == "http://gate:7000"
+        assert config.browser.proxy_password == self.SECRET
+
+    def test_load_from_args_proxy_flags(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "linkedin-mcp-server",
+                "--proxy-server",
+                "http://cli.example:3128",
+                "--proxy-username",
+                "cliuser",
+                "--proxy-bypass",
+                ".internal",
+            ],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.browser.proxy_server == "http://cli.example:3128"
+        assert config.browser.proxy_username == "cliuser"
+        assert config.browser.proxy_bypass == ".internal"
+
+    def test_args_override_env(self, monkeypatch):
+        monkeypatch.setenv("PROXY_SERVER", "http://env.example:7000")
+        monkeypatch.setattr(
+            "sys.argv", ["linkedin-mcp-server", "--proxy-server", "http://cli:3128"]
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args, load_from_env
+
+        config = load_from_args(load_from_env(AppConfig()))
+        assert config.browser.proxy_server == "http://cli:3128"
+
+    def test_cli_rejects_embedded_credentials(self, monkeypatch, capsys):
+        # There is no --proxy-password flag because argv is world-readable;
+        # accepting a credential URL here would hand that exposure back.
+        monkeypatch.setattr(
+            "sys.argv",
+            ["linkedin-mcp-server", "--proxy-server", f"http://u:{self.SECRET}@h:8080"],
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(SystemExit):
+            load_from_args(AppConfig())
+        assert self.SECRET not in capsys.readouterr().err
