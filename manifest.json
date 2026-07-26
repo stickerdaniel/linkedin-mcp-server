@@ -38,7 +38,11 @@
         "linkedin_mcp_server"
       ],
       "env": {
-        "LINKEDIN_MCP_RUNTIME": "mcpb"
+        "LINKEDIN_MCP_RUNTIME": "mcpb",
+        "PROXY_SERVER": "${user_config.proxy_server}",
+        "PROXY_USERNAME": "${user_config.proxy_username}",
+        "PROXY_PASSWORD": "${user_config.proxy_password}",
+        "PROXY_BYPASS": "${user_config.proxy_bypass}"
       }
     }
   },
@@ -120,7 +124,35 @@
       "description": "Properly close browser session and clean up resources"
     }
   ],
-  "user_config": {},
+  "user_config": {
+    "proxy_server": {
+      "type": "string",
+      "title": "Proxy server",
+      "description": "Optional. Route the browser through a proxy, as scheme://host:port (http, https, socks4 or socks5). May also include credentials, as http://user:password@host:port. Only browser traffic is routed.",
+      "required": false,
+      "sensitive": true
+    },
+    "proxy_username": {
+      "type": "string",
+      "title": "Proxy username",
+      "description": "Optional. Username for the proxy, if it requires one.",
+      "required": false,
+      "sensitive": true
+    },
+    "proxy_password": {
+      "type": "string",
+      "title": "Proxy password",
+      "description": "Optional. Password for the proxy. Chromium cannot authenticate to a SOCKS proxy, so credentials require an http or https endpoint.",
+      "required": false,
+      "sensitive": true
+    },
+    "proxy_bypass": {
+      "type": "string",
+      "title": "Proxy bypass list",
+      "description": "Optional. Comma-separated hosts to reach directly instead of through the proxy.",
+      "required": false
+    }
+  },
   "compatibility": {
     "claude_desktop": ">=0.10.0",
     "platforms": [

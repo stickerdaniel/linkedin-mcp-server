@@ -14,6 +14,7 @@ from typing import Any
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core import (
     BrowserManager,
+    goto_reporting_proxy_errors,
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
@@ -190,6 +191,13 @@ async def _login_into_fresh_profile(
     if config.browser.chrome_path:
         launch_options["executable_path"] = config.browser.chrome_path
 
+    # The login browser must leave from the same address as later scrapes: a
+    # session created on one IP and used from another is what trips LinkedIn's
+    # security checkpoint.
+    proxy = config.browser.proxy_settings()
+    if proxy:
+        launch_options["proxy"] = proxy
+
     viewport = {
         "width": config.browser.viewport_width,
         "height": config.browser.viewport_height,
@@ -222,7 +230,9 @@ async def _run_login(
 ) -> bool:
     async with manager as browser:
         # Navigate to LinkedIn login
-        await browser.page.goto("https://www.linkedin.com/login")
+        await goto_reporting_proxy_errors(
+            browser.page, "https://www.linkedin.com/login"
+        )
         # Let LinkedIn finish rendering the saved-account chooser, then retry the
         # same exact click target a few times before falling back to the normal
         # manual-login wait loop.

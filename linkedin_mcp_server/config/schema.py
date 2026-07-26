@@ -10,7 +10,8 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
+from urllib.parse import unquote, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,13 @@ BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
 # A backstop only — the handoff signal does the real work — so it is deliberately
 # long: a reopen costs one more LinkedIn request. 0 disables it.
 DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS: float = 600.0
+
+
+# Proxy schemes Chromium understands on --proxy-server. The SOCKS ones are
+# usable without credentials only: the browser cannot answer a SOCKS auth
+# challenge, so Patchright rejects that combination outright.
+SOCKS_PROXY_SCHEMES: frozenset[str] = frozenset({"socks4", "socks5"})
+PROXY_SCHEMES: frozenset[str] = frozenset({"http", "https"}) | SOCKS_PROXY_SCHEMES
 
 
 # Names that resolve only on this machine. Compared case-insensitively and
@@ -94,6 +102,20 @@ class BrowserConfig:
     default_timeout: int = 5000  # Milliseconds for page operations
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
     user_data_dir: str = "~/.linkedin-mcp/profile"  # Persistent browser profile
+    # Proxy for the browser's own traffic. The server's MCP transport is not
+    # routed through it. ``proxy_server`` accepts scheme://host:port and, from
+    # the environment only, a provider string carrying credentials; validate()
+    # splits those out so the stored value never holds a password.
+    proxy_server: str | None = None
+    # Both credentials are kept out of the repr, because cli_main logs the whole
+    # config at DEBUG level and users paste those logs into issue reports. The
+    # username is not merely a name: residential providers encode the account,
+    # zone and session in it. The server stays visible; it holds no secret once
+    # validate() has split the credentials off, and it is the field you need to
+    # diagnose a proxy problem.
+    proxy_username: str | None = field(default=None, repr=False)
+    proxy_password: str | None = field(default=None, repr=False)
+    proxy_bypass: str | None = None  # Comma-separated hosts to bypass
     # Manual-login wait timeout in seconds; 0 = unlimited
     login_timeout_seconds: float = DEFAULT_LOGIN_TIMEOUT_SECONDS
     # Bounded inline wait before the pending signal; 0 = immediate return
@@ -212,6 +234,127 @@ class BrowserConfig:
                 raise ConfigurationError(
                     f"chrome_path '{self.chrome_path}' is not a file"
                 )
+        self._normalize_proxy()
+
+    def _normalize_proxy(self) -> None:
+        """Split, check and canonicalize the proxy settings.
+
+        Credentials embedded in ``proxy_server`` are moved into the separate
+        fields, because Patchright's own normalization drops the userinfo from
+        the server URL and would authenticate with nothing. Runs from
+        ``validate()`` so a combined provider URL never survives in the config
+        object, and so the failures below surface at startup rather than as an
+        opaque 407 or a driver exception on the first navigation.
+
+        No message here may quote the raw value: it can carry a password and
+        configuration errors are printed to the console.
+        """
+        if not self.proxy_server:
+            for name in ("proxy_username", "proxy_password", "proxy_bypass"):
+                if getattr(self, name):
+                    raise ConfigurationError(
+                        f"{name} is set without proxy_server. "
+                        "Set the proxy server too, or unset it."
+                    )
+            return
+
+        raw = self.proxy_server.strip()
+        # A bare host:port is what most providers hand out. Patchright assumes
+        # HTTP for it; assume it here too so validation sees the same URL.
+        if "://" not in raw:
+            raw = f"http://{raw}"
+        try:
+            parsed = urlsplit(raw)
+            hostname, port = parsed.hostname, parsed.port
+        except ValueError:
+            raise ConfigurationError(
+                "proxy_server is not a valid URL. "
+                "Expected scheme://host:port, for example http://proxy.example:8080."
+            )
+
+        if parsed.scheme not in PROXY_SCHEMES:
+            raise ConfigurationError(
+                f"proxy_server scheme '{parsed.scheme}' is not supported. "
+                f"Use one of: {', '.join(sorted(PROXY_SCHEMES))}."
+            )
+        if not hostname or port is None:
+            raise ConfigurationError(
+                "proxy_server needs a host and an explicit port, "
+                "for example http://proxy.example:8080."
+            )
+        if "@" in unquote(hostname):
+            # A percent-encoded userinfo separator, as in
+            # "http://user%3Apass%40host:7000". urlsplit reads that as a plain
+            # hostname, so the credentials would neither be split out nor hidden
+            # from the logs, while still being trivially decodable. Patchright
+            # cannot parse it either and falls back to a nonsense host, so the
+            # browser would not even reach the intended proxy.
+            raise ConfigurationError(
+                "proxy_server contains a percent-encoded '@'. Pass the "
+                "credentials as PROXY_USERNAME and PROXY_PASSWORD instead of "
+                "encoding them into the address."
+            )
+        if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+            # Chromium takes only scheme, host and port; anything else would be
+            # dropped silently and the user would never learn it was ignored.
+            raise ConfigurationError(
+                "proxy_server must not carry a path, query or fragment. "
+                "Use only scheme://host:port."
+            )
+
+        embedded_user = unquote(parsed.username) if parsed.username else None
+        embedded_password = unquote(parsed.password) if parsed.password else None
+        if embedded_user or embedded_password:
+            if self.proxy_username or self.proxy_password:
+                # Picking a winner here is how the wrong password ships and
+                # nobody can tell why, so refuse instead.
+                raise ConfigurationError(
+                    "Proxy credentials are set both inside proxy_server and "
+                    "separately. Use one or the other."
+                )
+            self.proxy_username = embedded_user
+            self.proxy_password = embedded_password
+
+        # Store the host:port form Chromium actually receives.
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        self.proxy_server = f"{parsed.scheme}://{host}:{port}"
+
+        # A username with an empty password is legitimate -- Playwright supports
+        # it explicitly for key-style proxy accounts -- so only the reverse is
+        # rejected: a password alone can never be sent.
+        if self.proxy_password is not None and not self.proxy_username:
+            raise ConfigurationError(
+                "A proxy password is set without a username. "
+                "Set the username too, or unset the password."
+            )
+        if self.proxy_username and parsed.scheme in SOCKS_PROXY_SCHEMES:
+            # Chromium cannot answer a SOCKS auth challenge, and Patchright
+            # raises an opaque error at launch. Catch it here instead.
+            raise ConfigurationError(
+                f"Chromium cannot authenticate to a {parsed.scheme} proxy. "
+                "Use an http:// or https:// endpoint from your provider, or "
+                "run a local relay that holds the credentials."
+            )
+
+    def proxy_settings(self) -> dict[str, Any] | None:
+        """Build the Patchright ``proxy`` option, or None when unconfigured.
+
+        Both browser launch paths call this so the login session and the
+        scraping session leave from the same address. A session created on one
+        IP and used from another is what trips LinkedIn's security checkpoint.
+        """
+        if not self.proxy_server:
+            return None
+        settings: dict[str, Any] = {"server": self.proxy_server}
+        if self.proxy_username:
+            settings["username"] = self.proxy_username
+            # Compared against None, not truthiness: an empty password is a
+            # valid credential and must still be sent.
+            if self.proxy_password is not None:
+                settings["password"] = self.proxy_password
+        if self.proxy_bypass:
+            settings["bypass"] = self.proxy_bypass
+        return settings
 
 
 @dataclass

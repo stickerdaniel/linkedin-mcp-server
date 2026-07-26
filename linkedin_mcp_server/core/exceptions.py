@@ -39,6 +39,19 @@ class NetworkError(LinkedInScraperException):
     pass
 
 
+class ProxyConnectionError(NetworkError):
+    """Raised when the configured proxy cannot carry the request.
+
+    A subclass of :class:`NetworkError` on purpose. A proxy outage arrives as a
+    failed navigation, which the auth checks would otherwise read as an invalid
+    session and answer with "run --login" -- advice that cannot help and that
+    retires a perfectly good profile. Keeping it a network error also means any
+    handler that has not learned about proxies yet still degrades sensibly.
+    """
+
+    pass
+
+
 class ScrapingError(LinkedInScraperException):
     """Raised when scraping fails for various reasons."""
 

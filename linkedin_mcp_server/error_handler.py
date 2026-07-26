@@ -11,12 +11,14 @@ from typing import NoReturn
 
 from fastmcp.exceptions import ToolError
 
+from linkedin_mcp_server.core.proxy_errors import redacted_copy
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     ElementNotFoundError,
     LinkedInScraperException,
     NetworkError,
     ProfileNotFoundError,
+    ProxyConnectionError,
     RateLimitError,
     ScrapingError,
 )
@@ -161,6 +163,12 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             context=context,
         )
 
+    elif isinstance(exception, ProxyConnectionError):
+        # Ahead of NetworkError, which it subclasses. No issue diagnostics: a
+        # proxy that is down or misconfigured is not a bug worth reporting.
+        logger.warning("Proxy error%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
     elif isinstance(exception, NetworkError):
         logger.warning("Network error%s: %s", ctx, exception)
         _raise_tool_error_with_diagnostics(
@@ -188,5 +196,13 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         )
 
     else:
-        logger.error("Unexpected error%s: %s", ctx, exception, exc_info=True)
-        raise exception
+        # The catch-all for exceptions nothing else classified, so a raw driver
+        # error quoting the proxy URL arrives here intact. Redacting this log is
+        # not enough on its own: FastMCP catches whatever leaves this function
+        # and calls logger.exception (server.py:1343), which writes the message
+        # and the traceback again before masking the client-facing reply. So the
+        # exception itself is sanitised, not just the log. `from None` because
+        # the chained original would be printed there too.
+        safe = redacted_copy(exception)
+        logger.error("Unexpected error%s: %s", ctx, f"{type(safe).__name__}: {safe}")
+        raise safe from None

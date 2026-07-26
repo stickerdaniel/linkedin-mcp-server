@@ -8,6 +8,7 @@ from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
+    ProxyConnectionError,
 )
 from linkedin_mcp_server.scraping.connection import (
     ActionSignals,
@@ -5733,3 +5734,148 @@ class TestBuildFeedReferences:
             "/posts/alice_x-ugcPost-1-xx",
         ]
         assert kinds == {"feed_post"}
+
+
+class TestProxyNavigationFailures:
+    """A proxy outage during an ordinary tool call is reported as itself."""
+
+    async def test_proxy_error_is_raised_instead_of_a_scraping_failure(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_PROXY_CONNECTION_FAILED at …")
+        )
+
+        with pytest.raises(ProxyConnectionError):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+    async def test_proxy_error_is_converted_before_it_reaches_a_trace(self, mock_page):
+        # The trace records the raw exception text, which for a proxy failure
+        # can quote the proxy URL and put a password into trace.jsonl.
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_TUNNEL_CONNECTION_FAILED")
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.record_page_trace",
+                new_callable=AsyncMock,
+            ) as mock_trace,
+            pytest.raises(ProxyConnectionError),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        recorded = [call.args[1] for call in mock_trace.await_args_list]
+        assert "extractor-navigation-error" not in recorded
+
+    async def test_ordinary_navigation_failure_is_unaffected(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_ABORTED"))
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(Exception) as excinfo,
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert not isinstance(excinfo.value, ProxyConnectionError)
+
+
+class TestNavigationFailureLogRedaction:
+    """The navigation-failure log must not carry proxy credentials.
+
+    It reaches the log even for errors the marker check does not recognise as
+    proxy faults, and that log is what users paste into issue reports.
+    """
+
+    async def test_credentials_are_redacted_from_the_log(
+        self, mock_page, monkeypatch, caplog
+    ):
+        import logging
+
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_username = "acctzone9"
+        config.browser.proxy_password = "s3cr3t"
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        extractor = LinkedInExtractor(mock_page)
+        # No proxy marker, so it is not converted and reaches the logger.
+        mock_page.goto = AsyncMock(
+            side_effect=Exception(
+                "failed via http://acctzone9:s3cr3t@gate.example:7000"
+            )
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            caplog.at_level(logging.WARNING),
+            pytest.raises(Exception),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert "s3cr3t" not in caplog.text
+        assert "acctzone9" not in caplog.text
+
+
+class TestNavigationFailureCrossesTheToolBoundaryClean:
+    """The re-raised exception itself must be credential-free.
+
+    Redacting the extractor's own trace and log is not enough: everything
+    downstream logs the exception too, starting with the catch-all in
+    error_handler and FastMCP's handler above it.
+    """
+
+    async def test_reraised_exception_carries_no_credentials(
+        self, mock_page, monkeypatch
+    ):
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_username = "acctzone9"
+        config.browser.proxy_password = "s3cr3t"
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=Exception(
+                "failed via http://acctzone9:s3cr3t@gate.example:7000"
+            )
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(Exception) as excinfo,
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert "s3cr3t" not in str(excinfo.value)
+        assert "acctzone9" not in str(excinfo.value)
+        # The raw error must not survive as a cause either: the handlers
+        # downstream print the whole chain.
+        assert excinfo.value.__cause__ is None

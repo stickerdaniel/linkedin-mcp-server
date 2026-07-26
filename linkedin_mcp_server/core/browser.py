@@ -23,7 +23,7 @@ from linkedin_mcp_server.common_utils import (
 
 from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
 
-from .exceptions import NetworkError
+from .exceptions import NetworkError, ProxyConnectionError
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,19 @@ class BrowserManager:
                     "so the profile is kept. Restart the server to recover."
                 ) from e
             if isinstance(e, Exception):
-                raise NetworkError(f"Failed to start browser: {e}") from e
+                # A rejected proxy (bad scheme, SOCKS auth) fails at launch
+                # rather than on navigation. Reported as itself, with the
+                # credentials stripped and the raw cause dropped: the top-level
+                # handlers log the whole cause chain.
+                from .proxy_errors import is_proxy_error, redact_proxy_credentials
+
+                if is_proxy_error(e):
+                    raise ProxyConnectionError(
+                        f"Failed to start browser: {redact_proxy_credentials(str(e))}"
+                    ) from None
+                raise NetworkError(
+                    f"Failed to start browser: {redact_proxy_credentials(str(e))}"
+                ) from e
             raise
 
     async def close(self) -> bool:

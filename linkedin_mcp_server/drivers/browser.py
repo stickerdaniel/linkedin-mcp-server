@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
@@ -18,7 +19,12 @@ from linkedin_mcp_server.core import (
     BrowserManager,
     detect_auth_barrier_quick,
     detect_rate_limit,
+    goto_reporting_proxy_errors,
     is_logged_in,
+    proxy_hint,
+    raise_if_proxy_configured,
+    redact_proxy_credentials,
+    raise_if_proxy_error,
     resolve_remember_me_prompt,
 )
 
@@ -116,9 +122,13 @@ def _apply_browser_settings(browser: BrowserManager) -> None:
 async def _log_feed_failure_context(
     browser: BrowserManager,
     reason: str,
-    exc: Exception | None = None,
 ) -> None:
-    """Log the page state when /feed/ validation fails."""
+    """Log the page state when /feed/ validation fails.
+
+    *reason* must already be redacted. The exception itself is deliberately not
+    logged: a driver error can quote the proxy URL, and this log is what users
+    paste into issue reports.
+    """
     page = browser.page
 
     try:
@@ -146,7 +156,6 @@ async def _log_feed_failure_context(
         title,
         remember_me,
         " ".join(body_text.split())[:200],
-        exc_info=exc,
     )
 
 
@@ -157,7 +166,8 @@ async def _feed_auth_succeeds(
 ) -> bool:
     """Validate that /feed/ loads without an auth barrier."""
     try:
-        await browser.page.goto(
+        await goto_reporting_proxy_errors(
+            browser.page,
             "https://www.linkedin.com/feed/",
             wait_until="domcontentloaded",
         )
@@ -187,6 +197,13 @@ async def _feed_auth_succeeds(
             return False
         return True
     except Exception as exc:
+        # Before anything else: a proxy fault is not a dead session. Returning
+        # False here would have the caller retire a valid profile and tell the
+        # user to log in again, which cannot fix an unreachable proxy. Checked
+        # first because no page loaded, so there is no remember-me prompt to
+        # resolve, and it also catches a ProxyConnectionError raised by the
+        # recursive retries above, which run inside this try.
+        raise_if_proxy_error(exc)
         if allow_remember_me and await resolve_remember_me_prompt(browser.page):
             await stabilize_navigation(
                 "remember-me resolution after feed failure", logger
@@ -194,35 +211,61 @@ async def _feed_auth_succeeds(
             await record_page_trace(
                 browser.page,
                 "feed-after-remember-me-error-recovery",
-                extra={"error": f"{type(exc).__name__}: {exc}"},
+                extra={
+                    "error": redact_proxy_credentials(f"{type(exc).__name__}: {exc}")
+                },
             )
             return await _feed_auth_succeeds(browser, allow_remember_me=False)
+        # A failed navigation still leaves a URL and a title behind, and the
+        # quick check reads only those. LinkedIn may have committed a redirect
+        # to /login and merely missed the load event, which is real evidence
+        # about the session and must outrank the proxy explanation below.
+        barrier = await detect_auth_barrier_quick(browser.page)
+        detail = redact_proxy_credentials(f"{type(exc).__name__}: {exc}")
         await record_page_trace(
             browser.page,
             "feed-navigation-error",
-            extra={"error": f"{type(exc).__name__}: {exc}"},
+            extra={"error": detail, "barrier": barrier},
         )
-        await _log_feed_failure_context(browser, str(exc), exc)
+        # Redacted, and without exc_info: driver errors can quote the proxy URL,
+        # and both destinations here outlive the call -- the trace is written to
+        # disk and the log is what users paste into issue reports.
+        await _log_feed_failure_context(browser, detail)
+        if barrier is None:
+            # Nothing loaded and no barrier, so nothing proves the session is
+            # dead -- and with a proxy in front, the most likely cause is the
+            # proxy. Wrong credentials in particular produce no proxy error code
+            # at all: Chromium retries the 407 challenge until the navigation
+            # times out (verified against a local authenticating relay), so the
+            # marker check above cannot catch it. Reporting False would hand the
+            # caller an AuthenticationError, whose recovery moves the stored
+            # profile aside and starts a login through the same broken proxy.
+            raise_if_proxy_configured(exc)
         return False
 
 
-def _launch_options() -> tuple[dict[str, str], dict[str, int]]:
+def _launch_options() -> tuple[dict[str, Any], dict[str, int]]:
     config = get_config()
     viewport = {
         "width": config.browser.viewport_width,
         "height": config.browser.viewport_height,
     }
-    launch_options: dict[str, str] = {}
+    launch_options: dict[str, Any] = {}
     if config.browser.chrome_path:
         launch_options["executable_path"] = config.browser.chrome_path
         logger.info("Using custom Chrome path: %s", config.browser.chrome_path)
+    proxy = config.browser.proxy_settings()
+    if proxy:
+        launch_options["proxy"] = proxy
+        # Only the server: the credentials must not reach the log.
+        logger.info("Routing browser traffic through proxy %s", proxy["server"])
     return launch_options, viewport
 
 
 def _make_browser(
     profile_dir: Path,
     *,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     user_agent: str | None = None,
 ) -> BrowserManager:
@@ -243,7 +286,7 @@ def _make_browser(
 async def _authenticate_existing_profile(
     profile_dir: Path,
     *,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     user_agent: str | None = None,
 ) -> BrowserManager:
@@ -257,7 +300,8 @@ async def _authenticate_existing_profile(
         await browser.start()
         if not await _feed_auth_succeeds(browser):
             raise AuthenticationError(
-                f"Stored runtime profile is invalid: {profile_dir}. Run with --login to refresh the source session."
+                f"Stored runtime profile is invalid: {profile_dir}. "
+                f"Run with --login to refresh the source session.{proxy_hint()}"
             )
         browser.is_authenticated = True
         return browser
@@ -305,8 +349,10 @@ async def validate_imported_cookies(
     )
     try:
         await browser.start()
-        await browser.page.goto(
-            "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
+        await goto_reporting_proxy_errors(
+            browser.page,
+            "https://www.linkedin.com/feed/",
+            wait_until="domcontentloaded",
         )
         await stabilize_navigation("import pre-validate feed navigation", logger)
         if not await browser.import_cookies(cookie_path, preset_name="bridge_core"):
@@ -343,7 +389,7 @@ async def _bridge_runtime_profile(
     cookie_path: Path,
     source_state: SourceState,
     runtime_id: str,
-    launch_options: dict[str, str],
+    launch_options: dict[str, Any],
     viewport: dict[str, int],
     persist_runtime: bool,
 ) -> BrowserManager:
@@ -365,8 +411,10 @@ async def _bridge_runtime_profile(
             "bridge-browser-started",
             extra={"profile_dir": str(profile_dir)},
         )
-        await browser.page.goto(
-            "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
+        await goto_reporting_proxy_errors(
+            browser.page,
+            "https://www.linkedin.com/feed/",
+            wait_until="domcontentloaded",
         )
         await stabilize_navigation("pre-import feed navigation", logger)
         await record_page_trace(browser.page, "bridge-after-pre-import-feed")
@@ -382,7 +430,8 @@ async def _bridge_runtime_profile(
         )
         if not await _feed_auth_succeeds(browser):
             raise AuthenticationError(
-                "No authentication found. Run with --login to create a profile."
+                "No authentication found. "
+                f"Run with --login to create a profile.{proxy_hint()}"
             )
         await stabilize_navigation("post-import feed validation", logger)
         await record_page_trace(browser.page, "bridge-after-feed-validation")

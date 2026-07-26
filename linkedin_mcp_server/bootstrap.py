@@ -651,6 +651,19 @@ def _auto_import_allowed() -> bool:
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         # No host browser and no keychain inside a container.
         return False
+    if config.browser.proxy_server:
+        # The point of configuring a proxy is that LinkedIn sees one address.
+        # A local browser's session was created on the real one, so silently
+        # importing it and then driving it through the proxy produces exactly
+        # the IP change that trips a security checkpoint. Explicit
+        # --import-from-browser still works; only the automatic path defers to
+        # --login through the proxy.
+        logger.info(
+            "Skipping auto-import: a proxy is configured, so a session from a "
+            "local browser would move to a different address. Use --login to "
+            "create the session through the proxy."
+        )
+        return False
     # A network-exposed HTTP daemon must never silently harvest a cookie on a
     # request from a remote client. Gate on the BIND ADDRESS, not the transport
     # type: a streamable-http server on a loopback host is the documented local
@@ -719,7 +732,11 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
     from linkedin_mcp_server.browser_import.orchestrate import (
         import_session_from_browser,
     )
-    from linkedin_mcp_server.core.exceptions import AuthenticationError, NetworkError
+    from linkedin_mcp_server.core.exceptions import (
+        AuthenticationError,
+        NetworkError,
+        ProxyConnectionError,
+    )
     from linkedin_mcp_server.exceptions import (
         CookieDecryptionError,
         LinkedInMCPError,
@@ -760,6 +777,11 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
     except TimeoutError:
         logger.info("Auto-import timed out after 60s; falling back to manual login")
         return False
+    except ProxyConnectionError:
+        # Ahead of NetworkError, which it subclasses. A dead proxy is not a
+        # missing browser session: swallowing it here would hide the real cause
+        # and fall back to a manual login that has to fail the same way.
+        raise
     except (
         NoLinkedInSessionFoundError,
         CookieDecryptionError,
@@ -813,9 +835,18 @@ async def _start_login_if_needed(ctx: Context | None = None) -> None:
     # Await an import (ours or a peer's). On success the caller falls through to
     # the scrape; on failure we re-enter to take the manual-login path.
     if import_task is not None:
+        # Imported here, like the other core exceptions in this module, to keep
+        # bootstrap out of the config -> core import cycle.
+        from linkedin_mcp_server.core.exceptions import ProxyConnectionError
+
         try:
             await import_task
         except asyncio.CancelledError:
+            raise
+        except ProxyConnectionError:
+            # The import itself re-raises this rather than reporting "no
+            # session"; swallowing it here would undo that and send the user
+            # into a manual login that has to fail through the same proxy.
             raise
         except Exception:  # noqa: BLE001 - any import failure -> manual login
             logger.debug("Auto-import task failed", exc_info=True)
