@@ -347,6 +347,14 @@ docker run -it --rm \
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
+The HTTP server answers requests addressed to `localhost` or to the address it
+is bound to, and refuses others with `421`. That is what stops a website you
+merely visit from pointing a domain at this server and using your LinkedIn
+session through your own browser. If you reach the server by a hostname
+instead — a machine name on your network, or through a reverse proxy — that
+request is refused, and the endpoint has no authentication, so put it behind
+something that does.
+
 **Test with mcp inspector:**
 
 1. Install and run mcp inspector ```bunx @modelcontextprotocol/inspector```

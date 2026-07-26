@@ -184,6 +184,18 @@ class TestLegitimateClientsStillWork:
             pytest.skip("a localhost Host is genuinely foreign to a remote server")
         assert post({"Host": host}) == 200
 
+    def test_a_hostname_the_server_does_not_know_is_refused(self, post) -> None:
+        """The documented cost of strict validation, recorded deliberately.
+
+        Reaching an exposed server by its machine name rather than its address
+        gets 421, because the guard trusts the address it is bound to and
+        nothing else. Every documented flow uses localhost or an address, so
+        this affects setups that are not described here — and it fails loudly
+        with a status that names the problem, rather than quietly working until
+        someone points a domain at the same address.
+        """
+        assert post({"Host": "my-laptop.local:8000"}) == 421
+
     def test_the_servers_own_address_is_served(self, post, base_url: str) -> None:
         """However the server is reached, its own address is a valid Host.
 
