@@ -489,8 +489,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
         default=None,
         metavar="USER",
         help=(
-            "Username for the proxy. The password has no flag on purpose; set "
-            "PROXY_PASSWORD instead, so it stays out of the process list"
+            "Username for the proxy. Visible in the process list like any "
+            "argument, which is acceptable because it grants nothing without "
+            "the password; that one has no flag on purpose, set PROXY_PASSWORD"
         ),
     )
 

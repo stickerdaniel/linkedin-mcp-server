@@ -214,6 +214,18 @@ while a container is running.
 
 **Using a proxy:**
 
+> **Most people should not use one.** LinkedIn's own guidance for reducing
+> security challenges is to avoid a VPN or proxy, and it scores the addresses a
+> session signs in from. A home connection you have used for years is a trust
+> signal; a commercial exit node with a history you cannot see is not, and
+> switching to one is itself the kind of change that triggers a checkpoint.
+> A proxy is worth it in one case: the server runs somewhere its address is
+> obviously a data centre, or in a different country from the account's history.
+> Even then, a WireGuard or Tailscale exit node on your own home network beats
+> any paid provider, because the address really is yours. If you do buy one,
+> take a dedicated static ISP address and keep it, rather than a rotating
+> residential pool.
+
 - Route the browser through a proxy with `--proxy-server http://host:port` (`http`, `https`, `socks4` and `socks5` are accepted). Only browser traffic is routed, not the MCP transport.
 - Credentials go in `PROXY_USERNAME` and `PROXY_PASSWORD`. There is no `--proxy-password` flag on purpose: command-line arguments are readable by every other user on the machine. `PROXY_SERVER` also accepts the combined `http://user:pass@host:port` form most providers hand out.
 - Chromium cannot authenticate to a SOCKS proxy, so credentials require an `http(s)` endpoint. If your provider only offers authenticated SOCKS5, run a local relay that holds the credentials and point the server at that.
@@ -412,6 +424,18 @@ belongs behind something that provides it.
 
 **Using a proxy:**
 
+> **Most people should not use one.** LinkedIn's own guidance for reducing
+> security challenges is to avoid a VPN or proxy, and it scores the addresses a
+> session signs in from. A home connection you have used for years is a trust
+> signal; a commercial exit node with a history you cannot see is not, and
+> switching to one is itself the kind of change that triggers a checkpoint.
+> A proxy is worth it in one case: the server runs somewhere its address is
+> obviously a data centre, or in a different country from the account's history.
+> Even then, a WireGuard or Tailscale exit node on your own home network beats
+> any paid provider, because the address really is yours. If you do buy one,
+> take a dedicated static ISP address and keep it, rather than a rotating
+> residential pool.
+
 - Route the browser through a proxy with `--proxy-server http://host:port` (`http`, `https`, `socks4` and `socks5` are accepted). Only browser traffic is routed, not the MCP transport.
 - Credentials go in `PROXY_USERNAME` and `PROXY_PASSWORD`. There is no `--proxy-password` flag on purpose: command-line arguments are readable by every other user on the machine. `PROXY_SERVER` also accepts the combined `http://user:pass@host:port` form most providers hand out.
 - Chromium cannot authenticate to a SOCKS proxy, so credentials require an `http(s)` endpoint. If your provider only offers authenticated SOCKS5, run a local relay that holds the credentials and point the server at that.
@@ -544,6 +568,18 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 - Users on slow connections may need higher values for either.
 
 **Using a proxy:**
+
+> **Most people should not use one.** LinkedIn's own guidance for reducing
+> security challenges is to avoid a VPN or proxy, and it scores the addresses a
+> session signs in from. A home connection you have used for years is a trust
+> signal; a commercial exit node with a history you cannot see is not, and
+> switching to one is itself the kind of change that triggers a checkpoint.
+> A proxy is worth it in one case: the server runs somewhere its address is
+> obviously a data centre, or in a different country from the account's history.
+> Even then, a WireGuard or Tailscale exit node on your own home network beats
+> any paid provider, because the address really is yours. If you do buy one,
+> take a dedicated static ISP address and keep it, rather than a rotating
+> residential pool.
 
 - Route the browser through a proxy with `--proxy-server http://host:port` (`http`, `https`, `socks4` and `socks5` are accepted). Only browser traffic is routed, not the MCP transport.
 - Credentials go in `PROXY_USERNAME` and `PROXY_PASSWORD`. There is no `--proxy-password` flag on purpose: command-line arguments are readable by every other user on the machine. `PROXY_SERVER` also accepts the combined `http://user:pass@host:port` form most providers hand out.
