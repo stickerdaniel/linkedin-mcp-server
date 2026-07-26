@@ -17,6 +17,7 @@ from linkedin_mcp_server.core import (
     detect_auth_barrier_quick,
     raise_if_proxy_error,
     redact_proxy_credentials,
+    redacted_copy,
     resolve_remember_me_prompt,
 )
 from linkedin_mcp_server.core.exceptions import (
@@ -912,7 +913,13 @@ class LinkedInExtractor:
                 )
                 await self._log_navigation_failure(url, wait_until, exc, hops)
                 await self._raise_if_auth_barrier(url, navigation_error=exc)
-                raise
+                # Re-raised as a redacted copy rather than the original: with a
+                # proxy configured, a driver error can quote the proxy URL, and
+                # everything downstream from here logs the exception -- the
+                # catch-all in error_handler, and FastMCP's own handler above
+                # that. Only the message is rewritten; the type is preserved so
+                # callers that branch on it are unaffected.
+                raise redacted_copy(exc) from None
 
             barrier = await detect_auth_barrier_quick(self._page)
             if not barrier:

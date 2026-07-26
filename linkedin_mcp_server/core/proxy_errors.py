@@ -114,6 +114,25 @@ def raise_if_proxy_error(error: BaseException) -> None:
         raise as_proxy_error(error) from None
 
 
+def redacted_copy(error: Exception) -> Exception:
+    """Return *error* with the proxy credentials stripped from its message.
+
+    For re-raising across a boundary that logs exceptions. The type is
+    preserved so callers branching on it are unaffected; only the message is
+    rewritten. Exceptions whose constructor takes more than a message are
+    returned unchanged rather than being rebuilt wrongly -- losing the
+    redaction is better than losing the error.
+    """
+    message = str(error)
+    redacted = redact_proxy_credentials(message)
+    if redacted == message:
+        return error
+    try:
+        return type(error)(redacted)
+    except Exception:
+        return ProxyConnectionError(redacted)
+
+
 def raise_if_proxy_configured(error: BaseException) -> None:
     """Re-raise a failed navigation as a proxy fault when a proxy is in use.
 

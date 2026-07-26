@@ -26,6 +26,7 @@ from .proxy_errors import (
     raise_if_proxy_configured,
     raise_if_proxy_error,
     redact_proxy_credentials,
+    redacted_copy,
 )
 from .utils import detect_rate_limit, handle_modal_close, scroll_to_bottom
 
@@ -48,6 +49,7 @@ __all__ = [
     "raise_if_proxy_configured",
     "raise_if_proxy_error",
     "redact_proxy_credentials",
+    "redacted_copy",
     "detect_rate_limit",
     "handle_modal_close",
     "is_logged_in",

@@ -11,6 +11,7 @@ from typing import NoReturn
 
 from fastmcp.exceptions import ToolError
 
+from linkedin_mcp_server.core.proxy_errors import redact_proxy_credentials
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     ElementNotFoundError,
@@ -195,5 +196,14 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         )
 
     else:
-        logger.error("Unexpected error%s: %s", ctx, exception, exc_info=True)
+        # Redacted, and without exc_info: this is the catch-all for exceptions
+        # nothing else classified, so a raw driver error quoting the proxy URL
+        # arrives here intact -- and both the message and the traceback would
+        # otherwise carry the credentials into the log users attach to issue
+        # reports.
+        logger.error(
+            "Unexpected error%s: %s",
+            ctx,
+            redact_proxy_credentials(f"{type(exception).__name__}: {exception}"),
+        )
         raise exception

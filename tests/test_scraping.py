@@ -5834,3 +5834,48 @@ class TestNavigationFailureLogRedaction:
 
         assert "s3cr3t" not in caplog.text
         assert "acctzone9" not in caplog.text
+
+
+class TestNavigationFailureCrossesTheToolBoundaryClean:
+    """The re-raised exception itself must be credential-free.
+
+    Redacting the extractor's own trace and log is not enough: everything
+    downstream logs the exception too, starting with the catch-all in
+    error_handler and FastMCP's handler above it.
+    """
+
+    async def test_reraised_exception_carries_no_credentials(
+        self, mock_page, monkeypatch
+    ):
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_username = "acctzone9"
+        config.browser.proxy_password = "s3cr3t"
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.goto = AsyncMock(
+            side_effect=Exception(
+                "failed via http://acctzone9:s3cr3t@gate.example:7000"
+            )
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(Exception) as excinfo,
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        assert "s3cr3t" not in str(excinfo.value)
+        assert "acctzone9" not in str(excinfo.value)
+        # The raw error must not survive as a cause either: the handlers
+        # downstream print the whole chain.
+        assert excinfo.value.__cause__ is None

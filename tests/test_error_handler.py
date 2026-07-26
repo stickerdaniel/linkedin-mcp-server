@@ -161,3 +161,30 @@ def test_proxy_error_skips_issue_diagnostics(monkeypatch):
 
     with pytest.raises(ToolError):
         raise_tool_error(ProxyConnectionError("proxy gate:7000 is unreachable"))
+
+
+def test_unknown_exception_log_is_redacted(monkeypatch, caplog):
+    """The catch-all log must not carry proxy credentials.
+
+    Anything the handler cannot classify lands here, so a raw driver error
+    quoting the proxy URL arrives intact. This is the boundary every tool
+    wrapper funnels unknown failures through.
+    """
+    import logging
+
+    from linkedin_mcp_server.config.schema import AppConfig
+
+    config = AppConfig()
+    config.browser.proxy_server = "http://gate.example:7000"
+    config.browser.proxy_username = "acctzone9"
+    config.browser.proxy_password = "s3cr3t"
+    monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(Exception):
+        raise_tool_error(
+            Exception("failed via http://acctzone9:s3cr3t@gate.example:7000"),
+            "get_person_profile",
+        )
+
+    assert "s3cr3t" not in caplog.text
+    assert "acctzone9" not in caplog.text
