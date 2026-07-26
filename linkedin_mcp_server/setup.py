@@ -118,13 +118,23 @@ async def _login_into_fresh_profile(user_data_dir: Path, *, config: Any) -> bool
         # Wait for persistent context to flush cookies to disk
         await asyncio.sleep(2)
 
-        # Verify session cookie was persisted
+        # Verify the li_at session cookie was persisted. wait_for_manual_login
+        # already gates on it, so this is a defensive backstop: if it is still
+        # absent, refuse to export a half-baked session (which would later fail
+        # /feed/ validation and be quarantined). Returning False reopens the
+        # login browser on the next tool call instead of poisoning the profile.
         cookies = await browser.context.cookies()
         li_at = [c for c in cookies if c["name"] == "li_at"]
         if not li_at:
-            print("   Warning: Session cookie not found. Login may not have persisted.")
-            print("   Waiting longer for cookie propagation...")
             await asyncio.sleep(5)
+            cookies = await browser.context.cookies()
+            li_at = [c for c in cookies if c["name"] == "li_at"]
+        if not li_at:
+            print(
+                "   Error: Session cookie (li_at) never appeared — login did not "
+                "complete. Not exporting. Retry the tool to reopen the browser."
+            )
+            return False
 
         # Export source-session cookies for the one-time foreign-runtime bridge.
         # Docker now checkpoint-commits its own derived runtime profile after the

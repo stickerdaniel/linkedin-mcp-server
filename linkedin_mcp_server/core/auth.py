@@ -92,6 +92,25 @@ async def is_logged_in(page: Page) -> bool:
         raise
 
 
+async def has_auth_cookie(page: Page) -> bool:
+    """Return True only once the ``li_at`` session cookie has been issued.
+
+    ``li_at`` is the authoritative signal that LinkedIn has *fully* authenticated
+    the session — it is set only after every challenge (password, 2FA, app
+    verification, captcha) clears. Nav chrome can flash on screen during the 2FA
+    handshake before ``li_at`` exists, so relying on :func:`is_logged_in` alone
+    lets the login loop return — and the browser close — mid-2FA, persisting a
+    half-baked session that later fails ``/feed/`` validation. Gating on this
+    cookie closes that race.
+    """
+    try:
+        cookies = await page.context.cookies()
+    except Exception:
+        logger.warning("Could not read cookies while checking login completion")
+        return False
+    return any(c.get("name") == "li_at" and c.get("value") for c in cookies)
+
+
 async def detect_auth_barrier(page: Page) -> str | None:
     """Detect LinkedIn auth/account-picker barriers on the current page."""
     return await _detect_auth_barrier(page, include_body_text=True)
@@ -271,7 +290,11 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
                 raise _timeout_error()
             continue
 
-        if await is_logged_in(page):
+        # Require the authoritative li_at cookie, not just logged-in-looking
+        # chrome. During app/2FA verification LinkedIn can render nav elements
+        # before li_at is issued; returning then would close the browser
+        # mid-challenge and persist an unusable session. See has_auth_cookie.
+        if await is_logged_in(page) and await has_auth_cookie(page):
             logger.info("Manual login completed successfully")
             return
 

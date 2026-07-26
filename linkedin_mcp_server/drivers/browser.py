@@ -15,6 +15,7 @@ from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    NetworkError,
     detect_auth_barrier_quick,
     detect_rate_limit,
     is_logged_in,
@@ -131,12 +132,47 @@ async def _log_feed_failure_context(
     )
 
 
+# Chrome/patchright network-layer failures that mean "couldn't reach LinkedIn",
+# NOT "the session is invalid". Treating these as auth failures wrongly discards
+# a perfectly good logged-in session on a transient DNS/connectivity blip.
+_TRANSIENT_NETWORK_ERROR_MARKERS = (
+    "err_name_not_resolved",
+    "err_internet_disconnected",
+    "err_network_changed",
+    "err_connection_reset",
+    "err_connection_closed",
+    "err_connection_refused",
+    "err_connection_timed_out",
+    "err_connection_aborted",
+    "err_timed_out",
+    "err_address_unreachable",
+    "err_network_access_denied",
+    "err_proxy_connection_failed",
+    "err_socket_not_connected",
+    "err_empty_response",
+    "err_ssl_protocol_error",
+)
+
+
+def _is_transient_network_error(exc: Exception) -> bool:
+    """True if the exception is a network-layer failure, not an auth failure."""
+    message = str(exc).lower()
+    return any(marker in message for marker in _TRANSIENT_NETWORK_ERROR_MARKERS)
+
+
 async def _feed_auth_succeeds(
     browser: BrowserManager,
     *,
     allow_remember_me: bool = True,
 ) -> bool:
-    """Validate that /feed/ loads without an auth barrier."""
+    """Validate that /feed/ loads without an auth barrier.
+
+    Raises:
+        NetworkError: If ``/feed/`` could not be reached due to a transient
+            network/DNS failure. The caller must treat this as "could not
+            verify right now" and surface a retriable error — NOT as an expired
+            session, which would quarantine valid auth state and force re-login.
+    """
     try:
         await browser.page.goto(
             "https://www.linkedin.com/feed/",
@@ -184,6 +220,14 @@ async def _feed_auth_succeeds(
             extra={"error": f"{type(exc).__name__}: {exc}"},
         )
         await _log_feed_failure_context(browser, str(exc), exc)
+        if _is_transient_network_error(exc):
+            # Could not reach LinkedIn — do NOT discard the session. Surface a
+            # retriable error so valid auth state survives the network blip.
+            raise NetworkError(
+                "Could not reach LinkedIn to verify the session "
+                f"({type(exc).__name__}). This looks like a temporary network "
+                "issue, not an expired login. Retry the tool in a moment."
+            ) from exc
         return False
 
 

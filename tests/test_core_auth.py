@@ -8,6 +8,7 @@ from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.auth import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
+    has_auth_cookie,
     is_logged_in,
     resolve_remember_me_prompt,
     wait_for_manual_login,
@@ -210,10 +211,65 @@ async def test_wait_for_manual_login_clicks_saved_account(monkeypatch):
         "linkedin_mcp_server.core.auth.resolve_remember_me_prompt", fake_resolve
     )
     monkeypatch.setattr("linkedin_mcp_server.core.auth.is_logged_in", fake_is_logged_in)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.has_auth_cookie", AsyncMock(return_value=True)
+    )
 
     await wait_for_manual_login(page, timeout=1000)
 
     assert clicked["value"] is True
+
+
+@pytest.mark.asyncio
+async def test_has_auth_cookie_detects_li_at():
+    page = MagicMock()
+    page.context.cookies = AsyncMock(
+        return_value=[{"name": "li_at", "value": "AQED..."}]
+    )
+    assert await has_auth_cookie(page) is True
+
+
+@pytest.mark.asyncio
+async def test_has_auth_cookie_false_without_li_at():
+    page = MagicMock()
+    # Nav chrome can be present mid-2FA, but li_at is not yet issued.
+    page.context.cookies = AsyncMock(
+        return_value=[{"name": "lidc", "value": "x"}, {"name": "li_at", "value": ""}]
+    )
+    assert await has_auth_cookie(page) is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_manual_login_waits_until_li_at_present(monkeypatch):
+    """Logged-in-looking chrome alone must not end the wait — li_at must exist."""
+    page = MagicMock()
+    cookie_ready = {"value": False}
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.resolve_remember_me_prompt",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.is_logged_in", AsyncMock(return_value=True)
+    )
+
+    async def fake_has_cookie(_page):
+        # First poll: nav present but li_at not yet issued (mid-2FA).
+        # Second poll: li_at has landed.
+        if not cookie_ready["value"]:
+            cookie_ready["value"] = True
+            return False
+        return True
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.auth.has_auth_cookie", fake_has_cookie
+    )
+    monkeypatch.setattr("linkedin_mcp_server.core.auth.asyncio.sleep", AsyncMock())
+
+    await wait_for_manual_login(page, timeout=10000)
+
+    # Returned only after li_at appeared (second poll), proving the gate held.
+    assert cookie_ready["value"] is True
 
 
 @pytest.mark.asyncio
