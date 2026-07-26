@@ -90,8 +90,8 @@ class TestExposedBindWarning:
     """The endpoint has no authentication, so the bind address is the guard.
 
     The warning used to fire only for a literal 0.0.0.0 or ::, which meant the
-    most likely way to expose a session by accident — naming a LAN address
-    outright — happened in silence.
+    most likely way to expose a session by accident, naming a LAN address
+    outright, happened in silence.
     """
 
     @staticmethod

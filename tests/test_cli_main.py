@@ -2,6 +2,7 @@
 
 import importlib.metadata
 import json
+import logging
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -82,6 +83,62 @@ def test_main_interactive_prompts_when_transport_not_explicit(
         path=config.server.path,
         host_origin_protection=True,
     )
+    assert config.server.transport == "streamable-http"
+
+
+def test_choosing_http_at_the_prompt_warns_about_an_exposed_bind(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Answering the prompt has to update the stored transport, not a local.
+
+    Several checks read it to decide how exposed this process is. Leaving it at
+    stdio told the bind-address warning there was no listener to warn about,
+    and told the cookie-import gate that a server listening on every interface
+    was a private one.
+    """
+    config = _make_config(
+        is_interactive=True, transport="stdio", transport_explicitly_set=False
+    )
+    config.server.host = "0.0.0.0"
+    _patch_main_dependencies(monkeypatch, config)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.choose_transport_interactive",
+        lambda: "streamable-http",
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: MagicMock()
+    )
+
+    with caplog.at_level(logging.WARNING):
+        cli_main.main()
+
+    assert config.server.transport == "streamable-http"
+    assert "no authentication" in caplog.text
+
+
+def test_choosing_stdio_at_the_prompt_leaves_no_listener_recorded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The host is meaningless without a listener, so it must not warn."""
+    config = _make_config(
+        is_interactive=True, transport="streamable-http", transport_explicitly_set=False
+    )
+    config.server.host = "0.0.0.0"
+    _patch_main_dependencies(monkeypatch, config)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.choose_transport_interactive", lambda: "stdio"
+    )
+    mcp = MagicMock()
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.create_mcp_server", lambda **_kwargs: mcp
+    )
+
+    with caplog.at_level(logging.WARNING):
+        cli_main.main()
+
+    assert config.server.transport == "stdio"
+    assert "no authentication" not in caplog.text
+    mcp.run.assert_called_once_with(transport="stdio")
 
 
 def test_main_explicit_transport_skips_prompt(

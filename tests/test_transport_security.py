@@ -43,7 +43,7 @@ _ACCEPT = {
 _HOST_ORIGIN_PROTECTION = True
 
 # Every case runs against both, because the guard can behave differently
-# depending on which address the connection landed on — and it once did. The
+# depending on which address the connection landed on, and it once did. The
 # "auto" setting validated only a loopback connection, so a server bound to
 # 0.0.0.0 and reached over its LAN address checked nothing, which is precisely
 # the exposed case. A suite that only ever connected to 127.0.0.1 could not see
@@ -80,7 +80,7 @@ def post(base_url: str, monkeypatch: pytest.MonkeyPatch):
             path="/mcp", host_origin_protection=_HOST_ORIGIN_PROTECTION
         )
         # base_url sets the ASGI scope's server address, which is what decides
-        # whether the connection looks local — not the Host header.
+        # whether the connection looks local, not the Host header.
         # raise_server_exceptions=False so a rejection arrives as its status
         # rather than an exception, which is what a real client would see.
         with TestClient(
@@ -178,8 +178,8 @@ class TestLegitimateClientsStillWork:
         """This is the documented Docker flow, and it needs both parameters.
 
         A published container port is reached at ``localhost``, but inside the
-        container the connection lands on the container's own address — a
-        non-loopback scope. So the case that actually ships is a localhost Host
+        container the connection lands on the container's own address, which
+        is a non-loopback scope. So the case that ships is a localhost Host
         arriving on a non-loopback server, and only running this against both
         scopes covers it.
         """
@@ -197,8 +197,8 @@ class TestLegitimateClientsStillWork:
         Reaching an exposed server by its machine name rather than its address
         gets 421, because the guard trusts the address it is bound to and
         nothing else. Every documented flow uses localhost or an address, so
-        this affects setups that are not described here — and it fails loudly
-        with a status that names the problem, rather than quietly working until
+        this affects setups that are not described here, and it fails loudly
+        with a status that names the problem rather than quietly working until
         someone points a domain at the same address.
         """
         assert post({"Host": "my-laptop.local:8000"}) == 421

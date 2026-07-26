@@ -50,11 +50,11 @@ LOOPBACK_HOSTNAMES: frozenset[str] = frozenset({"localhost"})
 def is_loopback_host(host: str) -> bool:
     """Whether *host* is reachable only from this machine.
 
-    Fails closed: anything this cannot positively identify as loopback — a
-    wildcard bind, a LAN address, a name that needs DNS to answer — counts as
-    reachable from elsewhere. Erring that way costs a warning and a skipped
-    cookie import; erring the other way would hand a logged-in session to the
-    network.
+    Fails closed: anything this cannot positively identify as loopback counts
+    as reachable from elsewhere, whether that is a wildcard bind, a LAN
+    address, or a name that needs DNS to answer. Erring that way costs a
+    warning and a skipped cookie import; erring the other way would hand a
+    logged-in session to the network.
 
     Address literals go through :mod:`ipaddress` rather than a spelling list,
     so the whole 127/8 range and IPv4-mapped forms are recognised for what they
@@ -280,8 +280,8 @@ class AppConfig:
         if not is_loopback_host(self.server.host):
             logger.warning(
                 "HTTP transport is binding to %s, which is reachable from "
-                "outside this machine. The MCP endpoint has no authentication "
-                "— anyone who can reach that address can use your LinkedIn "
+                "outside this machine. The MCP endpoint has no authentication, "
+                "so anyone who can reach that address can use your LinkedIn "
                 "session. Use 127.0.0.1 (default) unless you understand the "
                 "risk.",
                 self.server.host,
