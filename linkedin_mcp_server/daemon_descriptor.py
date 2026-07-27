@@ -380,7 +380,13 @@ def publish(
 _MAX_DESCRIPTOR_BYTES = 64 * 1024
 
 
-def _read_own_file(path: Path, limit: int, *, missing_is_none: bool) -> str | None:
+def _read_own_file(
+    path: Path,
+    limit: int,
+    *,
+    missing_is_none: bool,
+    missing_message: str | None = None,
+) -> str | None:
     """Read a file this daemon wrote, refusing anything that is not one.
 
     Both files under the daemon directory go through here, because both are
@@ -394,7 +400,7 @@ def _read_own_file(path: Path, limit: int, *, missing_is_none: bool) -> str | No
 
     *missing_is_none* separates the two callers. Absence of a descriptor is the
     ordinary first-start case; absence of a token beside a published descriptor
-    is not.
+    is not, and *missing_message* is how that caller says why.
     """
     # O_NOFOLLOW fails on a symlink rather than resolving it, so the check and
     # the read cannot disagree about which file they mean. O_NONBLOCK has no
@@ -403,10 +409,20 @@ def _read_own_file(path: Path, limit: int, *, missing_is_none: bool) -> str | No
     try:
         fd = os.open(path, flags)
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
                 raise DescriptorError(
                     f"{path} is not a regular file, so it is not something this "
                     f"daemon wrote"
+                )
+            # Size checked before reading rather than by noticing a full
+            # buffer afterwards. Truncating instead would hand the caller a
+            # fragment, and a fragment of JSON is reported as malformed, which
+            # sends whoever reads that message looking for the wrong problem.
+            if info.st_size > limit:
+                raise DescriptorError(
+                    f"{path} is {info.st_size} bytes, far larger than anything "
+                    f"this daemon writes, so it is not one of its files"
                 )
             raw = os.read(fd, limit)
         finally:
@@ -414,9 +430,10 @@ def _read_own_file(path: Path, limit: int, *, missing_is_none: bool) -> str | No
     except FileNotFoundError:
         if missing_is_none:
             return None
-        raise DescriptorError(
-            "The daemon is publishing a descriptor with no token beside it"
-        ) from None
+        # Worded by the caller. Naming the token here would be right only for
+        # as long as it stays the only caller that asks absence to raise, and
+        # wrong without anything failing if that changes.
+        raise DescriptorError(missing_message or f"{path} is missing") from None
     except OSError as exc:
         # ELOOP arrives here when the path is a symlink, which is never
         # something this wrote and never something to follow.
@@ -486,8 +503,21 @@ def read_token(auth_root: Path, descriptor: DaemonDescriptor) -> str:
     client before any of the checks ran.
     """
     path = token_path(auth_root, descriptor.instance_id)
-    text = _read_own_file(path, _MAX_TOKEN_BYTES, missing_is_none=False)
-    assert text is not None  # missing_is_none=False raises rather than returning
+    # None only comes back for a missing file, and this caller asked for that
+    # to raise instead: a token missing beside a published descriptor is a
+    # daemon in a state it should not be in, not an ordinary absence. Checked
+    # rather than asserted, since assertions are removed under -O and this one
+    # guards what gets used as a credential.
+    text = _read_own_file(
+        path,
+        _MAX_TOKEN_BYTES,
+        missing_is_none=False,
+        missing_message=(
+            "The daemon is publishing a descriptor with no token beside it"
+        ),
+    )
+    if text is None:  # pragma: no cover - unreachable while the flag is False
+        raise DescriptorError(f"{path} could not be read")
     token = text.strip()
 
     if not descriptor.matches_token(token):
