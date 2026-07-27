@@ -295,7 +295,15 @@ def acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
         locked = False
         try:
             if not try_lock(fd, exclusive=exclusive):
-                return None
+                # Contention is only an answer about the file this opened. If
+                # the path has moved on since, the holder is holding something
+                # nobody else will consult, and reporting "busy" would refuse a
+                # lock that is free: measured, this returned None while the live
+                # path could be locked immediately. Retry against what is there
+                # now, exactly as a successful lock on a stale inode does.
+                if is_still_at(fd, path):
+                    return None
+                continue
             locked = True
             if is_still_at(fd, path):
                 keep = fd

@@ -170,6 +170,39 @@ class TestSingleProcess:
         finally:
             os.close(descriptor)
 
+    @_posix_unlink_race
+    def test_contention_on_a_stale_inode_retries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Being refused the old file says nothing about the current one.
+
+        Contention answers only about the file that was opened. If the path has
+        moved on since, the holder holds something nobody will consult, and
+        reporting busy refuses a lock that is free. Measured before the fix:
+        None came back while the live path could be locked immediately.
+        """
+        from linkedin_mcp_server import profile_lease
+
+        path = tmp_path / "profile.lock"
+        holder = profile_lease.open_lock_file(path)
+        assert profile_lease.try_lock(holder, exclusive=True)
+        real = profile_lease.try_lock
+
+        def rename_then_lock(fd: int, *, exclusive: bool) -> bool:
+            monkeypatch.setattr(profile_lease, "try_lock", real)
+            path.rename(tmp_path / "moved")
+            path.touch()
+            return real(fd, exclusive=exclusive)
+
+        monkeypatch.setattr(profile_lease, "try_lock", rename_then_lock)
+
+        try:
+            descriptor = profile_lease.acquire_locked_fd(path, exclusive=True)
+            assert descriptor is not None, "refused a lock nobody was holding"
+            os.close(descriptor)
+        finally:
+            os.close(holder)
+
     def test_lock_file_is_never_unlinked(self, tmp_path: Path) -> None:
         """Unlinking on release splits contenders across inodes.
 
@@ -709,8 +742,10 @@ class TestDegradedSignals:
     def test_an_unlinked_lock_file_is_reacquired(self, tmp_path: Path) -> None:
         """An orphaned inode protects nothing, so acquisition must retry.
 
-        Without the ``st_nlink`` check two processes end up holding locks on
+        Without the identity check two processes end up holding locks on
         different inodes for the same path and both believe they are the owner.
+        Unlinking is the easier half of that: it is also what a rename does,
+        which the test below covers and a link count cannot see.
         """
         from linkedin_mcp_server import profile_lease as module
 
@@ -735,7 +770,9 @@ class TestDegradedSignals:
 
         assert len(attempts) == 2, "the orphaned inode was accepted"
         assert lease._fd is not None
-        assert os.fstat(lease._fd).st_nlink > 0
+        # The descriptor is the file the path names, which is what the retry
+        # was for. A link count would also pass here and miss the rename case.
+        assert os.fstat(lease._fd).st_ino == lock_path.stat().st_ino
         assert lock_path.exists()
         lease.release()
 
