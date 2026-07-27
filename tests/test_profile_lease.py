@@ -140,6 +140,36 @@ class TestSingleProcess:
             holder.kill()
             holder.wait(timeout=10)
 
+    @_posix_unlink_race
+    def test_a_renamed_lock_file_is_not_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rename keeps the link count, so counting links cannot see it.
+
+        The inode holds its one link while the name comes to mean a different
+        file, so a count-based check passes and two processes end up locking
+        two inodes for one path. Comparing identity is what catches it.
+        """
+        from linkedin_mcp_server import profile_lease
+
+        path = tmp_path / "profile.lock"
+        real = profile_lease.try_lock
+
+        def rename_then_lock(fd: int, *, exclusive: bool) -> bool:
+            monkeypatch.setattr(profile_lease, "try_lock", real)
+            path.rename(tmp_path / "moved")
+            path.touch()
+            return real(fd, exclusive=exclusive)
+
+        monkeypatch.setattr(profile_lease, "try_lock", rename_then_lock)
+
+        descriptor = profile_lease.acquire_locked_fd(path, exclusive=True)
+        assert descriptor is not None
+        try:
+            assert os.fstat(descriptor).st_ino == path.stat().st_ino
+        finally:
+            os.close(descriptor)
+
     def test_lock_file_is_never_unlinked(self, tmp_path: Path) -> None:
         """Unlinking on release splits contenders across inodes.
 
