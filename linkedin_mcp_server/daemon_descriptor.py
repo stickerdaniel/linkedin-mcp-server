@@ -375,6 +375,62 @@ def publish(
     return descriptor_file, token_file
 
 
+#: A descriptor is a few hundred bytes of JSON. Bounded for the same reason the
+#: token read is: whatever sits at the path may not be what this wrote.
+_MAX_DESCRIPTOR_BYTES = 64 * 1024
+
+
+def _read_own_file(path: Path, limit: int, *, missing_is_none: bool) -> str | None:
+    """Read a file this daemon wrote, refusing anything that is not one.
+
+    Both files under the daemon directory go through here, because both are
+    read by a client that is about to act on them and neither is safe to open
+    by path alone. Three things are established before a byte is used:
+
+    * it is not a symbolic link, so the path cannot aim the read elsewhere;
+    * it is a regular file, so a named pipe cannot stand in for one;
+    * the open does not block, so such a pipe cannot hang the client inside
+      ``open`` before either check has run.
+
+    *missing_is_none* separates the two callers. Absence of a descriptor is the
+    ordinary first-start case; absence of a token beside a published descriptor
+    is not.
+    """
+    # O_NOFOLLOW fails on a symlink rather than resolving it, so the check and
+    # the read cannot disagree about which file they mean. O_NONBLOCK has no
+    # effect on the regular file this expects.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise DescriptorError(
+                    f"{path} is not a regular file, so it is not something this "
+                    f"daemon wrote"
+                )
+            raw = os.read(fd, limit)
+        finally:
+            os.close(fd)
+    except FileNotFoundError:
+        if missing_is_none:
+            return None
+        raise DescriptorError(
+            "The daemon is publishing a descriptor with no token beside it"
+        ) from None
+    except OSError as exc:
+        # ELOOP arrives here when the path is a symlink, which is never
+        # something this wrote and never something to follow.
+        raise DescriptorError(f"{path} could not be read: {exc}") from exc
+
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # Wrapped, because a caller distinguishing absence from untrusted state
+        # through DescriptorError would otherwise meet an unrelated exception
+        # for what is simply a file this did not write.
+        raise DescriptorError(f"{path} is not text this daemon wrote") from exc
+
+
 def read(auth_root: Path) -> DaemonDescriptor | None:
     """Return the published descriptor, or None when there is none.
 
@@ -384,30 +440,9 @@ def read(auth_root: Path) -> DaemonDescriptor | None:
     it would strand every other client attached to that daemon.
     """
     path = descriptor_path(auth_root)
-    # Checked without following, before anything is read. A symlink here is
-    # never something this wrote, and the two ways of getting it wrong both
-    # matter: a dangling one reads as absence, so a client elects a second owner
-    # while the first is still running, and a live one aims the read somewhere
-    # this never published.
-    try:
-        if path.is_symlink():
-            raise DescriptorError(
-                f"{path} is a symbolic link rather than a descriptor this "
-                f"daemon wrote. Remove it and start the server again."
-            )
-    except OSError as exc:
-        raise DescriptorError(
-            f"The daemon descriptor could not be read: {exc}"
-        ) from exc
-
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    raw = _read_own_file(path, _MAX_DESCRIPTOR_BYTES, missing_is_none=True)
+    if raw is None:
         return None
-    except OSError as exc:
-        raise DescriptorError(
-            f"The daemon descriptor could not be read: {exc}"
-        ) from exc
 
     try:
         parsed = json.loads(raw)
@@ -451,34 +486,9 @@ def read_token(auth_root: Path, descriptor: DaemonDescriptor) -> str:
     client before any of the checks ran.
     """
     path = token_path(auth_root, descriptor.instance_id)
-    try:
-        # O_NOFOLLOW fails on a symlink rather than resolving it, so the check
-        # and the read cannot disagree about which file they mean. O_NONBLOCK
-        # is what stops a named pipe planted at this path from hanging the
-        # client inside open(), before any check has had a chance to run; it
-        # has no effect on the regular file this expects.
-        flags = (
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        )
-        fd = os.open(path, flags)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                raise DescriptorError(
-                    f"{path} is not a regular file, so it is not a token this "
-                    f"daemon wrote"
-                )
-            token = os.read(fd, _MAX_TOKEN_BYTES).decode("utf-8").strip()
-        finally:
-            os.close(fd)
-    except FileNotFoundError as exc:
-        raise DescriptorError(
-            "The daemon is publishing a descriptor with no token beside it"
-        ) from exc
-    except OSError as exc:
-        # ELOOP lands here when the path is a symlink, which is never something
-        # this wrote and never something to follow.
-        raise DescriptorError(f"The daemon token could not be read: {exc}") from exc
+    text = _read_own_file(path, _MAX_TOKEN_BYTES, missing_is_none=False)
+    assert text is not None  # missing_is_none=False raises rather than returning
+    token = text.strip()
 
     if not descriptor.matches_token(token):
         raise DescriptorError(
