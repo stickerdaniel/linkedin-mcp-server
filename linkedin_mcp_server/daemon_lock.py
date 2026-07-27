@@ -229,17 +229,22 @@ class DaemonLock:
         """Take ownership of an inherited locked descriptor.
 
         POSIX only, like its counterpart, and for the measured reason above.
-        Called by a supervisor that was launched holding a copy. It does not
-        acquire anything: the lock is already held, and re-acquiring it against
-        our own copy would fail.
+        Called by a supervisor that was launched holding a copy.
 
-        The descriptor is checked to be this lock's own file and to actually
-        carry the lock, because adoption is the one path that takes a caller's
-        word for both. Measured with neither check: a descriptor belonging to
-        another auth root was adopted without complaint, so this process
-        reported it owned a browser nobody had elected it for while another
-        process took the real lock unopposed. An unlocked descriptor for the
-        right file did the same.
+        Adoption is the one path that would otherwise take a caller's word for
+        what it was handed, so the descriptor is checked to be this lock's own
+        file and then asked for the lock. Measured with neither check: a
+        descriptor belonging to another auth root was adopted without complaint,
+        so this process reported owning a browser nobody had elected it for
+        while another process took the real lock unopposed. An unlocked
+        descriptor for the right file did the same.
+
+        Asking for the lock is not a second acquisition. A process that already
+        holds it is granted it again against its own open file description, so
+        a genuine handover passes untouched; a descriptor that turns out to hold
+        nothing is turned into a real acquisition rather than a false claim.
+        Either way exactly one process ends up holding it, which is the whole
+        point of the exercise.
         """
         if not _INHERITED_LOCKS_TRANSFER:
             raise DaemonLockError(
