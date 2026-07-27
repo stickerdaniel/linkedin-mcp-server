@@ -34,6 +34,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from linkedin_mcp_server.common_utils import secure_mkdir
+from linkedin_mcp_server.profile_lease import is_still_at
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,26 @@ def harden_file(path: Path) -> None:
         raise PrivateStateError(f"{path} could not be opened to harden: {exc}") from exc
 
     try:
+        # O_RDONLY opens a directory quite happily on POSIX, and hardening one
+        # as if it were a file takes 0700 down to 0600, which removes the bit
+        # that makes it searchable. A caller that passes the wrong path should
+        # be told so rather than have its state directory quietly broken.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise PrivateStateError(f"{path} is not a regular file")
+
         _harden_posix_fd(fd, path, _PRIVATE_FILE_MODE)
+
+        # The descriptor is now provably private, but the promise is about the
+        # path: the caller's next step is to write a secret to it by name. If
+        # the name has come to mean something else in the meantime, hardening
+        # the old inode says nothing about where that write will land.
+        # Measured: this returned success while the path was already 0644
+        # again.
+        if not is_still_at(fd, path):
+            raise PrivateStateError(
+                f"{path} was replaced while it was being hardened, so it no "
+                f"longer refers to the file this made private."
+            )
     finally:
         os.close(fd)
 

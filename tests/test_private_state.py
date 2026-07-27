@@ -327,7 +327,9 @@ class TestRefusals:
         # Checking the path and then chmodding it resolves the name twice, so a
         # swap in between is followed by the second resolution. Measured with a
         # path-based implementation: an unrelated file became 0600 while this
-        # reported the token as private.
+        # reported the token as private. Hardening through the descriptor keeps
+        # the other file untouched, and the swap is then reported rather than
+        # passed off as success.
         token = tmp_path / "token"
         token.touch()
         token.chmod(0o644)
@@ -344,7 +346,8 @@ class TestRefusals:
 
         monkeypatch.setattr(os, "fchmod", swap_then_chmod)
 
-        harden_file(token)
+        with pytest.raises(PrivateStateError, match="was replaced"):
+            harden_file(token)
 
         assert stat.S_IMODE(victim.stat().st_mode) == 0o644
 
