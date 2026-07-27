@@ -8,11 +8,16 @@ configuration is compared through a fingerprint.
 
 Two fields exist because of measurements rather than tidiness:
 
-``profile_path`` and its filesystem identity
+``profile_path`` and ``profile_identity``
     ``auth_root_dir`` returns the profile's *parent*, so ``.../profile`` and
     ``.../profile2`` share one auth root and therefore one lock. The path is
-    retained for diagnostics, while device and inode decide identity so case or
-    Unicode aliases of one profile match without conflating sibling profiles.
+    retained for diagnostics; the identity is what is compared. It is built
+    from the parent's inode and the profile's own name rather than the
+    profile's inode, because the profile directory is replaced whenever a new
+    session is established: keyed by its inode, a descriptor would stop
+    matching its own profile at the first login. The parent's inode still
+    settles the case and Unicode aliases that a bare string comparison gets
+    wrong on an insensitive volume.
 
 ``config_fingerprint``
     Two clients that disagree about ``headless``, the user agent or the proxy
@@ -231,28 +236,48 @@ def _directory_identity(path: Path, *, label: str) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
-def _comparable_identity(path: Path) -> tuple[int, int] | str:
-    """Return an identity for *path* without creating or touching anything.
+def profile_identity(profile: Path) -> str:
+    """Return an identity for a browser profile, by location rather than inode.
 
-    Comparison must not have side effects. ``serves`` and ``mismatched_fields``
-    answer questions, and one of them runs while assembling a refusal message:
-    creating a browser profile directory in order to explain why a client was
-    turned away would be an odd thing for a client to discover afterwards.
+    Deliberately not the device and inode that address daemon state. A profile
+    directory is *replaced* in normal operation: every path that establishes a
+    new session rotates the old one into quarantine and Chromium creates a fresh
+    directory at the same place. Keyed by inode, a descriptor published before
+    the first login would stop matching its own profile the moment that login
+    happened, and the owner would keep the lock while no client could recognise
+    it. The auth root above it is not rotated, which is why the lock can use an
+    inode and this cannot.
 
-    A path that does not exist yet falls back to its spelling, which can never
-    equal a real device and inode pair. Two clients naming the same missing
-    directory still agree; a missing one and a real one do not. That errs
-    towards a refusal, which this module prefers over serving a client a browser
-    that is not the one it asked for.
+    Location, then, but not a bare string comparison: on a case-insensitive
+    volume ``resolve()`` keeps whichever spelling the caller used, so two names
+    for one profile would look like two profiles. The parent is identified by
+    its inode, and the final component is taken from the parent's own directory
+    listing rather than from the caller, which is what makes ``Profile`` and
+    ``profile`` land on the same answer where the filesystem says they are one
+    directory. ``normcase`` alone would not: it is a no-op on POSIX, and macOS
+    is case-insensitive all the same.
+
+    Creates nothing: this runs while assembling a refusal, and leaving a browser
+    profile behind to explain one would be a strange thing for a client to
+    discover afterwards.
     """
-    canonical = path.expanduser().resolve()
+    canonical = profile.expanduser().resolve()
+    spelled = f"path\0{os.path.normcase(str(canonical))}"
     try:
-        info = canonical.stat()
+        info = canonical.parent.stat()
+        if not stat.S_ISDIR(info.st_mode) or not info.st_ino:
+            return spelled
+        # The name as the filesystem holds it. scandir is one syscall over a
+        # directory this already resolved, and it is the only way to learn which
+        # spelling is the real one where several address one entry.
+        name = os.path.normcase(canonical.name)
+        for entry in os.scandir(canonical.parent):
+            if os.path.normcase(entry.name) == name or canonical.samefile(entry.path):
+                name = entry.name
+                break
     except OSError:
-        return f"path\0{os.path.normcase(str(canonical))}"
-    if not stat.S_ISDIR(info.st_mode) or not info.st_ino:
-        return f"path\0{os.path.normcase(str(canonical))}"
-    return info.st_dev, info.st_ino
+        return spelled
+    return f"under\0{info.st_dev}\0{info.st_ino}\0{name}"
 
 
 def _auth_root_identity(auth_root: Path) -> bytes:
@@ -359,7 +384,7 @@ def _normalize(name: str, value: Any) -> Any:
         # The profile is shared state, so compare the physical directory rather
         # than one spelling. macOS can preserve case and Unicode aliases in a
         # resolved path even when both names address the same directory.
-        return _comparable_identity(Path(str(value)))
+        return profile_identity(Path(str(value)))
     if name == "chrome_path":
         path = Path(str(value)).expanduser().resolve()
         return os.path.normcase(str(path))
@@ -420,8 +445,7 @@ class DaemonDescriptor:
     package_version: str
     runtime_id: str
     profile_path: str
-    profile_device: int
-    profile_inode: int
+    profile_identity: str
     host: str
     port: int
     path: str
@@ -470,8 +494,7 @@ class DaemonDescriptor:
             package_version=_text(raw, "package_version"),
             runtime_id=_text(raw, "runtime_id"),
             profile_path=_text(raw, "profile_path"),
-            profile_device=_number(raw, "profile_device"),
-            profile_inode=_number(raw, "profile_inode"),
+            profile_identity=_text(raw, "profile_identity"),
             host=_text(raw, "host"),
             port=_number(raw, "port"),
             path=_text(raw, "path"),
@@ -516,10 +539,7 @@ class DaemonDescriptor:
         Two directories side by side elect one owner between them, and a client
         that only checked the auth root would be served the wrong browser.
         """
-        return _comparable_identity(profile) == (
-            self.profile_device,
-            self.profile_inode,
-        )
+        return profile_identity(profile) == self.profile_identity
 
 
 def publish(
@@ -728,9 +748,6 @@ def build(
     log_path: Path,
 ) -> DaemonDescriptor:
     """Assemble a descriptor for a daemon that is already listening."""
-    profile_device, profile_inode = _directory_identity(
-        profile, label="browser profile"
-    )
     return DaemonDescriptor(
         instance_id=instance_id,
         schema_version=SCHEMA_VERSION,
@@ -738,8 +755,7 @@ def build(
         package_version=package_version,
         runtime_id=runtime_id,
         profile_path=str(profile.expanduser().resolve()),
-        profile_device=profile_device,
-        profile_inode=profile_inode,
+        profile_identity=profile_identity(profile),
         host=host,
         port=port,
         path=path,
