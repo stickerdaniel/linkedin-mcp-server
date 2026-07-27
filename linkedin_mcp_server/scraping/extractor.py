@@ -2707,7 +2707,8 @@ class LinkedInExtractor:
                     return True
             except Exception:
                 logger.debug("Could not verify sent message", exc_info=True)
-                return False
+                # LinkedIn can replace the composer node while rendering the
+                # sent bubble; retry until the verification deadline.
             await asyncio.sleep(0.25)
         return False
 
@@ -4022,8 +4023,10 @@ class LinkedInExtractor:
         message_url: str,
     ) -> bool:
         """Open an invitation's message modal from the received-invitations page."""
-        username = _normalize_invitation_username(linkedin_username)
-        await self._navigate_to_page(_invitation_manager_url("received"))
+        username = linkedin_username.strip().lower()
+        await self._navigate_to_page(
+            "https://www.linkedin.com/mynetwork/invitation-manager/received/"
+        )
         await detect_rate_limit(self._page)
         await self._wait_for_main_text(log_context="Invitations (received)")
         await handle_modal_close(self._page)
@@ -4031,43 +4034,57 @@ class LinkedInExtractor:
         await self._page.wait_for_timeout(2000)
 
         for attempt in range(20):
-            invitations = await self._extract_invitation_cards(
-                kind="received",
-                limit=100,
-            )
-            matching_invitation = next(
-                (
-                    invitation
-                    for invitation in invitations
-                    if invitation.get("type") == "connection_request"
-                    and invitation.get("message_url") == message_url
-                    and _normalize_invitation_username(
-                        ((invitation.get("sender") or {}).get("url") or "")
-                    )
-                    == username
-                ),
-                None,
-            )
-            if matching_invitation is not None:
-                # DOM access is required to trigger LinkedIn's modal; direct URL
-                # navigation renders an empty compose shell.
-                link_index = await self._page.evaluate(
-                    """({ expected }) => Array.from(
-                        document.querySelectorAll('a[href*="/messaging/compose/"]')
+            link_index = await self._page.evaluate(
+                """({ expected, username }) => {
+                    const main = document.querySelector('main');
+                    if (!main) return -1;
+                    const profileUsername = href => {
+                        try {
+                            const match = new URL(href, location.origin)
+                                .pathname.match(/^\\/in\\/([^/]+)/);
+                            return decodeURIComponent(match?.[1] || '').toLowerCase();
+                        } catch {
+                            return '';
+                        }
+                    };
+                    return Array.from(
+                        main.querySelectorAll('a[href*="/messaging/compose/"]')
                     ).findIndex(anchor => {
                         const url = new URL(
                             anchor.getAttribute('href'),
                             location.origin
                         );
-                        return url.pathname + url.search === expected;
-                    })""",
-                    {"expected": message_url},
-                )
-                if not isinstance(link_index, int) or link_index < 0:
-                    return False
+                        if (url.pathname + url.search !== expected) return false;
+                        for (
+                            let root = anchor.parentElement;
+                            root && root !== main;
+                            root = root.parentElement
+                        ) {
+                            if (
+                                root.querySelectorAll(
+                                    'a[href*="/messaging/compose/"]'
+                                ).length > 1
+                            ) return false;
+                            if (
+                                Array.from(
+                                    root.querySelectorAll('a[href*="/in/"]')
+                                ).some(profile =>
+                                    profileUsername(profile.getAttribute('href'))
+                                        === username
+                                )
+                            ) return true;
+                        }
+                        return false;
+                    });
+                }""",
+                {"expected": message_url, "username": username},
+            )
+            if isinstance(link_index, int) and link_index >= 0:
+                # DOM access is required to trigger LinkedIn's modal; direct URL
+                # navigation renders an empty compose shell.
                 try:
                     await (
-                        self._page.locator('a[href*="/messaging/compose/"]')
+                        self._page.locator('main a[href*="/messaging/compose/"]')
                         .nth(link_index)
                         .click()
                     )
@@ -4079,8 +4096,11 @@ class LinkedInExtractor:
                     return False
                 return True
 
-            if attempt >= 19 or not await self._scroll_invitation_manager_down():
-                break
+            if attempt < 19:
+                await self._scroll_main_scrollable_region(
+                    position="bottom",
+                    attempts=1,
+                )
 
         return False
 

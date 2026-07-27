@@ -5518,18 +5518,6 @@ class TestSendMessage:
                 "linkedin_mcp_server.scraping.extractor.handle_modal_close",
                 new_callable=AsyncMock,
             ),
-            patch.object(
-                extractor,
-                "_extract_invitation_cards",
-                new_callable=AsyncMock,
-                return_value=[
-                    {
-                        "type": "connection_request",
-                        "sender": {"url": "/in/testuser/"},
-                        "message_url": invitation_url,
-                    }
-                ],
-            ),
         ):
             opened = await extractor._open_invitation_message_compose(
                 "testuser",
@@ -5543,7 +5531,7 @@ class TestSendMessage:
     async def test_rejects_invitation_url_for_different_sender(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         invitation_url = "/messaging/compose/?recipient=ACoAAB&invitation=urn"
-        mock_page.evaluate = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value=-1)
         mock_page.wait_for_timeout = AsyncMock()
 
         with (
@@ -5563,21 +5551,8 @@ class TestSendMessage:
             ),
             patch.object(
                 extractor,
-                "_extract_invitation_cards",
+                "_scroll_main_scrollable_region",
                 new_callable=AsyncMock,
-                return_value=[
-                    {
-                        "type": "connection_request",
-                        "sender": {"url": "/in/someone-else/"},
-                        "message_url": invitation_url,
-                    }
-                ],
-            ),
-            patch.object(
-                extractor,
-                "_scroll_invitation_manager_down",
-                new_callable=AsyncMock,
-                return_value=False,
             ),
         ):
             opened = await extractor._open_invitation_message_compose(
@@ -5586,7 +5561,7 @@ class TestSendMessage:
             )
 
         assert opened is False
-        mock_page.evaluate.assert_not_awaited()
+        assert mock_page.evaluate.await_count == 20
 
     @pytest.mark.parametrize(
         "compose_url",
@@ -5833,7 +5808,7 @@ class TestSendMessageComposerInteraction:
     async def test_sent_message_verification_uses_resolved_composer(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         compose_box = MagicMock()
-        compose_box.evaluate = AsyncMock(side_effect=[False, True])
+        compose_box.evaluate = AsyncMock(side_effect=[RuntimeError, True])
 
         with patch(
             "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
