@@ -39,9 +39,9 @@ from pathlib import Path
 from types import TracebackType
 
 from linkedin_mcp_server.daemon_descriptor import daemon_dir, daemon_state_root
+from linkedin_mcp_server.common_utils import is_still_at
 from linkedin_mcp_server.private_state import harden_directory
 from linkedin_mcp_server.profile_lease import (
-    is_still_at,
     acquire_locked_fd,
     open_lock_file,
     try_lock,
