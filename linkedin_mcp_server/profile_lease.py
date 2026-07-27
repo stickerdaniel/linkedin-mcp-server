@@ -32,6 +32,7 @@ exclusion. It is also not a runtime dependency.
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import time
@@ -94,6 +95,12 @@ else:  # pragma: no cover - POSIX
     _HAS_WINDOWS_LOCKS = False
 
 
+#: The errnos a non-blocking lock request uses to say "somebody else holds it".
+#: POSIX allows either, and they are the same value on Linux while macOS keeps
+#: them distinct, so both are listed rather than assumed to coincide.
+_CONTENTION_ERRNOS = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
+
+
 def try_lock(fd: int, *, exclusive: bool) -> bool:
     """Take a non-blocking lock on *fd*. Return whether it was granted.
 
@@ -107,8 +114,22 @@ def try_lock(fd: int, *, exclusive: bool) -> bool:
         mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         try:
             fcntl.flock(fd, mode | fcntl.LOCK_NB)
-        except OSError:
-            return False
+        except OSError as exc:
+            # Only contention means "somebody else holds it". Every other errno
+            # means the question could not be answered, and answering it with
+            # "busy" is the worst of the two wrong answers: on a filesystem
+            # without usable flock, every process would report a live owner
+            # forever, no owner could ever be elected, and the message would
+            # point at contention that does not exist. Measured with
+            # EOPNOTSUPP: reported as busy.
+            if exc.errno in _CONTENTION_ERRNOS:
+                return False
+            raise ProfileLeaseUnavailableError(
+                f"Could not lock the profile: {exc}. This filesystem may not "
+                f"support the locking that keeps two servers off one browser "
+                f"profile. Move the profile to a local disk, or run only one "
+                f"server process against it."
+            ) from exc
         return True
 
     if _HAS_WINDOWS_LOCKS:  # pragma: no cover - Windows
