@@ -402,6 +402,22 @@ def _read_own_file(
     ordinary first-start case; absence of a token beside a published descriptor
     is not, and *missing_message* is how that caller says why.
     """
+    # Windows has no O_NOFOLLOW, so the open there resolves a link and the
+    # check below then sees a perfectly ordinary regular file at the other end.
+    # Checking the entry itself is the only refusal available on that platform.
+    # It is a check-then-open rather than an atomic one, so a link planted in
+    # the gap still wins; closing that properly needs the Win32 reparse-point
+    # flag, which is worth doing when the daemon actually runs there.
+    if not hasattr(os, "O_NOFOLLOW"):  # pragma: no cover - Windows only
+        try:
+            if path.is_symlink():
+                raise DescriptorError(
+                    f"{path} is a symbolic link rather than a file this daemon "
+                    f"wrote. Remove it and start the server again."
+                )
+        except OSError as exc:
+            raise DescriptorError(f"{path} could not be read: {exc}") from exc
+
     # O_NOFOLLOW fails on a symlink rather than resolving it, so the check and
     # the read cannot disagree about which file they mean. O_NONBLOCK has no
     # effect on the regular file this expects.
