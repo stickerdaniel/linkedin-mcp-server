@@ -209,31 +209,36 @@ def daemon_state_root() -> Path:
     return (_account_home() / _APPLICATION_STATE_DIR / _DAEMON_DIR).resolve()
 
 
-def _directory_identity(path: Path, *, label: str) -> tuple[int, int]:
-    """Return the stable filesystem identity of a directory, creating it once.
+def _auth_root_identity(auth_root: Path) -> bytes:
+    """Return the stable filesystem identity of *auth_root*, creating it once.
 
-    For the process that is establishing state. The first daemon on a fresh
-    install must not key a missing path and then switch to an inode after
-    creating it, which would leave its own lock at an address nothing else
-    computes. ``secure_mkdir`` creates only what is missing and deliberately
-    leaves permissions on existing parents alone.
+    Created rather than merely inspected, because this runs in the process that
+    is establishing state: the first daemon on a fresh install must not key a
+    missing path and then switch to an inode after creating it, which would
+    leave its own lock at an address nothing else computes. ``secure_mkdir``
+    creates only what is missing and deliberately leaves permissions on
+    existing parents alone.
+
+    Device plus inode identifies the physical directory rather than one
+    spelling of it, which keeps case and Unicode aliases together on an
+    insensitive volume without conflating distinct directories on a sensitive
+    one. The auth root can be keyed this way because nothing rotates it; the
+    profile inside it cannot, and :func:`profile_identity` says why.
     """
-    canonical = path.expanduser().resolve()
+    canonical = auth_root.expanduser().resolve()
     secure_mkdir(canonical, mode=0o700)
     info = canonical.stat()
 
     if not stat.S_ISDIR(info.st_mode):
-        raise DescriptorError(f"The {label} is not a directory: {canonical}")
-
-    # Device plus inode identifies the physical directory, not one spelling of
-    # it. That keeps case and Unicode aliases together on insensitive volumes
-    # without conflating distinct directories on a case-sensitive volume.
+        raise DescriptorError(
+            f"The authentication root is not a directory: {canonical}"
+        )
     if not info.st_ino:
         raise DescriptorError(
             f"The filesystem does not provide a stable identity for {canonical}, "
             "so browser ownership cannot be coordinated safely"
         )
-    return info.st_dev, info.st_ino
+    return f"inode\0{info.st_dev}\0{info.st_ino}".encode("ascii")
 
 
 def profile_identity(profile: Path) -> str:
@@ -278,11 +283,6 @@ def profile_identity(profile: Path) -> str:
     except OSError:
         return spelled
     return f"under\0{info.st_dev}\0{info.st_ino}\0{name}"
-
-
-def _auth_root_identity(auth_root: Path) -> bytes:
-    device, inode = _directory_identity(auth_root, label="authentication root")
-    return f"inode\0{device}\0{inode}".encode("ascii")
 
 
 def daemon_dir(auth_root: Path) -> Path:
