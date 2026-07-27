@@ -175,6 +175,40 @@ class TestHandoff:
         assert not daemon_is_running(tmp_path)
 
 
+class TestRegistry:
+    def test_a_held_lock_survives_losing_its_last_reference(self, tmp_path: Path):
+        # Measured before the fix: the registry was weak throughout, so a lock
+        # acquired and then dropped left the descriptor open with nothing left
+        # to close it. Another process could not take the lock, and no object
+        # remained through which to release it or clean it up after a fork.
+        import gc
+
+        from linkedin_mcp_server.daemon_lock import _held_locks
+
+        DaemonLock(tmp_path).try_acquire()
+        gc.collect()
+
+        assert daemon_is_running(tmp_path)
+        held = [lock for lock in _held_locks if lock.path.parent == tmp_path]
+        assert held, "a held lock must stay reachable"
+
+        for lock in held:
+            lock.release()
+        assert not daemon_is_running(tmp_path)
+
+    def test_an_unheld_lock_is_not_kept_alive(self, tmp_path: Path):
+        # Only held locks are worth pinning. One that was built and never used
+        # owns nothing, so keeping it would be a leak for no benefit.
+        import gc
+
+        from linkedin_mcp_server.daemon_lock import _held_locks
+
+        DaemonLock(tmp_path)
+        gc.collect()
+
+        assert not [lock for lock in _held_locks if lock.path.parent == tmp_path]
+
+
 class TestPlatformDifference:
     @pytest.mark.skipif(
         os.name != "nt", reason="the refusal only applies where handoff cannot work"

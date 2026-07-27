@@ -35,6 +35,7 @@ import hmac
 import json
 import os
 import secrets
+import stat
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -421,19 +422,62 @@ def read(auth_root: Path) -> DaemonDescriptor | None:
             f"The daemon descriptor is version {descriptor.schema_version}, and "
             f"this client understands version {SCHEMA_VERSION}"
         )
+    # Enforced, not merely recorded. This is the field compatibility is meant
+    # to key on, and a client that attached across a protocol change would be
+    # speaking to an owner whose control routes, call metadata and ping
+    # contract it does not share.
+    if descriptor.protocol_version != PROTOCOL_VERSION:
+        raise DescriptorError(
+            f"The running daemon speaks protocol {descriptor.protocol_version} "
+            f"and this client speaks {PROTOCOL_VERSION}. Stop the running "
+            f"daemon to let a compatible one start."
+        )
     return descriptor
 
 
+#: A token is a few dozen characters. Reading is bounded anyway, so a file that
+#: turns out to be something else cannot pull an unbounded amount into memory
+#: before the checks below reject it.
+_MAX_TOKEN_BYTES = 4096
+
+
 def read_token(auth_root: Path, descriptor: DaemonDescriptor) -> str:
-    """Read the token belonging to *descriptor*, checking it is the right one."""
+    """Read the token belonging to *descriptor*, checking it is the right one.
+
+    Opened without following links and confirmed to be a regular file before a
+    byte is read. Confining the *filename* to the daemon directory, which the
+    UUID check does, is not enough on its own: a link sitting at that name
+    still points wherever it likes, and a special file there could block the
+    client before any of the checks ran.
+    """
     path = token_path(auth_root, descriptor.instance_id)
     try:
-        token = path.read_text(encoding="utf-8").strip()
+        # O_NOFOLLOW fails on a symlink rather than resolving it, so the check
+        # and the read cannot disagree about which file they mean. O_NONBLOCK
+        # is what stops a named pipe planted at this path from hanging the
+        # client inside open(), before any check has had a chance to run; it
+        # has no effect on the regular file this expects.
+        flags = (
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
+        fd = os.open(path, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise DescriptorError(
+                    f"{path} is not a regular file, so it is not a token this "
+                    f"daemon wrote"
+                )
+            token = os.read(fd, _MAX_TOKEN_BYTES).decode("utf-8").strip()
+        finally:
+            os.close(fd)
     except FileNotFoundError as exc:
         raise DescriptorError(
             "The daemon is publishing a descriptor with no token beside it"
         ) from exc
     except OSError as exc:
+        # ELOOP lands here when the path is a symlink, which is never something
+        # this wrote and never something to follow.
         raise DescriptorError(f"The daemon token could not be read: {exc}") from exc
 
     if not descriptor.matches_token(token):
