@@ -112,6 +112,10 @@
       "description": "Send a message to a LinkedIn user with explicit confirmation and optional profile URN support"
     },
     {
+      "name": "message_invitation_sender",
+      "description": "Message a received connection-invitation sender through its invitation compose URL with explicit confirmation"
+    },
+    {
       "name": "get_feed",
       "description": "Get recent posts from the authenticated user's LinkedIn home feed"
     },

@@ -45,6 +45,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_conversation` | Read a specific messaging conversation by username or thread ID | working |
 | `search_conversations` | Search messages by keyword | working |
 | `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#433](https://github.com/stickerdaniel/linkedin-mcp-server/issues/433) [#441](https://github.com/stickerdaniel/linkedin-mcp-server/issues/441) [#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483) [#560](https://github.com/stickerdaniel/linkedin-mcp-server/issues/560) [#573](https://github.com/stickerdaniel/linkedin-mcp-server/issues/573) |
+| `message_invitation_sender` | Message a received connection-invitation sender using its invitation compose URL (requires confirmation) | [#613](https://github.com/stickerdaniel/linkedin-mcp-server/issues/613) |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet | working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
 | `search_companies` | Search for companies on LinkedIn by keywords | working |
@@ -56,6 +57,10 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) | working |
 | `close_session` | Close browser session and clean up resources | working |
+
+`message_invitation_sender` accepts the relative `/messaging/compose/` URL
+exposed by a received invitation plus the sender's `linkedin_username`; set
+`confirm_send=true` to send.
 
 <br/>
 <br/>

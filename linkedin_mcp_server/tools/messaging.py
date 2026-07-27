@@ -269,3 +269,47 @@ def register_messaging_tools(
                 raise_tool_error(relogin_exc, "send_message")
         except Exception as e:
             raise_tool_error(e, "send_message")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Message Invitation Sender",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"messaging", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def message_invitation_sender(
+        linkedin_username: str,
+        message_url: str,
+        message: str,
+        confirm_send: bool,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """Message the sender of a received connection invitation.
+
+        ``message_url`` must be the relative compose URL returned by
+        ``get_pending_invitations`` for the sender. Set ``confirm_send`` to
+        ``True`` to send; ``False`` performs a recipient-verified dry run.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="message_invitation_sender"
+            )
+            logger.info(
+                "Messaging invitation sender %s (confirm_send=%s)",
+                linkedin_username,
+                confirm_send,
+            )
+            return await extractor.send_message(
+                linkedin_username,
+                message,
+                confirm_send=confirm_send,
+                compose_url=message_url,
+            )
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "message_invitation_sender")
+        except Exception as e:
+            raise_tool_error(e, "message_invitation_sender")  # NoReturn

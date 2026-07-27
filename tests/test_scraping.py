@@ -5416,6 +5416,204 @@ class TestSendMessage:
         assert "screenContext=NON_SELF_PROFILE_VIEW" in compose_url
         assert "interop=msgOverlay" in compose_url
 
+    async def test_uses_invitation_compose_url_when_provided(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        invitation_url = (
+            "/messaging/compose/?recipient=ACoAAB"
+            "&invitation=urn%3Ali%3Afsd_invitation%3A123"
+        )
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_read_profile_display_name",
+                new_callable=AsyncMock,
+                return_value="Test User",
+            ),
+            patch.object(
+                extractor,
+                "_open_invitation_message_compose",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_open_invitation_compose,
+            patch.object(
+                extractor,
+                "_resolve_message_compose_href",
+                new_callable=AsyncMock,
+            ) as mock_resolve_href,
+            patch.object(
+                extractor,
+                "_wait_for_message_surface",
+                new_callable=AsyncMock,
+                return_value="composer",
+            ),
+            patch.object(
+                extractor,
+                "_resolve_message_compose_box",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                extractor,
+                "_compose_page_matches_recipient",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_dismiss_message_ui",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.send_message(
+                "testuser",
+                "Hello!",
+                confirm_send=False,
+                profile_urn="ignored",
+                compose_url=invitation_url,
+            )
+
+        assert result["status"] == "confirmation_required"
+        mock_open_invitation_compose.assert_awaited_once_with(
+            "testuser",
+            invitation_url,
+        )
+        mock_resolve_href.assert_not_awaited()
+
+    async def test_opens_matching_invitation_message_modal(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        invitation_url = (
+            "/messaging/compose/?recipient=ACoAAB"
+            "&invitation=urn%3Ali%3Afsd_invitation%3A123"
+        )
+        message_link = MagicMock()
+        message_link.click = AsyncMock()
+        message_links = MagicMock()
+        message_links.nth.return_value = message_link
+        mock_page.locator = MagicMock(return_value=message_links)
+        mock_page.evaluate = AsyncMock(return_value=0)
+        mock_page.wait_for_timeout = AsyncMock()
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_main_text",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_extract_invitation_cards",
+                new_callable=AsyncMock,
+                return_value=[
+                    {
+                        "type": "connection_request",
+                        "sender": {"url": "/in/testuser/"},
+                        "message_url": invitation_url,
+                    }
+                ],
+            ),
+        ):
+            opened = await extractor._open_invitation_message_compose(
+                "testuser",
+                invitation_url,
+            )
+
+        assert opened is True
+        message_links.nth.assert_called_once_with(0)
+        message_link.click.assert_awaited_once()
+
+    async def test_rejects_invitation_url_for_different_sender(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        invitation_url = "/messaging/compose/?recipient=ACoAAB&invitation=urn"
+        mock_page.evaluate = AsyncMock()
+        mock_page.wait_for_timeout = AsyncMock()
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_main_text",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_extract_invitation_cards",
+                new_callable=AsyncMock,
+                return_value=[
+                    {
+                        "type": "connection_request",
+                        "sender": {"url": "/in/someone-else/"},
+                        "message_url": invitation_url,
+                    }
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_scroll_invitation_manager_down",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            opened = await extractor._open_invitation_message_compose(
+                "testuser",
+                invitation_url,
+            )
+
+        assert opened is False
+        mock_page.evaluate.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "compose_url",
+        [
+            "https://example.com/messaging/compose/?recipient=ACoAAB",
+            "/in/testuser/",
+            "/messaging/compose/",
+        ],
+    )
+    async def test_rejects_invalid_invitation_compose_url(self, mock_page, compose_url):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "_navigate_to_page",
+            new_callable=AsyncMock,
+        ) as mock_navigate:
+            result = await extractor.send_message(
+                "testuser",
+                "Hello!",
+                confirm_send=True,
+                compose_url=compose_url,
+            )
+
+        assert result["status"] == "message_unavailable"
+        assert result["sent"] is False
+        mock_navigate.assert_not_awaited()
+
 
 class TestResolveMessageComposeBox:
     async def test_returns_locator_when_count_positive(self, mock_page):

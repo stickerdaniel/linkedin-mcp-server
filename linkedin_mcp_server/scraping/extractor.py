@@ -4007,6 +4007,74 @@ class LinkedInExtractor:
             references=references,
         )
 
+    async def _open_invitation_message_compose(
+        self,
+        linkedin_username: str,
+        message_url: str,
+    ) -> bool:
+        """Open an invitation's message modal from the received-invitations page."""
+        username = _normalize_invitation_username(linkedin_username)
+        await self._navigate_to_page(_invitation_manager_url("received"))
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context="Invitations (received)")
+        await handle_modal_close(self._page)
+        # Invitation links render before LinkedIn attaches their SPA modal handlers.
+        await self._page.wait_for_timeout(2000)
+
+        for attempt in range(20):
+            invitations = await self._extract_invitation_cards(
+                kind="received",
+                limit=100,
+            )
+            matching_invitation = next(
+                (
+                    invitation
+                    for invitation in invitations
+                    if invitation.get("type") == "connection_request"
+                    and invitation.get("message_url") == message_url
+                    and _normalize_invitation_username(
+                        ((invitation.get("sender") or {}).get("url") or "")
+                    )
+                    == username
+                ),
+                None,
+            )
+            if matching_invitation is not None:
+                # DOM access is required to trigger LinkedIn's modal; direct URL
+                # navigation renders an empty compose shell.
+                link_index = await self._page.evaluate(
+                    """({ expected }) => Array.from(
+                        document.querySelectorAll('a[href*="/messaging/compose/"]')
+                    ).findIndex(anchor => {
+                        const url = new URL(
+                            anchor.getAttribute('href'),
+                            location.origin
+                        );
+                        return url.pathname + url.search === expected;
+                    })""",
+                    {"expected": message_url},
+                )
+                if not isinstance(link_index, int) or link_index < 0:
+                    return False
+                try:
+                    await (
+                        self._page.locator('a[href*="/messaging/compose/"]')
+                        .nth(link_index)
+                        .click()
+                    )
+                except Exception:
+                    logger.debug(
+                        "Could not click invitation message link",
+                        exc_info=True,
+                    )
+                    return False
+                return True
+
+            if attempt >= 19 or not await self._scroll_invitation_manager_down():
+                break
+
+        return False
+
     async def send_message(
         self,
         linkedin_username: str,
@@ -4014,6 +4082,7 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        compose_url: str | None = None,
     ) -> dict[str, Any]:
         """Send a message to a LinkedIn user with explicit confirmation gating.
 
@@ -4023,8 +4092,26 @@ class LinkedInExtractor:
             confirm_send: Must be True to actually send (False does a dry run).
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
                 compose URL directly, bypassing the Message-button lookup.
+            compose_url: Optional relative invitation compose URL returned by
+                ``get_pending_invitations``.
         """
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        if compose_url is not None:
+            parsed_compose_url = urlparse(compose_url)
+            if (
+                parsed_compose_url.scheme
+                or parsed_compose_url.netloc
+                or parsed_compose_url.path != "/messaging/compose/"
+                or not parsed_compose_url.query
+                or parsed_compose_url.fragment
+            ):
+                return self._message_action_result(
+                    profile_url,
+                    "message_unavailable",
+                    "Invitation message URL must be a relative "
+                    "/messaging/compose/ path with a query string.",
+                )
+
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 
@@ -4035,38 +4122,51 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         display_name = await self._read_profile_display_name()
-        if profile_urn:
-            # Build the full compose URL that LinkedIn's own Message button
-            # generates. The minimal ?recipient=<URN> form works for established
-            # connections but shows a "Say hello" widget (no compose box) for new
-            # connections. Adding profileUrn + screenContext + interop=msgOverlay
-            # consistently opens the real composer regardless of connection age.
-            _encoded = quote_plus(f"urn:li:fsd_profile:{profile_urn}")
-            compose_url: str | None = (
-                f"https://www.linkedin.com/messaging/compose/"
-                f"?profileUrn={_encoded}"
-                f"&recipient={profile_urn}"
-                f"&screenContext=NON_SELF_PROFILE_VIEW"
-                f"&interop=msgOverlay"
-            )
+        if compose_url is not None:
+            if not await self._open_invitation_message_compose(
+                linkedin_username,
+                compose_url,
+            ):
+                return self._message_action_result(
+                    profile_url,
+                    "message_unavailable",
+                    "LinkedIn did not expose the requested invitation message action.",
+                )
         else:
-            compose_url = await self._resolve_message_compose_href()
-        if not compose_url:
-            return self._message_action_result(
-                profile_url,
-                "message_unavailable",
-                "LinkedIn did not expose a usable Message action for this profile.",
-            )
+            if profile_urn:
+                # Build the full compose URL that LinkedIn's own Message button
+                # generates. The minimal ?recipient=<URN> form works for established
+                # connections but shows a "Say hello" widget (no compose box) for new
+                # connections. Adding profileUrn + screenContext + interop=msgOverlay
+                # consistently opens the real composer regardless of connection age.
+                _encoded = quote_plus(f"urn:li:fsd_profile:{profile_urn}")
+                compose_url = (
+                    f"https://www.linkedin.com/messaging/compose/"
+                    f"?profileUrn={_encoded}"
+                    f"&recipient={profile_urn}"
+                    f"&screenContext=NON_SELF_PROFILE_VIEW"
+                    f"&interop=msgOverlay"
+                )
+            else:
+                compose_url = await self._resolve_message_compose_href()
+            if not compose_url:
+                return self._message_action_result(
+                    profile_url,
+                    "message_unavailable",
+                    "LinkedIn did not expose a usable Message action for this profile.",
+                )
 
-        await self._navigate_to_page(compose_url)
-        await detect_rate_limit(self._page)
+            await self._navigate_to_page(compose_url)
+            await detect_rate_limit(self._page)
 
-        try:
-            await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
-            logger.debug("Compose page did not fully load for %s", linkedin_username)
+            try:
+                await self._page.wait_for_selector("main")
+            except PlaywrightTimeoutError:
+                logger.debug(
+                    "Compose page did not fully load for %s", linkedin_username
+                )
 
-        await handle_modal_close(self._page)
+            await handle_modal_close(self._page)
         message_surface = await self._wait_for_message_surface()
         logger.debug(
             "Message surface for %s before hydration was %s",
