@@ -153,6 +153,45 @@ class TestExtendedAcls:
         with pytest.raises(PrivateStateError, match="access control list"):
             harden_directory(target)
 
+    @pytest.mark.skipif(
+        sys.platform != "darwin", reason="extended ACLs are a macOS mechanism here"
+    )
+    def test_hardening_does_not_depend_on_an_executable_being_findable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # This ran chmod and read ls once, and that failed open: measured with
+        # no usable PATH, hardening reported success while everyone could still
+        # read the token, because neither step could run and both treated that
+        # as nothing to report. Going through libc removes the dependency
+        # rather than adding a check for it.
+        subprocess.run(
+            [
+                "chmod",
+                "+a",
+                "everyone allow read,list,search,file_inherit,directory_inherit",
+                str(tmp_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        monkeypatch.setenv("PATH", "")
+
+        target = tmp_path / "daemon"
+        harden_directory(target)
+        token = target / "token"
+        token.touch()
+        harden_file(token)
+
+        listing = subprocess.run(
+            ["/bin/ls", "-lde", str(token)], capture_output=True, text=True, check=True
+        ).stdout
+        entries = [
+            line
+            for line in listing.splitlines()[1:]
+            if line.strip() and line.strip()[0].isdigit()
+        ]
+        assert entries == [], "the token is still readable outside this account"
+
 
 class TestRefusals:
     def test_hardening_a_missing_file_refuses(self, tmp_path: Path):

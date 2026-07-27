@@ -22,10 +22,11 @@ keeps out root or an administrator, and no file permission ever has.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import logging
 import os
 import stat
-import subprocess
 from pathlib import Path
 
 from linkedin_mcp_server.common_utils import secure_mkdir
@@ -96,6 +97,64 @@ def _harden_posix(path: Path, mode: int) -> None:
     _verify_no_extended_acl(path)
 
 
+#: macOS ``acl_get_file``/``acl_set_file`` selector for the list that sits
+#: alongside the mode bits.
+_ACL_TYPE_EXTENDED = 0x00000100
+
+#: Resolved once, on first use. Two variables rather than a sentinel value, so
+#: "not looked up yet" and "looked up and unavailable" stay distinguishable
+#: without a type the caller has to narrow.
+_libc_resolved = False
+_libc_cache: ctypes.CDLL | None = None
+
+
+def _libc() -> ctypes.CDLL | None:
+    """Return libc with the ACL calls bound, or None where they do not exist.
+
+    Through libc rather than by running ``chmod`` and reading ``ls``. Shelling
+    out made this fail open: measured with no usable ``PATH``, hardening
+    reported success while the token stayed readable by ``everyone``, because
+    neither the clearing nor the check could run and both treated that as
+    nothing to report. A missing library is a fact this can establish; a
+    missing executable was not.
+    """
+    global _libc_cache, _libc_resolved
+    if _libc_resolved:
+        return _libc_cache
+
+    _libc_resolved = True
+    name = ctypes.util.find_library("c")
+    if name is not None:
+        library = ctypes.CDLL(name, use_errno=True)
+        if hasattr(library, "acl_get_file") and hasattr(library, "acl_set_file"):
+            library.acl_get_file.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+            library.acl_get_file.restype = ctypes.c_void_p
+            library.acl_set_file.argtypes = [
+                ctypes.c_char_p,
+                ctypes.c_uint,
+                ctypes.c_void_p,
+            ]
+            library.acl_set_file.restype = ctypes.c_int
+            library.acl_init.argtypes = [ctypes.c_int]
+            library.acl_init.restype = ctypes.c_void_p
+            library.acl_free.argtypes = [ctypes.c_void_p]
+            library.acl_free.restype = ctypes.c_int
+            _libc_cache = library
+    return _libc_cache
+
+
+def _has_extended_acl(path: Path) -> bool:
+    """Whether *path* carries an access list beyond its permission bits."""
+    library = _libc()
+    if library is None:  # pragma: no cover - no ACL support to report on
+        return False
+    handle = library.acl_get_file(str(path).encode(), _ACL_TYPE_EXTENDED)
+    if not handle:
+        return False
+    library.acl_free(handle)
+    return True
+
+
 def _drop_extended_acl(path: Path) -> None:
     """Remove an extended ACL, which the mode bits do not describe.
 
@@ -108,47 +167,34 @@ def _drop_extended_acl(path: Path) -> None:
     Linux ACLs behave the same way in principle, but ``chmod`` there already
     clamps the mask so the extra entries grant nothing.
     """
-    if not hasattr(os, "O_NOFOLLOW"):  # pragma: no cover - POSIX only
+    library = _libc()
+    if library is None:  # pragma: no cover - nothing to clear
         return
-    try:
-        subprocess.run(
-            ["chmod", "-N", str(path)],
-            check=False,
-            capture_output=True,
-            timeout=10,
+
+    empty = library.acl_init(0)
+    if not empty:
+        raise PrivateStateError(
+            f"Could not build an empty access list to apply to {path}"
         )
-    except (OSError, subprocess.SubprocessError):
-        # Absence of the tool is not a failure by itself: the verification
-        # below decides, and it fails closed if an ACL is still there.
-        logger.debug("Could not clear an extended ACL on %s", path, exc_info=True)
+    try:
+        if library.acl_set_file(str(path).encode(), _ACL_TYPE_EXTENDED, empty) != 0:
+            # Not swallowed. The verification below would catch a list that is
+            # still there, but a failure here is worth reporting on its own
+            # terms rather than as a mysterious refusal one step later.
+            raise PrivateStateError(
+                f"Could not clear the access list on {path}: "
+                f"{os.strerror(ctypes.get_errno())}"
+            )
+    finally:
+        library.acl_free(empty)
 
 
 def _verify_no_extended_acl(path: Path) -> None:
     """Refuse when an extended ACL still grants access the mode does not show."""
-    try:
-        listing = subprocess.run(
-            ["ls", "-lde", str(path)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):  # pragma: no cover - no ls
-        return
-
-    # An ACL entry is printed as a numbered line under the mode. The mode line
-    # itself also ends in "@" or "+" when one is present, but reading the
-    # entries is the part that cannot be misread.
-    entries = [
-        line
-        for line in listing.stdout.splitlines()[1:]
-        if line.strip() and line.strip()[0].isdigit()
-    ]
-    if entries:
+    if _has_extended_acl(path):
         raise PrivateStateError(
             f"{path} carries an access control list that the permission bits "
-            f"do not describe, so it may still be readable by other accounts:\n"
-            f"{chr(10).join(entries)}\n"
+            f"do not describe, so it may still be readable by other accounts. "
             f"Clear it with: chmod -N {path}"
         )
 
