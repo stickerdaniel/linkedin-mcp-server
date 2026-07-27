@@ -217,6 +217,17 @@ class TestRefusals:
         with pytest.raises(DescriptorError, match="not something this daemon wrote"):
             read(tmp_path)
 
+    def test_an_oversized_descriptor_is_refused_as_oversized(self, tmp_path: Path):
+        # The read is bounded, so without a size check the caller would get a
+        # fragment, and a fragment of JSON reads as malformed. That sends
+        # whoever reads the message looking for a corrupt descriptor rather
+        # than for whatever wrote something this size.
+        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        descriptor_path(tmp_path).write_text(json.dumps({"pad": "x" * 200_000}))
+
+        with pytest.raises(DescriptorError, match="larger than anything"):
+            read(tmp_path)
+
     def test_bytes_that_are_not_text_are_refused_as_such(self, tmp_path: Path):
         # A caller telling absence from untrusted state through DescriptorError
         # would otherwise meet a decoding error, which says nothing about which
