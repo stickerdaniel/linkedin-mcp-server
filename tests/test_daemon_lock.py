@@ -239,6 +239,56 @@ class TestHandoff:
             DaemonLock(tmp_path).inheritable_copy()
 
     @posix_handoff
+    def test_a_descriptor_for_another_auth_root_is_not_adopted(self, tmp_path: Path):
+        # Measured before the check: it was adopted without complaint, so this
+        # process reported it owned a browser nobody had elected it for, while
+        # another process took the real lock unopposed.
+        other = tmp_path / "other"
+        other.mkdir()
+        mine = tmp_path / "mine"
+        mine.mkdir()
+        elsewhere = DaemonLock(other)
+        assert elsewhere.try_acquire()
+        inherited = elsewhere.inheritable_copy()
+        elsewhere.release()
+        # Give this auth root a lock file of its own, so the refusal has to come
+        # from comparing the two rather than from one of them being absent.
+        own = DaemonLock(mine)
+        assert own.try_acquire()
+        own.release()
+
+        try:
+            with pytest.raises(DaemonLockError, match="not this auth root's"):
+                DaemonLock(mine).adopt(inherited)
+        finally:
+            os.close(inherited)
+
+    @posix_handoff
+    def test_adopting_a_descriptor_that_holds_no_lock_still_excludes(
+        self, tmp_path: Path
+    ):
+        # A supervisor launched with a descriptor that was never locked, or
+        # whose lock was already released. Measured before the fix: it reported
+        # ownership while daemon_is_running said no daemon was there and a
+        # contender took the lock alongside it. Adoption now asks for the lock,
+        # which is granted against our own open file description when we already
+        # hold it and takes it when it is free. Either way exactly one holder.
+        creator = DaemonLock(tmp_path)
+        assert creator.try_acquire()
+        creator.release()
+        unlocked = os.open(daemon_lock_path(tmp_path), os.O_RDWR)
+
+        adopter = DaemonLock(tmp_path)
+        adopter.adopt(unlocked)
+        try:
+            assert adopter.held
+            assert daemon_is_running(tmp_path)
+            contender = DaemonLock(tmp_path)
+            assert not contender.try_acquire()
+        finally:
+            adopter.release()
+
+    @posix_handoff
     def test_an_adopted_lock_is_held_without_reacquiring(self, tmp_path: Path):
         # A supervisor is launched already holding a copy. Acquiring again would
         # fail on POSIX, where the process already holds it, so adoption records
