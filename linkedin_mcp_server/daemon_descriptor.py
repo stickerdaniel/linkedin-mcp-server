@@ -193,6 +193,10 @@ def _normalize(name: str, value: Any) -> Any:
     names the field. Erring the other way hands a client a browser configured
     differently from what it asked for.
     """
+    if name == "auto_import_from_browser":
+        # Auto-import is enabled by default. None and True therefore ask for the
+        # same browser behaviour; only an explicit False disables it.
+        return value is not False
     if value is None:
         return None
     if name in ("user_data_dir", "chrome_path"):
