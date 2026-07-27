@@ -557,6 +557,24 @@ class TestProfileIdentity:
 
         assert descriptor.serves(tmp_path / "sub" / ".." / "profile")
 
+    def test_a_rotated_profile_is_still_served(self, tmp_path: Path):
+        # Every path that establishes a new session rotates the old profile into
+        # quarantine and Chromium creates a fresh directory in its place. Keyed
+        # by the profile's own inode, a descriptor stopped matching its own
+        # profile at the first login while its owner kept holding the lock.
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        descriptor = _descriptor(tmp_path, new_token(), profile=profile)
+        before = profile.stat().st_ino
+
+        quarantine = tmp_path / "quarantine"
+        quarantine.mkdir()
+        profile.rename(quarantine / "profile")
+        profile.mkdir()
+
+        assert profile.stat().st_ino != before
+        assert descriptor.serves(profile)
+
     def test_asking_what_a_daemon_serves_creates_nothing(self, tmp_path: Path):
         # Comparison answers a question. Creating a browser profile in order to
         # explain why a client was turned away would be a surprising thing for
