@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import os
 import signal
 import subprocess
@@ -751,6 +752,52 @@ class TestDegradedSignals:
         from linkedin_mcp_server.profile_lease import _windows_failure_is_contention
 
         assert _windows_failure_is_contention(error_code) is is_contention
+
+    @pytest.mark.skipif(os.name == "nt", reason="flock is the POSIX backend")
+    @pytest.mark.parametrize(
+        "code,is_contention",
+        [
+            (errno.EAGAIN, True),
+            (errno.EWOULDBLOCK, True),
+            (errno.EACCES, True),
+            (errno.EOPNOTSUPP, False),
+            (errno.EIO, False),
+            (errno.EBADF, False),
+        ],
+    )
+    def test_posix_failures_are_classified(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        code: int,
+        is_contention: bool,
+    ) -> None:
+        """The POSIX half of the same question, and for the same reason.
+
+        Only contention means somebody else holds the lock. Measured with
+        EOPNOTSUPP before the fix: reported as busy, which on a filesystem
+        without usable flock would leave every process seeing an owner that does
+        not exist, no owner electable, and an error pointing at contention.
+        """
+        import fcntl
+
+        from linkedin_mcp_server.profile_lease import (
+            ProfileLeaseUnavailableError,
+            open_lock_file,
+            try_lock,
+        )
+
+        def failing(fd: int, operation: int) -> None:
+            raise OSError(code, os.strerror(code))
+
+        descriptor = open_lock_file(tmp_path / "probe.lock")
+        monkeypatch.setattr(fcntl, "flock", failing)
+
+        if is_contention:
+            assert try_lock(descriptor, exclusive=True) is False
+        else:
+            with pytest.raises(ProfileLeaseUnavailableError, match="Could not lock"):
+                try_lock(descriptor, exclusive=True)
 
     def test_a_failing_backend_does_not_leak_descriptors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
