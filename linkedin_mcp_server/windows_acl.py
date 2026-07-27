@@ -583,3 +583,15 @@ def verify_owner_only(path: Path, *, directory: bool) -> None:
             f"{path} has inheritance flags {entry.flags:#04x}, expected "
             f"{expected_flags:#04x}"
         )
+    # The entry names the right account and nobody else, which is half the
+    # question; the other half is what it actually grants. A backend that
+    # accepts the call and stores a reduced mask would leave this account
+    # unable to read its own token, or unable to create files in its own state
+    # directory, while everything above still looked correct. Measured with a
+    # read-back of zero: verification passed.
+    if entry.mask != FILE_ALL_ACCESS:
+        raise PrivateStateError(
+            f"{path} grants this account {entry.mask:#010x} rather than the "
+            f"{FILE_ALL_ACCESS:#010x} that was asked for, so the filesystem "
+            f"stored something other than what was requested"
+        )

@@ -92,6 +92,26 @@ def harden_file(path: Path) -> None:
     if not path.exists():
         raise PrivateStateError(f"Cannot harden a file that does not exist: {path}")
 
+    # Before the platform split, because both halves get it wrong in their own
+    # way. POSIX opens a directory with O_RDONLY quite happily and would take it
+    # from 0700 to 0600, which stops it being searchable; Windows would give it
+    # a file's non-inheritable access list, so files created inside afterwards
+    # no longer inherit the owner-only entry that is the point of hardening the
+    # directory. Neither is something a caller should discover later.
+    #
+    # lstat, so a link is judged as itself rather than as its target. POSIX
+    # refuses one again at open time through O_NOFOLLOW; Windows has no
+    # equivalent, so this is where both learn about it, and a link is worth its
+    # own message because it is the case a caller is most likely to hit.
+    entry = path.lstat()
+    if stat.S_ISLNK(entry.st_mode):
+        raise PrivateStateError(
+            f"{path} is a symbolic link rather than a file. Hardening it would "
+            f"change permissions somewhere else and say nothing about this path."
+        )
+    if not stat.S_ISREG(entry.st_mode):
+        raise PrivateStateError(f"{path} is not a regular file")
+
     if _WINDOWS:
         from linkedin_mcp_server.windows_acl import restrict_to_current_user
 
@@ -119,10 +139,9 @@ def harden_file(path: Path) -> None:
         raise PrivateStateError(f"{path} could not be opened to harden: {exc}") from exc
 
     try:
-        # O_RDONLY opens a directory quite happily on POSIX, and hardening one
-        # as if it were a file takes 0700 down to 0600, which removes the bit
-        # that makes it searchable. A caller that passes the wrong path should
-        # be told so rather than have its state directory quietly broken.
+        # Asked again of the descriptor, not the name. The check above was made
+        # before the open, so it says what the path was then; this says what
+        # was actually opened, which is what the next few calls will change.
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise PrivateStateError(f"{path} is not a regular file")
 
