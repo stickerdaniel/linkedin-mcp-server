@@ -421,22 +421,57 @@ class TestStateLocation:
     @pytest.mark.skipif(
         os.name == "nt", reason="creating directory symlinks needs extra privileges"
     )
-    @pytest.mark.parametrize("depth", ["daemon", "application"])
-    def test_a_linked_state_root_is_refused(self, tmp_path: Path, depth: str):
-        # Measured before the check: retargeting the link between two starts let
-        # a second process take a lock on another inode at the same path, so two
-        # owners each believed they held the one lock.
-        application = tmp_path / ".mcp-server-linkedin"
-        target = tmp_path / "elsewhere"
-        target.mkdir()
-        if depth == "application":
-            application.symlink_to(target, target_is_directory=True)
+    @pytest.mark.parametrize("depth", ["home", "application", "daemon"])
+    def test_state_reached_through_a_link_resolves_to_one_place(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, depth: str
+    ):
+        # A symlinked home is an ordinary POSIX layout, so it has to work rather
+        # than be refused. What matters is that two routes to it agree, which is
+        # what resolving gives: the lock is addressed by path, and two spellings
+        # would otherwise be two locks.
+        real = tmp_path / "real"
+        real.mkdir()
+        home = tmp_path / "home"
+        if depth == "home":
+            home.symlink_to(real, target_is_directory=True)
         else:
-            application.mkdir()
-            (application / "daemon").symlink_to(target, target_is_directory=True)
+            home.mkdir()
+            application = home / ".mcp-server-linkedin"
+            if depth == "application":
+                application.symlink_to(real, target_is_directory=True)
+            else:
+                application.mkdir()
+                (application / "daemon").symlink_to(real, target_is_directory=True)
+        monkeypatch.setattr(daemon_descriptor_module, "_account_home", lambda: home)
 
-        with pytest.raises(DescriptorError, match="symbolic link"):
+        root = daemon_state_root()
+
+        assert not root.is_symlink()
+        assert root == root.resolve()
+        assert real in (root, *root.parents)
+
+    def test_a_home_that_is_not_there_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        # Creating it would shadow a home that is merely not mounted yet, and
+        # the daemon that did so would key its state under that empty directory
+        # while everything started after the mount keys it under the real one.
+        missing = tmp_path / "not-mounted" / "user"
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_account_home", _REAL_ACCOUNT_HOME
+        )
+        monkeypatch.setattr(os, "getuid", lambda: 424242, raising=False)
+
+        import pwd
+
+        entry = pwd.struct_passwd(
+            ("nobody", "x", 424242, 424242, "", str(missing), "/usr/bin/false")
+        )
+        monkeypatch.setattr(pwd, "getpwuid", lambda _uid: entry)
+
+        with pytest.raises(DescriptorError, match="does not exist"):
             daemon_state_root()
+        assert not missing.exists()
 
     def test_an_account_without_an_absolute_home_is_refused(
         self, monkeypatch: pytest.MonkeyPatch
