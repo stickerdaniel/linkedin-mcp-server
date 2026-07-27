@@ -7,6 +7,8 @@ only assert that the mock was called.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 import stat
 import subprocess
@@ -15,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from linkedin_mcp_server import private_state
 from linkedin_mcp_server.private_state import (
     PrivateStateError,
     harden_directory,
@@ -306,6 +309,60 @@ class TestRefusals:
 
         with pytest.raises(PrivateStateError, match="Not a directory"):
             harden_directory(occupied)
+
+    @pytest.mark.skipif(
+        sys.platform != "darwin", reason="macOS is where an access list needs libc"
+    )
+    def test_missing_access_list_functions_refuse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Measured before the check: with the bindings absent, a directory
+        # carrying an inherited everyone entry came back from hardening
+        # unchanged while the call reported success. On macOS these functions
+        # are part of libc, so their absence is a broken system rather than a
+        # platform without access lists.
+        monkeypatch.setattr(private_state, "_libc", lambda: None)
+
+        with pytest.raises(PrivateStateError, match="access list functions"):
+            harden_directory(tmp_path / "daemon")
+
+    @posix_only
+    def test_an_unreadable_access_list_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # acl_get_file returns NULL for any failure and sets errno to say which.
+        # Only the errnos meaning "there is no list" are an answer; reading
+        # EACCES as one would report a path as private without having checked.
+        target = tmp_path / "daemon"
+        target.mkdir()
+
+        class _Failing:
+            def __call__(self, *args: object) -> None:
+                ctypes.set_errno(errno.EACCES)
+                return None
+
+        library = private_state._libc()
+        if library is None:
+            pytest.skip("this platform has no access list functions to fail")
+        monkeypatch.setattr(library, "acl_get_file", _Failing())
+
+        with pytest.raises(PrivateStateError, match="Could not read the access list"):
+            private_state._has_extended_acl(target)
+
+    @posix_only
+    def test_a_path_owned_by_another_account_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # 0600 says "only the owner", which is worth nothing when the owner is
+        # somebody else: the bits grant them, and they can widen them again. It
+        # takes a privileged process to reach this, which is exactly what a
+        # container started against a pre-existing state tree is.
+        target = tmp_path / "token"
+        target.touch()
+        monkeypatch.setattr(os, "geteuid", lambda: os.stat(target).st_uid + 1)
+
+        with pytest.raises(PrivateStateError, match="is owned by uid"):
+            harden_file(target)
 
     @posix_only
     def test_a_filesystem_that_ignores_chmod_refuses(

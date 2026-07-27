@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import errno
 import logging
 import os
 import stat
+import sys
 import threading
 from pathlib import Path
 
@@ -38,6 +40,7 @@ _PRIVATE_DIR_MODE = 0o700
 _PRIVATE_FILE_MODE = 0o600
 
 _WINDOWS = os.name == "nt"
+_MACOS = sys.platform == "darwin"
 
 
 class PrivateStateError(RuntimeError):
@@ -90,17 +93,70 @@ def harden_file(path: Path) -> None:
     _harden_posix(path, _PRIVATE_FILE_MODE)
 
 
+def _require_acl_support(path: Path) -> None:
+    """Refuse to promise owner-only where access lists cannot be read at all.
+
+    macOS puts an access list alongside the mode on every filesystem this runs
+    on, and the functions that reach it are part of its libc. Not finding them
+    there means something is wrong with the interpreter or the library, not that
+    the platform has no access lists, and treating it as the latter is what made
+    this fail open. Measured with the bindings absent: a directory carrying an
+    inherited ``everyone`` entry came back from hardening unchanged, and the
+    call reported success. Elsewhere a missing binding genuinely does mean there
+    is no list to clear.
+    """
+    if _MACOS and _libc() is None:
+        raise PrivateStateError(
+            f"The access list functions are missing from this system's C "
+            f"library, so it cannot be established that only this account can "
+            f"read {path}. Refusing to treat it as private."
+        )
+
+
 def _harden_posix(path: Path, mode: int) -> None:
     """Apply *mode*, drop any extended ACL, and check the result."""
+    _require_acl_support(path)
     path.chmod(mode)
     _drop_extended_acl(path)
+    _verify_posix_owner(path)
     _verify_posix_mode(path, mode)
     _verify_no_extended_acl(path)
+
+
+def _verify_posix_owner(path: Path) -> None:
+    """Refuse a path owned by another account.
+
+    ``0600`` says "only the owner", which is worth nothing when the owner is
+    somebody else: those bits are then granting *them* the access, and an owner
+    can chmod their own path back open whenever they like. The mode alone
+    cannot distinguish the two cases.
+
+    It takes a privileged process to get here, since chmod on another account's
+    path fails otherwise, and a container or service started against a
+    pre-existing state tree is exactly that. The Windows side already reads its
+    owner back for the same reason; this is the POSIX half of that promise.
+    """
+    owner = path.stat().st_uid
+    if owner != os.geteuid():
+        raise PrivateStateError(
+            f"{path} is owned by uid {owner}, not by this account (uid "
+            f"{os.geteuid()}), so its permission bits grant that account rather "
+            f"than this one and it can widen them again at any time"
+        )
 
 
 #: macOS ``acl_get_file``/``acl_set_file`` selector for the list that sits
 #: alongside the mode bits.
 _ACL_TYPE_EXTENDED = 0x00000100
+
+#: The errno values that mean "this path carries no extended access list"
+#: rather than "the question could not be answered". ENOENT is what macOS
+#: returns for a perfectly ordinary directory without one, measured. The other
+#: two are how a filesystem says it does not implement access lists at all,
+#: which is equally an answer: there is no list to worry about.
+_NO_EXTENDED_ACL_ERRNOS = frozenset(
+    {errno.ENOENT, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
+)
 
 #: Resolved once, on first use. Two variables rather than a sentinel value, so
 #: "not looked up yet" and "looked up and unavailable" stay distinguishable
@@ -171,13 +227,30 @@ def _libc() -> ctypes.CDLL | None:
 
 
 def _has_extended_acl(path: Path) -> bool:
-    """Whether *path* carries an access list beyond its permission bits."""
+    """Whether *path* carries an access list beyond its permission bits.
+
+    ``acl_get_file`` returns NULL for *any* failure and sets errno to say
+    which, so NULL alone does not mean the path carries no list. Measured on
+    macOS: a directory with no extended ACL returns NULL with ENOENT, which is
+    the answer this wants. Anything else is the call failing to answer, and
+    reading that as "no list" would report a path as owner-only precisely when
+    its permissions could not be established.
+    """
     library = _libc()
     if library is None:  # pragma: no cover - no ACL support to report on
         return False
+    # Cleared first: errno keeps whatever an earlier call left there, so a
+    # stale value would be read as this call's outcome.
+    ctypes.set_errno(0)
     handle = library.acl_get_file(str(path).encode(), _ACL_TYPE_EXTENDED)
     if not handle:
-        return False
+        code = ctypes.get_errno()
+        if code in _NO_EXTENDED_ACL_ERRNOS:
+            return False
+        raise PrivateStateError(
+            f"Could not read the access list on {path}: {os.strerror(code)}. "
+            f"Refusing to report it as owner-only without having checked."
+        )
     library.acl_free(handle)
     return True
 
