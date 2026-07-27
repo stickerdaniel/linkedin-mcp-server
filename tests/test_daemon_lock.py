@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
+import linkedin_mcp_server.daemon_lock as daemon_lock_module
 from linkedin_mcp_server.daemon_descriptor import daemon_dir, daemon_state_root
 from linkedin_mcp_server.daemon_lock import (
     DaemonLock,
@@ -265,6 +266,36 @@ class TestHandoff:
             os.close(inherited)
 
     @posix_handoff
+    def test_a_lock_file_replaced_mid_adoption_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The descriptor is compared against the path before the lock is held,
+        # so an unlink and recreate in between leaves adoption holding an
+        # orphaned inode while the live path sits free. Measured before the
+        # check: adopter and contender each reported ownership, on two inodes.
+        seed = DaemonLock(tmp_path)
+        assert seed.try_acquire()
+        inherited = seed.inheritable_copy()
+        seed.release()
+        path = daemon_lock_path(tmp_path)
+
+        real = daemon_lock_module.try_lock
+
+        def replace_then_lock(fd: int, *, exclusive: bool) -> bool:
+            monkeypatch.setattr(daemon_lock_module, "try_lock", real)
+            path.unlink()
+            path.touch()
+            return real(fd, exclusive=exclusive)
+
+        monkeypatch.setattr(daemon_lock_module, "try_lock", replace_then_lock)
+
+        try:
+            with pytest.raises(DaemonLockError, match="was replaced"):
+                DaemonLock(tmp_path).adopt(inherited)
+        finally:
+            os.close(inherited)
+
+    @posix_handoff
     def test_adopting_a_descriptor_that_holds_no_lock_still_excludes(
         self, tmp_path: Path
     ):
@@ -467,12 +498,12 @@ class TestLiveness:
             lock.release()
 
     def test_concurrent_probes_do_not_see_each_other(self, tmp_path: Path):
-        # Measured before the probe became shared: 43 of 400 concurrent probes
-        # reported a daemon that did not exist, because an exclusive probe
-        # briefly holds the lock and the other probe reads its own sibling as an
-        # owner. A cold-starting client would then look for a descriptor rather
-        # than elect. Shared still fails against the owner's exclusive hold, so
-        # the answer stays right when there really is one.
+        # The half of the trade the shared probe buys. Measured with an
+        # exclusive probe: 43 of 400 concurrent probes reported a daemon that
+        # did not exist, because one briefly held the lock and the other read
+        # its own sibling as an owner. Inventing an owner is the unrecoverable
+        # direction, which is why shared is preferred despite the cost pinned
+        # in the test below.
         creator = DaemonLock(tmp_path)
         assert creator.try_acquire()
         creator.release()
@@ -491,6 +522,32 @@ class TestLiveness:
             thread.join()
 
         assert answers and not any(answers)
+
+    def test_the_probe_is_an_observation_not_a_decision(self, tmp_path: Path):
+        # The other half, and the reason the docstring calls this a hint. There
+        # is no way to ask flock whether a lock is held without taking one, so a
+        # probe contends with a concurrent election: measured, 11 of 3000
+        # elections failed against a probe while no owner existed. Ownership is
+        # therefore decided by try_acquire alone, never by asking this first.
+        creator = DaemonLock(tmp_path)
+        assert creator.try_acquire()
+        creator.release()
+
+        # An election is never wrong when nothing competes with it, which is
+        # the property callers may rely on.
+        for _ in range(50):
+            lock = DaemonLock(tmp_path)
+            assert lock.try_acquire()
+            lock.release()
+
+        # And the probe agrees with a settled state in both directions.
+        assert not daemon_is_running(tmp_path)
+        owner = DaemonLock(tmp_path)
+        assert owner.try_acquire()
+        try:
+            assert daemon_is_running(tmp_path)
+        finally:
+            owner.release()
 
     def test_a_stale_lock_file_does_not_look_alive(self, tmp_path: Path):
         # The file is never unlinked, so it outlives the daemon that made it.

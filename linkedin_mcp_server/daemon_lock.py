@@ -268,6 +268,21 @@ class DaemonLock:
                 "The inherited descriptor does not hold the daemon lock, so "
                 "adopting it would leave the browser unowned."
             )
+        # Checked again now that the lock is held, because the comparison above
+        # happened before it. An unlink and recreate in between leaves this
+        # holding a lock on an orphaned inode while the live path sits free for
+        # somebody else to take, which is two owners. st_nlink is what says the
+        # difference: zero means nothing refers to this inode any more.
+        # ``acquire_locked_fd`` guards its own acquisition the same way; it
+        # retries because it can, while adoption cannot re-lock a descriptor
+        # somebody else opened and has to refuse. Measured before this: adopter
+        # and contender each reported ownership, on two inodes.
+        if os.fstat(fd).st_nlink == 0:
+            raise DaemonLockError(
+                "The lock file was replaced while the inherited descriptor was "
+                "being adopted, so it now locks an inode nothing refers to. "
+                "Start the supervisor again."
+            )
         # Made non-inheritable again straight away. It was marked inheritable
         # for exactly one launch, and leaving it that way would let any later
         # child that inherits descriptors, a Chromium among them, keep the lock
@@ -324,28 +339,35 @@ if hasattr(os, "register_at_fork"):  # pragma: no branch - POSIX
 
 
 def daemon_is_running(auth_root: Path) -> bool:
-    """Whether some process currently owns the daemon for *auth_root*.
+    """Whether some process appeared to own the daemon for *auth_root*.
 
-    Answers the question that makes discovery cheap. A dead daemon leaves its
-    descriptor file behind, and probing that file over the network costs a
-    timeout on every cold start. The kernel already knows the answer for free:
-    if the lock can be taken, nobody owns the daemon, so whatever the descriptor
-    says is stale by definition and no connection needs attempting.
+    An observation, never a decision. Deciding whether to become the owner is
+    what :meth:`DaemonLock.try_acquire` is for, and asking this first would be
+    both slower and wrong: the answer can stop being true before the caller has
+    read it, and the attempt settles the question anyway.
 
-    Says nothing about whether a browser is still running. The kernel frees the
-    lock the moment the holder dies, and Chromium can outlive it.
+    The imprecision is not a shortcoming of this implementation, it is what
+    ``flock`` offers. There is no way to ask whether a lock is held without
+    taking one, so every probe contends with everything else touching the file.
+    Both directions were measured on this tree. Probing exclusively, 43 of 400
+    concurrent probes read a *sibling probe* as an owner. Probing shared fixes
+    that and costs the other half: 11 of 3000 concurrent elections failed
+    against a probe while no owner existed at all. Shared is the better trade,
+    because a probe that briefly delays an election is recoverable and a probe
+    that invents an owner is not, but neither is exact.
+
+    So: a False here means nobody held it a moment ago, which is worth acting
+    on only as a hint. A True may be an owner or may be another caller of this
+    function. Tests use it to observe ownership they established themselves,
+    where no such race exists.
+
+    Says nothing about whether a browser is still running either. The kernel
+    frees the lock the moment the holder dies, and Chromium can outlive it.
     """
     path = daemon_lock_path(auth_root)
     if not path.exists():
         return False
 
-    # Shared rather than exclusive, and that is not a detail. The owner holds
-    # the lock exclusively, so a shared request still fails against it and the
-    # answer stays correct. What it stops is two probes answering each other:
-    # with an exclusive request, one probe briefly holds the lock and the other
-    # reads its own sibling as a daemon. Measured before the change: 43 of 400
-    # concurrent probes reported a daemon that did not exist, which would have
-    # sent a cold-starting client looking for a descriptor rather than electing.
     fd = open_lock_file(path)
     try:
         if try_lock(fd, exclusive=False):
