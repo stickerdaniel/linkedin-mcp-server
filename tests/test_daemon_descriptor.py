@@ -10,11 +10,14 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
+import unicodedata
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_descriptor import (
     PROTOCOL_VERSION,
@@ -24,6 +27,7 @@ from linkedin_mcp_server.daemon_descriptor import (
     build,
     config_fingerprint,
     daemon_dir,
+    daemon_state_root,
     descriptor_path,
     mismatched_fields,
     new_instance_id,
@@ -37,26 +41,40 @@ from linkedin_mcp_server.daemon_descriptor import (
 posix_only = pytest.mark.skipif(
     os.name == "nt", reason="POSIX permission bits do not exist on Windows"
 )
+_REAL_ACCOUNT_HOME = daemon_descriptor_module._account_home
+
+
+@pytest.fixture(autouse=True)
+def _isolate_daemon_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    # Production state lives under the user's private application directory.
+    # Isolate it per test rather than touching the real user directory.
+    monkeypatch.setattr(daemon_descriptor_module, "_account_home", lambda: tmp_path)
 
 
 def _config(**browser: object) -> AppConfig:
     config = AppConfig()
+    config.browser.user_data_dir = str(
+        daemon_descriptor_module._account_home() / ".linkedin-mcp" / "profile"
+    )
     for name, value in browser.items():
         setattr(config.browser, name, value)
     return config
 
 
-def _descriptor(tmp_path: Path, token: str, **overrides: object) -> DaemonDescriptor:
+def _descriptor(
+    tmp_path: Path, token: str, *, profile: Path | None = None, **overrides: object
+) -> DaemonDescriptor:
+    profile = profile or (tmp_path / "profile")
     descriptor = build(
         instance_id="11111111-2222-3333-4444-555555555555",
         package_version="4.19.0",
         runtime_id="macos-arm64-host",
-        profile=tmp_path / "profile",
+        profile=profile,
         host="127.0.0.1",
         port=49152,
         path="/mcp",
         token=token,
-        config=_config(),
+        config=_config(user_data_dir=str(profile)),
         log_path=tmp_path / "daemon.log",
     )
     return replace(descriptor, **overrides) if overrides else descriptor
@@ -337,6 +355,131 @@ class TestEndpointUrl:
         httpx.URL(descriptor.url)  # raises if a client could not use it
 
 
+class TestStateLocation:
+    def test_state_is_outside_the_configured_auth_root(self, tmp_path: Path):
+        # The auth root can be /tmp, a home directory, or another shared parent.
+        # Daemon state must not change it or trust entries planted inside it.
+        auth_root = tmp_path / "shared-parent"
+
+        assert daemon_dir(auth_root).parent == daemon_state_root()
+        assert auth_root not in daemon_dir(auth_root).parents
+
+    def test_equivalent_auth_roots_share_one_state_directory(self, tmp_path: Path):
+        direct = tmp_path / "shared-parent"
+        indirect = tmp_path / "sub" / ".." / "shared-parent"
+
+        assert daemon_dir(direct) == daemon_dir(indirect)
+
+    def test_different_auth_roots_have_different_state_directories(
+        self, tmp_path: Path
+    ):
+        one = tmp_path / "one"
+        two = tmp_path / "two"
+        one.mkdir()
+        two.mkdir()
+
+        assert daemon_dir(one) != daemon_dir(two)
+
+    def test_case_aliases_share_state_on_an_insensitive_volume(self, tmp_path: Path):
+        mixed = tmp_path / "MixedCase"
+        lower = tmp_path / "mixedcase"
+        mixed.mkdir()
+        if not lower.exists():
+            pytest.skip("the test volume is case-sensitive")
+
+        assert mixed.samefile(lower)
+        assert daemon_dir(mixed) == daemon_dir(lower)
+
+    def test_process_home_overrides_do_not_move_daemon_state(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        # Launchers and services can override these per process. Election scope
+        # follows the OS account, so the same absolute profile cannot split.
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_account_home", _REAL_ACCOUNT_HOME
+        )
+        auth_root = tmp_path / "shared-parent"
+        auth_root.mkdir()
+        before = daemon_dir(auth_root)
+
+        monkeypatch.setenv("HOME", str(tmp_path / "other-home"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "other-profile"))
+
+        assert daemon_dir(auth_root) == before
+
+    @pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="Linux filesystems accept non-UTF-8 byte names through surrogateescape",
+    )
+    def test_a_non_utf8_auth_root_spelling_can_be_keyed(self, tmp_path: Path):
+        raw = os.fsencode(tmp_path) + b"/missing-\xff"
+        path = Path(os.fsdecode(raw))
+
+        assert daemon_dir(path).parent == daemon_state_root()
+        assert path.is_dir()
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="creating directory symlinks needs extra privileges"
+    )
+    @pytest.mark.parametrize("depth", ["daemon", "application"])
+    def test_a_linked_state_root_is_refused(self, tmp_path: Path, depth: str):
+        # Measured before the check: retargeting the link between two starts let
+        # a second process take a lock on another inode at the same path, so two
+        # owners each believed they held the one lock.
+        application = tmp_path / ".mcp-server-linkedin"
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        if depth == "application":
+            application.symlink_to(target, target_is_directory=True)
+        else:
+            application.mkdir()
+            (application / "daemon").symlink_to(target, target_is_directory=True)
+
+        with pytest.raises(DescriptorError, match="symbolic link"):
+            daemon_state_root()
+
+    def test_an_account_without_an_absolute_home_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Path("") is ".", so an empty entry would key state under whichever
+        # directory the process happened to start in and split one account's
+        # election between them.
+        monkeypatch.setattr(
+            daemon_descriptor_module, "_account_home", _REAL_ACCOUNT_HOME
+        )
+        monkeypatch.setattr(os, "getuid", lambda: 424242, raising=False)
+
+        import pwd
+
+        entry = pwd.struct_passwd(
+            ("nobody", "x", 424242, 424242, "", "", "/usr/bin/false")
+        )
+        monkeypatch.setattr(pwd, "getpwuid", lambda _uid: entry)
+
+        with pytest.raises(DescriptorError, match="absolute home directory"):
+            daemon_state_root()
+
+    def test_a_filesystem_without_stable_ids_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        auth_root = tmp_path / "shared-parent"
+        auth_root.mkdir()
+        real_stat = os.stat
+
+        def stat_without_inode(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            if Path(path) == auth_root:
+                fields = list(result)
+                fields[1] = 0
+                return os.stat_result(fields)
+            return result
+
+        monkeypatch.setattr(os, "stat", stat_without_inode)
+
+        with pytest.raises(DescriptorError, match="stable identity"):
+            daemon_dir(auth_root)
+
+
 class TestInstanceIdentity:
     def test_an_instance_id_cannot_escape_the_daemon_directory(self, tmp_path: Path):
         # The identifier becomes part of a filename, and it arrives from a file
@@ -378,6 +521,48 @@ class TestProfileIdentity:
         descriptor = _descriptor(tmp_path, new_token())
 
         assert descriptor.serves(tmp_path / "sub" / ".." / "profile")
+
+    def test_asking_what_a_daemon_serves_creates_nothing(self, tmp_path: Path):
+        # Comparison answers a question. Creating a browser profile in order to
+        # explain why a client was turned away would be a surprising thing for
+        # that client to find afterwards.
+        descriptor = _descriptor(tmp_path, new_token())
+        absent = tmp_path / "never-created"
+
+        assert not descriptor.serves(absent)
+        assert not absent.exists()
+
+    def test_reporting_a_mismatch_creates_nothing(self, tmp_path: Path):
+        absent = tmp_path / "also-never-created"
+
+        assert mismatched_fields(_config(), _config(user_data_dir=str(absent))) == (
+            "user_data_dir",
+        )
+        assert not absent.exists()
+
+    def test_a_case_alias_of_the_same_profile_is_served(self, tmp_path: Path):
+        profile = tmp_path / "MixedRoot" / "Profile"
+        profile.mkdir(parents=True)
+        alias = tmp_path / "mixedroot" / "profile"
+        if not alias.exists():
+            pytest.skip("the test volume is case-sensitive")
+        descriptor = _descriptor(tmp_path, new_token(), profile=profile)
+
+        assert profile.samefile(alias)
+        assert descriptor.serves(alias)
+
+    def test_a_unicode_alias_of_the_same_profile_is_served(self, tmp_path: Path):
+        composed = unicodedata.normalize("NFC", "é")
+        decomposed = unicodedata.normalize("NFD", "é")
+        profile = tmp_path / composed / "profile"
+        profile.mkdir(parents=True)
+        alias = tmp_path / decomposed / "profile"
+        if not alias.exists():
+            pytest.skip("the test volume preserves distinct Unicode spellings")
+        descriptor = _descriptor(tmp_path, new_token(), profile=profile)
+
+        assert profile.samefile(alias)
+        assert descriptor.serves(alias)
 
 
 class TestConfigFingerprint:
@@ -437,6 +622,32 @@ class TestConfigFingerprint:
         assert config_fingerprint(direct, key=token) == config_fingerprint(
             indirect, key=token
         )
+
+    def test_case_aliases_of_the_same_profile_match(self, tmp_path: Path):
+        profile = tmp_path / "MixedRoot" / "Profile"
+        profile.mkdir(parents=True)
+        alias = tmp_path / "mixedroot" / "profile"
+        if not alias.exists():
+            pytest.skip("the test volume is case-sensitive")
+        token = new_token()
+
+        assert config_fingerprint(
+            _config(user_data_dir=str(profile)), key=token
+        ) == config_fingerprint(_config(user_data_dir=str(alias)), key=token)
+
+    def test_unicode_aliases_of_the_same_profile_match(self, tmp_path: Path):
+        composed = unicodedata.normalize("NFC", "é")
+        decomposed = unicodedata.normalize("NFD", "é")
+        profile = tmp_path / composed / "profile"
+        profile.mkdir(parents=True)
+        alias = tmp_path / decomposed / "profile"
+        if not alias.exists():
+            pytest.skip("the test volume preserves distinct Unicode spellings")
+        token = new_token()
+
+        assert config_fingerprint(
+            _config(user_data_dir=str(profile)), key=token
+        ) == config_fingerprint(_config(user_data_dir=str(alias)), key=token)
 
     def test_an_empty_proxy_password_is_not_an_absent_one(self):
         # proxy_settings compares the password against None precisely so an

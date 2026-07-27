@@ -8,11 +8,11 @@ configuration is compared through a fingerprint.
 
 Two fields exist because of measurements rather than tidiness:
 
-``profile_path``
+``profile_path`` and its filesystem identity
     ``auth_root_dir`` returns the profile's *parent*, so ``.../profile`` and
-    ``.../profile2`` share one auth root and therefore one lock. Without an
-    exact comparison here, a client configured for the second would attach to
-    the first one's browser and never notice.
+    ``.../profile2`` share one auth root and therefore one lock. The path is
+    retained for diagnostics, while device and inode decide identity so case or
+    Unicode aliases of one profile match without conflating sibling profiles.
 
 ``config_fingerprint``
     Two clients that disagree about ``headless``, the user agent or the proxy
@@ -26,6 +26,15 @@ its own file, named after the instance, and the descriptor carries only its
 digest. Fixed names would let a client pair one generation's descriptor with the
 next generation's token and read that mismatch as corruption rather than as the
 restart it is.
+
+State lives under the account's own directory rather than under the auth root,
+which is configurable and may be a directory this application does not own. One
+consequence is worth stating before anything is wired to it: two containers
+sharing a bind-mounted auth root do *not* share this state, because each has its
+own home. Measured with two containers on one mounted profile: both saw the same
+auth root identity and both took the lock. Whatever adopts this has to either
+keep containers on the existing per-operation lease or give them a shared state
+directory of their own.
 """
 
 from __future__ import annotations
@@ -42,13 +51,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from linkedin_mcp_server.common_utils import secure_write_text, utcnow_iso
+from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
 from linkedin_mcp_server.config.schema import AppConfig, is_loopback_host
 from linkedin_mcp_server.private_state import harden_directory, harden_file
 
 #: Bumped when the shape below changes incompatibly. A client that does not
 #: recognise the value refuses rather than guessing at fields it cannot read.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: Bumped when the daemon's own protocol changes: the control routes, the call
 #: metadata, or the ping contract. Compatibility keys on this rather than on the
@@ -60,6 +69,7 @@ PROTOCOL_VERSION = 1
 
 _DESCRIPTOR_FILE = "daemon.json"
 _DAEMON_DIR = "daemon"
+_APPLICATION_STATE_DIR = ".mcp-server-linkedin"
 
 # Enough that guessing is not a strategy. Read straight from the OS source.
 _TOKEN_BYTES = 32
@@ -113,9 +123,148 @@ def _number(raw: Mapping[Any, Any], name: str, *, default: int | None = None) ->
     return value
 
 
+def _account_home() -> Path:
+    """Return the operating system account's home, ignoring process overrides."""
+    if os.name == "nt":  # pragma: no cover - exercised on the Windows CI runner
+        import ctypes
+        from ctypes import wintypes
+
+        # CSIDL_PROFILE asks Windows for the current account's profile directory.
+        # Unlike Path.home(), this does not change when a launcher overrides
+        # HOME or USERPROFILE for one process and would otherwise split one
+        # account's daemon election into several roots.
+        shell32 = getattr(ctypes, "WinDLL")("shell32", use_last_error=True)
+        get_folder = shell32.SHGetFolderPathW
+        get_folder.argtypes = [
+            wintypes.HWND,
+            ctypes.c_int,
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+        ]
+        get_folder.restype = ctypes.c_long
+        buffer = ctypes.create_unicode_buffer(32768)
+        result = get_folder(None, 0x0028, None, 0, buffer)
+        if result != 0 or not buffer.value:
+            raise DescriptorError(
+                "Windows could not identify the current account's profile directory"
+            )
+        return Path(buffer.value)
+
+    import pwd
+
+    try:
+        entry = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError as exc:
+        raise DescriptorError(
+            "The operating system could not identify the current account's home directory"
+        ) from exc
+
+    # An empty or relative entry is not an answer. Path("") is ".", so two
+    # processes of one account started from different working directories would
+    # key their state under different roots and each elect its own owner.
+    home = Path(entry)
+    if not entry or not home.is_absolute():
+        raise DescriptorError(
+            "The current account has no absolute home directory, so daemon state "
+            "has nowhere stable to live"
+        )
+    return home
+
+
+def daemon_state_root() -> Path:
+    """Return the private application root shared by every local daemon.
+
+    Refuses a symbolic link on the way, because the lock is taken by path: with
+    a link here, retargeting it between two acquisitions puts two owners on two
+    inodes while both believe they hold the one lock. Measured before the check.
+
+    This is a consistency guard, not a security boundary. Only the account that
+    owns this directory can plant or retarget the link, and that same account
+    could equally rename the real directory or delete the lock file. What it
+    buys is that an unusual layout fails loudly instead of quietly electing a
+    second browser owner.
+    """
+    root = _account_home() / _APPLICATION_STATE_DIR / _DAEMON_DIR
+    for part in (root.parent, root):
+        if part.is_symlink():
+            raise DescriptorError(
+                f"{part} is a symbolic link. Daemon state has to sit at a real "
+                f"path, because a link that is retargeted between two starts "
+                f"would let two processes each own the browser. Replace it with "
+                f"a directory."
+            )
+    return root
+
+
+def _directory_identity(path: Path, *, label: str) -> tuple[int, int]:
+    """Return the stable filesystem identity of a directory, creating it once.
+
+    For the process that is establishing state. The first daemon on a fresh
+    install must not key a missing path and then switch to an inode after
+    creating it, which would leave its own lock at an address nothing else
+    computes. ``secure_mkdir`` creates only what is missing and deliberately
+    leaves permissions on existing parents alone.
+    """
+    canonical = path.expanduser().resolve()
+    secure_mkdir(canonical, mode=0o700)
+    info = canonical.stat()
+
+    if not stat.S_ISDIR(info.st_mode):
+        raise DescriptorError(f"The {label} is not a directory: {canonical}")
+
+    # Device plus inode identifies the physical directory, not one spelling of
+    # it. That keeps case and Unicode aliases together on insensitive volumes
+    # without conflating distinct directories on a case-sensitive volume.
+    if not info.st_ino:
+        raise DescriptorError(
+            f"The filesystem does not provide a stable identity for {canonical}, "
+            "so browser ownership cannot be coordinated safely"
+        )
+    return info.st_dev, info.st_ino
+
+
+def _comparable_identity(path: Path) -> tuple[int, int] | str:
+    """Return an identity for *path* without creating or touching anything.
+
+    Comparison must not have side effects. ``serves`` and ``mismatched_fields``
+    answer questions, and one of them runs while assembling a refusal message:
+    creating a browser profile directory in order to explain why a client was
+    turned away would be an odd thing for a client to discover afterwards.
+
+    A path that does not exist yet falls back to its spelling, which can never
+    equal a real device and inode pair. Two clients naming the same missing
+    directory still agree; a missing one and a real one do not. That errs
+    towards a refusal, which this module prefers over serving a client a browser
+    that is not the one it asked for.
+    """
+    canonical = path.expanduser().resolve()
+    try:
+        info = canonical.stat()
+    except OSError:
+        return f"path\0{os.path.normcase(str(canonical))}"
+    if not stat.S_ISDIR(info.st_mode) or not info.st_ino:
+        return f"path\0{os.path.normcase(str(canonical))}"
+    return info.st_dev, info.st_ino
+
+
+def _auth_root_identity(auth_root: Path) -> bytes:
+    device, inode = _directory_identity(auth_root, label="authentication root")
+    return f"inode\0{device}\0{inode}".encode("ascii")
+
+
 def daemon_dir(auth_root: Path) -> Path:
-    """Where a daemon's descriptor and token live for *auth_root*."""
-    return auth_root.expanduser().resolve() / _DAEMON_DIR
+    """Where daemon state for *auth_root* lives.
+
+    The auth root is user-configurable and may be a shared directory such as
+    ``/tmp`` or a home directory. Storing state below it would either change
+    permissions on a directory this application does not own or trust a
+    replaceable directory link for the ownership lock. Keep state under the
+    operating system account's private application directory instead, keyed by
+    the physical auth root so sibling profiles still share exactly one election.
+    """
+    key = hashlib.sha256(_auth_root_identity(auth_root)).hexdigest()
+    return daemon_state_root() / key
 
 
 def descriptor_path(auth_root: Path) -> Path:
@@ -199,10 +348,13 @@ def _normalize(name: str, value: Any) -> Any:
         return value is not False
     if value is None:
         return None
-    if name in ("user_data_dir", "chrome_path"):
+    if name == "user_data_dir":
+        # The profile is shared state, so compare the physical directory rather
+        # than one spelling. macOS can preserve case and Unicode aliases in a
+        # resolved path even when both names address the same directory.
+        return _comparable_identity(Path(str(value)))
+    if name == "chrome_path":
         path = Path(str(value)).expanduser().resolve()
-        # Windows paths differ only in case, so comparing them literally would
-        # split one owner into several.
         return os.path.normcase(str(path))
     if name == "proxy_bypass":
         # An ordered, comma-separated list where neither the order nor the
@@ -261,6 +413,8 @@ class DaemonDescriptor:
     package_version: str
     runtime_id: str
     profile_path: str
+    profile_device: int
+    profile_inode: int
     host: str
     port: int
     path: str
@@ -309,6 +463,8 @@ class DaemonDescriptor:
             package_version=_text(raw, "package_version"),
             runtime_id=_text(raw, "runtime_id"),
             profile_path=_text(raw, "profile_path"),
+            profile_device=_number(raw, "profile_device"),
+            profile_inode=_number(raw, "profile_inode"),
             host=_text(raw, "host"),
             port=_number(raw, "port"),
             path=_text(raw, "path"),
@@ -353,8 +509,10 @@ class DaemonDescriptor:
         Two directories side by side elect one owner between them, and a client
         that only checked the auth root would be served the wrong browser.
         """
-        wanted = os.path.normcase(str(profile.expanduser().resolve()))
-        return wanted == os.path.normcase(self.profile_path)
+        return _comparable_identity(profile) == (
+            self.profile_device,
+            self.profile_inode,
+        )
 
 
 def publish(
@@ -368,6 +526,7 @@ def publish(
     token into existence.
     """
     directory = daemon_dir(auth_root)
+    harden_directory(daemon_state_root())
     harden_directory(directory)
 
     token_file = token_path(auth_root, descriptor.instance_id)
@@ -562,6 +721,9 @@ def build(
     log_path: Path,
 ) -> DaemonDescriptor:
     """Assemble a descriptor for a daemon that is already listening."""
+    profile_device, profile_inode = _directory_identity(
+        profile, label="browser profile"
+    )
     return DaemonDescriptor(
         instance_id=instance_id,
         schema_version=SCHEMA_VERSION,
@@ -569,6 +731,8 @@ def build(
         package_version=package_version,
         runtime_id=runtime_id,
         profile_path=str(profile.expanduser().resolve()),
+        profile_device=profile_device,
+        profile_inode=profile_inode,
         host=host,
         port=port,
         path=path,
