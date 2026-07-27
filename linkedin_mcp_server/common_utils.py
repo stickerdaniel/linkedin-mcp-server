@@ -60,6 +60,25 @@ def harden_linkedin_tree(path: Path) -> None:
             return
 
 
+def is_still_at(fd: int, path: Path) -> bool:
+    """Whether *fd* is still the file that *path* names.
+
+    Compared by device and inode rather than by counting links. A count catches
+    an unlink and misses a rename: the inode keeps its one link while the name
+    comes to mean a different file, so the count still reads as one. A path that
+    has since vanished counts as changed.
+
+    Only meaningful once whatever the caller wanted to establish is in hand.
+    Asked earlier, the answer can stop being true immediately afterwards.
+    """
+    held = os.fstat(fd)
+    try:
+        current = path.stat()
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino)
+
+
 def secure_write_text(path: Path, content: str, mode: int = 0o600) -> None:
     """Atomically write *content* to *path* with owner-only permissions.
 

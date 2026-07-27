@@ -33,8 +33,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from linkedin_mcp_server.common_utils import secure_mkdir
-from linkedin_mcp_server.profile_lease import is_still_at
+from linkedin_mcp_server.common_utils import is_still_at, secure_mkdir
 
 logger = logging.getLogger(__name__)
 
