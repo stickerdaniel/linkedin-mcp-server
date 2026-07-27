@@ -80,6 +80,9 @@ _APPLICATION_STATE_DIR = ".mcp-server-linkedin"
 # Enough that guessing is not a strategy. Read straight from the OS source.
 _TOKEN_BYTES = 32
 
+#: What a hex digest may contain, for checking one read from a file.
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
 #: Configuration a client must share with the owner to be served by it. Each of
 #: these either changes what the browser *is* (its fingerprint, its exit
 #: address, where its profile lives) or how long the owner keeps it. Anything
@@ -114,6 +117,25 @@ def _text(raw: Mapping[Any, Any], name: str) -> str:
     if not isinstance(value, str):
         raise DescriptorError(
             f"The daemon descriptor field {name} is missing or not text"
+        )
+    return value
+
+
+def _digest_text(raw: Mapping[Any, Any], name: str) -> str:
+    """Read a field that must be a SHA-256 digest, and check that it is one.
+
+    Both digests are compared with ``hmac.compare_digest``, which refuses a
+    string carrying anything outside ASCII and raises TypeError doing so.
+    Measured with an accented character: the descriptor was accepted here and
+    the comparison failed later with a TypeError, outside the DescriptorError
+    every caller of this module is written to expect. A digest has one shape,
+    so checking it costs nothing and keeps the failure where it can be
+    explained.
+    """
+    value = _text(raw, name)
+    if len(value) != 64 or any(character not in _HEX_DIGITS for character in value):
+        raise DescriptorError(
+            f"The daemon descriptor field {name} is not a SHA-256 digest"
         )
     return value
 
@@ -285,20 +307,23 @@ def profile_identity(profile: Path) -> str:
     # matching its own profile. Measured, with the auth root non-empty so the
     # scan had something to walk: serves() went from True to False across the
     # login that created the directory.
-    # casefold rather than normcase: normcase is a no-op on POSIX, while macOS
-    # is case-insensitive regardless, so Profile and profile name one directory
-    # there and the listing holds only one of the two spellings.
+    # An exact match wins over a case-insensitive one, and that order is the
+    # whole point. On a case-insensitive volume the listing holds one spelling,
+    # so Profile and profile find each other and agree, which is what this is
+    # for. On a case-sensitive one they are two directories that both exist,
+    # and folding without preferring the exact name gave them the same identity:
+    # measured on a case-sensitive APFS volume, two distinct siblings both
+    # keyed as Profile, which would have handed a client the other's session.
     wanted = canonical.name
     folded = wanted.casefold()
     try:
-        for entry in os.scandir(canonical.parent):
-            if entry.name == wanted or entry.name.casefold() == folded:
-                wanted = entry.name
-                break
+        entries = [entry.name for entry in os.scandir(canonical.parent)]
     except OSError:
         # The parent stopped being readable between the two calls. The spelling
         # the caller gave still identifies it well enough to compare.
-        pass
+        entries = []
+    if wanted not in entries:
+        wanted = next((name for name in entries if name.casefold() == folded), wanted)
     return f"under\0{info.st_dev}\0{info.st_ino}\0{wanted}"
 
 
@@ -515,8 +540,8 @@ class DaemonDescriptor:
             host=_text(raw, "host"),
             port=_number(raw, "port"),
             path=_text(raw, "path"),
-            token_sha256=_text(raw, "token_sha256"),
-            config_fingerprint=_text(raw, "config_fingerprint"),
+            token_sha256=_digest_text(raw, "token_sha256"),
+            config_fingerprint=_digest_text(raw, "config_fingerprint"),
             started_at=_text(raw, "started_at"),
             log_path=_text(raw, "log_path"),
             pid=_number(raw, "pid", default=0),

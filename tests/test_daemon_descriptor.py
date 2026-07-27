@@ -556,7 +556,45 @@ class TestEndpointSpelling:
         httpx.URL(descriptor.url)
 
 
+class TestDigestFields:
+    @pytest.mark.parametrize("field", ["token_sha256", "config_fingerprint"])
+    @pytest.mark.parametrize("value", ["é" * 64, "z" * 64, "abc", "a" * 63, "a" * 65])
+    def test_a_field_that_is_not_a_digest_is_refused(
+        self, tmp_path: Path, field: str, value: str
+    ):
+        # compare_digest refuses a string carrying anything outside ASCII and
+        # raises TypeError doing so. Measured with an accented character: the
+        # descriptor was accepted and the comparison failed later, outside the
+        # DescriptorError every caller of this module expects.
+        token = new_token()
+        publish(tmp_path, _descriptor(tmp_path, token), token)
+        raw = json.loads(descriptor_path(tmp_path).read_text())
+        raw[field] = value
+        descriptor_path(tmp_path).write_text(json.dumps(raw))
+
+        with pytest.raises(DescriptorError, match="SHA-256 digest"):
+            read(tmp_path)
+
+
 class TestProfileIdentityStability:
+    def test_case_distinct_siblings_do_not_collide(self, tmp_path: Path):
+        # On a case-insensitive volume Profile and profile name one directory,
+        # which is what the fold is for. On a case-sensitive one they are two,
+        # and folding without preferring an exact match gave both the same
+        # identity: measured on a case-sensitive APFS volume, which would have
+        # handed a client the other profile's logged-in session.
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir()
+        upper = auth_root / "Profile"
+        lower = auth_root / "profile"
+        upper.mkdir()
+        try:
+            lower.mkdir()
+        except FileExistsError:
+            pytest.skip("this volume is case-insensitive, so these are one directory")
+
+        assert profile_identity(upper) != profile_identity(lower)
+
     def test_the_identity_survives_the_profile_being_created(self, tmp_path: Path):
         # The profile does not exist before the first login, so an identity
         # that changed when it appeared would leave a descriptor published
