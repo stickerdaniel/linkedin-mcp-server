@@ -32,6 +32,7 @@ from linkedin_mcp_server.daemon_descriptor import (
     mismatched_fields,
     new_instance_id,
     new_token,
+    profile_identity,
     publish,
     read,
     read_token,
@@ -513,6 +514,35 @@ class TestStateLocation:
 
         with pytest.raises(DescriptorError, match="stable identity"):
             daemon_dir(auth_root)
+
+
+class TestEndpointSpelling:
+    def test_a_host_with_whitespace_is_refused(self, tmp_path: Path):
+        # is_loopback_host trims before classifying, so such a host passes as
+        # loopback and then produces a URL no client can parse. Measured:
+        # "[::1] " was accepted and failed later with "Invalid port".
+        descriptor = _descriptor(tmp_path, new_token(), host="[::1] ")
+
+        with pytest.raises(DescriptorError, match="whitespace"):
+            descriptor.check_endpoint_is_local()
+
+
+class TestProfileIdentityStability:
+    def test_the_identity_survives_the_profile_being_created(self, tmp_path: Path):
+        # The profile does not exist before the first login, so an identity
+        # that changed when it appeared would leave a descriptor published
+        # beforehand no longer matching its own profile. Measured with the auth
+        # root non-empty, which is the normal case since the lease files are
+        # never removed: serves() went from True to False across that login.
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir()
+        (auth_root / "profile.lock").touch()
+        profile = auth_root / "profile"
+
+        before = profile_identity(profile)
+        profile.mkdir()
+
+        assert profile_identity(profile) == before
 
 
 class TestInstanceIdentity:

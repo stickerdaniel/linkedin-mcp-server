@@ -267,22 +267,38 @@ def profile_identity(profile: Path) -> str:
     discover afterwards.
     """
     canonical = profile.expanduser().resolve()
-    spelled = f"path\0{os.path.normcase(str(canonical))}"
     try:
         info = canonical.parent.stat()
-        if not stat.S_ISDIR(info.st_mode) or not info.st_ino:
-            return spelled
-        # The name as the filesystem holds it. scandir is one syscall over a
-        # directory this already resolved, and it is the only way to learn which
-        # spelling is the real one where several address one entry.
-        name = os.path.normcase(canonical.name)
+    except OSError:
+        # No parent to key on. Two clients naming the same absent directory
+        # still agree with each other, which is all this can offer.
+        return f"path\0{os.path.normcase(str(canonical))}"
+
+    if not stat.S_ISDIR(info.st_mode) or not info.st_ino:
+        return f"path\0{os.path.normcase(str(canonical))}"
+
+    # The name as the filesystem holds it, where it holds one. Only the parent
+    # is consulted, never the profile itself, because the profile legitimately
+    # does not exist yet before the first login: an identity that changed when
+    # it appeared would leave a descriptor published beforehand no longer
+    # matching its own profile. Measured, with the auth root non-empty so the
+    # scan had something to walk: serves() went from True to False across the
+    # login that created the directory.
+    # casefold rather than normcase: normcase is a no-op on POSIX, while macOS
+    # is case-insensitive regardless, so Profile and profile name one directory
+    # there and the listing holds only one of the two spellings.
+    wanted = canonical.name
+    folded = wanted.casefold()
+    try:
         for entry in os.scandir(canonical.parent):
-            if os.path.normcase(entry.name) == name or canonical.samefile(entry.path):
-                name = entry.name
+            if entry.name == wanted or entry.name.casefold() == folded:
+                wanted = entry.name
                 break
     except OSError:
-        return spelled
-    return f"under\0{info.st_dev}\0{info.st_ino}\0{name}"
+        # The parent stopped being readable between the two calls. The spelling
+        # the caller gave still identifies it well enough to compare.
+        pass
+    return f"under\0{info.st_dev}\0{info.st_ino}\0{wanted}"
 
 
 def daemon_dir(auth_root: Path) -> Path:
@@ -515,6 +531,17 @@ class DaemonDescriptor:
         write access to the auth root into a way to collect the token and,
         through it, the LinkedIn session behind it.
         """
+        # Compared against the host as written, because that is the string the
+        # URL is built from. is_loopback_host trims before classifying, so a
+        # host with whitespace around it passes as loopback and then produces a
+        # URL no client can parse: measured, "[::1] " was accepted here and
+        # failed later with "Invalid port: ' :49152'", outside anything that
+        # could explain it as a bad descriptor.
+        if self.host != self.host.strip():
+            raise DescriptorError(
+                f"The daemon descriptor names host {self.host!r}, which carries "
+                f"whitespace and cannot be used to reach anything"
+            )
         if not is_loopback_host(self.host):
             raise DescriptorError(
                 f"The daemon descriptor points at {self.host}, which is not "
