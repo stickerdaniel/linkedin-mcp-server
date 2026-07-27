@@ -39,7 +39,11 @@ import time
 from pathlib import Path
 from types import TracebackType
 
-from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
+from linkedin_mcp_server.common_utils import (
+    harden_linkedin_tree,
+    is_still_at,
+    secure_mkdir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -327,21 +331,6 @@ def acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
     raise ProfileLeaseUnavailableError(
         f"The lock file {path} keeps being replaced; refusing to continue."
     )
-
-
-def is_still_at(fd: int, path: Path) -> bool:
-    """Whether *fd* is still the file that *path* names.
-
-    Answered after the lock is taken, because that is the only order in which
-    the answer means anything: before it, the file can change immediately
-    afterwards. A path that has since vanished counts as changed.
-    """
-    held = os.fstat(fd)
-    try:
-        current = path.stat()
-    except OSError:
-        return False
-    return (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino)
 
 
 def _release_locked_fd(fd: int) -> None:
