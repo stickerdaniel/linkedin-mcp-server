@@ -64,11 +64,23 @@ CONTAINER_INHERITANCE = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
 ACCESS_ALLOWED_ACE_TYPE = 0x00
 SE_FILE_OBJECT = 1
 
+OWNER_SECURITY_INFORMATION = 0x00000001
 DACL_SECURITY_INFORMATION = 0x00000004
 PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 # Replace the DACL *and* stop the parent's entries being inherited back in.
 # Without the second flag the first one is close to cosmetic.
-REPLACE_PROTECTED_DACL = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
+#
+# The owner goes with them, because a DACL is only as good as who may rewrite
+# it. Windows grants an object's owner READ_CONTROL and WRITE_DAC implicitly,
+# with no ACE saying so, so a directory this account merely had permission to
+# modify would keep its previous owner and that owner could widen the DACL
+# straight back. Taking ownership is what makes the entry we just wrote the
+# last word.
+REPLACE_PROTECTED_DACL = (
+    OWNER_SECURITY_INFORMATION
+    | DACL_SECURITY_INFORMATION
+    | PROTECTED_DACL_SECURITY_INFORMATION
+)
 
 SE_DACL_PROTECTED = 0x1000
 FILE_ALL_ACCESS = 0x001F01FF
@@ -378,7 +390,7 @@ def restrict_to_current_user(path: Path, *, directory: bool) -> None:
     acl = _build_owner_only_acl(sid, directory=directory)
     try:
         code = _advapi32.SetNamedSecurityInfoW(
-            str(path), SE_FILE_OBJECT, REPLACE_PROTECTED_DACL, None, None, acl, None
+            str(path), SE_FILE_OBJECT, REPLACE_PROTECTED_DACL, sid, None, acl, None
         )
         # This one returns the error code rather than setting the thread's last
         # error, so checking GetLastError here would read a stale value from
@@ -498,6 +510,33 @@ def _sid_to_string(sid: _PSID) -> str:
         _kernel32.LocalFree(ctypes.cast(text, _HLOCAL))
 
 
+def read_owner(path: Path) -> str:
+    """Return the SID string of *path*'s owner."""
+    _advapi32, _kernel32 = _load()
+
+    owner = _PSID()
+    descriptor = _PSECURITY_DESCRIPTOR()
+    code = _advapi32.GetNamedSecurityInfoW(
+        str(path),
+        SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION,
+        ctypes.byref(owner),
+        None,
+        None,
+        None,
+        ctypes.byref(descriptor),
+    )
+    if code != ERROR_SUCCESS:
+        _fail("GetNamedSecurityInfoW", code)
+    try:
+        if not owner:
+            raise PrivateStateError(f"{path} has no owner")
+        return _sid_to_string(owner)
+    finally:
+        if descriptor:
+            _kernel32.LocalFree(descriptor)
+
+
 def verify_owner_only(path: Path, *, directory: bool) -> None:
     """Raise unless *path*'s DACL grants this account and nothing else."""
     sid, sid_buffer = current_user_sid()
@@ -505,6 +544,17 @@ def verify_owner_only(path: Path, *, directory: bool) -> None:
         expected_sid = _sid_to_string(sid)
     finally:
         del sid_buffer
+
+    # Checked first, because it decides what the rest is worth. Windows grants
+    # an owner READ_CONTROL and WRITE_DAC with no ACE saying so, so a DACL that
+    # names only this account still means nothing while someone else owns the
+    # path and can rewrite it at will.
+    actual_owner = read_owner(path)
+    if actual_owner != expected_sid:
+        raise PrivateStateError(
+            f"{path} is owned by {actual_owner}, not by this account, so that "
+            f"owner can widen its permissions again at any time"
+        )
 
     described = describe_dacl(path)
     if not described.protected:

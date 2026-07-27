@@ -391,6 +391,47 @@ class TestWindowsAcl:
         assert "S-1-5-11" not in granted  # Authenticated Users
 
     @windows_only
+    def test_hardening_takes_ownership(self, tmp_path: Path):
+        # Windows grants an owner READ_CONTROL and WRITE_DAC implicitly, with
+        # no ACE saying so. A DACL naming only this account is therefore worth
+        # nothing while someone else owns the path: that owner can widen it
+        # again between hardening the directory and writing the token into it.
+        from linkedin_mcp_server.windows_acl import (
+            current_user_sid,
+            read_owner,
+            _sid_to_string,
+        )
+
+        target = tmp_path / "daemon"
+        harden_directory(target)
+
+        sid, buffer = current_user_sid()
+        try:
+            expected = _sid_to_string(sid)
+        finally:
+            del buffer
+
+        assert read_owner(target) == expected
+
+    @windows_only
+    def test_a_foreign_owner_is_refused(self, tmp_path: Path):
+        # The verification has to fail rather than report success, since the
+        # DACL alone looks correct in exactly this case.
+        from unittest.mock import patch
+
+        from linkedin_mcp_server.windows_acl import verify_owner_only
+
+        target = tmp_path / "daemon"
+        harden_directory(target)
+
+        with patch(
+            "linkedin_mcp_server.windows_acl.read_owner",
+            return_value="S-1-5-21-0-0-0-1234",
+        ):
+            with pytest.raises(PrivateStateError, match="owned by"):
+                verify_owner_only(target, directory=True)
+
+    @windows_only
     def test_the_struct_layouts_match_the_windows_headers(self):
         # ctypes sizes a struct from its declared fields, so a wrong field type
         # produces a struct Windows reads at the wrong offsets and reports as
