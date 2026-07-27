@@ -17,6 +17,7 @@ import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_descriptor import (
+    PROTOCOL_VERSION,
     SCHEMA_VERSION,
     DaemonDescriptor,
     DescriptorError,
@@ -200,6 +201,58 @@ class TestRefusals:
 
         with pytest.raises(DescriptorError, match="symbolic link"):
             read(tmp_path)
+
+    def test_a_descriptor_from_another_protocol_is_refused(self, tmp_path: Path):
+        # The field compatibility is meant to key on. Parsed but unenforced, a
+        # client would attach to an owner whose control routes, call metadata
+        # and ping contract it does not share.
+        token = new_token()
+        publish(tmp_path, _descriptor(tmp_path, token), token)
+        raw = json.loads(descriptor_path(tmp_path).read_text())
+        raw["protocol_version"] = PROTOCOL_VERSION + 1
+        descriptor_path(tmp_path).write_text(json.dumps(raw))
+
+        with pytest.raises(DescriptorError, match="protocol"):
+            read(tmp_path)
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="symlinks need a privilege this test cannot assume"
+    )
+    def test_a_token_symlink_is_not_followed(self, tmp_path: Path):
+        # Confining the filename to the daemon directory is not enough on its
+        # own: a link sitting at that name still points wherever it likes, so
+        # a planted one whose target matched the digest would have been read
+        # and sent to the endpoint as this client's credential.
+        token = new_token()
+        publish(tmp_path, _descriptor(tmp_path, token), token)
+        loaded = read(tmp_path)
+        assert loaded is not None
+        elsewhere = tmp_path / "planted"
+        elsewhere.write_text(token)
+        path = token_path(tmp_path, loaded.instance_id)
+        path.unlink()
+        path.symlink_to(elsewhere)
+
+        with pytest.raises(DescriptorError, match="could not be read"):
+            read_token(tmp_path, loaded)
+
+    @pytest.mark.skipif(
+        not hasattr(os, "mkfifo"), reason="named pipes are a POSIX mechanism"
+    )
+    def test_a_token_that_is_not_a_regular_file_is_refused(self, tmp_path: Path):
+        # A named pipe at that path would otherwise block the client inside
+        # open(), before any check could run, so the read is opened
+        # non-blocking and the file type is confirmed first.
+        token = new_token()
+        publish(tmp_path, _descriptor(tmp_path, token), token)
+        loaded = read(tmp_path)
+        assert loaded is not None
+        path = token_path(tmp_path, loaded.instance_id)
+        path.unlink()
+        os.mkfifo(path)
+
+        with pytest.raises(DescriptorError, match="not a regular file"):
+            read_token(tmp_path, loaded)
 
     def test_a_descriptor_with_no_token_beside_it_is_refused(self, tmp_path: Path):
         token = new_token()

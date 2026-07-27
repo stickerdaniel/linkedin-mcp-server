@@ -74,8 +74,16 @@ class DaemonLockError(RuntimeError):
 
 
 #: Every lock this process has built, so a fork can be cleaned up in the child.
-#: Weak, so holding a lock here never keeps a discarded one alive.
+#:
+#: Held strongly while a lock is *held* and weakly otherwise. A held lock owns a
+#: descriptor, and the descriptor is what the kernel lock hangs on, so letting
+#: the wrapper be collected would leave the lock held with nothing left to
+#: release it or to close it in a forked child. Measured: after dropping the
+#: last reference to a lock that had been acquired, the registry was empty and
+#: another process still could not take it. Unheld locks stay weak, so building
+#: one and never using it costs nothing.
 _live_locks: weakref.WeakSet[DaemonLock] = weakref.WeakSet()
+_held_locks: set[DaemonLock] = set()
 
 
 def _discard_inherited_locks() -> None:
@@ -90,7 +98,7 @@ def _discard_inherited_locks() -> None:
 
     Registered rather than polled, so it also covers a child that forks again.
     """
-    for lock in list(_live_locks):
+    for lock in [*_live_locks, *_held_locks]:
         lock._discard_if_forked()
 
 
@@ -155,6 +163,7 @@ class DaemonLock:
 
         self._fd = fd
         self._owner_pid = os.getpid()
+        _held_locks.add(self)
         logger.debug("Daemon lock acquired for %s", self._auth_root)
         return True
 
@@ -172,6 +181,7 @@ class DaemonLock:
             return
 
         fd, self._fd, self._owner_pid = self._fd, None, None
+        _held_locks.discard(self)
         try:
             os.close(fd)
         except OSError:
@@ -228,6 +238,7 @@ class DaemonLock:
         os.set_inheritable(fd, False)
         self._fd = fd
         self._owner_pid = os.getpid()
+        _held_locks.add(self)
         logger.debug("Adopted an inherited daemon lock for %s", self._auth_root)
 
     def hold(self) -> _DaemonLockScope:
@@ -242,6 +253,7 @@ class DaemonLock:
         if self._owner_pid is not None and self._owner_pid != os.getpid():
             logger.debug("Discarding a daemon lock inherited across a fork")
             inherited, self._fd, self._owner_pid = self._fd, None, None
+            _held_locks.discard(self)
             if inherited is not None:
                 # Closed, not unlocked, for the reason release() gives: the
                 # parent shares this open file description and still believes it
