@@ -2639,14 +2639,16 @@ class LinkedInExtractor:
 
         return None
 
-    async def _compose_page_matches_recipient(self, *candidates: str) -> bool:
-        """Verify the compose page visibly identifies the intended recipient."""
+    async def _compose_page_matches_recipient(
+        self, compose_box: Any, *candidates: str
+    ) -> bool:
+        """Verify the resolved compose dialog identifies the intended recipient."""
         normalized_candidates = [value.strip() for value in candidates if value.strip()]
         if not normalized_candidates:
             return False
 
-        matched = await self._page.evaluate(
-            """({ candidates }) => {
+        matched = await compose_box.evaluate(
+            """(editor, { candidates }) => {
                 const normalize = value =>
                     (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
                 const isVisible = element =>
@@ -2658,7 +2660,8 @@ class LinkedInExtractor:
                     );
 
                 const targetValues = candidates.map(normalize).filter(Boolean);
-                const root = document.querySelector('main') || document.body;
+                const root =
+                    editor.closest('[role="dialog"]') || editor.closest('form');
                 if (!root) return false;
 
                 const entries = Array.from(
@@ -2691,7 +2694,9 @@ class LinkedInExtractor:
                     """(editor, expected) => {
                         const normalize = value =>
                             (value || '').replace(/\\s+/g, ' ').trim();
-                        const root = editor.getRootNode();
+                        const root =
+                            editor.closest('[role="dialog"]') || editor.closest('form');
+                        if (!root) return false;
                         const messageVisible = Array.from(
                             root.querySelectorAll('p, div, span')
                         ).some(element =>
@@ -4224,6 +4229,7 @@ class LinkedInExtractor:
         )
 
         if not await self._compose_page_matches_recipient(
+            compose_box,
             display_name or "",
             linkedin_username,
         ):

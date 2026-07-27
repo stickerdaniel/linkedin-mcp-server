@@ -5846,6 +5846,24 @@ class TestSendMessageComposerInteraction:
 
         assert visible is True
         assert compose_box.evaluate.await_count == 2
+        verification_script = compose_box.evaluate.await_args_list[0].args[0]
+        assert "editor.closest('[role=\"dialog\"]')" in verification_script
+        assert "editor.getRootNode()" not in verification_script
+
+    async def test_recipient_verification_uses_resolved_composer(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        compose_box = MagicMock()
+        compose_box.evaluate = AsyncMock(return_value=True)
+
+        matched = await extractor._compose_page_matches_recipient(
+            compose_box,
+            "Test User",
+        )
+
+        assert matched is True
+        verification_script = compose_box.evaluate.await_args_list[0].args[0]
+        assert "editor.closest('[role=\"dialog\"]')" in verification_script
+        assert "document.querySelector('main')" not in verification_script
 
 
 class TestBuildFeedReferences:
