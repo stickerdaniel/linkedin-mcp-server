@@ -38,6 +38,7 @@ import weakref
 from pathlib import Path
 from types import TracebackType
 
+from linkedin_mcp_server.daemon_descriptor import daemon_dir, daemon_state_root
 from linkedin_mcp_server.private_state import harden_directory
 from linkedin_mcp_server.profile_lease import (
     acquire_locked_fd,
@@ -105,14 +106,13 @@ def _discard_inherited_locks() -> None:
 def daemon_lock_path(auth_root: Path) -> Path:
     """Where the lock lives for *auth_root*.
 
-    At the auth root, not under the per-profile directory, and that placement is
-    load-bearing. The profile lease keys on the auth root too, because
-    ``auth_root_dir`` returns the profile's parent, so two profile directories
-    that sit side by side share one lease. An election scoped more narrowly than
-    that would let two owners start, each convinced it had won, and then compete
-    forever for a lease only one of them can hold.
+    The dedicated daemon directory is private state owned by this application,
+    unlike the configurable auth root, which must keep the user's permissions.
+    The path remains derived from the auth root rather than a profile directory,
+    so sibling profiles still share one election and cannot start two owners that
+    compete for the same profile lease.
     """
-    return auth_root.expanduser().resolve() / _DAEMON_LOCK_FILE
+    return daemon_dir(auth_root) / _DAEMON_LOCK_FILE
 
 
 class DaemonLock:
@@ -156,7 +156,8 @@ class DaemonLock:
             # exactly one holder exists.
             raise DaemonLockError("This process already holds the daemon lock")
 
-        harden_directory(self._auth_root)
+        harden_directory(daemon_state_root())
+        harden_directory(daemon_dir(self._auth_root))
         fd = acquire_locked_fd(self._path, exclusive=True)
         if fd is None:
             return False

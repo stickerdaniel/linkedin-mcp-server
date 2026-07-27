@@ -8,6 +8,7 @@ behaviour that is easy to write correctly and just as easy to break later.
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import sys
 import textwrap
@@ -16,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
+from linkedin_mcp_server.daemon_descriptor import daemon_dir, daemon_state_root
 from linkedin_mcp_server.daemon_lock import (
     DaemonLock,
     DaemonLockError,
@@ -24,6 +27,14 @@ from linkedin_mcp_server.daemon_lock import (
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_daemon_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    # The child interpreters inherit HOME and patch the account lookup below, so
+    # every process contends on the same state without touching the real user.
+    monkeypatch.setattr(daemon_descriptor_module, "_account_home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 def _run_child(source: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -42,10 +53,13 @@ def _run_child(source: str, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 _TRY_ACQUIRE = """
+    import os
     import sys
     from pathlib import Path
+    import linkedin_mcp_server.daemon_descriptor as daemon_descriptor
     from linkedin_mcp_server.daemon_lock import DaemonLock
 
+    daemon_descriptor._account_home = lambda: Path(os.environ["HOME"])
     lock = DaemonLock(Path(sys.argv[1]))
     print("ACQUIRED" if lock.try_acquire() else "BUSY")
 """
@@ -93,12 +107,82 @@ class TestOwnership:
 
 
 class TestScope:
-    def test_the_lock_covers_the_whole_auth_root(self, tmp_path: Path):
-        # Every profile under one auth root shares one browser lease, so the
-        # election has to be just as wide. Scoped per profile, two owners would
-        # both start and then compete forever for a lease only one can hold.
-        assert daemon_lock_path(tmp_path / "profile").parent != tmp_path
-        assert daemon_lock_path(tmp_path).parent == tmp_path
+    def test_the_lock_lives_in_private_daemon_state(self, tmp_path: Path):
+        # The path remains keyed by the auth root, so every profile under that
+        # root shares one election, while different roots cannot collide.
+        first = daemon_lock_path(tmp_path)
+        second = daemon_lock_path(tmp_path / "other-root")
+
+        assert first.parent == daemon_dir(tmp_path)
+        assert first.parent.parent == daemon_state_root()
+        assert second.parent.parent == daemon_state_root()
+        assert first != second
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="POSIX permission bits do not exist on Windows"
+    )
+    def test_acquiring_does_not_harden_the_configured_auth_root(self, tmp_path: Path):
+        # Measured before the fix: acquiring changed any existing auth root from
+        # 0755 to 0700. A custom profile directly under /tmp would try to chmod
+        # /tmp itself; under a home directory it would silently change the home.
+        auth_root = tmp_path / "shared-parent"
+        auth_root.mkdir(mode=0o755)
+        auth_root.chmod(0o755)
+        lock = DaemonLock(auth_root)
+
+        assert lock.try_acquire()
+        try:
+            assert stat.S_IMODE(auth_root.stat().st_mode) == 0o755
+            assert not (auth_root / "daemon").exists()
+            assert stat.S_IMODE(daemon_state_root().stat().st_mode) == 0o700
+            assert stat.S_IMODE(daemon_dir(auth_root).stat().st_mode) == 0o700
+        finally:
+            lock.release()
+
+    def test_a_fresh_auth_root_keeps_one_lock_identity(self, tmp_path: Path):
+        # Measured before the fix: the first wrapper cached a path-derived key,
+        # then acquisition created the auth root and every later lookup used its
+        # inode. The live lock appeared free and a second owner was elected.
+        auth_root = tmp_path / "fresh" / ".linkedin-mcp"
+        first = DaemonLock(auth_root)
+
+        assert first.try_acquire()
+        try:
+            assert daemon_is_running(auth_root)
+            second = DaemonLock(auth_root)
+            assert not second.try_acquire()
+            second.release()
+        finally:
+            first.release()
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="creating directory symlinks needs extra privileges"
+    )
+    def test_an_auth_root_symlink_cannot_split_the_election(self, tmp_path: Path):
+        # Measured before the fix: the default auth root also held daemon state,
+        # so retargeting its daemon link let another owner lock a second inode.
+        auth_root = tmp_path / ".linkedin-mcp"
+        first_target = tmp_path / "first-target"
+        second_target = tmp_path / "second-target"
+        auth_root.mkdir()
+        first_target.mkdir()
+        second_target.mkdir()
+        planted = auth_root / "daemon"
+        planted.symlink_to(first_target, target_is_directory=True)
+
+        first = DaemonLock(auth_root)
+        assert first.try_acquire()
+        planted.unlink()
+        planted.symlink_to(second_target, target_is_directory=True)
+
+        second = DaemonLock(auth_root)
+        try:
+            assert not second.try_acquire()
+            assert not (first_target / "daemon.lock").exists()
+            assert not (second_target / "daemon.lock").exists()
+        finally:
+            second.release()
+            first.release()
 
     def test_two_locks_on_one_root_are_the_same_lock(self, tmp_path: Path):
         lock = DaemonLock(tmp_path)
@@ -189,7 +273,9 @@ class TestRegistry:
         gc.collect()
 
         assert daemon_is_running(tmp_path)
-        held = [lock for lock in _held_locks if lock.path.parent == tmp_path]
+        held = [
+            lock for lock in _held_locks if lock.path.parent == daemon_dir(tmp_path)
+        ]
         assert held, "a held lock must stay reachable"
 
         for lock in held:
