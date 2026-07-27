@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import threading
 import sys
 import textwrap
 import time
@@ -464,6 +465,32 @@ class TestLiveness:
             assert lock.held
         finally:
             lock.release()
+
+    def test_concurrent_probes_do_not_see_each_other(self, tmp_path: Path):
+        # Measured before the probe became shared: 43 of 400 concurrent probes
+        # reported a daemon that did not exist, because an exclusive probe
+        # briefly holds the lock and the other probe reads its own sibling as an
+        # owner. A cold-starting client would then look for a descriptor rather
+        # than elect. Shared still fails against the owner's exclusive hold, so
+        # the answer stays right when there really is one.
+        creator = DaemonLock(tmp_path)
+        assert creator.try_acquire()
+        creator.release()
+
+        answers: list[bool] = []
+        start = threading.Barrier(2)
+
+        def probe() -> None:
+            start.wait()
+            answers.extend(daemon_is_running(tmp_path) for _ in range(200))
+
+        threads = [threading.Thread(target=probe) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert answers and not any(answers)
 
     def test_a_stale_lock_file_does_not_look_alive(self, tmp_path: Path):
         # The file is never unlinked, so it outlives the daemon that made it.

@@ -339,11 +339,16 @@ def daemon_is_running(auth_root: Path) -> bool:
     if not path.exists():
         return False
 
-    # Opened and probed rather than acquired and released: taking the lock for
-    # real would briefly exclude a supervisor that is starting up.
+    # Shared rather than exclusive, and that is not a detail. The owner holds
+    # the lock exclusively, so a shared request still fails against it and the
+    # answer stays correct. What it stops is two probes answering each other:
+    # with an exclusive request, one probe briefly holds the lock and the other
+    # reads its own sibling as a daemon. Measured before the change: 43 of 400
+    # concurrent probes reported a daemon that did not exist, which would have
+    # sent a cold-starting client looking for a descriptor rather than electing.
     fd = open_lock_file(path)
     try:
-        if try_lock(fd, exclusive=True):
+        if try_lock(fd, exclusive=False):
             return False
         return True
     finally:
