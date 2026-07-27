@@ -202,6 +202,41 @@ class TestRefusals:
         with pytest.raises(DescriptorError, match="symbolic link"):
             read(tmp_path)
 
+    @pytest.mark.skipif(
+        not hasattr(os, "mkfifo"), reason="named pipes are a POSIX mechanism"
+    )
+    def test_a_descriptor_that_is_not_a_regular_file_does_not_hang(
+        self, tmp_path: Path
+    ):
+        # Discovery runs on every cold start, so a named pipe left at this path
+        # would stall it inside open() with no timeout and no error, rather
+        # than being reported as something the daemon did not write.
+        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(descriptor_path(tmp_path))
+
+        with pytest.raises(DescriptorError, match="not something this daemon wrote"):
+            read(tmp_path)
+
+    def test_bytes_that_are_not_text_are_refused_as_such(self, tmp_path: Path):
+        # A caller telling absence from untrusted state through DescriptorError
+        # would otherwise meet a decoding error, which says nothing about which
+        # of the two it is looking at.
+        descriptor_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        descriptor_path(tmp_path).write_bytes(b"\xff\xfe")
+
+        with pytest.raises(DescriptorError, match="not text this daemon wrote"):
+            read(tmp_path)
+
+    def test_a_token_that_is_not_text_is_refused_as_such(self, tmp_path: Path):
+        token = new_token()
+        publish(tmp_path, _descriptor(tmp_path, token), token)
+        loaded = read(tmp_path)
+        assert loaded is not None
+        token_path(tmp_path, loaded.instance_id).write_bytes(b"\xff\xfe")
+
+        with pytest.raises(DescriptorError, match="not text this daemon wrote"):
+            read_token(tmp_path, loaded)
+
     def test_a_descriptor_from_another_protocol_is_refused(self, tmp_path: Path):
         # The field compatibility is meant to key on. Parsed but unenforced, a
         # client would attach to an owner whose control routes, call metadata
