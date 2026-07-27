@@ -5865,6 +5865,35 @@ class TestSendMessageComposerInteraction:
         assert "editor.closest('[role=\"dialog\"]')" in verification_script
         assert "document.querySelector('main')" not in verification_script
 
+    async def test_waits_for_recipient_composer_to_hydrate(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        wrong_compose_box = MagicMock()
+        recipient_compose_box = MagicMock()
+
+        with (
+            patch.object(
+                extractor,
+                "_resolve_message_compose_box",
+                new_callable=AsyncMock,
+                side_effect=[wrong_compose_box, recipient_compose_box],
+            ),
+            patch.object(
+                extractor,
+                "_compose_page_matches_recipient",
+                new_callable=AsyncMock,
+                side_effect=[False, True],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            resolved = await extractor._resolve_recipient_message_compose_box(
+                "Test User"
+            )
+
+        assert resolved is recipient_compose_box
+
 
 class TestBuildFeedReferences:
     """Tests for _build_feed_references SDUI-capture / DOM-anchor merging."""

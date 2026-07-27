@@ -2591,6 +2591,20 @@ class LinkedInExtractor:
         """Wait for the usable LinkedIn message composer to appear."""
         return await self._resolve_message_compose_box() is not None
 
+    async def _resolve_recipient_message_compose_box(
+        self, *candidates: str
+    ) -> Any | None:
+        """Wait for the newest compose box to identify the intended recipient."""
+        for _ in range(20):
+            compose_box = await self._resolve_message_compose_box()
+            if compose_box is not None and await self._compose_page_matches_recipient(
+                compose_box,
+                *candidates,
+            ):
+                return compose_box
+            await asyncio.sleep(0.25)
+        return None
+
     async def _resolve_message_compose_box(self) -> Any | None:
         """Resolve the visible compose box used for writing a LinkedIn message.
 
@@ -4228,11 +4242,11 @@ class LinkedInExtractor:
             linkedin_username,
         )
 
-        if not await self._compose_page_matches_recipient(
-            compose_box,
+        recipient_compose_box = await self._resolve_recipient_message_compose_box(
             display_name or "",
             linkedin_username,
-        ):
+        )
+        if recipient_compose_box is None:
             logger.debug(
                 "Recipient match still failed for %s after compose hydration",
                 linkedin_username,
@@ -4244,6 +4258,7 @@ class LinkedInExtractor:
                 "LinkedIn opened a compose page, but the visible recipient did not match the requested profile.",
                 recipient_selected=recipient_selected,
             )
+        compose_box = recipient_compose_box
         recipient_selected = True
 
         if not confirm_send:
