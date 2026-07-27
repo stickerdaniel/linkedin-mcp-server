@@ -221,6 +221,14 @@ class DaemonLock:
         Called by a supervisor that was launched holding a copy. It does not
         acquire anything: the lock is already held, and re-acquiring it against
         our own copy would fail.
+
+        The descriptor is checked to be this lock's own file and to actually
+        carry the lock, because adoption is the one path that takes a caller's
+        word for both. Measured with neither check: a descriptor belonging to
+        another auth root was adopted without complaint, so this process
+        reported it owned a browser nobody had elected it for while another
+        process took the real lock unopposed. An unlocked descriptor for the
+        right file did the same.
         """
         if not _INHERITED_LOCKS_TRANSFER:
             raise DaemonLockError(
@@ -230,6 +238,36 @@ class DaemonLock:
         self._discard_if_forked()
         if self._fd is not None:
             raise DaemonLockError("This process already holds the daemon lock")
+
+        try:
+            inherited = os.fstat(fd)
+        except OSError as exc:
+            raise DaemonLockError(
+                f"The inherited descriptor cannot be used: {exc}"
+            ) from exc
+        try:
+            expected = self._path.stat()
+        except OSError as exc:
+            raise DaemonLockError(
+                f"There is no lock file at {self._path} for the inherited "
+                f"descriptor to belong to"
+            ) from exc
+        if (inherited.st_dev, inherited.st_ino) != (expected.st_dev, expected.st_ino):
+            raise DaemonLockError(
+                "The inherited descriptor is not this auth root's lock file. "
+                "Adopting it would report ownership of a browser this process "
+                "was never elected to hold."
+            )
+        # A descriptor for the right file that holds no lock is the same
+        # mistake wearing the right name: another process would take the lock
+        # while this one believed it already had it. Asking for the lock here
+        # is not acquiring it twice, because on POSIX a process that already
+        # holds it is granted it again against its own open file description.
+        if not try_lock(fd, exclusive=True):
+            raise DaemonLockError(
+                "The inherited descriptor does not hold the daemon lock, so "
+                "adopting it would leave the browser unowned."
+            )
         # Made non-inheritable again straight away. It was marked inheritable
         # for exactly one launch, and leaving it that way would let any later
         # child that inherits descriptors, a Chromium among them, keep the lock
