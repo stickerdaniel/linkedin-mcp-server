@@ -192,6 +192,71 @@ class TestExtendedAcls:
         ]
         assert entries == [], "the token is still readable outside this account"
 
+    @pytest.mark.skipif(
+        sys.platform != "darwin", reason="extended ACLs are a macOS mechanism here"
+    )
+    def test_concurrent_first_use_does_not_skip_the_access_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The library is resolved once and cached. Publishing "resolved" before
+        # the cache was filled let a second thread read an empty cache, which
+        # reads as "this platform has no access lists" everywhere below.
+        # Measured: that thread hardened a directory which kept an inherited
+        # everyone entry, and the call reported success.
+        import threading
+        import time
+
+        from linkedin_mcp_server import private_state
+
+        monkeypatch.setattr(private_state, "_libc_resolved", False)
+        monkeypatch.setattr(private_state, "_libc_cache", None)
+        real_find = private_state.ctypes.util.find_library
+        monkeypatch.setattr(
+            private_state.ctypes.util,
+            "find_library",
+            lambda name: (time.sleep(0.2), real_find(name))[1],
+        )
+
+        hardened: list[Path] = []
+
+        def harden(index: int) -> None:
+            root = tmp_path / f"root{index}"
+            root.mkdir()
+            subprocess.run(
+                [
+                    "chmod",
+                    "+a",
+                    "everyone allow list,file_inherit,directory_inherit",
+                    str(root),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            target = root / "daemon"
+            harden_directory(target)
+            hardened.append(target)
+
+        threads = [threading.Thread(target=harden, args=(i,)) for i in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert len(hardened) == 4
+        for target in hardened:
+            listing = subprocess.run(
+                ["/bin/ls", "-lde", str(target)],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            entries = [
+                line
+                for line in listing.splitlines()[1:]
+                if line.strip() and line.strip()[0].isdigit()
+            ]
+            assert entries == [], f"{target} kept an inherited access list"
+
 
 class TestRefusals:
     def test_hardening_a_missing_file_refuses(self, tmp_path: Path):

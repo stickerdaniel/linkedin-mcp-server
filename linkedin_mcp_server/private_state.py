@@ -27,6 +27,7 @@ import ctypes.util
 import logging
 import os
 import stat
+import threading
 from pathlib import Path
 
 from linkedin_mcp_server.common_utils import secure_mkdir
@@ -106,6 +107,7 @@ _ACL_TYPE_EXTENDED = 0x00000100
 #: without a type the caller has to narrow.
 _libc_resolved = False
 _libc_cache: ctypes.CDLL | None = None
+_libc_lock = threading.Lock()
 
 
 def _libc() -> ctypes.CDLL | None:
@@ -119,28 +121,47 @@ def _libc() -> ctypes.CDLL | None:
     missing executable was not.
     """
     global _libc_cache, _libc_resolved
-    if _libc_resolved:
-        return _libc_cache
+    # Under the lock for the whole resolution, and the flag is set last.
+    # Published early, the flag would tell a concurrent caller the lookup was
+    # finished while the cache was still empty, and an empty cache reads as
+    # "this platform has no access lists" everywhere below. Measured: a second
+    # thread entering that window hardened a directory that kept an inherited
+    # everyone entry, and the call reported success.
+    with _libc_lock:
+        if _libc_resolved:
+            return _libc_cache
 
-    _libc_resolved = True
-    name = ctypes.util.find_library("c")
-    if name is not None:
-        library = ctypes.CDLL(name, use_errno=True)
-        if hasattr(library, "acl_get_file") and hasattr(library, "acl_set_file"):
-            library.acl_get_file.argtypes = [ctypes.c_char_p, ctypes.c_uint]
-            library.acl_get_file.restype = ctypes.c_void_p
-            library.acl_set_file.argtypes = [
-                ctypes.c_char_p,
-                ctypes.c_uint,
-                ctypes.c_void_p,
-            ]
-            library.acl_set_file.restype = ctypes.c_int
-            library.acl_init.argtypes = [ctypes.c_int]
-            library.acl_init.restype = ctypes.c_void_p
-            library.acl_free.argtypes = [ctypes.c_void_p]
-            library.acl_free.restype = ctypes.c_int
-            _libc_cache = library
-    return _libc_cache
+        library: ctypes.CDLL | None = None
+        try:
+            name = ctypes.util.find_library("c")
+            if name is not None:
+                candidate = ctypes.CDLL(name, use_errno=True)
+                if hasattr(candidate, "acl_get_file") and hasattr(
+                    candidate, "acl_set_file"
+                ):
+                    candidate.acl_get_file.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+                    candidate.acl_get_file.restype = ctypes.c_void_p
+                    candidate.acl_set_file.argtypes = [
+                        ctypes.c_char_p,
+                        ctypes.c_uint,
+                        ctypes.c_void_p,
+                    ]
+                    candidate.acl_set_file.restype = ctypes.c_int
+                    candidate.acl_init.argtypes = [ctypes.c_int]
+                    candidate.acl_init.restype = ctypes.c_void_p
+                    candidate.acl_free.argtypes = [ctypes.c_void_p]
+                    candidate.acl_free.restype = ctypes.c_int
+                    library = candidate
+        except OSError:
+            # A failure to load is not an answer about the platform, so it is
+            # not cached as one: the next caller looks again rather than living
+            # with a verdict reached while something was momentarily wrong.
+            logger.debug("Could not load the access list functions", exc_info=True)
+            raise
+
+        _libc_cache = library
+        _libc_resolved = True
+        return _libc_cache
 
 
 def _has_extended_acl(path: Path) -> bool:
