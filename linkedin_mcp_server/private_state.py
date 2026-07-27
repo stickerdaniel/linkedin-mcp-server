@@ -107,7 +107,13 @@ _ACL_TYPE_EXTENDED = 0x00000100
 #: without a type the caller has to narrow.
 _libc_resolved = False
 _libc_cache: ctypes.CDLL | None = None
-_libc_lock = threading.Lock()
+# Reentrant, because loading a library raises a ctypes.dlopen audit event and
+# a hook on it runs synchronously, inside this lock. A hook that reached back
+# into hardening would deadlock the resolving thread against itself on a plain
+# lock. Measured: one that re-entered left the thread waiting indefinitely.
+# Nothing in this project installs such a hook, but an embedding process or a
+# security monitor can, and the cost of allowing for it is one word.
+_libc_lock = threading.RLock()
 
 
 def _libc() -> ctypes.CDLL | None:

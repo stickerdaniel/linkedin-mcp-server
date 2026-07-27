@@ -257,6 +257,40 @@ class TestExtendedAcls:
             ]
             assert entries == [], f"{target} kept an inherited access list"
 
+    def test_resolution_survives_an_audit_hook_reaching_back_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Loading a library raises a ctypes.dlopen audit event, and a hook on
+        # it runs synchronously inside the resolution lock. Measured with a
+        # plain lock: a hook that called back in left the resolving thread
+        # waiting on itself and it never finished.
+        import sys
+        import threading
+
+        from linkedin_mcp_server import private_state
+
+        monkeypatch.setattr(private_state, "_libc_resolved", False)
+        monkeypatch.setattr(private_state, "_libc_cache", None)
+
+        reentered: list[str] = []
+
+        def hook(event: str, args: object) -> None:
+            if event == "ctypes.dlopen" and not reentered:
+                reentered.append(event)
+                private_state._libc()
+
+        sys.addaudithook(hook)  # cannot be removed, hence the one-shot guard
+
+        finished = threading.Event()
+
+        def resolve() -> None:
+            private_state._libc()
+            finished.set()
+
+        threading.Thread(target=resolve, daemon=True).start()
+
+        assert finished.wait(5), "resolution deadlocked against its own lock"
+
 
 class TestRefusals:
     def test_hardening_a_missing_file_refuses(self, tmp_path: Path):
