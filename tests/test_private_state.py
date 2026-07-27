@@ -303,6 +303,23 @@ class TestRefusals:
         with pytest.raises(PrivateStateError, match="does not exist"):
             harden_file(tmp_path / "absent")
 
+    @posix_only
+    def test_hardening_a_linked_file_refuses(self, tmp_path: Path):
+        # chmod follows a link, so hardening one would set 0600 on whatever it
+        # points at and report the secret's own file as private. Measured: an
+        # unrelated 0644 file became 0600 while the caller was told its token
+        # was protected.
+        elsewhere = tmp_path / "someone-elses"
+        elsewhere.write_text("not ours")
+        elsewhere.chmod(0o644)
+        link = tmp_path / "token"
+        link.symlink_to(elsewhere)
+
+        with pytest.raises(PrivateStateError, match="symbolic link"):
+            harden_file(link)
+
+        assert stat.S_IMODE(elsewhere.stat().st_mode) == 0o644
+
     def test_a_file_where_a_directory_belongs_refuses(self, tmp_path: Path):
         occupied = tmp_path / "daemon"
         occupied.write_text("not a directory")

@@ -59,6 +59,13 @@ def harden_directory(path: Path) -> None:
     daemon directory inside an auth root that some earlier version or the user
     created with a default umask would otherwise keep those wider permissions
     while the token inside it looked safe.
+
+    A link is followed rather than refused, unlike :func:`harden_file`. The
+    difference is where the two get their paths. Every caller here passes one
+    that ``daemon_state_root`` or ``daemon_dir`` already resolved, so a link is
+    part of the layout the user chose, and a home reached through one is an
+    ordinary arrangement. A file name, by contrast, is built from an identifier
+    and lands in a directory this hardens first.
     """
     if path.exists() and not path.is_dir():
         raise PrivateStateError(f"Not a directory: {path}")
@@ -83,6 +90,19 @@ def harden_file(path: Path) -> None:
     """
     if not path.exists():
         raise PrivateStateError(f"Cannot harden a file that does not exist: {path}")
+
+    # A link here would send the whole operation somewhere else: chmod follows
+    # it, so hardening would set 0600 on whatever it points at and report that
+    # the secret's own file is private. Measured: an unrelated 0644 file was
+    # changed to 0600 while the caller was told its token was protected. The
+    # only caller writes into a directory hardened to 0700 first, so nothing
+    # else can plant the link there, but this promise should not depend on
+    # where it happens to be called from.
+    if path.is_symlink():
+        raise PrivateStateError(
+            f"{path} is a symbolic link rather than a file. Hardening it would "
+            f"change permissions somewhere else and say nothing about this path."
+        )
 
     if _WINDOWS:
         from linkedin_mcp_server.windows_acl import restrict_to_current_user
