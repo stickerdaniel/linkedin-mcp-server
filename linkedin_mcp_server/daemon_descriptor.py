@@ -169,32 +169,39 @@ def _account_home() -> Path:
             "The current account has no absolute home directory, so daemon state "
             "has nowhere stable to live"
         )
-    return home
+
+    # The home has to be there already. Creating it would be wrong twice: a home
+    # that is merely not mounted yet would be shadowed by an empty directory,
+    # and the daemon that did so would key its state under that directory while
+    # every process started after the mount keys it under the real one.
+    if not home.is_dir():
+        raise DescriptorError(
+            f"The current account's home directory {home} does not exist. Daemon "
+            f"state has nowhere to live until it does."
+        )
+
+    # Resolved, not merely checked for links. A home reached through a symlink
+    # is an ordinary layout on POSIX, and refusing it would refuse a working
+    # machine. What matters is that every process agrees, which resolving gives
+    # and an is_symlink() refusal does not.
+    return home.resolve()
 
 
 def daemon_state_root() -> Path:
     """Return the private application root shared by every local daemon.
 
-    Refuses a symbolic link on the way, because the lock is taken by path: with
-    a link here, retargeting it between two acquisitions puts two owners on two
-    inodes while both believe they hold the one lock. Measured before the check.
+    Fully resolved, so that processes reaching this directory by different
+    routes still agree on one lock. Symbolic links along the way are followed
+    rather than refused: they are a normal way to lay out a home directory.
 
-    This is a consistency guard, not a security boundary. Only the account that
-    owns this directory can plant or retarget the link, and that same account
-    could equally rename the real directory or delete the lock file. What it
-    buys is that an unusual layout fails loudly instead of quietly electing a
-    second browser owner.
+    What this cannot defend against is the path being *changed* underneath a
+    running owner, by retargeting a link or renaming a directory. Measured: a
+    second process then takes a lock on a different inode while the first still
+    holds its own. The existing profile lease has exactly the same property, for
+    the same reason, and no lock addressed by path can avoid it. The account
+    that could do this is the one whose browser is at stake.
     """
-    root = _account_home() / _APPLICATION_STATE_DIR / _DAEMON_DIR
-    for part in (root.parent, root):
-        if part.is_symlink():
-            raise DescriptorError(
-                f"{part} is a symbolic link. Daemon state has to sit at a real "
-                f"path, because a link that is retargeted between two starts "
-                f"would let two processes each own the browser. Replace it with "
-                f"a directory."
-            )
-    return root
+    return (_account_home() / _APPLICATION_STATE_DIR / _DAEMON_DIR).resolve()
 
 
 def _directory_identity(path: Path, *, label: str) -> tuple[int, int]:
