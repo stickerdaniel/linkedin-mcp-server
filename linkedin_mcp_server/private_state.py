@@ -30,6 +30,7 @@ import os
 import stat
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from linkedin_mcp_server.common_utils import secure_mkdir
@@ -91,26 +92,36 @@ def harden_file(path: Path) -> None:
     if not path.exists():
         raise PrivateStateError(f"Cannot harden a file that does not exist: {path}")
 
-    # A link here would send the whole operation somewhere else: chmod follows
-    # it, so hardening would set 0600 on whatever it points at and report that
-    # the secret's own file is private. Measured: an unrelated 0644 file was
-    # changed to 0600 while the caller was told its token was protected. The
-    # only caller writes into a directory hardened to 0700 first, so nothing
-    # else can plant the link there, but this promise should not depend on
-    # where it happens to be called from.
-    if path.is_symlink():
-        raise PrivateStateError(
-            f"{path} is a symbolic link rather than a file. Hardening it would "
-            f"change permissions somewhere else and say nothing about this path."
-        )
-
     if _WINDOWS:
         from linkedin_mcp_server.windows_acl import restrict_to_current_user
 
         restrict_to_current_user(path, directory=False)
         return
 
-    _harden_posix(path, _PRIVATE_FILE_MODE)
+    # Opened once, then hardened through the descriptor. Checking the path for
+    # a link and then calling chmod on that same path resolves it twice, and
+    # anything that swaps the file in between is followed by the second
+    # resolution: measured, an unrelated file became 0600 while this reported
+    # the token as private. O_NOFOLLOW refuses the link at open time, and every
+    # step afterwards names the descriptor, so there is no second lookup to
+    # race. The only caller writes into a directory hardened to 0700 first, so
+    # nothing else can plant the link there, but a promise this specific should
+    # not rest on where it happens to be called from.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise PrivateStateError(
+                f"{path} is a symbolic link rather than a file. Hardening it "
+                f"would change permissions somewhere else and say nothing "
+                f"about this path."
+            ) from exc
+        raise PrivateStateError(f"{path} could not be opened to harden: {exc}") from exc
+
+    try:
+        _harden_posix_fd(fd, path, _PRIVATE_FILE_MODE)
+    finally:
+        os.close(fd)
 
 
 def _require_acl_support(path: Path) -> None:
@@ -134,16 +145,38 @@ def _require_acl_support(path: Path) -> None:
 
 
 def _harden_posix(path: Path, mode: int) -> None:
-    """Apply *mode*, drop any extended ACL, and check the result."""
+    """Apply *mode*, drop any extended ACL, and check the result.
+
+    By path, which is right for a directory: the caller passes one that has
+    already been resolved, and a directory reached through a link is an ordinary
+    layout. A file goes through :func:`_harden_posix_fd` instead, because its
+    name is built rather than resolved and a second lookup could be aimed
+    elsewhere in between.
+    """
     _require_acl_support(path)
     path.chmod(mode)
     _drop_extended_acl(path)
-    _verify_posix_owner(path)
-    _verify_posix_mode(path, mode)
+    _verify_posix_owner(path.stat(), path)
+    _verify_posix_mode(path.stat(), mode, path)
     _verify_no_extended_acl(path)
 
 
-def _verify_posix_owner(path: Path) -> None:
+def _harden_posix_fd(fd: int, path: Path, mode: int) -> None:
+    """The same, applied and verified through an open descriptor.
+
+    Every step names *fd* rather than the path, so nothing between them can be
+    redirected by swapping what the name refers to. *path* is carried only to
+    say where a failure happened.
+    """
+    _require_acl_support(path)
+    os.fchmod(fd, mode)
+    _drop_extended_acl_fd(fd, path)
+    _verify_posix_owner(os.fstat(fd), path)
+    _verify_posix_mode(os.fstat(fd), mode, path)
+    _verify_no_extended_acl_fd(fd, path)
+
+
+def _verify_posix_owner(info: os.stat_result, path: Path) -> None:
     """Refuse a path owned by another account.
 
     ``0600`` says "only the owner", which is worth nothing when the owner is
@@ -156,10 +189,9 @@ def _verify_posix_owner(path: Path) -> None:
     pre-existing state tree is exactly that. The Windows side already reads its
     owner back for the same reason; this is the POSIX half of that promise.
     """
-    owner = path.stat().st_uid
-    if owner != os.geteuid():
+    if info.st_uid != os.geteuid():
         raise PrivateStateError(
-            f"{path} is owned by uid {owner}, not by this account (uid "
+            f"{path} is owned by uid {info.st_uid}, not by this account (uid "
             f"{os.geteuid()}), so its permission bits grant that account rather "
             f"than this one and it can widen them again at any time"
         )
@@ -233,6 +265,12 @@ def _libc() -> ctypes.CDLL | None:
                     candidate.acl_init.restype = ctypes.c_void_p
                     candidate.acl_free.argtypes = [ctypes.c_void_p]
                     candidate.acl_free.restype = ctypes.c_int
+                    # The descriptor forms, used where a second lookup of the
+                    # name would be a second chance to redirect it.
+                    candidate.acl_get_fd.argtypes = [ctypes.c_int]
+                    candidate.acl_get_fd.restype = ctypes.c_void_p
+                    candidate.acl_set_fd.argtypes = [ctypes.c_int, ctypes.c_void_p]
+                    candidate.acl_set_fd.restype = ctypes.c_int
                     library = candidate
         except OSError:
             # A failure to load is not an answer about the platform, so it is
@@ -256,13 +294,27 @@ def _has_extended_acl(path: Path) -> bool:
     reading that as "no list" would report a path as owner-only precisely when
     its permissions could not be established.
     """
+    return _has_extended_acl_via(
+        lambda library: library.acl_get_file(str(path).encode(), _ACL_TYPE_EXTENDED),
+        path,
+    )
+
+
+def _has_extended_acl_fd(fd: int, path: Path) -> bool:
+    """The same question, asked of an open descriptor."""
+    return _has_extended_acl_via(lambda library: library.acl_get_fd(fd), path)
+
+
+def _has_extended_acl_via(
+    read: Callable[[ctypes.CDLL], int | None], path: Path
+) -> bool:
     library = _libc()
     if library is None:  # pragma: no cover - no ACL support to report on
         return False
     # Cleared first: errno keeps whatever an earlier call left there, so a
     # stale value would be read as this call's outcome.
     ctypes.set_errno(0)
-    handle = library.acl_get_file(str(path).encode(), _ACL_TYPE_EXTENDED)
+    handle = read(library)
     if not handle:
         code = ctypes.get_errno()
         if code in _NO_EXTENDED_ACL_ERRNOS:
@@ -287,6 +339,25 @@ def _drop_extended_acl(path: Path) -> None:
     Linux ACLs behave the same way in principle, but ``chmod`` there already
     clamps the mask so the extra entries grant nothing.
     """
+    _drop_extended_acl_via(
+        lambda library, empty: library.acl_set_file(
+            str(path).encode(), _ACL_TYPE_EXTENDED, empty
+        ),
+        path,
+    )
+
+
+def _drop_extended_acl_fd(fd: int, path: Path) -> None:
+    """The same, applied to an open descriptor."""
+    _drop_extended_acl_via(
+        lambda library, empty: library.acl_set_fd(fd, empty),
+        path,
+    )
+
+
+def _drop_extended_acl_via(
+    apply_empty: Callable[[ctypes.CDLL, int], int], path: Path
+) -> None:
     library = _libc()
     if library is None:  # pragma: no cover - nothing to clear
         return
@@ -297,7 +368,7 @@ def _drop_extended_acl(path: Path) -> None:
             f"Could not build an empty access list to apply to {path}"
         )
     try:
-        if library.acl_set_file(str(path).encode(), _ACL_TYPE_EXTENDED, empty) != 0:
+        if apply_empty(library, empty) != 0:
             # Not swallowed. The verification below would catch a list that is
             # still there, but a failure here is worth reporting on its own
             # terms rather than as a mysterious refusal one step later.
@@ -312,21 +383,30 @@ def _drop_extended_acl(path: Path) -> None:
 def _verify_no_extended_acl(path: Path) -> None:
     """Refuse when an extended ACL still grants access the mode does not show."""
     if _has_extended_acl(path):
-        raise PrivateStateError(
-            f"{path} carries an access control list that the permission bits "
-            f"do not describe, so it may still be readable by other accounts. "
-            f"Clear it with: chmod -N {path}"
-        )
+        raise PrivateStateError(_EXTENDED_ACL_REMAINS.format(path=path))
 
 
-def _verify_posix_mode(path: Path, expected: int) -> None:
+def _verify_no_extended_acl_fd(fd: int, path: Path) -> None:
+    """The same check, made through the descriptor that was hardened."""
+    if _has_extended_acl_fd(fd, path):
+        raise PrivateStateError(_EXTENDED_ACL_REMAINS.format(path=path))
+
+
+_EXTENDED_ACL_REMAINS = (
+    "{path} carries an access control list that the permission bits do not "
+    "describe, so it may still be readable by other accounts. Clear it with: "
+    "chmod -N {path}"
+)
+
+
+def _verify_posix_mode(info: os.stat_result, expected: int, path: Path) -> None:
     """Read the mode back, because chmod can silently do nothing.
 
     A filesystem that does not carry POSIX permission bits, such as a mounted
     share or a FAT volume, accepts the call and keeps the old mode. Trusting the
     call to have worked is exactly how a secret ends up world-readable.
     """
-    actual = stat.S_IMODE(path.stat().st_mode)
+    actual = stat.S_IMODE(info.st_mode)
     if actual != expected:
         raise PrivateStateError(
             f"{path} could not be made owner-only: asked for {expected:04o}, "

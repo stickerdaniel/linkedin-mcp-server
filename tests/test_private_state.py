@@ -320,6 +320,34 @@ class TestRefusals:
 
         assert stat.S_IMODE(elsewhere.stat().st_mode) == 0o644
 
+    @posix_only
+    def test_a_file_swapped_for_a_link_mid_hardening_is_not_followed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Checking the path and then chmodding it resolves the name twice, so a
+        # swap in between is followed by the second resolution. Measured with a
+        # path-based implementation: an unrelated file became 0600 while this
+        # reported the token as private.
+        token = tmp_path / "token"
+        token.touch()
+        token.chmod(0o644)
+        victim = tmp_path / "victim"
+        victim.write_text("not ours")
+        victim.chmod(0o644)
+        real = os.fchmod
+
+        def swap_then_chmod(fd: int, mode: int) -> None:
+            if token.exists() and not token.is_symlink():
+                token.unlink()
+                token.symlink_to(victim)
+            real(fd, mode)
+
+        monkeypatch.setattr(os, "fchmod", swap_then_chmod)
+
+        harden_file(token)
+
+        assert stat.S_IMODE(victim.stat().st_mode) == 0o644
+
     def test_a_file_where_a_directory_belongs_refuses(self, tmp_path: Path):
         occupied = tmp_path / "daemon"
         occupied.write_text("not a directory")
@@ -390,7 +418,10 @@ class TestRefusals:
         # says so. Simulated, since neither can be mounted in a test run.
         target = tmp_path / "token"
         target.touch(mode=0o644)
-        monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
+        # fchmod rather than Path.chmod: a file is hardened through the
+        # descriptor it was opened on, so that is the call such a filesystem
+        # would accept and ignore.
+        monkeypatch.setattr(os, "fchmod", lambda fd, mode: None)
 
         with pytest.raises(PrivateStateError, match="owner-only"):
             harden_file(target)
