@@ -279,10 +279,16 @@ def open_lock_file(path: Path) -> int:
 def acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
     """Open *path* and lock it, or return ``None`` if it is already held.
 
-    Re-opens when the path was unlinked between open and lock. Without that
-    check two processes can hold locks on different inodes for the same path and
-    believe they hold the same logical lock — the failure mode Bazel guards
-    against with the same ``st_nlink`` test.
+    Re-opens when the file at the path changed between open and lock. Without
+    that check two processes can hold locks on different inodes for the same
+    path and each believe it holds the same logical lock.
+
+    The identity is compared, not merely the link count. Counting links catches
+    an unlink, which is the case Bazel's version of this guards against, and
+    misses a rename: the inode keeps its one link, so the count still says one
+    while the name now refers to something else. Measured: a rename plus
+    recreate passed the count test, and a second process locked the live path
+    alongside the first.
     """
     for _ in range(3):
         fd = open_lock_file(path)
@@ -291,7 +297,7 @@ def acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
             if not try_lock(fd, exclusive=exclusive):
                 return None
             locked = True
-            if os.fstat(fd).st_nlink > 0:
+            if is_still_at(fd, path):
                 keep = fd
                 fd = -1  # handed to the caller; not ours to close below
                 return keep
@@ -307,11 +313,27 @@ def acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
                     os.close(fd)
                 except OSError:
                     logger.debug("Closing lock descriptor failed", exc_info=True)
-        # The path was unlinked while we held the lock: our inode is orphaned
-        # and protects nothing. Retry against the live path.
+        # The file at the path changed while we held the lock: our inode no
+        # longer protects anything anyone else will look at. Retry against
+        # whatever is there now.
     raise ProfileLeaseUnavailableError(
         f"The lock file {path} keeps being replaced; refusing to continue."
     )
+
+
+def is_still_at(fd: int, path: Path) -> bool:
+    """Whether *fd* is still the file that *path* names.
+
+    Answered after the lock is taken, because that is the only order in which
+    the answer means anything: before it, the file can change immediately
+    afterwards. A path that has since vanished counts as changed.
+    """
+    held = os.fstat(fd)
+    try:
+        current = path.stat()
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino)
 
 
 def _release_locked_fd(fd: int) -> None:

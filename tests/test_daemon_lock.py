@@ -296,6 +296,60 @@ class TestHandoff:
             os.close(inherited)
 
     @posix_handoff
+    def test_a_lock_file_renamed_mid_adoption_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A rename keeps the inode's one link, so a link count still reads as
+        # one while the name now refers to something else. Measured with a
+        # count-based check: the rename passed and a contender locked the live
+        # path alongside the adopter.
+        seed = DaemonLock(tmp_path)
+        assert seed.try_acquire()
+        inherited = seed.inheritable_copy()
+        seed.release()
+        path = daemon_lock_path(tmp_path)
+        real = daemon_lock_module.try_lock
+
+        def rename_then_lock(fd: int, *, exclusive: bool) -> bool:
+            monkeypatch.setattr(daemon_lock_module, "try_lock", real)
+            path.rename(path.parent / "moved")
+            path.touch()
+            return real(fd, exclusive=exclusive)
+
+        monkeypatch.setattr(daemon_lock_module, "try_lock", rename_then_lock)
+
+        try:
+            with pytest.raises(DaemonLockError, match="was replaced"):
+                DaemonLock(tmp_path).adopt(inherited)
+        finally:
+            os.close(inherited)
+
+    @posix_handoff
+    def test_a_failed_handover_does_not_leak_the_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The duplicate already shares the kernel lock, so leaking it holds the
+        # lock for this process's whole life: release() closes the original and
+        # the lock survives in the copy. Measured before the fix: the daemon
+        # still read as running after release and nobody could take over.
+        lock = DaemonLock(tmp_path)
+        assert lock.try_acquire()
+
+        def refuse(*args: object, **kwargs: object) -> None:
+            raise OSError("cannot mark inheritable")
+
+        monkeypatch.setattr(os, "set_inheritable", refuse)
+        with pytest.raises(OSError):
+            lock.inheritable_copy()
+        monkeypatch.undo()
+
+        lock.release()
+
+        successor = DaemonLock(tmp_path)
+        assert successor.try_acquire(), "the duplicate leaked and kept the lock"
+        successor.release()
+
+    @posix_handoff
     def test_adopting_a_descriptor_that_holds_no_lock_still_excludes(
         self, tmp_path: Path
     ):

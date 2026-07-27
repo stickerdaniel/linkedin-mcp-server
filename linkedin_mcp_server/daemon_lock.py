@@ -41,6 +41,7 @@ from types import TracebackType
 from linkedin_mcp_server.daemon_descriptor import daemon_dir, daemon_state_root
 from linkedin_mcp_server.private_state import harden_directory
 from linkedin_mcp_server.profile_lease import (
+    is_still_at,
     acquire_locked_fd,
     open_lock_file,
     try_lock,
@@ -211,7 +212,17 @@ class DaemonLock:
         if self._fd is None:
             raise DaemonLockError("Cannot hand over a lock this process does not hold")
         duplicate = os.dup(self._fd)
-        os.set_inheritable(duplicate, True)
+        try:
+            os.set_inheritable(duplicate, True)
+        except OSError:
+            # The duplicate already shares the kernel lock, so leaking it here
+            # would hold the lock for this process's whole life with nothing
+            # left to release it: release() closes the original and the lock
+            # survives in the copy. Measured with the call made to fail: the
+            # daemon still read as running after release, and no other process
+            # could take over.
+            os.close(duplicate)
+            raise
         return duplicate
 
     def adopt(self, fd: int) -> None:
@@ -268,16 +279,19 @@ class DaemonLock:
                 "The inherited descriptor does not hold the daemon lock, so "
                 "adopting it would leave the browser unowned."
             )
-        # Checked again now that the lock is held, because the comparison above
-        # happened before it. An unlink and recreate in between leaves this
-        # holding a lock on an orphaned inode while the live path sits free for
-        # somebody else to take, which is two owners. st_nlink is what says the
-        # difference: zero means nothing refers to this inode any more.
-        # ``acquire_locked_fd`` guards its own acquisition the same way; it
-        # retries because it can, while adoption cannot re-lock a descriptor
-        # somebody else opened and has to refuse. Measured before this: adopter
-        # and contender each reported ownership, on two inodes.
-        if os.fstat(fd).st_nlink == 0:
+        # Compared again now that the lock is held, because the check above
+        # happened before it. Anything that replaces the file in between leaves
+        # this holding a lock on an inode the path no longer names, while the
+        # live path sits free for somebody else to take, which is two owners.
+        #
+        # By identity rather than link count. A count catches an unlink and
+        # misses a rename, where the inode keeps its one link and the name now
+        # refers to something else. Measured with a rename plus recreate: the
+        # count test passed and a contender locked the live path alongside the
+        # adopter. ``acquire_locked_fd`` makes the same comparison and retries;
+        # adoption cannot re-lock a descriptor another process opened, so it
+        # refuses instead.
+        if not is_still_at(fd, self._path):
             raise DaemonLockError(
                 "The lock file was replaced while the inherited descriptor was "
                 "being adopted, so it now locks an inode nothing refers to. "
