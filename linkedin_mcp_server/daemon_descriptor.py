@@ -55,6 +55,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
 from linkedin_mcp_server.config.schema import AppConfig, is_loopback_host
@@ -531,17 +532,6 @@ class DaemonDescriptor:
         write access to the auth root into a way to collect the token and,
         through it, the LinkedIn session behind it.
         """
-        # Compared against the host as written, because that is the string the
-        # URL is built from. is_loopback_host trims before classifying, so a
-        # host with whitespace around it passes as loopback and then produces a
-        # URL no client can parse: measured, "[::1] " was accepted here and
-        # failed later with "Invalid port: ' :49152'", outside anything that
-        # could explain it as a bad descriptor.
-        if self.host != self.host.strip():
-            raise DescriptorError(
-                f"The daemon descriptor names host {self.host!r}, which carries "
-                f"whitespace and cannot be used to reach anything"
-            )
         if not is_loopback_host(self.host):
             raise DescriptorError(
                 f"The daemon descriptor points at {self.host}, which is not "
@@ -554,6 +544,43 @@ class DaemonDescriptor:
             )
         if not self.path.startswith("/"):
             raise DescriptorError("The daemon descriptor has no usable path")
+
+        # A request line is one line. A control character in any of these ends
+        # up in the URL and, in the wrong place, would let a descriptor written
+        # by something else decide where one header stops and the next begins.
+        # urlsplit is happy to carry them, so they are refused here.
+        for name, value in (("host", self.host), ("path", self.path)):
+            if any(character in value for character in "\r\n\t\x00"):
+                raise DescriptorError(
+                    f"The daemon descriptor's {name} contains a control "
+                    f"character, so it cannot name an endpoint"
+                )
+
+        # The fields are individually plausible; whether they compose into
+        # something a client can use is a separate question, and the only one
+        # that finally matters. is_loopback_host trims before classifying, for
+        # instance, so a host with whitespace around it is loopback by that
+        # measure and produces a URL that parses as a bad port. Measured
+        # accepting three such descriptors: "[::1] ", a bracketed IPv4, and a
+        # path with a newline, each failing later in the client rather than
+        # here where it could be explained as a descriptor this did not write.
+        #
+        # urlsplit rather than an HTTP client's parser: this has no business
+        # depending on which client the caller happens to use, and reading the
+        # port back is what catches a host that ran into it.
+        try:
+            parsed = urlsplit(self.url)
+            reachable = parsed.port == self.port and parsed.scheme == "http"
+        except ValueError as exc:
+            raise DescriptorError(
+                f"The daemon descriptor describes an endpoint that cannot be "
+                f"used to reach anything: {exc}"
+            ) from exc
+        if not reachable:
+            raise DescriptorError(
+                f"The daemon descriptor's host, port and path do not compose "
+                f"into a usable address: {self.url!r}"
+            )
 
     def matches_token(self, token: str) -> bool:
         """Whether *token* is the one this descriptor was published with."""

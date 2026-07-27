@@ -517,14 +517,43 @@ class TestStateLocation:
 
 
 class TestEndpointSpelling:
-    def test_a_host_with_whitespace_is_refused(self, tmp_path: Path):
-        # is_loopback_host trims before classifying, so such a host passes as
-        # loopback and then produces a URL no client can parse. Measured:
-        # "[::1] " was accepted and failed later with "Invalid port".
-        descriptor = _descriptor(tmp_path, new_token(), host="[::1] ")
+    @pytest.mark.parametrize(
+        "host,path",
+        [
+            ("[::1] ", "/mcp"),
+            ("[127.0.0.1]", "/mcp"),
+            ("127.0.0.1\r", "/mcp"),
+            ("127.0.0.1", "/mcp\n"),
+            ("127.0.0.1", "/mcp\ta"),
+        ],
+    )
+    def test_an_endpoint_that_composes_into_nothing_usable_is_refused(
+        self, tmp_path: Path, host: str, path: str
+    ):
+        # Each field is plausible on its own. Whether they compose into an
+        # address a client can reach is the question that matters, and it used
+        # to be answered by the client, far from anything that could explain it
+        # as a descriptor this daemon did not write. Measured: "[::1] " passed
+        # as loopback because the check trims and the URL does not.
+        descriptor = _descriptor(tmp_path, new_token(), host=host, path=path)
 
-        with pytest.raises(DescriptorError, match="whitespace"):
+        with pytest.raises(DescriptorError):
             descriptor.check_endpoint_is_local()
+
+    @pytest.mark.parametrize(
+        "host", ["127.0.0.1", "::1", "[::1]", "localhost", "::ffff:127.0.0.1"]
+    )
+    def test_every_spelling_a_daemon_publishes_is_accepted(
+        self, tmp_path: Path, host: str
+    ):
+        # The other half: tightening this must not refuse an endpoint the
+        # daemon itself would write, which is easy to do by accident.
+        import httpx
+
+        descriptor = _descriptor(tmp_path, new_token(), host=host)
+
+        descriptor.check_endpoint_is_local()
+        httpx.URL(descriptor.url)
 
 
 class TestProfileIdentityStability:
