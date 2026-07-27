@@ -2683,24 +2683,33 @@ class LinkedInExtractor:
         )
         return bool(matched)
 
-    async def _message_text_visible(self, message: str) -> bool:
-        """Wait until the compose page visibly contains the just-sent message text.
-
-        Uses the page-level default timeout (``BrowserConfig.default_timeout``).
-        """
-        try:
-            await self._page.wait_for_function(
-                """({ expected }) => {
-                    const normalize = value =>
-                        (value || '').replace(/\\s+/g, ' ').trim();
-                    const bodyText = normalize(document.body?.innerText || '');
-                    return bodyText.includes(normalize(expected));
-                }""",
-                arg={"expected": message},
-            )
-            return True
-        except PlaywrightTimeoutError:
-            return False
+    async def _message_text_visible(self, message: str, compose_box: Any) -> bool:
+        """Confirm the editor cleared and a sent bubble contains ``message``."""
+        for _ in range(20):
+            try:
+                visible = await compose_box.evaluate(
+                    """(editor, expected) => {
+                        const normalize = value =>
+                            (value || '').replace(/\\s+/g, ' ').trim();
+                        const root = editor.getRootNode();
+                        const messageVisible = Array.from(
+                            root.querySelectorAll('p, div, span')
+                        ).some(element =>
+                            !element.closest('[contenteditable="true"]')
+                            && normalize(element.innerText || element.textContent)
+                                === normalize(expected)
+                        );
+                        return !normalize(editor.innerText) && messageVisible;
+                    }""",
+                    message,
+                )
+                if visible:
+                    return True
+            except Exception:
+                logger.debug("Could not verify sent message", exc_info=True)
+                return False
+            await asyncio.sleep(0.25)
+        return False
 
     async def _dismiss_message_ui(self) -> None:
         """Best-effort dismissal for the profile messaging UI."""
@@ -4242,25 +4251,30 @@ class LinkedInExtractor:
 
         # patchright quirk: compose_box.click() and press_sequentially() use
         # actionability checks internally and hit the same wait_for timeout.
-        # Instead: focus via page.evaluate() (no actionability check) and type
-        # via page.keyboard.type() which operates on the active element directly
-        # and fires the real keydown/input/keyup events React needs to enable Send.
+        # Instead: focus the resolved element via evaluate() (no actionability
+        # check) and type via page.keyboard, which fires the real events React
+        # needs to enable Send.
         #
-        # DOM dependency: innerText extraction is not applicable here — we need
-        # to call .focus() on the element reference, which requires querySelector.
-        # Selectors use only role + contenteditable + aria-label (ARIA attributes,
-        # not layout class names) so they are stable across LinkedIn UI changes.
-        focused = await self._page.evaluate(
-            """() => {
-                const el = document.querySelector(
-                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
-                    + 'div[role="textbox"][contenteditable="true"]'
-                );
-                if (!el) return false;
-                el.focus();
-                return true;
-            }"""
-        )
+        # Newlines are emitted as Shift+Enter (see _type_message_with_newlines):
+        # plain Enter submits LinkedIn's composer, so a literal "\n" inside
+        # keyboard.type() would split a multi-paragraph message into one send
+        # per line. See issue #441.
+        #
+        # DOM dependency: innerText cannot focus an element. The resolved
+        # locator uses role + contenteditable + aria-label, not layout classes.
+        try:
+            focused = await compose_box.evaluate(
+                """el => {
+                    el.focus();
+                    return (
+                        document.activeElement === el
+                        || el.getRootNode().activeElement === el
+                    );
+                }"""
+            )
+        except Exception:
+            logger.debug("Could not focus resolved compose box", exc_info=True)
+            focused = False
         if not focused:
             await self._dismiss_message_ui()
             return self._message_action_result(
@@ -4274,16 +4288,18 @@ class LinkedInExtractor:
         await asyncio.sleep(0.3)
 
         # patchright actionability also blocks send_button.click(). Use JS click
-        # on any visible, enabled send button; fall back to Enter key which
-        # LinkedIn's composer also accepts for submission.
+        # on a visible, enabled send button in this editor's form; fall back to
+        # Enter, which LinkedIn's composer also accepts for submission.
         #
         # DOM dependency: we need btn.click() on the element reference — not
         # achievable via innerText or URL navigation. Selectors use only type,
         # aria-label, and data attributes (no layout class names).
         await asyncio.sleep(1.0)  # allow React to process keyboard input
-        sent_via_js = await self._page.evaluate(
-            """() => {
-                const btn = Array.from(document.querySelectorAll(
+        sent_via_js = await compose_box.evaluate(
+            """editor => {
+                const form = editor.closest('form');
+                if (!form) return false;
+                const btn = Array.from(form.querySelectorAll(
                     'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
                     + 'button[data-control-name="send"]'
                 )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
@@ -4295,7 +4311,7 @@ class LinkedInExtractor:
         if not sent_via_js:
             await self._page.keyboard.press("Enter")
 
-        if not await self._message_text_visible(message):
+        if not await self._message_text_visible(message, compose_box):
             await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,

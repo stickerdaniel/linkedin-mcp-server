@@ -5674,6 +5674,8 @@ class TestSendMessageComposerInteraction:
 
     def _patch_send_message_to_compose(self, extractor, mock_page):
         """Return a context manager that patches send_message up to the compose step."""
+        self.compose_box = MagicMock()
+        self.compose_box.evaluate = AsyncMock(side_effect=[True, True])
         return (
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch(
@@ -5706,7 +5708,7 @@ class TestSendMessageComposerInteraction:
                 extractor,
                 "_resolve_message_compose_box",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=self.compose_box,
             ),
             patch.object(
                 extractor,
@@ -5732,8 +5734,7 @@ class TestSendMessageComposerInteraction:
         mock_keyboard.type = AsyncMock()
         mock_keyboard.press = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), True (send button click)
-        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+        mock_page.evaluate = AsyncMock(return_value=True)
         patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with (
@@ -5760,6 +5761,7 @@ class TestSendMessageComposerInteraction:
 
         assert result["status"] == "sent"
         assert result["sent"] is True
+        assert self.compose_box.evaluate.await_count == 2
         # Verify keyboard.type was used (not press_sequentially)
         mock_keyboard.type.assert_awaited_once_with("Hello!", delay=15)
 
@@ -5769,9 +5771,9 @@ class TestSendMessageComposerInteraction:
         mock_keyboard = MagicMock()
         mock_keyboard.type = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns False (focus failed)
-        mock_page.evaluate = AsyncMock(return_value=False)
         patches = self._patch_send_message_to_compose(extractor, mock_page)
+        self.compose_box.evaluate.side_effect = None
+        self.compose_box.evaluate.return_value = False
 
         with (
             patches[0],
@@ -5799,9 +5801,8 @@ class TestSendMessageComposerInteraction:
         mock_keyboard.type = AsyncMock()
         mock_keyboard.press = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), False (no send button found)
-        mock_page.evaluate = AsyncMock(side_effect=[True, False])
         patches = self._patch_send_message_to_compose(extractor, mock_page)
+        self.compose_box.evaluate.side_effect = [True, False]
 
         with (
             patches[0],
@@ -5828,6 +5829,23 @@ class TestSendMessageComposerInteraction:
         assert result["status"] == "sent"
         # Enter was pressed as fallback
         mock_keyboard.press.assert_awaited_once_with("Enter")
+
+    async def test_sent_message_verification_uses_resolved_composer(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        compose_box = MagicMock()
+        compose_box.evaluate = AsyncMock(side_effect=[False, True])
+
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            visible = await extractor._message_text_visible(
+                "Hello!",
+                compose_box,
+            )
+
+        assert visible is True
+        assert compose_box.evaluate.await_count == 2
 
 
 class TestBuildFeedReferences:
