@@ -455,7 +455,14 @@ class TestAdoptedDescriptors:
         try:
             adopter.release()
 
-            assert not daemon_is_running(tmp_path)
+            # Asked by electing rather than by probing. daemon_is_running takes
+            # a lock to answer, so under a loaded parallel test run it competes
+            # with whatever else is touching this file and can report a holder
+            # that is really another probe. Election is the question that
+            # matters anyway: if the child still held the lock, this would fail.
+            successor = DaemonLock(tmp_path)
+            assert successor.try_acquire(), "the child kept the lock alive"
+            successor.release()
         finally:
             child.kill()
             child.wait()
