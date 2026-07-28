@@ -30,6 +30,7 @@ from linkedin_mcp_server.daemon_descriptor import (
     new_token,
     publish,
 )
+from linkedin_mcp_server.daemon_lock import DaemonLock
 
 _RUNTIME = "macos-arm64-host"
 
@@ -240,21 +241,19 @@ class TestTellingTheRefusalsApart:
     them is how a second Chromium ends up on a live session.
     """
 
-    def test_nothing_published_is_the_only_case_that_may_elect_itself(
-        self, tmp_path: Path
-    ):
+    def test_nothing_published_is_worth_an_election_attempt(self, tmp_path: Path):
         profile = tmp_path / "profile"
         profile.mkdir()
 
         lookup = look_up_owner(tmp_path, profile, _config(profile))
 
         assert lookup.state is OwnerState.ABSENT
-        assert lookup.may_elect_itself
+        assert lookup.worth_attempting_election
 
-    def test_a_live_incompatible_owner_may_not_be_displaced(self, tmp_path: Path):
+    def test_a_live_incompatible_owner_is_not_worth_displacing(self, tmp_path: Path):
         # The lock is per auth root, so this client cannot take the position
-        # either. Electing itself would put a second browser on the auth root
-        # the running daemon owns.
+        # either. Trying would put a second browser on the auth root the
+        # running daemon owns.
         theirs = tmp_path / "their-profile"
         ours = tmp_path / "our-profile"
         ours.mkdir()
@@ -263,12 +262,15 @@ class TestTellingTheRefusalsApart:
         lookup = look_up_owner(tmp_path, ours, _config(ours))
 
         assert lookup.state is OwnerState.LIVE_INCOMPATIBLE
-        assert not lookup.may_elect_itself
+        assert not lookup.worth_attempting_election
 
-    def test_an_untrusted_descriptor_may_not_be_displaced(self, tmp_path: Path):
-        # Beside a held lock this is a live daemon we cannot talk to. Treating
-        # it as absence is the reading that opens a browser on a profile
-        # someone else is driving.
+    def test_an_untrusted_descriptor_is_kept_but_does_not_block_an_attempt(
+        self, tmp_path: Path
+    ):
+        # Two things that look alike and are not. The file must survive — beside
+        # a held lock it belongs to a live daemon. But a crashed owner leaves
+        # exactly this file behind with the lock free, so refusing to even try
+        # would strand the profile until someone deleted it by hand.
         profile = tmp_path / "profile"
         _publish_owner(tmp_path, profile)
         descriptor_path(tmp_path).write_text("{not json", encoding="utf-8")
@@ -276,7 +278,36 @@ class TestTellingTheRefusalsApart:
         lookup = look_up_owner(tmp_path, profile, _config(profile))
 
         assert lookup.state is OwnerState.UNTRUSTED
-        assert not lookup.may_elect_itself
+        assert lookup.attachment is None
+        assert descriptor_path(tmp_path).exists()
+        assert lookup.worth_attempting_election
+
+    def test_the_descriptor_never_answers_who_holds_the_lock(self, tmp_path: Path):
+        # The artifacts go out of step in both directions, so no reading of one
+        # settles the other. Both halves reproduced here; the lock is the only
+        # authority, and taking it is what asks.
+        profile = tmp_path / "profile"
+        profile.mkdir()
+
+        # Held, nothing published: the ordinary startup window.
+        holder = DaemonLock(tmp_path)
+        assert holder.try_acquire()
+        try:
+            during_startup = look_up_owner(tmp_path, profile, _config(profile))
+        finally:
+            holder.release()
+        assert during_startup.state is OwnerState.ABSENT
+
+        # Free, a corrupt descriptor left behind by a crash.
+        _publish_owner(tmp_path, profile)
+        descriptor_path(tmp_path).write_text("{not json", encoding="utf-8")
+        after_a_crash = look_up_owner(tmp_path, profile, _config(profile))
+        contender = DaemonLock(tmp_path)
+        try:
+            assert contender.try_acquire(), "the lock is free despite the descriptor"
+        finally:
+            contender.release()
+        assert after_a_crash.state is OwnerState.UNTRUSTED
 
     def test_an_incompatible_owner_is_not_waited_out(self, tmp_path: Path):
         # Waiting is for an owner that is still starting. A daemon serving

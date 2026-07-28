@@ -68,9 +68,10 @@ class OwnerState(enum.Enum):
     #: election and this client can neither attach nor elect itself.
     LIVE_INCOMPATIBLE = "live_incompatible"
 
-    #: A descriptor exists that cannot be trusted. Never an absence: beside a
-    #: held lock it means a live daemon this client cannot talk to, and opening
-    #: a browser on that assumption is the corruption the lease exists to stop.
+    #: A descriptor exists that cannot be trusted. Distinct from absence
+    #: because it must not be *deleted* or explained away: beside a held lock
+    #: it is a live daemon this client cannot talk to. Whether the position is
+    #: actually free is still the lock's answer, not this one.
     UNTRUSTED = "untrusted"
 
 
@@ -92,14 +93,27 @@ class OwnerLookup:
     reason: str = ""
 
     @property
-    def may_elect_itself(self) -> bool:
-        """Whether this client is free to become the owner.
+    def worth_attempting_election(self) -> bool:
+        """Whether becoming the owner is worth *trying*, never whether it is free.
 
-        Only true when nobody holds the position. An untrusted descriptor is
-        deliberately excluded: it may be sitting beside a held lock, and the
-        election attempt itself is what settles that safely.
+        Nothing here can answer that. The descriptor and the lock are separate
+        artifacts that go out of step in both directions, and both directions
+        were reproduced on this tree:
+
+        * lock held, nothing published yet — the ordinary startup window. Reads
+          as ``ABSENT``, and taking that for "the position is free" would put a
+          second browser on the profile.
+        * lock free, a corrupt descriptor left by a crashed owner. Reads as
+          ``UNTRUSTED`` while ``try_acquire`` succeeds, and refusing on that
+          basis would strand the profile until someone deleted the file by hand.
+
+        So this only says the descriptor gives no reason *not* to try;
+        :meth:`DaemonLock.try_acquire` settles it, which is what its own
+        docstring says of the matching probe (``daemon_lock.py:382-407``).
+        A caller must attempt the lock and treat this state as the explanation
+        for what to do when the attempt fails, not as permission before it.
         """
-        return self.state is OwnerState.ABSENT
+        return self.state in (OwnerState.ABSENT, OwnerState.UNTRUSTED)
 
 
 def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
