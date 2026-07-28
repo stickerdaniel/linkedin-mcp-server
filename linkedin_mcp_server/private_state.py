@@ -30,7 +30,8 @@ import os
 import stat
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from linkedin_mcp_server.common_utils import is_still_at, secure_mkdir
@@ -45,11 +46,32 @@ _MACOS = sys.platform == "darwin"
 
 
 class PrivateStateError(RuntimeError):
-    """Owner-only storage could not be established, so nothing was written.
+    """Owner-only storage could not be established.
 
     Always fatal to the operation that asked for it. A caller that catches this
-    and continues has written a secret somewhere it did not verify.
+    and carries on is working with a path whose permissions were never
+    established, and its next step is usually to write a secret there.
     """
+
+
+@contextmanager
+def _as_private_state_error(path: Path, action: str) -> Iterator[None]:
+    """Turn a filesystem failure into this module's own error.
+
+    Every entry point here promises to raise :class:`PrivateStateError` when it
+    cannot establish owner-only storage. The operating system does not know
+    that, so a file where a directory belongs, an unreadable parent, or a path
+    that vanishes mid-flight arrives as NotADirectoryError, PermissionError or
+    FileNotFoundError and crosses the boundary as itself. Measured: a file at
+    the state root surfaced as NotADirectoryError from inside a lock
+    acquisition, several layers from anything that could explain it.
+    """
+    try:
+        yield
+    except PrivateStateError:
+        raise
+    except OSError as exc:
+        raise PrivateStateError(f"Could not {action} {path}: {exc}") from exc
 
 
 def harden_directory(path: Path) -> None:
@@ -68,42 +90,46 @@ def harden_directory(path: Path) -> None:
     ordinary arrangement. A file name, by contrast, is built from an identifier
     and lands in a directory this hardens first.
     """
-    if path.exists() and not path.is_dir():
-        raise PrivateStateError(f"Not a directory: {path}")
+    with _as_private_state_error(path, "prepare the private directory"):
+        if path.exists() and not path.is_dir():
+            raise PrivateStateError(f"Not a directory: {path}")
 
-    secure_mkdir(path, mode=_PRIVATE_DIR_MODE)
+        secure_mkdir(path, mode=_PRIVATE_DIR_MODE)
 
-    if _WINDOWS:
-        from linkedin_mcp_server.windows_acl import restrict_to_current_user
+        if _WINDOWS:
+            from linkedin_mcp_server.windows_acl import restrict_to_current_user
 
-        restrict_to_current_user(path, directory=True)
-        return
+            restrict_to_current_user(path, directory=True)
+            return
 
-    _harden_posix(path, _PRIVATE_DIR_MODE)
+        _harden_posix(path, _PRIVATE_DIR_MODE)
 
 
 def harden_file(path: Path) -> None:
     """Leave the existing file *path* readable only by this account.
 
-    Harden the file before writing the secret into it, not after: the window in
-    between is a window in which the secret is on disk under whatever
-    permissions it was created with.
+    The file has to exist already, so a caller writing a secret creates it with
+    owner-only permissions itself and calls this to *establish* that rather
+    than assume it: the mode, the owner and the access list are read back, and
+    on Windows the access list is replaced outright. A refusal therefore means
+    the permissions could not be confirmed, not that the file is exposed.
     """
-    if not path.exists():
-        raise PrivateStateError(f"Cannot harden a file that does not exist: {path}")
+    with _as_private_state_error(path, "inspect"):
+        if not path.exists():
+            raise PrivateStateError(f"Cannot harden a file that does not exist: {path}")
 
-    # Before the platform split, because both halves get it wrong in their own
-    # way. POSIX opens a directory with O_RDONLY quite happily and would take it
-    # from 0700 to 0600, which stops it being searchable; Windows would give it
-    # a file's non-inheritable access list, so files created inside afterwards
-    # no longer inherit the owner-only entry that is the point of hardening the
-    # directory. Neither is something a caller should discover later.
-    #
-    # lstat, so a link is judged as itself rather than as its target. POSIX
-    # refuses one again at open time through O_NOFOLLOW; Windows has no
-    # equivalent, so this is where both learn about it, and a link is worth its
-    # own message because it is the case a caller is most likely to hit.
-    entry = path.lstat()
+        # Before the platform split, because both halves get it wrong in their own
+        # way. POSIX opens a directory with O_RDONLY quite happily and would take it
+        # from 0700 to 0600, which stops it being searchable; Windows would give it
+        # a file's non-inheritable access list, so files created inside afterwards
+        # no longer inherit the owner-only entry that is the point of hardening the
+        # directory. Neither is something a caller should discover later.
+        #
+        # lstat, so a link is judged as itself rather than as its target. POSIX
+        # refuses one again at open time through O_NOFOLLOW; Windows has no
+        # equivalent, so this is where both learn about it, and a link is worth its
+        # own message because it is the case a caller is most likely to hit.
+        entry = path.lstat()
     if stat.S_ISLNK(entry.st_mode):
         raise PrivateStateError(
             f"{path} is a symbolic link rather than a file. Hardening it would "
