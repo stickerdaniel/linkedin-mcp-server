@@ -98,6 +98,21 @@ class TestAttaching:
 
         assert find_owner(tmp_path, profile, _config(profile)) is None
 
+    def test_the_token_stays_out_of_the_repr(self, tmp_path: Path):
+        # This is a bearer token for a server driving a logged-in LinkedIn
+        # session. Surrounding code logs whole objects at DEBUG and users paste
+        # those logs into issue reports, so a default dataclass repr is how the
+        # credential leaves the machine.
+        profile = tmp_path / "profile"
+        token = _publish_owner(tmp_path, profile)
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert lookup.attachment is not None
+        assert lookup.attachment.token == token
+        assert token not in repr(lookup.attachment)
+        assert token not in repr(lookup)
+
 
 class TestRefusing:
     def test_a_daemon_from_another_runtime_is_refused(self, tmp_path: Path):

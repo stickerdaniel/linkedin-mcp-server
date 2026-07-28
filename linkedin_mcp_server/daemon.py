@@ -24,7 +24,7 @@ from __future__ import annotations
 import enum
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from linkedin_mcp_server import daemon_descriptor
@@ -79,7 +79,11 @@ class Attachment:
     """An owner worth talking to, and the credential for doing so."""
 
     descriptor: DaemonDescriptor
-    token: str
+    #: Kept out of the repr, as the proxy credentials are
+    #: (``config/schema.py:116-117``). This is a bearer token for a server that
+    #: drives a logged-in LinkedIn session, and the surrounding code logs whole
+    #: objects at DEBUG while users paste those logs into issue reports.
+    token: str = field(repr=False)
 
 
 @dataclass(frozen=True)
