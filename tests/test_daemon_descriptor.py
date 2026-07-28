@@ -531,6 +531,9 @@ class TestEndpointSpelling:
             ("127.0.0.1", "/mcp\ta"),
             ("127.0.0.1", "/mcp\x0b"),
             ("127.0.0.1", "/mcp\udcff"),
+            ("127.0.0.1.", "/mcp"),
+            ("127.0.0.1..", "/mcp"),
+            ("localhost..", "/mcp"),
         ],
     )
     def test_an_endpoint_that_composes_into_nothing_usable_is_refused(

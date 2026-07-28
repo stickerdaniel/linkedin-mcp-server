@@ -49,6 +49,7 @@ import hmac
 import json
 import os
 import secrets
+import socket
 import stat
 import uuid
 from collections.abc import Mapping
@@ -124,13 +125,16 @@ def _text(raw: Mapping[Any, Any], name: str) -> str:
 def _digest_text(raw: Mapping[Any, Any], name: str) -> str:
     """Read a field that must be a SHA-256 digest, and check that it is one.
 
-    Both digests are compared with ``hmac.compare_digest``, which refuses a
+    ``token_sha256`` is compared with ``hmac.compare_digest``, which refuses a
     string carrying anything outside ASCII and raises TypeError doing so.
     Measured with an accented character: the descriptor was accepted here and
     the comparison failed later with a TypeError, outside the DescriptorError
-    every caller of this module is written to expect. A digest has one shape,
-    so checking it costs nothing and keeps the failure where it can be
-    explained.
+    every caller of this module is written to expect.
+
+    ``config_fingerprint`` is only produced and parsed so far, and is checked
+    the same way because it is the same kind of value and will be compared the
+    same way once there is something to compare it against. A digest has one
+    shape, so establishing it costs nothing.
     """
     value = _text(raw, name)
     if len(value) != 64 or any(character not in _HEX_DIGITS for character in value):
@@ -645,6 +649,24 @@ class DaemonDescriptor:
                 f"The daemon descriptor's host, port and path do not compose "
                 f"into a usable address: {self.url!r}"
             )
+
+        # And finally: can this name be turned into an address at all. Spelling
+        # rules keep answering slightly the wrong question, because a host can
+        # be well formed and still resolve to nothing. is_loopback_host strips
+        # trailing dots before deciding whether it is looking at a literal or a
+        # name, so "127.0.0.1." and "localhost.." were both accepted as
+        # loopback while getaddrinfo refused them outright. Asking the resolver
+        # settles it without this having to know which spellings it likes.
+        #
+        # Local by definition, so no name lookup leaves the machine: anything
+        # that resolved to something not loopback was already refused above.
+        try:
+            socket.getaddrinfo(parsed.hostname, self.port, type=socket.SOCK_STREAM)
+        except (OSError, UnicodeError) as exc:
+            raise DescriptorError(
+                f"The daemon descriptor names host {self.host!r}, which does "
+                f"not resolve to an address on this machine: {exc}"
+            ) from exc
 
     def matches_token(self, token: str) -> bool:
         """Whether *token* is the one this descriptor was published with."""
