@@ -30,6 +30,7 @@ import os
 import stat
 import sys
 import threading
+import contextlib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -165,27 +166,34 @@ def harden_file(path: Path) -> None:
         raise PrivateStateError(f"{path} could not be opened to harden: {exc}") from exc
 
     try:
-        # Asked again of the descriptor, not the name. The check above was made
-        # before the open, so it says what the path was then; this says what
-        # was actually opened, which is what the next few calls will change.
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise PrivateStateError(f"{path} is not a regular file")
+        # The whole descriptor half is inside the translation, not just the
+        # path work before it: fchmod, fstat, the access list calls and the
+        # close can each fail with an OSError of their own. Measured with
+        # fchmod made to answer EIO: it crossed the boundary as itself.
+        with _as_private_state_error(path, "make private"):
+            # Asked again of the descriptor, not the name. The check above was
+            # made before the open, so it says what the path was then; this
+            # says what was actually opened, which is what the next few calls
+            # will change.
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise PrivateStateError(f"{path} is not a regular file")
 
-        _harden_posix_fd(fd, path, _PRIVATE_FILE_MODE)
+            _harden_posix_fd(fd, path, _PRIVATE_FILE_MODE)
 
-        # The descriptor is now provably private, but the promise is about the
-        # path: the caller's next step is to write a secret to it by name. If
-        # the name has come to mean something else in the meantime, hardening
-        # the old inode says nothing about where that write will land.
-        # Measured: this returned success while the path was already 0644
-        # again.
-        if not is_still_at(fd, path):
-            raise PrivateStateError(
-                f"{path} was replaced while it was being hardened, so it no "
-                f"longer refers to the file this made private."
-            )
+            # The descriptor is provably private now, but the promise is about
+            # the path, and the caller reaches this file by name. If the name
+            # has come to mean something else in the meantime, hardening the
+            # old inode says nothing about the file that answers to it.
+            # Measured: this returned success while the path was already 0644
+            # again.
+            if not is_still_at(fd, path):
+                raise PrivateStateError(
+                    f"{path} was replaced while it was being hardened, so it "
+                    f"no longer refers to the file this made private."
+                )
     finally:
-        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def _require_acl_support(path: Path) -> None:
