@@ -97,6 +97,22 @@ Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or worki
   5. Create a draft PR; only convert to regular PR when ready to merge
   6. Review with AI agents first, then manual review. PRs are squash-merged into `main` (one commit per PR), so keep the PR title as the conventional-commit subject; commits within a PR are for review only.
 
+### Merging a stack
+
+Use `gt merge`, which merges every PR from `main` up to the current branch in
+one operation. Do not merge a stack one PR at a time with `gh pr merge`.
+
+The repository deletes the head branch on merge, and that races GitHub's
+retargeting of the PR above. Measured twice, both times two seconds apart:
+merging the middle PR deleted its branch, and the PR on top of it was closed
+before its base could be moved to `main`. A PR closed that way cannot be
+reopened or retargeted, so the only way back is to recreate it, which loses its
+review history.
+
+If a stacked PR does get closed this way, rebase its branch onto `main`,
+force-push with a lease, open a replacement, and leave a comment on the closed
+one pointing at it.
+
 ## PR Reviews
 
 Greptile posts initial reviews as PR review comments, but follow-ups as **issue comments**. Always check both.
