@@ -622,6 +622,23 @@ class TestAuthRootShape:
             daemon_dir(occupied)
 
 
+class TestUnusablePaths:
+    @pytest.mark.parametrize(
+        "path",
+        [Path("~definitely-no-such-user-xyz/auth"), Path("/tmp/auth\x00x")],
+    )
+    def test_a_path_that_cannot_be_resolved_is_refused(self, path: Path):
+        # expanduser and resolve run before anything else and have failure
+        # modes of their own: an unknown user raises RuntimeError, an embedded
+        # NUL raises ValueError. Both come from type-correct configuration, so
+        # they are refusals rather than defects.
+        with pytest.raises(DescriptorError, match="not a usable path"):
+            daemon_dir(path)
+
+        with pytest.raises(DescriptorError, match="not a usable path"):
+            profile_identity(path)
+
+
 class TestDigestFields:
     @pytest.mark.parametrize("field", ["token_sha256", "config_fingerprint"])
     @pytest.mark.parametrize("value", ["é" * 64, "z" * 64, "abc", "a" * 63, "a" * 65])

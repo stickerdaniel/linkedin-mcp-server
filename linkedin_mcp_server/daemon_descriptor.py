@@ -239,6 +239,26 @@ def daemon_state_root() -> Path:
     return (_account_home() / _APPLICATION_STATE_DIR / _DAEMON_DIR).resolve()
 
 
+def _canonical_path(path: Path, label: str) -> Path:
+    """Resolve *path*, in this module's vocabulary rather than the runtime's.
+
+    expanduser and resolve are the first thing every caller reaches, and they
+    have failure modes of their own: a home directory that cannot be
+    determined raises RuntimeError, an embedded NUL raises ValueError, and an
+    unreadable parent raises PermissionError. All three arrive from
+    type-correct configuration, so they are refusals rather than defects, and
+    they belong in the error every caller of this module is written to expect.
+    """
+    try:
+        return path.expanduser().resolve()
+    except DescriptorError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise DescriptorError(
+            f"The {label} {path!r} is not a usable path: {exc}"
+        ) from exc
+
+
 def _auth_root_identity(auth_root: Path) -> bytes:
     """Return the stable filesystem identity of *auth_root*, creating it once.
 
@@ -255,7 +275,7 @@ def _auth_root_identity(auth_root: Path) -> bytes:
     one. The auth root can be keyed this way because nothing rotates it; the
     profile inside it cannot, and :func:`profile_identity` says why.
     """
-    canonical = auth_root.expanduser().resolve()
+    canonical = _canonical_path(auth_root, "authentication root")
     # Checked before creating, not after. secure_mkdir refuses an existing
     # non-directory itself, with a NotADirectoryError that reaches the caller
     # instead of the DescriptorError this module is read through, and the check
@@ -316,7 +336,7 @@ def profile_identity(profile: Path) -> str:
     profile behind to explain one would be a strange thing for a client to
     discover afterwards.
     """
-    canonical = profile.expanduser().resolve()
+    canonical = _canonical_path(profile, "browser profile")
     try:
         info = canonical.parent.stat()
     except OSError:
