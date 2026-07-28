@@ -1,0 +1,252 @@
+"""When a client attaches to a running daemon, and when it must not.
+
+Attaching means sending a bearer token to an address read from a file and then
+driving a logged-in LinkedIn session through whatever answers. Most of these
+tests pin a case where that must not happen; the rest pin the one window where
+refusing is just as wrong as attaching.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+import linkedin_mcp_server.daemon as daemon_module
+import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
+from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.daemon import (
+    daemon_would_be_used,
+    find_owner,
+)
+from linkedin_mcp_server.daemon_descriptor import (
+    build,
+    descriptor_path,
+    new_instance_id,
+    new_token,
+    publish,
+)
+
+_RUNTIME = "macos-arm64-host"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_daemon_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    # Production state lives under the user's private application directory.
+    monkeypatch.setattr(daemon_descriptor_module, "_account_home", lambda: tmp_path)
+    monkeypatch.setattr(daemon_module, "get_runtime_id", lambda: _RUNTIME)
+
+
+def _config(profile: Path, **browser: object) -> AppConfig:
+    config = AppConfig()
+    config.browser.user_data_dir = str(profile)
+    for name, value in browser.items():
+        setattr(config.browser, name, value)
+    return config
+
+
+def _publish_owner(
+    auth_root: Path,
+    profile: Path,
+    *,
+    config: AppConfig | None = None,
+    runtime_id: str = _RUNTIME,
+    host: str = "127.0.0.1",
+) -> str:
+    """Publish a descriptor as a live owner would, and return its token."""
+    profile.mkdir(parents=True, exist_ok=True)
+    token = new_token()
+    publish(
+        auth_root,
+        build(
+            instance_id=new_instance_id(),
+            package_version="4.20.0",
+            runtime_id=runtime_id,
+            profile=profile,
+            host=host,
+            port=49152,
+            path="/mcp",
+            token=token,
+            config=config or _config(profile),
+            log_path=auth_root / "daemon.log",
+        ),
+        token,
+    )
+    return token
+
+
+class TestAttaching:
+    def test_a_matching_owner_is_attached_to(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        token = _publish_owner(tmp_path, profile)
+
+        attachment = find_owner(tmp_path, profile, _config(profile))
+
+        assert attachment is not None
+        assert attachment.token == token
+        assert attachment.descriptor.url == "http://127.0.0.1:49152/mcp"
+
+    def test_no_daemon_is_not_an_error(self, tmp_path: Path):
+        # The ordinary first-start case. Nothing published, nobody to talk to.
+        profile = tmp_path / "profile"
+        profile.mkdir()
+
+        assert find_owner(tmp_path, profile, _config(profile)) is None
+
+
+class TestRefusing:
+    def test_a_daemon_from_another_runtime_is_refused(self, tmp_path: Path):
+        # A host and a container share the mounted auth root but not their
+        # filesystems. Attaching across that boundary hands back a browser
+        # running against a profile in a different namespace.
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile, runtime_id="docker-abc123")
+
+        assert find_owner(tmp_path, profile, _config(profile)) is None
+
+    def test_a_daemon_serving_another_profile_is_refused(self, tmp_path: Path):
+        # The lock is per auth root, but a browser opens a profile. Sibling
+        # profiles elect one owner between them, so an owner can exist that is
+        # not this client's owner.
+        theirs = tmp_path / "their-profile"
+        ours = tmp_path / "our-profile"
+        ours.mkdir()
+
+        # Published with our configuration, not theirs. Otherwise the profile
+        # path reaches the fingerprint too and that check does the refusing,
+        # leaving this one passing whether or not the profile is compared.
+        # Verified by removing the check: the test still passed.
+        _publish_owner(tmp_path, theirs, config=_config(ours))
+
+        assert find_owner(tmp_path, ours, _config(ours)) is None
+
+    def test_a_daemon_with_a_different_configuration_is_refused(self, tmp_path: Path):
+        # Attaching anyway would silently give the client a browser configured
+        # differently from the one it asked for — a different proxy, in this
+        # case, which is the difference between traffic leaving the machine one
+        # way or another.
+        profile = tmp_path / "profile"
+        _publish_owner(
+            tmp_path,
+            profile,
+            config=_config(profile, proxy_server="http://proxy.example:8080"),
+        )
+
+        assert find_owner(tmp_path, profile, _config(profile)) is None
+
+    def test_an_off_machine_endpoint_is_refused_before_the_token_is_sent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        # The descriptor is a file, so its host is whatever was last written
+        # there. Posting a bearer token to it unchecked would turn a corrupted
+        # file into a way to hand the session to another machine.
+        #
+        # The refusal happens while parsing, in `from_mapping`, so it is in
+        # force before anything here can act on the host. This test pins the
+        # behaviour at the boundary a client actually calls, so that moving the
+        # check would surface here rather than silently going missing.
+        profile = tmp_path / "profile"
+        token = _publish_owner(tmp_path, profile, host="198.51.100.7")
+
+        with caplog.at_level("INFO", logger="linkedin_mcp_server.daemon"):
+            assert find_owner(tmp_path, profile, _config(profile)) is None
+
+        # Refused for the right reason, and loudly: a silent None here reads
+        # like an ordinary first start rather than a descriptor pointing off
+        # the machine.
+        assert "198.51.100.7" in caplog.text
+        # And the token itself never appears in what we log about the refusal.
+        assert token not in caplog.text
+
+    def test_an_unreadable_descriptor_is_not_read_as_absence(self, tmp_path: Path):
+        # This is the dangerous confusion. A corrupt descriptor beside a held
+        # lock means a live daemon this client cannot talk to. Returning None
+        # says "attach to nobody", which is correct; what must never happen is
+        # deleting it or concluding the profile is free.
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+        descriptor_path(tmp_path).write_text("{not json", encoding="utf-8")
+
+        assert find_owner(tmp_path, profile, _config(profile)) is None
+        assert descriptor_path(tmp_path).exists()
+
+
+class TestWaitingForAStartingOwner:
+    """The window between a lock being taken and a descriptor being published.
+
+    An owner binds and starts serving before it publishes, so a client that
+    arrives in between sees no descriptor and also cannot take the lock. That is
+    the normal two-client startup, and treating it as "no daemon" would leave
+    this process driving its own browser against the same profile for its whole
+    life — the per-call handoff the daemon exists to remove.
+    """
+
+    def test_an_owner_that_publishes_late_is_still_found(self, tmp_path: Path):
+        profile = tmp_path / "profile"
+        profile.mkdir()
+        published = threading.Event()
+
+        def publish_after_a_moment() -> None:
+            time.sleep(0.3)
+            _publish_owner(tmp_path, profile)
+            published.set()
+
+        starter = threading.Thread(target=publish_after_a_moment)
+        starter.start()
+        try:
+            attachment = find_owner(
+                tmp_path, profile, _config(profile), wait_seconds=5.0
+            )
+        finally:
+            starter.join()
+
+        assert published.is_set()
+        assert attachment is not None
+
+    def test_waiting_gives_up_rather_than_hanging(self, tmp_path: Path):
+        # Nothing ever publishes. The caller has to get an answer, because a
+        # client blocked here is a client whose first tool call never returns.
+        profile = tmp_path / "profile"
+        profile.mkdir()
+
+        started = time.monotonic()
+        attachment = find_owner(tmp_path, profile, _config(profile), wait_seconds=0.3)
+
+        assert attachment is None
+        assert time.monotonic() - started >= 0.3
+
+    def test_not_waiting_is_the_default(self, tmp_path: Path):
+        # Callers that only want to know the current state must not pay for a
+        # wait they did not ask for.
+        profile = tmp_path / "profile"
+        profile.mkdir()
+
+        started = time.monotonic()
+        find_owner(tmp_path, profile, _config(profile))
+
+        assert time.monotonic() - started < 0.2
+
+
+class TestWhetherTheDaemonAppliesAtAll:
+    def test_the_daemon_is_off_by_default(self):
+        # Supervision and liveness are unfinished, so nobody gets this without
+        # asking for it.
+        assert daemon_would_be_used(AppConfig()) is False
+
+    def test_an_explicit_http_bind_does_not_use_a_daemon(self):
+        # HTTP already serves every client from one process, so there is
+        # nothing to deduplicate and a second listener would only add a hop.
+        config = AppConfig()
+        config.server.daemon_enabled = True
+        config.server.transport = "streamable-http"
+
+        assert daemon_would_be_used(config) is False
+
+    def test_stdio_with_the_flag_on_uses_a_daemon(self):
+        config = AppConfig()
+        config.server.daemon_enabled = True
+
+        assert config.server.transport == "stdio"
+        assert daemon_would_be_used(config) is True

@@ -117,6 +117,7 @@ class EnvironmentKeys:
     IMPORT_FROM_BROWSER = "IMPORT_FROM_BROWSER"
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
+    DAEMON_ENABLED = "DAEMON_ENABLED"
 
 
 def is_interactive_environment() -> bool:
@@ -323,6 +324,14 @@ def load_from_env(config: AppConfig) -> AppConfig:
             config.browser.eager_full_chromium = False
         elif eager_full_value in TRUTHY_VALUES:
             config.browser.eager_full_chromium = True
+
+    # Share one browser-owning process across stdio clients.
+    if daemon_env := os.environ.get(EnvironmentKeys.DAEMON_ENABLED):
+        daemon_value = _normalize_env(daemon_env)
+        if daemon_value in FALSY_VALUES:
+            config.server.daemon_enabled = False
+        elif daemon_value in TRUTHY_VALUES:
+            config.server.daemon_enabled = True
 
     return config
 
@@ -591,6 +600,25 @@ def load_from_args(config: AppConfig) -> AppConfig:
         ),
     )
 
+    daemon_group = parser.add_mutually_exclusive_group()
+    daemon_group.add_argument(
+        "--daemon",
+        dest="daemon_enabled",
+        action="store_true",
+        default=None,
+        help=(
+            "Serve every stdio client from one browser-owning process instead "
+            "of giving each its own (experimental)."
+        ),
+    )
+    daemon_group.add_argument(
+        "--no-daemon",
+        dest="daemon_enabled",
+        action="store_false",
+        default=None,
+        help="Give every stdio client its own browser (default; overrides DAEMON_ENABLED=true).",
+    )
+
     args = parser.parse_args()
 
     # Update configuration with parsed arguments
@@ -687,6 +715,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.eager_full_chromium is not None:
         config.browser.eager_full_chromium = args.eager_full_chromium
+
+    if args.daemon_enabled is not None:
+        config.server.daemon_enabled = args.daemon_enabled
 
     return config
 
