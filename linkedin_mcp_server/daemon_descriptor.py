@@ -650,23 +650,41 @@ class DaemonDescriptor:
                 f"into a usable address: {self.url!r}"
             )
 
-        # And finally: can this name be turned into an address at all. Spelling
-        # rules keep answering slightly the wrong question, because a host can
-        # be well formed and still resolve to nothing. is_loopback_host strips
-        # trailing dots before deciding whether it is looking at a literal or a
-        # name, so "127.0.0.1." and "localhost.." were both accepted as
-        # loopback while getaddrinfo refused them outright. Asking the resolver
-        # settles it without this having to know which spellings it likes.
-        #
-        # Local by definition, so no name lookup leaves the machine: anything
-        # that resolved to something not loopback was already refused above.
+        # And finally: what does this name actually resolve to. Spelling rules
+        # keep answering slightly the wrong question, because a host can be
+        # well formed and still resolve to nothing, or to somewhere else.
+        # is_loopback_host strips trailing dots before deciding whether it is
+        # looking at a literal or a name, so "127.0.0.1." and "localhost.."
+        # passed as loopback while getaddrinfo refused them outright; and it
+        # accepts "localhost" by name, which says nothing about where the
+        # resolver on this machine actually sends it.
         try:
-            socket.getaddrinfo(parsed.hostname, self.port, type=socket.SOCK_STREAM)
+            resolved = socket.getaddrinfo(
+                parsed.hostname, self.port, type=socket.SOCK_STREAM
+            )
         except (OSError, UnicodeError) as exc:
             raise DescriptorError(
                 f"The daemon descriptor names host {self.host!r}, which does "
                 f"not resolve to an address on this machine: {exc}"
             ) from exc
+
+        # Every answer, not merely the first: a name can carry several, and one
+        # of them being loopback says nothing about the one a client picks.
+        # Measured with the resolver made to answer 203.0.113.9 for localhost:
+        # the descriptor was accepted, and the token would have been posted off
+        # this machine.
+        #
+        # This does not close the gap entirely, because the client resolves the
+        # name again when it connects and can get a different answer. What it
+        # does is stop a descriptor naming a host that resolves elsewhere right
+        # now, which is the difference between a check and a decoration.
+        for *_, address in resolved:
+            if not is_loopback_host(str(address[0])):
+                raise DescriptorError(
+                    f"The daemon descriptor names host {self.host!r}, which "
+                    f"resolves to {address[0]}, somewhere other than this "
+                    f"machine. Refusing to send credentials there."
+                )
 
     def matches_token(self, token: str) -> bool:
         """Whether *token* is the one this descriptor was published with."""
