@@ -32,7 +32,6 @@ them rather than share one path that is only true on one of them.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import weakref
@@ -318,8 +317,17 @@ class DaemonLock:
             # could not take the lock afterwards and only a manual close freed
             # it. Closing gives the lock up, which is the honest outcome of an
             # adoption that did not complete.
-            with contextlib.suppress(OSError):
+            #
+            # A failing close is logged rather than retried, and does not leave
+            # the descriptor behind. Linux and the BSDs release it early in the
+            # call and only then do the work that can fail, so the fd is gone
+            # whatever the return says; retrying would close whichever
+            # descriptor has since taken that number. POSIX.1-2024 standardised
+            # the opposite for EINTR, which Linux does not implement.
+            try:
                 os.close(fd)
+            except OSError:
+                logger.debug("Closing the adopted descriptor failed", exc_info=True)
             raise DaemonLockError(
                 f"The inherited descriptor could not be taken over: {exc}"
             ) from exc
