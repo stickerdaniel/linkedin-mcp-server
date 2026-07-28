@@ -273,22 +273,34 @@ class TestWaitingForAStartingOwner:
 
     @pytest.mark.parametrize("budget", [0.001, 0.01])
     def test_a_small_budget_is_not_rounded_up_to_a_poll(
-        self, tmp_path: Path, budget: float
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: float
     ):
         # A flat poll interval turned a 1 ms budget into 101 ms: a caller who
-        # asked to stay near fail-fast paid a hundredfold. The lower bound was
-        # the only thing asserted before, which cannot see this.
+        # asked to stay near fail-fast paid a hundredfold.
+        #
+        # Asserts what the code *asks for*, not what the clock shows. An upper
+        # bound on elapsed time fails on a descheduled runner even when the
+        # request was correct — reproduced: a 0.8 ms sleep request measured
+        # 66 ms of wall time. That is a test failing at the machine rather than
+        # at the code, and in CI it would be indistinguishable from a real bug.
         profile = tmp_path / "profile"
         profile.mkdir()
 
+        requested: list[float] = []
+        real_sleep = time.sleep
+
+        def record(duration: float) -> None:
+            requested.append(duration)
+            real_sleep(duration)
+
+        monkeypatch.setattr(daemon_module.time, "sleep", record)
+
         started = time.monotonic()
         look_up_owner(tmp_path, profile, _config(profile), wait_seconds=budget)
-        elapsed = time.monotonic() - started
 
-        assert elapsed >= budget
-        # Generous, because a loaded machine can stretch any wall-clock bound.
-        # Even so it fails by a wide margin against a full unclamped poll.
-        assert elapsed < budget + 0.05
+        assert time.monotonic() - started >= budget
+        assert requested, "a positive budget has to poll at least once"
+        assert max(requested) <= budget
 
     def test_a_negative_wait_is_simply_no_wait(self, tmp_path: Path):
         # Unlike a non-finite budget, this one has an obvious reading.
