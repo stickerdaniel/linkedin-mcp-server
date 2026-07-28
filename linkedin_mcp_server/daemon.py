@@ -12,11 +12,16 @@ to it and supervising it build on this and land with the code that forwards.
 Finding an owner takes a wait rather than a single read, because the interesting
 case is neither "an owner exists" nor "none does", but the window in between. An
 owner takes the lock first and publishes its descriptor only once it is actually
-listening, so a client arriving in that gap sees no descriptor *and* loses the
-lock race. Reading that as "no daemon" is the one wrong answer: the process
-would drive its own browser against the same profile for its whole life, which
-is exactly the per-call handoff this feature exists to remove, and it is what
-two clients starting together would normally hit.
+listening, so a client arriving in that gap loses the lock race while the file
+still says whatever the *last* owner left there — nothing, or a descriptor that
+outlived its writer. Settling on either reading is how a process ends up driving
+its own browser against the same profile for its whole life, which is the
+per-call handoff this feature exists to remove, and it is what two clients
+starting together would normally hit.
+
+One rule underpins the whole module: a file says nothing about whether the
+process that wrote it still exists. Only :meth:`DaemonLock.try_acquire` answers
+that. Every place this module was wrong before, it was wrong by forgetting it.
 """
 
 from __future__ import annotations
@@ -34,15 +39,9 @@ from linkedin_mcp_server.session_state import get_runtime_id
 
 logger = logging.getLogger(__name__)
 
-#: How long to keep re-reading while an owner is starting up. It covers the gap
-#: between a lock being taken and the descriptor being published, which is a
-#: bind plus a server start, so this is generous rather than tuned. Waiting too
-#: long costs a slow first call; giving up too early costs a redundant browser
-#: for the life of the process.
-_ATTACH_WAIT_SECONDS = 10.0
-
 #: Re-read this often while waiting. Short enough that the common case (an owner
-#: that is nearly ready) does not feel like a stall.
+#: that is nearly ready) does not feel like a stall. How *long* to wait belongs
+#: to the caller that lost the lock race, not here.
 _ATTACH_POLL_SECONDS = 0.1
 
 
@@ -181,14 +180,21 @@ def look_up_owner(
     *,
     wait_seconds: float = 0.0,
 ) -> OwnerLookup:
-    """Say what owner is out there, waiting only while that could still change.
+    """Say what owner is out there, re-reading until one is usable or time runs out.
 
-    Waiting is for ``ABSENT`` alone, because that is the one reading a starting
-    owner produces: it publishes only once it is listening, so a client can
-    arrive after the lock was taken and before the file exists. The other
-    states are already answers. A descriptor that names another profile or a
-    configuration this client did not ask for will still name it in ten
-    seconds, and polling would only postpone the same verdict.
+    Every unusable state is waited out, not just ``ABSENT``. The tempting rule
+    is that only ``ABSENT`` can turn into ``ATTACHABLE``, since a starting owner
+    publishes late. It is wrong for the same reason the election rule was: a
+    descriptor left by a *previous* owner survives that owner's death, so a
+    fresh owner starting right now is seen through the dead one's file.
+    Reproduced on this tree — an owner that crashed serving a sibling profile
+    reads as ``INCOMPATIBLE`` while its replacement is mid-startup, and
+    returning that immediately hands the caller a verdict about a process that
+    no longer exists.
+
+    Callers pass a wait only when they have reason to think that is happening,
+    which in practice means having just lost the lock race: somebody holds it,
+    so somebody is starting. With the default of no wait this is a single read.
     """
     deadline = time.monotonic() + max(wait_seconds, 0.0)
     while True:
@@ -199,9 +205,9 @@ def look_up_owner(
             # cleaned up: beside a held lock it belongs to a live daemon. It
             # says nothing about whether the position is free, which is why
             # this state still allows an election attempt.
-            return OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
+            lookup = OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
 
-        if lookup.state is not OwnerState.ABSENT:
+        if lookup.state is OwnerState.ATTACHABLE:
             return lookup
         if time.monotonic() >= deadline:
             return lookup

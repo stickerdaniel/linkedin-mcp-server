@@ -334,20 +334,48 @@ class TestTellingTheRefusalsApart:
             contender.release()
         assert after_a_crash.state is OwnerState.UNTRUSTED
 
-    def test_an_incompatible_owner_is_not_waited_out(self, tmp_path: Path):
-        # Waiting is for an owner that is still starting. A daemon serving
-        # another profile is not a phase, so polling would only stall a client
-        # for an answer that cannot change.
+    def test_a_replacement_owner_is_seen_through_a_dead_descriptor(
+        self, tmp_path: Path
+    ):
+        # The tempting rule is that only ABSENT can become ATTACHABLE, because
+        # a starting owner publishes late. It is wrong: a descriptor outlives
+        # the owner that wrote it, so a fresh owner starting right now is read
+        # through the dead one's file. Returning that at once answers a
+        # question about a process that no longer exists.
+        theirs = tmp_path / "their-profile"
+        ours = tmp_path / "our-profile"
+        ours.mkdir()
+        _publish_owner(tmp_path, theirs, config=_config(ours))
+        replaced = threading.Event()
+
+        def replace_after_a_moment() -> None:
+            time.sleep(0.3)
+            _publish_owner(tmp_path, ours)
+            replaced.set()
+
+        starter = threading.Thread(target=replace_after_a_moment)
+        starter.start()
+        try:
+            lookup = look_up_owner(tmp_path, ours, _config(ours), wait_seconds=5.0)
+        finally:
+            starter.join()
+
+        assert replaced.is_set()
+        assert lookup.state is OwnerState.ATTACHABLE
+
+    def test_an_incompatible_descriptor_still_bounds_the_wait(self, tmp_path: Path):
+        # Nothing replaces it, so the caller has to get its answer. A client
+        # blocked here is a client whose first tool call never returns.
         theirs = tmp_path / "their-profile"
         ours = tmp_path / "our-profile"
         ours.mkdir()
         _publish_owner(tmp_path, theirs, config=_config(ours))
 
         started = time.monotonic()
-        lookup = look_up_owner(tmp_path, ours, _config(ours), wait_seconds=5.0)
+        lookup = look_up_owner(tmp_path, ours, _config(ours), wait_seconds=0.3)
 
         assert lookup.state is OwnerState.INCOMPATIBLE
-        assert time.monotonic() - started < 1.0
+        assert time.monotonic() - started >= 0.3
 
     def test_the_refusal_reason_carries_no_secret(self, tmp_path: Path):
         # The shared configuration includes a proxy password. A mismatch has to
