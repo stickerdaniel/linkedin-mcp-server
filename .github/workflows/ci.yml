@@ -48,14 +48,15 @@ jobs:
 
       - run: uv cache prune --ci
 
-  # The lease coordinates server processes through kernel file locks, and the
-  # Windows backend is a different implementation from the POSIX one
-  # (LockFileEx rather than flock). The Ubuntu job above never executes it, so
-  # these two files run on every platform we ship on. Serial by choice: the
+  # Everything here coordinates or protects state through the operating system
+  # rather than through Python, so each platform runs a different
+  # implementation: the lease locks with flock or with LockFileEx, and
+  # owner-only storage is a permission bit or an access control list. The
+  # Ubuntu job above executes neither Windows path. Serial by choice: the lease
   # tests spawn their own competing processes, and xdist would only add
   # scheduling noise on top of that.
-  profile-lease-platforms:
-    name: Profile lease (${{ matrix.os }})
+  platform-behaviour:
+    name: Platform behaviour (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -70,7 +71,7 @@ jobs:
 
       - run: uv sync --group dev
 
-      - name: Run profile lease tests
-        run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py
+      - name: Run platform behaviour tests
+        run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py
 
       - run: uv cache prune --ci
