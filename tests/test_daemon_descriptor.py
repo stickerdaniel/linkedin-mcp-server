@@ -550,6 +550,37 @@ class TestEndpointSpelling:
             descriptor.check_endpoint_is_local()
 
     @pytest.mark.parametrize(
+        "answers",
+        [
+            [("203.0.113.9", 49152)],
+            [("127.0.0.1", 49152), ("10.0.0.5", 49152)],
+        ],
+    )
+    def test_a_name_resolving_off_this_machine_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answers: list
+    ):
+        # is_loopback_host accepts "localhost" by name, which says nothing
+        # about where the resolver on this machine sends it. Measured with the
+        # resolver answering 203.0.113.9: the descriptor was accepted, and the
+        # bearer token would have been posted off this machine. Every answer is
+        # checked, since one of several being loopback says nothing about the
+        # one a client picks.
+        import socket
+
+        descriptor = _descriptor(tmp_path, new_token(), host="localhost")
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", answer)
+                for answer in answers
+            ],
+        )
+
+        with pytest.raises(DescriptorError, match="other than this machine"):
+            descriptor.check_endpoint_is_local()
+
+    @pytest.mark.parametrize(
         "host", ["127.0.0.1", "::1", "[::1]", "localhost", "::ffff:127.0.0.1"]
     )
     def test_every_spelling_a_daemon_publishes_is_accepted(
