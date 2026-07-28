@@ -374,6 +374,12 @@ class ServerConfig:
     port: int = 8000
     path: str = "/mcp"
     tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+    # Serve every stdio client from one browser-owning process instead of
+    # giving each its own. Off while the supervision and liveness work is
+    # unfinished: an owner that outlives its client must be provably unable to
+    # keep scraping, and until then this stays something you opt into. Only
+    # applies to stdio; an explicit HTTP bind is already a single server.
+    daemon_enabled: bool = False
 
     def validate(self) -> None:
         """Validate server configuration values."""

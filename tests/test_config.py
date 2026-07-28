@@ -737,6 +737,56 @@ class TestLoaders:
         config = load_config()
         assert config.browser.eager_full_chromium is False
 
+    def test_daemon_enabled_default_is_false(self):
+        # Supervision and liveness are unfinished, so a shared browser-owning
+        # process is something you ask for, never something you get.
+        assert ServerConfig().daemon_enabled is False
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("false", False), ("true", True), ("0", False), ("1", True)],
+    )
+    def test_load_from_env_daemon_enabled(self, monkeypatch, value, expected):
+        monkeypatch.setenv("DAEMON_ENABLED", value)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        assert config.server.daemon_enabled is expected
+
+    def test_load_from_args_daemon(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--daemon"])
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = load_from_args(AppConfig())
+        assert config.server.daemon_enabled is True
+
+    def test_load_from_args_no_daemon(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--no-daemon"])
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        config = AppConfig()
+        config.server.daemon_enabled = True
+        config = load_from_args(config)
+        assert config.server.daemon_enabled is False
+
+    def test_no_daemon_flag_overrides_env_true(self, monkeypatch):
+        # The way out for someone whose environment enables the daemon and who
+        # needs one process back on its own browser.
+        monkeypatch.setenv("DAEMON_ENABLED", "true")
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--no-daemon"])
+        from linkedin_mcp_server.config import load_config
+
+        config = load_config()
+        assert config.server.daemon_enabled is False
+
+    def test_daemon_enabled_absent_keeps_default(self, monkeypatch):
+        monkeypatch.delenv("DAEMON_ENABLED", raising=False)
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        from linkedin_mcp_server.config import load_config
+
+        config = load_config()
+        assert config.server.daemon_enabled is False
+
     def test_load_from_env_port(self, monkeypatch):
         monkeypatch.setenv("PORT", "9000")
         from linkedin_mcp_server.config.loaders import load_from_env

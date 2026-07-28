@@ -1,4 +1,6 @@
 import asyncio
+import subprocess
+import sys
 from unittest.mock import AsyncMock, MagicMock, call
 
 import mcp.types as mt
@@ -6,6 +8,7 @@ import pytest
 from fastmcp import FastMCP
 from fastmcp.server.middleware import MiddlewareContext
 
+import linkedin_mcp_server.server as server_module
 from linkedin_mcp_server import __version__
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
@@ -69,6 +72,31 @@ class TestServerRoles:
 
         assert len(set(map(frozenset, served.values()))) == 1
         assert "get_person_profile" in served[ServerRole.DIRECT]
+
+    def test_the_role_is_readable_without_importing_the_server(self):
+        # The reason the enum lives in its own module. Behaviour has to differ
+        # by role well below the server — an owner must not open a login
+        # window, and that decision is made in `dependencies`, which `server`
+        # reaches only through the tool modules. Importing back the other way
+        # would close the cycle, so the enum has to be reachable on its own.
+        probe = (
+            "import linkedin_mcp_server.server_role, sys;"
+            "print(any(name.startswith('linkedin_mcp_server.tools') for name in sys.modules)"
+            " or 'linkedin_mcp_server.server' in sys.modules)"
+        )
+        pulled_in_the_server_graph = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        assert pulled_in_the_server_graph == "False"
+
+    def test_the_enum_stays_importable_from_the_server(self):
+        # Moving it must not break an embedder that already imports it from
+        # where it used to live.
+        assert server_module.ServerRole is ServerRole
 
 
 class TestSequentialToolExecutionMiddleware:
