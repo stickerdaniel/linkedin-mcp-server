@@ -6,6 +6,7 @@ person profiles, company data, job information, and session management capabilit
 """
 
 import asyncio
+import enum
 import logging
 from typing import Any, AsyncIterator
 
@@ -36,6 +37,39 @@ from linkedin_mcp_server.tools.person import register_person_tools
 from linkedin_mcp_server.tools.post import register_post_tools
 
 logger = logging.getLogger(__name__)
+
+
+class ServerRole(enum.Enum):
+    """Which job a server process does for the shared LinkedIn profile.
+
+    One process per MCP client is the transport's doing, not a choice: a stdio
+    server is spawned per client instance. That makes "who drives Chromium" a
+    property of the process rather than of the code, and every difference below
+    follows from it.
+    """
+
+    #: Drives its own browser and talks to its own client. The historical
+    #: behaviour, and still what an explicit HTTP bind or an embedder gets.
+    DIRECT = "direct"
+
+    #: Drives the browser on behalf of other processes over loopback HTTP.
+    #: Never speaks to an end client, so nothing user-facing belongs here.
+    OWNER = "owner"
+
+    # A forwarding role belongs here too, but only once something actually
+    # forwards. Adding it now would mean a server that registers the local
+    # browser-backed tools and then declines to serialize them, which is a
+    # worse starting point than not having the role at all.
+
+    @property
+    def drives_browser(self) -> bool:
+        """Whether this role launches Chromium against the shared profile."""
+        return self in (ServerRole.DIRECT, ServerRole.OWNER)
+
+    @property
+    def faces_a_client(self) -> bool:
+        """Whether an end user reads this server's tool results."""
+        return self is ServerRole.DIRECT
 
 
 @lifespan
@@ -86,16 +120,35 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
             await close_browser()
 
 
-def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> FastMCP:
-    """Create and configure the MCP server with all LinkedIn tools."""
+def create_mcp_server(
+    *,
+    tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
+    role: ServerRole = ServerRole.DIRECT,
+) -> FastMCP:
+    """Create and configure the MCP server with all LinkedIn tools.
+
+    *role* selects which parts belong to this process. It defaults to
+    :attr:`ServerRole.DIRECT`, which is exactly the historical server, so every
+    existing caller keeps what it had.
+    """
     mcp = FastMCP(
         "mcp-server-linkedin",
         version=__version__,
         lifespan=browser_lifespan,
         mask_error_details=True,
     )
-    mcp.add_middleware(SequentialToolExecutionMiddleware())
-    mcp.add_middleware(UpdateNoticeMiddleware())
+    # Profile ownership belongs to whoever launches Chromium. A process that
+    # only forwards calls must not take the lease: it would either block itself
+    # until its own timeout, or take the lease and leave the process that
+    # actually needs it waiting for one held by a caller that never uses it.
+    if role.drives_browser:
+        mcp.add_middleware(SequentialToolExecutionMiddleware())
+    # The notice is appended to one tool result per process, so it belongs
+    # wherever a user reads results. On a shared owner it would reach whichever
+    # client happened to call first and nobody after that, however many clients
+    # attach over the owner's life.
+    if role.faces_a_client:
+        mcp.add_middleware(UpdateNoticeMiddleware())
 
     # Register all tools
     register_person_tools(mcp, tool_timeout=tool_timeout)

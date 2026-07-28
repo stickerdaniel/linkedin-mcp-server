@@ -10,7 +10,61 @@ from linkedin_mcp_server import __version__
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
-from linkedin_mcp_server.server import create_mcp_server
+from linkedin_mcp_server.server import ServerRole, create_mcp_server
+from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
+
+
+def _has_middleware(mcp: FastMCP, kind: type) -> bool:
+    return any(isinstance(middleware, kind) for middleware in mcp.middleware)
+
+
+class TestServerRoles:
+    """Which middleware each role gets, and why the split has to exist.
+
+    These are not restatements of the implementation: each one pins a failure
+    that is invisible in a single-process test run and only shows up once two
+    processes share a profile.
+    """
+
+    def test_the_default_role_is_the_historical_server(self):
+        # Every existing caller passes only tool_timeout, so the default has to
+        # keep giving them exactly what they had before the split.
+        default = create_mcp_server()
+        direct = create_mcp_server(role=ServerRole.DIRECT)
+
+        for mcp in (default, direct):
+            assert _has_middleware(mcp, SequentialToolExecutionMiddleware)
+            assert _has_middleware(mcp, UpdateNoticeMiddleware)
+
+    def test_every_role_that_drives_a_browser_serializes_its_calls(self):
+        # The invariant the shared profile depends on: any server that can
+        # reach Chromium takes the lease first. A role added later that skips
+        # this would corrupt the session rather than merely run slowly.
+        for role in ServerRole:
+            mcp = create_mcp_server(role=role)
+
+            assert role.drives_browser
+            assert _has_middleware(mcp, SequentialToolExecutionMiddleware), role
+
+    def test_the_update_notice_goes_only_where_a_user_reads_it(self):
+        # Appended to one tool result per process. On a server shared by many
+        # clients that means the first caller sees it and nobody afterwards
+        # does, however long that server lives.
+        owner = create_mcp_server(role=ServerRole.OWNER)
+
+        assert not _has_middleware(owner, UpdateNoticeMiddleware)
+
+    def test_every_role_serves_the_same_tools(self):
+        # A tool present in one role and missing from another would disappear
+        # from a client's list depending on how its server happened to start.
+        async def tool_names(role: ServerRole) -> set[str]:
+            tools = await create_mcp_server(role=role).list_tools()
+            return {tool.name for tool in tools}
+
+        served = {role: asyncio.run(tool_names(role)) for role in ServerRole}
+
+        assert len(set(map(frozenset, served.values()))) == 1
+        assert "get_person_profile" in served[ServerRole.DIRECT]
 
 
 class TestSequentialToolExecutionMiddleware:
