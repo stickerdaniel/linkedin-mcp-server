@@ -250,19 +250,29 @@ class TestTellingTheRefusalsApart:
         assert lookup.state is OwnerState.ABSENT
         assert lookup.worth_attempting_election
 
-    def test_a_live_incompatible_owner_is_not_worth_displacing(self, tmp_path: Path):
-        # The lock is per auth root, so this client cannot take the position
-        # either. Trying would put a second browser on the auth root the
-        # running daemon owns.
+    def test_an_incompatible_descriptor_does_not_block_an_attempt_either(
+        self, tmp_path: Path
+    ):
+        # A valid descriptor is no more proof of a living owner than a corrupt
+        # one. An owner for a sibling profile that crashed leaves exactly this
+        # behind with the lock free, so refusing here strands the profile for
+        # good — nothing would ever clean the file up.
         theirs = tmp_path / "their-profile"
         ours = tmp_path / "our-profile"
         ours.mkdir()
         _publish_owner(tmp_path, theirs, config=_config(ours))
 
         lookup = look_up_owner(tmp_path, ours, _config(ours))
+        contender = DaemonLock(tmp_path)
+        try:
+            lock_is_free = contender.try_acquire()
+        finally:
+            contender.release()
 
-        assert lookup.state is OwnerState.LIVE_INCOMPATIBLE
-        assert not lookup.worth_attempting_election
+        assert lookup.state is OwnerState.INCOMPATIBLE
+        assert lookup.attachment is None
+        assert lock_is_free, "a crashed owner leaves the descriptor, not the lock"
+        assert lookup.worth_attempting_election
 
     def test_an_untrusted_descriptor_is_kept_but_does_not_block_an_attempt(
         self, tmp_path: Path
@@ -321,7 +331,7 @@ class TestTellingTheRefusalsApart:
         started = time.monotonic()
         lookup = look_up_owner(tmp_path, ours, _config(ours), wait_seconds=5.0)
 
-        assert lookup.state is OwnerState.LIVE_INCOMPATIBLE
+        assert lookup.state is OwnerState.INCOMPATIBLE
         assert time.monotonic() - started < 1.0
 
     def test_the_refusal_reason_carries_no_secret(self, tmp_path: Path):
@@ -340,7 +350,7 @@ class TestTellingTheRefusalsApart:
 
         lookup = look_up_owner(tmp_path, profile, _config(profile))
 
-        assert lookup.state is OwnerState.LIVE_INCOMPATIBLE
+        assert lookup.state is OwnerState.INCOMPATIBLE
         assert "hunter2-not-in-logs" not in lookup.reason
         assert "proxy.example" not in lookup.reason
 

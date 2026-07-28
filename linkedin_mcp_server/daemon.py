@@ -49,11 +49,10 @@ _ATTACH_POLL_SECONDS = 0.1
 class OwnerState(enum.Enum):
     """What the published descriptor says, in the terms a caller must act on.
 
-    One verdict rather than "an owner or not", because the right response
-    differs and some of these are permanent. A client that reduced them all to
-    "nobody to attach to" would treat "an owner is starting" and "an owner is
-    running that I may not use" the same way, and only one of those is a reason
-    to open a second browser.
+    Strictly a reading of one file. None of these states knows whether the
+    process that wrote it still exists, which is why none of them decides who
+    owns the browser; they decide whether there is someone to *talk* to, and
+    what to say when there is not.
     """
 
     #: Nothing published. The ordinary first start.
@@ -62,11 +61,11 @@ class OwnerState(enum.Enum):
     #: Published and usable. Attach.
     ATTACHABLE = "attachable"
 
-    #: An owner exists and is running, but not for us: it serves a different
-    #: profile, or a configuration this client did not ask for. Permanent, not
-    #: a phase — the lock is per auth root, so sibling profiles share one
-    #: election and this client can neither attach nor elect itself.
-    LIVE_INCOMPATIBLE = "live_incompatible"
+    #: A descriptor we may not use: it names a different profile, runtime, or
+    #: configuration. Says nothing about whether that daemon is still running.
+    #: A crashed owner leaves a perfectly valid descriptor behind, so this is
+    #: "not for us", never "in use".
+    INCOMPATIBLE = "incompatible"
 
     #: A descriptor exists that cannot be trusted. Distinct from absence
     #: because it must not be *deleted* or explained away: beside a held lock
@@ -94,26 +93,29 @@ class OwnerLookup:
 
     @property
     def worth_attempting_election(self) -> bool:
-        """Whether becoming the owner is worth *trying*, never whether it is free.
+        """Whether to try the lock: true whenever there is nothing to attach to.
 
-        Nothing here can answer that. The descriptor and the lock are separate
-        artifacts that go out of step in both directions, and both directions
-        were reproduced on this tree:
+        Every state other than :attr:`OwnerState.ATTACHABLE` gets an attempt,
+        because none of them can tell whether the position is actually free.
+        The descriptor and the lock are separate artifacts that go out of step
+        in both directions, and each case below was reproduced on this tree:
 
         * lock held, nothing published yet — the ordinary startup window. Reads
-          as ``ABSENT``, and taking that for "the position is free" would put a
-          second browser on the profile.
+          as ``ABSENT``, so a "free" reading here would start a second browser.
         * lock free, a corrupt descriptor left by a crashed owner. Reads as
-          ``UNTRUSTED`` while ``try_acquire`` succeeds, and refusing on that
-          basis would strand the profile until someone deleted the file by hand.
+          ``UNTRUSTED`` while ``try_acquire`` succeeds.
+        * lock free, a *valid* descriptor left by a crashed owner that served a
+          sibling profile. Reads as ``INCOMPATIBLE`` while ``try_acquire``
+          succeeds. Nothing about a descriptor says its writer is alive.
 
-        So this only says the descriptor gives no reason *not* to try;
-        :meth:`DaemonLock.try_acquire` settles it, which is what its own
-        docstring says of the matching probe (``daemon_lock.py:382-407``).
-        A caller must attempt the lock and treat this state as the explanation
-        for what to do when the attempt fails, not as permission before it.
+        Refusing on any of those readings strands the profile until someone
+        deletes a file by hand. So this says only that there is no owner to
+        talk to; :meth:`DaemonLock.try_acquire` settles who owns, which is what
+        its own docstring says of the matching probe
+        (``daemon_lock.py:382-407``). The state is the explanation for a failed
+        attempt, never permission granted before one.
         """
-        return self.state in (OwnerState.ABSENT, OwnerState.UNTRUSTED)
+        return self.state is not OwnerState.ATTACHABLE
 
 
 def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
@@ -129,23 +131,19 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
     # Not enforced by read(), deliberately: it is the caller who knows which
     # runtime it belongs to. A host attaching to a container's daemon would be
     # handed a browser in a different filesystem namespace.
-    #
-    # Incompatible rather than absent, and that distinction is the point: the
-    # container's daemon holds the lock on the shared auth root, so this client
-    # cannot take the position either.
     if descriptor.runtime_id != get_runtime_id():
         return OwnerLookup(
-            state=OwnerState.LIVE_INCOMPATIBLE,
-            reason="the running daemon belongs to another runtime",
+            state=OwnerState.INCOMPATIBLE,
+            reason="the published daemon belongs to another runtime",
         )
 
     # The lock is per auth root, but a profile is what a browser opens. Two
-    # profiles side by side elect one owner between them, so an owner exists
-    # that is not *our* owner — permanently, not while it starts up.
+    # profiles side by side elect one owner between them, so a published owner
+    # can be one this client may not use.
     if not descriptor.serves(profile):
         return OwnerLookup(
-            state=OwnerState.LIVE_INCOMPATIBLE,
-            reason="the running daemon serves a different profile",
+            state=OwnerState.INCOMPATIBLE,
+            reason="the published daemon serves a different profile",
         )
 
     # No endpoint check here: `from_mapping` already refuses a non-local host
@@ -159,10 +157,10 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
         config, key=token
     ):
         return OwnerLookup(
-            state=OwnerState.LIVE_INCOMPATIBLE,
+            state=OwnerState.INCOMPATIBLE,
             # Names no values: the shared fields include a proxy password and
             # the path to someone's profile.
-            reason="the running daemon uses a different configuration",
+            reason="the published daemon uses a different configuration",
         )
 
     return OwnerLookup(
@@ -181,20 +179,22 @@ def look_up_owner(
 ) -> OwnerLookup:
     """Say what owner is out there, waiting only while that could still change.
 
-    Waiting is for exactly one state. ABSENT can become ATTACHABLE, because an
-    owner publishes only once it is listening and a client can arrive in that
-    window. LIVE_INCOMPATIBLE cannot: the lock is per auth root, so a daemon
-    serving another profile or configuration is not a phase this client can
-    wait out. Polling it would only delay an answer that will not change.
+    Waiting is for ``ABSENT`` alone, because that is the one reading a starting
+    owner produces: it publishes only once it is listening, so a client can
+    arrive after the lock was taken and before the file exists. The other
+    states are already answers. A descriptor that names another profile or a
+    configuration this client did not ask for will still name it in ten
+    seconds, and polling would only postpone the same verdict.
     """
     deadline = time.monotonic() + max(wait_seconds, 0.0)
     while True:
         try:
             lookup = _inspect(auth_root, profile, config)
         except DescriptorError as exc:
-            # Not an absence. Beside a held lock this is a live daemon this
-            # client cannot talk to, so the caller must not read it as licence
-            # to open a browser on the profile.
+            # Distinct from absence so the file is preserved rather than
+            # cleaned up: beside a held lock it belongs to a live daemon. It
+            # says nothing about whether the position is free, which is why
+            # this state still allows an election attempt.
             return OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
 
         if lookup.state is not OwnerState.ABSENT:
