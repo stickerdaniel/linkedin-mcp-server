@@ -32,13 +32,18 @@ exclusion. It is also not a runtime dependency.
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import time
 from pathlib import Path
 from types import TracebackType
 
-from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
+from linkedin_mcp_server.common_utils import (
+    harden_linkedin_tree,
+    is_still_at,
+    secure_mkdir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +91,7 @@ if not _HAS_FCNTL:  # pragma: no cover - Windows
         # Probed here rather than assumed: the block below binds kernel32 at
         # import time, and an ImportError or a missing symbol there would take
         # the whole server down with an obscure message instead of the explicit
-        # "no usable file locking" refusal that _try_lock raises.
+        # "no usable file locking" refusal that try_lock raises.
         _HAS_WINDOWS_LOCKS = hasattr(ctypes, "WinDLL")
     except ImportError:
         _HAS_WINDOWS_LOCKS = False
@@ -94,7 +99,13 @@ else:  # pragma: no cover - POSIX
     _HAS_WINDOWS_LOCKS = False
 
 
-def _try_lock(fd: int, *, exclusive: bool) -> bool:
+#: The errnos a non-blocking lock request uses to say "somebody else holds it".
+#: POSIX allows either, and they are the same value on Linux while macOS keeps
+#: them distinct, so both are listed rather than assumed to coincide.
+_CONTENTION_ERRNOS = frozenset({errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES})
+
+
+def try_lock(fd: int, *, exclusive: bool) -> bool:
     """Take a non-blocking lock on *fd*. Return whether it was granted.
 
     ``msvcrt.locking`` is deliberately not used on Windows: it offers only
@@ -107,8 +118,22 @@ def _try_lock(fd: int, *, exclusive: bool) -> bool:
         mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         try:
             fcntl.flock(fd, mode | fcntl.LOCK_NB)
-        except OSError:
-            return False
+        except OSError as exc:
+            # Only contention means "somebody else holds it". Every other errno
+            # means the question could not be answered, and answering it with
+            # "busy" is the worst of the two wrong answers: on a filesystem
+            # without usable flock, every process would report a live owner
+            # forever, no owner could ever be elected, and the message would
+            # point at contention that does not exist. Measured with
+            # EOPNOTSUPP: reported as busy.
+            if exc.errno in _CONTENTION_ERRNOS:
+                return False
+            raise ProfileLeaseUnavailableError(
+                f"Could not lock the profile: {exc}. This filesystem may not "
+                f"support the locking that keeps two servers off one browser "
+                f"profile. Move the profile to a local disk, or run only one "
+                f"server process against it."
+            ) from exc
         return True
 
     if _HAS_WINDOWS_LOCKS:  # pragma: no cover - Windows
@@ -244,7 +269,7 @@ if not _HAS_FCNTL and _HAS_WINDOWS_LOCKS:  # pragma: no cover - Windows
 # --------------------------------------------------------------------------- #
 
 
-def _open_lock_file(path: Path) -> int:
+def open_lock_file(path: Path) -> int:
     """Open *path* for locking, creating it with owner-only permissions."""
     secure_mkdir(path.parent)
     harden_linkedin_tree(path.parent)
@@ -255,22 +280,36 @@ def _open_lock_file(path: Path) -> int:
     return os.open(path, os.O_RDWR | os.O_CREAT | cloexec, 0o600)
 
 
-def _acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
+def acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
     """Open *path* and lock it, or return ``None`` if it is already held.
 
-    Re-opens when the path was unlinked between open and lock. Without that
-    check two processes can hold locks on different inodes for the same path and
-    believe they hold the same logical lock — the failure mode Bazel guards
-    against with the same ``st_nlink`` test.
+    Re-opens when the file at the path changed between open and lock. Without
+    that check two processes can hold locks on different inodes for the same
+    path and each believe it holds the same logical lock.
+
+    The identity is compared, not merely the link count. Counting links catches
+    an unlink, which is the case Bazel's version of this guards against, and
+    misses a rename: the inode keeps its one link, so the count still says one
+    while the name now refers to something else. Measured: a rename plus
+    recreate passed the count test, and a second process locked the live path
+    alongside the first.
     """
     for _ in range(3):
-        fd = _open_lock_file(path)
+        fd = open_lock_file(path)
         locked = False
         try:
-            if not _try_lock(fd, exclusive=exclusive):
-                return None
+            if not try_lock(fd, exclusive=exclusive):
+                # Contention is only an answer about the file this opened. If
+                # the path has moved on since, the holder is holding something
+                # nobody else will consult, and reporting "busy" would refuse a
+                # lock that is free: measured, this returned None while the live
+                # path could be locked immediately. Retry against what is there
+                # now, exactly as a successful lock on a stale inode does.
+                if is_still_at(fd, path):
+                    return None
+                continue
             locked = True
-            if os.fstat(fd).st_nlink > 0:
+            if is_still_at(fd, path):
                 keep = fd
                 fd = -1  # handed to the caller; not ours to close below
                 return keep
@@ -286,8 +325,9 @@ def _acquire_locked_fd(path: Path, *, exclusive: bool) -> int | None:
                     os.close(fd)
                 except OSError:
                     logger.debug("Closing lock descriptor failed", exc_info=True)
-        # The path was unlinked while we held the lock: our inode is orphaned
-        # and protects nothing. Retry against the live path.
+        # The file at the path changed while we held the lock: our inode no
+        # longer protects anything anyone else will look at. Retry against
+        # whatever is there now.
     raise ProfileLeaseUnavailableError(
         f"The lock file {path} keeps being replaced; refusing to continue."
     )
@@ -421,7 +461,7 @@ class ProfileLease:
             self._refs += 1
             return True
 
-        fd = _acquire_locked_fd(self._lease_path, exclusive=True)
+        fd = acquire_locked_fd(self._lease_path, exclusive=True)
         if fd is None:
             return False
 
@@ -492,7 +532,7 @@ class ProfileLease:
         waiter holds its shared lock.
         """
         try:
-            fd = _acquire_locked_fd(self._handoff_path, exclusive=True)
+            fd = acquire_locked_fd(self._handoff_path, exclusive=True)
         except ProfileLeaseUnavailableError:
             # A path that keeps being replaced tells us nothing; do not hand over
             # on the strength of a broken signal.
@@ -547,7 +587,7 @@ class _Announcement:
 
     def __enter__(self) -> _Announcement:
         try:
-            self._fd = _acquire_locked_fd(self._path, exclusive=False)
+            self._fd = acquire_locked_fd(self._path, exclusive=False)
         except ProfileLeaseUnavailableError:
             # Failing to announce only costs us a prompt handoff, so degrade to
             # waiting quietly rather than failing the caller's tool call.

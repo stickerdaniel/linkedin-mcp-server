@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import os
 import signal
 import subprocess
@@ -138,6 +139,69 @@ class TestSingleProcess:
         finally:
             holder.kill()
             holder.wait(timeout=10)
+
+    @_posix_unlink_race
+    def test_a_renamed_lock_file_is_not_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rename keeps the link count, so counting links cannot see it.
+
+        The inode holds its one link while the name comes to mean a different
+        file, so a count-based check passes and two processes end up locking
+        two inodes for one path. Comparing identity is what catches it.
+        """
+        from linkedin_mcp_server import profile_lease
+
+        path = tmp_path / "profile.lock"
+        real = profile_lease.try_lock
+
+        def rename_then_lock(fd: int, *, exclusive: bool) -> bool:
+            monkeypatch.setattr(profile_lease, "try_lock", real)
+            path.rename(tmp_path / "moved")
+            path.touch()
+            return real(fd, exclusive=exclusive)
+
+        monkeypatch.setattr(profile_lease, "try_lock", rename_then_lock)
+
+        descriptor = profile_lease.acquire_locked_fd(path, exclusive=True)
+        assert descriptor is not None
+        try:
+            assert os.fstat(descriptor).st_ino == path.stat().st_ino
+        finally:
+            os.close(descriptor)
+
+    @_posix_unlink_race
+    def test_contention_on_a_stale_inode_retries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Being refused the old file says nothing about the current one.
+
+        Contention answers only about the file that was opened. If the path has
+        moved on since, the holder holds something nobody will consult, and
+        reporting busy refuses a lock that is free. Measured before the fix:
+        None came back while the live path could be locked immediately.
+        """
+        from linkedin_mcp_server import profile_lease
+
+        path = tmp_path / "profile.lock"
+        holder = profile_lease.open_lock_file(path)
+        assert profile_lease.try_lock(holder, exclusive=True)
+        real = profile_lease.try_lock
+
+        def rename_then_lock(fd: int, *, exclusive: bool) -> bool:
+            monkeypatch.setattr(profile_lease, "try_lock", real)
+            path.rename(tmp_path / "moved")
+            path.touch()
+            return real(fd, exclusive=exclusive)
+
+        monkeypatch.setattr(profile_lease, "try_lock", rename_then_lock)
+
+        try:
+            descriptor = profile_lease.acquire_locked_fd(path, exclusive=True)
+            assert descriptor is not None, "refused a lock nobody was holding"
+            os.close(descriptor)
+        finally:
+            os.close(holder)
 
     def test_lock_file_is_never_unlinked(self, tmp_path: Path) -> None:
         """Unlinking on release splits contenders across inodes.
@@ -678,14 +742,16 @@ class TestDegradedSignals:
     def test_an_unlinked_lock_file_is_reacquired(self, tmp_path: Path) -> None:
         """An orphaned inode protects nothing, so acquisition must retry.
 
-        Without the ``st_nlink`` check two processes end up holding locks on
+        Without the identity check two processes end up holding locks on
         different inodes for the same path and both believe they are the owner.
+        Unlinking is the easier half of that: it is also what a rename does,
+        which the test below covers and a link count cannot see.
         """
         from linkedin_mcp_server import profile_lease as module
 
         lease = ProfileLease(tmp_path)
         lock_path = tmp_path / "profile.lock"
-        real_open = module._open_lock_file
+        real_open = module.open_lock_file
         attempts: list[int] = []
 
         def unlink_once(path: Path) -> int:
@@ -699,12 +765,14 @@ class TestDegradedSignals:
         # would also revert the autouse profile-directory patches in conftest,
         # silently unpinning this test from its tmp_path for the rest of the run.
         with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(module, "_open_lock_file", unlink_once)
+            patch.setattr(module, "open_lock_file", unlink_once)
             assert lease.try_acquire()
 
         assert len(attempts) == 2, "the orphaned inode was accepted"
         assert lease._fd is not None
-        assert os.fstat(lease._fd).st_nlink > 0
+        # The descriptor is the file the path names, which is what the retry
+        # was for. A link count would also pass here and miss the rename case.
+        assert os.fstat(lease._fd).st_ino == lock_path.stat().st_ino
         assert lock_path.exists()
         lease.release()
 
@@ -715,14 +783,14 @@ class TestDegradedSignals:
         """Retrying forever would hang a tool call; refuse instead."""
         from linkedin_mcp_server import profile_lease as module
 
-        real_open = module._open_lock_file
+        real_open = module.open_lock_file
 
         def always_unlink(path: Path) -> int:
             fd = real_open(path)
             path.unlink()
             return fd
 
-        monkeypatch.setattr(module, "_open_lock_file", always_unlink)
+        monkeypatch.setattr(module, "open_lock_file", always_unlink)
         with pytest.raises(ProfileLeaseUnavailableError, match="keeps being"):
             ProfileLease(tmp_path).try_acquire()
 
@@ -752,6 +820,52 @@ class TestDegradedSignals:
 
         assert _windows_failure_is_contention(error_code) is is_contention
 
+    @pytest.mark.skipif(os.name == "nt", reason="flock is the POSIX backend")
+    @pytest.mark.parametrize(
+        "code,is_contention",
+        [
+            (errno.EAGAIN, True),
+            (errno.EWOULDBLOCK, True),
+            (errno.EACCES, True),
+            (errno.EOPNOTSUPP, False),
+            (errno.EIO, False),
+            (errno.EBADF, False),
+        ],
+    )
+    def test_posix_failures_are_classified(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        code: int,
+        is_contention: bool,
+    ) -> None:
+        """The POSIX half of the same question, and for the same reason.
+
+        Only contention means somebody else holds the lock. Measured with
+        EOPNOTSUPP before the fix: reported as busy, which on a filesystem
+        without usable flock would leave every process seeing an owner that does
+        not exist, no owner electable, and an error pointing at contention.
+        """
+        import fcntl
+
+        from linkedin_mcp_server.profile_lease import (
+            ProfileLeaseUnavailableError,
+            open_lock_file,
+            try_lock,
+        )
+
+        def failing(fd: int, operation: int) -> None:
+            raise OSError(code, os.strerror(code))
+
+        descriptor = open_lock_file(tmp_path / "probe.lock")
+        monkeypatch.setattr(fcntl, "flock", failing)
+
+        if is_contention:
+            assert try_lock(descriptor, exclusive=True) is False
+        else:
+            with pytest.raises(ProfileLeaseUnavailableError, match="Could not lock"):
+                try_lock(descriptor, exclusive=True)
+
     def test_a_failing_backend_does_not_leak_descriptors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -765,7 +879,7 @@ class TestDegradedSignals:
         from linkedin_mcp_server import profile_lease as module
 
         opened: list[int] = []
-        real_open = module._open_lock_file
+        real_open = module.open_lock_file
 
         def spy(path: Path) -> int:
             fd = real_open(path)
@@ -775,12 +889,12 @@ class TestDegradedSignals:
         def refuse(fd: int, *, exclusive: bool) -> bool:
             raise ProfileLeaseUnavailableError("backend unavailable")
 
-        monkeypatch.setattr(module, "_open_lock_file", spy)
-        monkeypatch.setattr(module, "_try_lock", refuse)
+        monkeypatch.setattr(module, "open_lock_file", spy)
+        monkeypatch.setattr(module, "try_lock", refuse)
 
         for _ in range(3):
             with pytest.raises(ProfileLeaseUnavailableError):
-                module._acquire_locked_fd(tmp_path / "probe.lock", exclusive=True)
+                module.acquire_locked_fd(tmp_path / "probe.lock", exclusive=True)
 
         assert opened, "the spy never ran, so this proves nothing"
         for fd in set(opened):
@@ -797,10 +911,10 @@ class TestDegradedSignals:
             os.close(fd)  # as if something else had already reclaimed it
             raise ProfileLeaseUnavailableError("backend unavailable")
 
-        monkeypatch.setattr(module, "_try_lock", close_then_refuse)
+        monkeypatch.setattr(module, "try_lock", close_then_refuse)
 
         with pytest.raises(ProfileLeaseUnavailableError, match="backend unavailable"):
-            module._acquire_locked_fd(tmp_path / "probe.lock", exclusive=True)
+            module.acquire_locked_fd(tmp_path / "probe.lock", exclusive=True)
 
     def test_an_inconclusive_probe_does_not_hand_the_profile_over(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -817,7 +931,7 @@ class TestDegradedSignals:
         def refuse(path: Path, *, exclusive: bool) -> int | None:
             raise ProfileLeaseUnavailableError("signal unreadable")
 
-        monkeypatch.setattr(module, "_acquire_locked_fd", refuse)
+        monkeypatch.setattr(module, "acquire_locked_fd", refuse)
         assert lease.handoff_requested() is False
 
     def test_a_failed_announcement_degrades_to_waiting_quietly(
@@ -831,7 +945,7 @@ class TestDegradedSignals:
         def refuse(path: Path, *, exclusive: bool) -> int | None:
             raise ProfileLeaseUnavailableError("signal unreadable")
 
-        monkeypatch.setattr(module, "_acquire_locked_fd", refuse)
+        monkeypatch.setattr(module, "acquire_locked_fd", refuse)
         with lease.announce() as announcement:
             assert announcement.holds_lock is False
 
@@ -852,7 +966,7 @@ class TestDegradedSignals:
             with pytest.raises(
                 ProfileLeaseUnavailableError, match="no usable file locking"
             ):
-                module._try_lock(fd, exclusive=True)
+                module.try_lock(fd, exclusive=True)
             # Unlocking has nothing to undo and must stay silent, or a cleanup
             # path would raise on top of the original failure.
             module._unlock(fd)
