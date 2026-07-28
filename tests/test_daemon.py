@@ -29,6 +29,8 @@ from linkedin_mcp_server.daemon_descriptor import (
     new_instance_id,
     new_token,
     publish,
+    read,
+    token_path,
 )
 from linkedin_mcp_server.daemon_lock import DaemonLock
 
@@ -177,6 +179,28 @@ class TestRefusing:
         assert "198.51.100.7" in caplog.text
         # And the token itself never appears in what we log about the refusal.
         assert token not in caplog.text
+
+    def test_a_descriptor_with_no_token_beside_it_is_untrusted(self, tmp_path: Path):
+        # The pair can come apart: a half-finished publish, or a token file
+        # removed under a descriptor that stays. There is nothing to
+        # authenticate with, and inventing a fallback would mean talking to a
+        # daemon we cannot prove is ours.
+        #
+        # Two independent refusals cover this, which is why the test asserts
+        # the outcome rather than one mechanism: the token read treats absence
+        # as an error, and the digest comparison that follows would reject a
+        # missing token anyway. Verified by disabling the first — the second
+        # still refuses.
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+        published = read(tmp_path)
+        assert published is not None
+        token_path(tmp_path, published.instance_id).unlink()
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert lookup.state is OwnerState.UNTRUSTED
+        assert lookup.attachment is None
 
     def test_an_unreadable_descriptor_is_not_read_as_absence(self, tmp_path: Path):
         # This is the dangerous confusion. A corrupt descriptor beside a held
