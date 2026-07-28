@@ -170,12 +170,13 @@ class TestRefusing:
         profile = tmp_path / "profile"
         token = _publish_owner(tmp_path, profile, host="198.51.100.7")
 
-        with caplog.at_level("INFO", logger="linkedin_mcp_server.daemon"):
+        with caplog.at_level("DEBUG", logger="linkedin_mcp_server.daemon"):
             assert find_owner(tmp_path, profile, _config(profile)) is None
 
-        # Refused for the right reason, and loudly: a silent None here reads
-        # like an ordinary first start rather than a descriptor pointing off
-        # the machine.
+        # Refused for the right reason, and it says so: a silent None here
+        # reads like an ordinary first start rather than a descriptor pointing
+        # off the machine. The address is DEBUG-grade, because a reason can
+        # quote a path or host out of the descriptor.
         assert "198.51.100.7" in caplog.text
         # And the token itself never appears in what we log about the refusal.
         assert token not in caplog.text
@@ -271,6 +272,25 @@ class TestWaitingForAStartingOwner:
         with pytest.raises(ValueError):
             look_up_owner(tmp_path, profile, _config(profile), wait_seconds=budget)
 
+    @pytest.mark.parametrize("budget", [0.001, 0.01])
+    def test_a_small_budget_is_not_rounded_up_to_a_poll(
+        self, tmp_path: Path, budget: float
+    ):
+        # A flat poll interval turned a 1 ms budget into 101 ms: a caller who
+        # asked to stay near fail-fast paid a hundredfold. The lower bound was
+        # the only thing asserted before, which cannot see this.
+        profile = tmp_path / "profile"
+        profile.mkdir()
+
+        started = time.monotonic()
+        look_up_owner(tmp_path, profile, _config(profile), wait_seconds=budget)
+        elapsed = time.monotonic() - started
+
+        assert elapsed >= budget
+        # Generous, because a loaded machine can stretch any wall-clock bound.
+        # Even so it fails by a wide margin against a full unclamped poll.
+        assert elapsed < budget + 0.05
+
     def test_a_negative_wait_is_simply_no_wait(self, tmp_path: Path):
         # Unlike a non-finite budget, this one has an obvious reading.
         profile = tmp_path / "profile"
@@ -310,7 +330,7 @@ class TestTellingTheRefusalsApart:
         lookup = look_up_owner(tmp_path, profile, _config(profile))
 
         assert lookup.state is OwnerState.ABSENT
-        assert lookup.worth_attempting_election
+        assert not lookup.worth_connecting
 
     def test_an_incompatible_descriptor_does_not_block_an_attempt_either(
         self, tmp_path: Path
@@ -334,7 +354,7 @@ class TestTellingTheRefusalsApart:
         assert lookup.state is OwnerState.INCOMPATIBLE
         assert lookup.attachment is None
         assert lock_is_free, "a crashed owner leaves the descriptor, not the lock"
-        assert lookup.worth_attempting_election
+        assert not lookup.worth_connecting
 
     def test_an_untrusted_descriptor_is_kept_but_does_not_block_an_attempt(
         self, tmp_path: Path
@@ -352,7 +372,7 @@ class TestTellingTheRefusalsApart:
         assert lookup.state is OwnerState.UNTRUSTED
         assert lookup.attachment is None
         assert descriptor_path(tmp_path).exists()
-        assert lookup.worth_attempting_election
+        assert not lookup.worth_connecting
 
     def test_the_descriptor_never_answers_who_holds_the_lock(self, tmp_path: Path):
         # The artifacts go out of step in both directions, so no reading of one
@@ -424,6 +444,31 @@ class TestTellingTheRefusalsApart:
         assert lookup.state is OwnerState.INCOMPATIBLE
         assert time.monotonic() - started >= 0.3
 
+    def test_a_matching_descriptor_from_a_dead_owner_is_still_only_a_file(
+        self, tmp_path: Path
+    ):
+        # The state this module was most likely to over-read. An owner that
+        # crashes *after* publishing leaves a descriptor and token that pass
+        # every check, so the reading is ATTACHABLE while the lock is free and
+        # nothing is listening. Connecting is what finds that out; a caller
+        # whose connection fails has to fall through to the lock rather than
+        # conclude a daemon exists.
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+        contender = DaemonLock(tmp_path)
+        try:
+            lock_is_free = contender.try_acquire()
+        finally:
+            contender.release()
+
+        assert lookup.state is OwnerState.ATTACHABLE
+        assert lock_is_free, "the owner is dead; only its file remains"
+        # Says what the file is, never that anything is running or attached.
+        assert "running" not in lookup.reason
+        assert "attached" not in lookup.reason
+
     def test_the_refusal_reason_carries_no_secret(self, tmp_path: Path):
         # The shared configuration includes a proxy password. A mismatch has to
         # say enough to act on and nothing more.
@@ -443,6 +488,23 @@ class TestTellingTheRefusalsApart:
         assert lookup.state is OwnerState.INCOMPATIBLE
         assert "hunter2-not-in-logs" not in lookup.reason
         assert "proxy.example" not in lookup.reason
+
+    def test_a_path_in_a_reason_stays_out_of_the_info_log(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        # A reason can quote a path out of the descriptor, because an unusable
+        # profile path is only actionable if you can see which one. INFO is
+        # what users paste into issue reports, so the detail belongs a level
+        # down and only the state stays up.
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+        descriptor_path(tmp_path).write_text("{not json", encoding="utf-8")
+
+        with caplog.at_level("INFO", logger="linkedin_mcp_server.daemon"):
+            find_owner(tmp_path, profile, _config(profile))
+
+        assert "untrusted" in caplog.text
+        assert "not valid JSON" not in caplog.text
 
 
 class TestWhetherTheDaemonAppliesAtAll:

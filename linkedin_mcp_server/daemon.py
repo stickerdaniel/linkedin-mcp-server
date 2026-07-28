@@ -58,7 +58,10 @@ class OwnerState(enum.Enum):
     #: Nothing published. The ordinary first start.
     ABSENT = "absent"
 
-    #: Published and usable. Attach.
+    #: A descriptor this client may use, with a token to match. Says the file
+    #: is *compatible*, never that anyone is listening: an owner that crashes
+    #: after publishing leaves exactly this behind. Whether the endpoint
+    #: answers is settled by connecting, and who owns the browser by the lock.
     ATTACHABLE = "attachable"
 
     #: A descriptor we may not use: it names a different profile, runtime, or
@@ -92,34 +95,23 @@ class OwnerLookup:
 
     state: OwnerState
     attachment: Attachment | None = None
-    #: Why, in words worth logging. Never carries a token or a config value.
+    #: Why, for a log line. Never a token, and never a value read from the
+    #: configuration. It *can* name a path or host taken from the descriptor
+    #: when that is the diagnosis — an unusable profile path is only
+    #: actionable if you can see which path — so it is DEBUG-grade detail and
+    #: the callers here log it accordingly.
     reason: str = ""
 
     @property
-    def worth_attempting_election(self) -> bool:
-        """Whether to try the lock: true whenever there is nothing to attach to.
+    def worth_connecting(self) -> bool:
+        """Whether there is a compatible endpoint to try talking to.
 
-        Every state other than :attr:`OwnerState.ATTACHABLE` gets an attempt,
-        because none of them can tell whether the position is actually free.
-        The descriptor and the lock are separate artifacts that go out of step
-        in both directions, and each case below was reproduced on this tree:
-
-        * lock held, nothing published yet — the ordinary startup window. Reads
-          as ``ABSENT``, so a "free" reading here would start a second browser.
-        * lock free, a corrupt descriptor left by a crashed owner. Reads as
-          ``UNTRUSTED`` while ``try_acquire`` succeeds.
-        * lock free, a *valid* descriptor left by a crashed owner that served a
-          sibling profile. Reads as ``INCOMPATIBLE`` while ``try_acquire``
-          succeeds. Nothing about a descriptor says its writer is alive.
-
-        Refusing on any of those readings strands the profile until someone
-        deletes a file by hand. So this says only that there is no owner to
-        talk to; :meth:`DaemonLock.try_acquire` settles who owns, which is what
-        its own docstring says of the matching probe
-        (``daemon_lock.py:382-407``). The state is the explanation for a failed
-        attempt, never permission granted before one.
+        Deliberately not "an owner is running". Connecting is what establishes
+        that, and a caller whose connection is refused is looking at a crashed
+        owner's leftovers, not at a daemon. It must fall through to the lock
+        exactly as if nothing had been published.
         """
-        return self.state is not OwnerState.ATTACHABLE
+        return self.state is OwnerState.ATTACHABLE
 
 
 def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
@@ -170,7 +162,10 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
     return OwnerLookup(
         state=OwnerState.ATTACHABLE,
         attachment=Attachment(descriptor=descriptor, token=token),
-        reason="attached to the running daemon",
+        # Says what the file is, not what any process is doing. "attached to
+        # the running daemon" was the earlier wording and it was wrong twice
+        # over: nothing has attached yet, and the writer may be long dead.
+        reason="the published daemon is compatible with this client",
     )
 
 
@@ -181,21 +176,24 @@ def look_up_owner(
     *,
     wait_seconds: float = 0.0,
 ) -> OwnerLookup:
-    """Say what owner is out there, re-reading until one is usable or time runs out.
+    """Read the descriptor until it is compatible or the budget runs out.
 
-    Every unusable state is waited out, not just ``ABSENT``. The tempting rule
-    is that only ``ABSENT`` can turn into ``ATTACHABLE``, since a starting owner
-    publishes late. It is wrong for the same reason the election rule was: a
-    descriptor left by a *previous* owner survives that owner's death, so a
-    fresh owner starting right now is seen through the dead one's file.
-    Reproduced on this tree — an owner that crashed serving a sibling profile
-    reads as ``INCOMPATIBLE`` while its replacement is mid-startup, and
-    returning that immediately hands the caller a verdict about a process that
-    no longer exists.
+    Every state but ``ATTACHABLE`` is waited out, not just ``ABSENT``. The
+    tempting rule is that only ``ABSENT`` can turn into ``ATTACHABLE``, since a
+    starting owner publishes late. It is wrong for the same reason every other
+    mistake in this module was: a descriptor outlives the owner that wrote it,
+    so a fresh owner mid-startup is read through the dead one's file. Measured
+    on this tree — an owner that crashed serving a sibling profile reads as
+    ``INCOMPATIBLE`` while its replacement is coming up.
 
-    Callers pass a wait only when they have reason to think that is happening,
-    which in practice means having just lost the lock race: somebody holds it,
-    so somebody is starting. With the default of no wait this is a single read.
+    Stopping at ``ATTACHABLE`` is not the same claim. It says a compatible file
+    is on disk, which is all a re-read can ever establish; the process that
+    wrote it may be gone. A caller whose connection to that endpoint fails must
+    go to the lock rather than conclude a daemon exists.
+
+    Callers pass a wait only when they have reason to think an owner is
+    starting, which in practice means having just lost the lock race. With the
+    default of no wait this is a single read.
 
     Raises:
         ValueError: *wait_seconds* is not finite.
@@ -221,9 +219,14 @@ def look_up_owner(
 
         if lookup.state is OwnerState.ATTACHABLE:
             return lookup
-        if time.monotonic() >= deadline:
+
+        # Never sleep past the deadline. A flat poll interval turned a 1 ms
+        # budget into 101 ms, which is a hundredfold overrun for a caller that
+        # asked to stay near fail-fast. Measured before this clamp existed.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return lookup
-        time.sleep(_ATTACH_POLL_SECONDS)
+        time.sleep(min(_ATTACH_POLL_SECONDS, remaining))
 
 
 def find_owner(
@@ -241,7 +244,11 @@ def find_owner(
     """
     lookup = look_up_owner(auth_root, profile, config, wait_seconds=wait_seconds)
     if lookup.state is not OwnerState.ATTACHABLE:
-        logger.info("Not attaching to a daemon: %s", lookup.reason)
+        # The state at INFO, the detail at DEBUG. A reason can quote a path or
+        # host out of the descriptor, and "no daemon was usable" is the part
+        # that belongs in a log a user pastes into an issue report.
+        logger.info("Not attaching to a daemon (%s)", lookup.state.value)
+        logger.debug("Daemon lookup detail: %s", lookup.reason)
     return lookup.attachment
 
 
