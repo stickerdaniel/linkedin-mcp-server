@@ -32,6 +32,7 @@ them rather than share one path that is only true on one of them.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import weakref
@@ -308,7 +309,20 @@ class DaemonLock:
         # alive after this process exits. Measured: an unrelated child did
         # exactly that, and every client afterwards saw a daemon that was no
         # longer there.
-        os.set_inheritable(fd, False)
+        try:
+            os.set_inheritable(fd, False)
+        except OSError as exc:
+            # The lock is held through this descriptor by now, and nothing has
+            # recorded that yet, so failing here without closing it would leave
+            # it held with no object able to release it: measured, a contender
+            # could not take the lock afterwards and only a manual close freed
+            # it. Closing gives the lock up, which is the honest outcome of an
+            # adoption that did not complete.
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise DaemonLockError(
+                f"The inherited descriptor could not be taken over: {exc}"
+            ) from exc
         self._fd = fd
         self._owner_pid = os.getpid()
         _held_locks.add(self)

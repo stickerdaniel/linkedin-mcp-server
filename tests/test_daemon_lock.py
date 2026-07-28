@@ -350,6 +350,31 @@ class TestHandoff:
         successor.release()
 
     @posix_handoff
+    def test_an_adoption_that_cannot_complete_gives_the_lock_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # By the time inheritance is cleared the lock is held through this
+        # descriptor, and nothing has recorded that yet. Measured before the
+        # cleanup: the failure left it held with no object able to release it,
+        # and only a manual close freed it.
+        elector = DaemonLock(tmp_path)
+        assert elector.try_acquire()
+        inherited = elector.inheritable_copy()
+        elector.release()
+
+        def refuse(*args: object, **kwargs: object) -> None:
+            raise OSError("cannot clear inheritance")
+
+        monkeypatch.setattr(os, "set_inheritable", refuse)
+        with pytest.raises(DaemonLockError, match="could not be taken over"):
+            DaemonLock(tmp_path).adopt(inherited)
+        monkeypatch.undo()
+
+        successor = DaemonLock(tmp_path)
+        assert successor.try_acquire(), "the lock was left held by nobody"
+        successor.release()
+
+    @posix_handoff
     def test_adopting_a_descriptor_that_holds_no_lock_still_excludes(
         self, tmp_path: Path
     ):
