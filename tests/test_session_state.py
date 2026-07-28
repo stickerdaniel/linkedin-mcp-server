@@ -600,6 +600,13 @@ class TestContainerDetection:
                 "a backup job named after docker",
                 "0::/system.slice/docker-backup.scope\n",
             ),
+            # Contrived, but it is what a length bound has to survive: every
+            # letter happens to be a-f. Real runtimes write a full container
+            # id, measured at 64 characters for a Docker systemd scope.
+            (
+                "a host unit whose name is accidentally hex",
+                "0::/system.slice/docker-beefcafedeadbeef.scope\n",
+            ),
             (
                 "cgroup v1 with no container",
                 "12:pids:/user.slice\n1:name=systemd:/user.slice/session-2.scope\n",
@@ -621,20 +628,20 @@ class TestContainerDetection:
             ("docker, cgroup v2", "0::/docker/3f2abc\n"),
             (
                 "docker with the systemd cgroup driver",
-                "0::/system.slice/docker-3f2abc9d8e7f6a5b4c3d2e1f0a9b8c7d.scope\n",
+                "0::/system.slice/docker-" + "3f2a" * 16 + ".scope\n",
             ),
             ("kubernetes", "0::/kubepods/besteffort/pod123/abc\n"),
             (
                 "kubernetes on systemd",
                 "0::/kubepods.slice/kubepods-burstable.slice/x.scope\n",
             ),
-            ("podman", "0::/libpod_parent/libpod-abc123def456\n"),
+            ("podman", "0::/libpod_parent/libpod-" + "ab12" * 16 + "\n"),
             (
                 "rootless podman",
-                "0::/user.slice/user-1000.slice/libpod-abc123def4567.scope\n",
+                "0::/user.slice/user-1000.slice/libpod-" + "ab12" * 16 + ".scope\n",
             ),
             ("containerd", "0::/containerd/abcdef\n"),
-            ("cri-o", "0::/system.slice/crio-abc123def4567890.scope\n"),
+            ("cri-o", "0::/system.slice/crio-" + "cd34" * 16 + ".scope\n"),
             # containerd's default namespace, which a plain `ctr run` writes.
             ("raw containerd", "0::/moby/some-container-name\n"),
         ],

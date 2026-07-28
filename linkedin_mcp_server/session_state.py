@@ -263,8 +263,14 @@ _CONTAINER_CGROUP_SEGMENTS = frozenset(
 #: is no bare segment to match. The identifier is required, not just the
 #: prefix: ``docker-backup.scope`` is a perfectly ordinary host service, and an
 #: earlier version of this read it as a container. Measured on a real host.
+#:
+#: 32 hex minimum rather than a token length. These runtimes write a full
+#: container id — measured at 64 characters for a Docker systemd scope — while
+#: a service someone names by hand does not reach that even when every letter
+#: happens to be a-f. ``docker-beefcafedeadbeef.scope`` is contrived but would
+#: pass a shorter bound.
 _CONTAINER_CGROUP_INSTANCE = re.compile(
-    r"^(?:libpod-|libpod_|crio-|docker-|containerd-)[0-9a-f]{12,}$"
+    r"^(?:libpod-|libpod_|crio-|docker-|containerd-)[0-9a-f]{32,}$"
 )
 
 
