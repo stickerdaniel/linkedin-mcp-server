@@ -20,7 +20,6 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import (
     OwnerState,
     daemon_would_be_used,
-    find_owner,
     look_up_owner,
 )
 from linkedin_mcp_server.daemon_descriptor import (
@@ -87,7 +86,7 @@ class TestAttaching:
         profile = tmp_path / "profile"
         token = _publish_owner(tmp_path, profile)
 
-        attachment = find_owner(tmp_path, profile, _config(profile))
+        attachment = look_up_owner(tmp_path, profile, _config(profile)).attachment
 
         assert attachment is not None
         assert attachment.token == token
@@ -98,7 +97,7 @@ class TestAttaching:
         profile = tmp_path / "profile"
         profile.mkdir()
 
-        assert find_owner(tmp_path, profile, _config(profile)) is None
+        assert look_up_owner(tmp_path, profile, _config(profile)).attachment is None
 
     def test_the_token_stays_out_of_the_repr(self, tmp_path: Path):
         # This is a bearer token for a server driving a logged-in LinkedIn
@@ -124,7 +123,7 @@ class TestRefusing:
         profile = tmp_path / "profile"
         _publish_owner(tmp_path, profile, runtime_id="docker-abc123")
 
-        assert find_owner(tmp_path, profile, _config(profile)) is None
+        assert look_up_owner(tmp_path, profile, _config(profile)).attachment is None
 
     def test_a_daemon_serving_another_profile_is_refused(self, tmp_path: Path):
         # The lock is per auth root, but a browser opens a profile. Sibling
@@ -140,7 +139,7 @@ class TestRefusing:
         # Verified by removing the check: the test still passed.
         _publish_owner(tmp_path, theirs, config=_config(ours))
 
-        assert find_owner(tmp_path, ours, _config(ours)) is None
+        assert look_up_owner(tmp_path, ours, _config(ours)).attachment is None
 
     def test_a_daemon_with_a_different_configuration_is_refused(self, tmp_path: Path):
         # Attaching anyway would silently give the client a browser configured
@@ -154,7 +153,7 @@ class TestRefusing:
             config=_config(profile, proxy_server="http://proxy.example:8080"),
         )
 
-        assert find_owner(tmp_path, profile, _config(profile)) is None
+        assert look_up_owner(tmp_path, profile, _config(profile)).attachment is None
 
     def test_an_off_machine_endpoint_is_refused_before_the_token_is_sent(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -171,7 +170,7 @@ class TestRefusing:
         token = _publish_owner(tmp_path, profile, host="198.51.100.7")
 
         with caplog.at_level("DEBUG", logger="linkedin_mcp_server.daemon"):
-            assert find_owner(tmp_path, profile, _config(profile)) is None
+            assert look_up_owner(tmp_path, profile, _config(profile)).attachment is None
 
         # Refused for the right reason, and it says so: a silent None here
         # reads like an ordinary first start rather than a descriptor pointing
@@ -212,7 +211,7 @@ class TestRefusing:
         _publish_owner(tmp_path, profile)
         descriptor_path(tmp_path).write_text("{not json", encoding="utf-8")
 
-        assert find_owner(tmp_path, profile, _config(profile)) is None
+        assert look_up_owner(tmp_path, profile, _config(profile)).attachment is None
         assert descriptor_path(tmp_path).exists()
 
 
@@ -239,14 +238,14 @@ class TestWaitingForAStartingOwner:
         starter = threading.Thread(target=publish_after_a_moment)
         starter.start()
         try:
-            attachment = find_owner(
+            lookup = look_up_owner(
                 tmp_path, profile, _config(profile), wait_seconds=5.0
             )
         finally:
             starter.join()
 
         assert published.is_set()
-        assert attachment is not None
+        assert lookup.attachment is not None
 
     def test_waiting_gives_up_rather_than_hanging(self, tmp_path: Path):
         # Nothing ever publishes. The caller has to get an answer, because a
@@ -255,9 +254,9 @@ class TestWaitingForAStartingOwner:
         profile.mkdir()
 
         started = time.monotonic()
-        attachment = find_owner(tmp_path, profile, _config(profile), wait_seconds=0.3)
+        lookup = look_up_owner(tmp_path, profile, _config(profile), wait_seconds=0.3)
 
-        assert attachment is None
+        assert lookup.attachment is None
         assert time.monotonic() - started >= 0.3
 
     @pytest.mark.parametrize("budget", [float("nan"), float("inf")])
@@ -309,7 +308,7 @@ class TestWaitingForAStartingOwner:
         profile.mkdir()
 
         started = time.monotonic()
-        find_owner(tmp_path, profile, _config(profile))
+        look_up_owner(tmp_path, profile, _config(profile)).attachment
 
         assert time.monotonic() - started < 0.2
 
@@ -501,7 +500,7 @@ class TestTellingTheRefusalsApart:
         descriptor_path(tmp_path).write_text("{not json", encoding="utf-8")
 
         with caplog.at_level("INFO", logger="linkedin_mcp_server.daemon"):
-            find_owner(tmp_path, profile, _config(profile))
+            look_up_owner(tmp_path, profile, _config(profile)).attachment
 
         assert "untrusted" in caplog.text
         assert "not valid JSON" not in caplog.text

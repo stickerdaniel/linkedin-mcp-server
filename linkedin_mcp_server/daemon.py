@@ -20,8 +20,16 @@ per-call handoff this feature exists to remove, and it is what two clients
 starting together would normally hit.
 
 One rule underpins the whole module: a file says nothing about whether the
-process that wrote it still exists. Only :meth:`DaemonLock.try_acquire` answers
-that. Every place this module was wrong before, it was wrong by forgetting it.
+process that wrote it still exists. Only :meth:`DaemonLock.try_acquire` settles
+who owns the browser, and only connecting settles whether anything is listening.
+Every place this module was wrong before, it was wrong by forgetting that — most
+recently about ``ATTACHABLE`` itself, which an owner leaves behind intact when it
+crashes after publishing.
+
+That is also why the only entry point returns an :class:`OwnerLookup` rather
+than an optional attachment. A convenience wrapper that handed back just the
+attachment existed here and was removed: it let a caller act on "there is a
+daemon" without the state that says how much that is worth.
 """
 
 from __future__ import annotations
@@ -225,31 +233,13 @@ def look_up_owner(
         # asked to stay near fail-fast. Measured before this clamp existed.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            # The state at INFO, the detail at DEBUG. A reason can quote a path
+            # or host out of the descriptor, and "nothing usable was published"
+            # is the part that belongs in a log a user pastes into a report.
+            logger.info("No daemon to attach to (%s)", lookup.state.value)
+            logger.debug("Daemon lookup detail: %s", lookup.reason)
             return lookup
         time.sleep(min(_ATTACH_POLL_SECONDS, remaining))
-
-
-def find_owner(
-    auth_root: Path,
-    profile: Path,
-    config: AppConfig,
-    *,
-    wait_seconds: float = 0.0,
-) -> Attachment | None:
-    """The attachment alone, for callers that only want to talk to an owner.
-
-    Callers deciding what this process should *be* want
-    :func:`look_up_owner`: the reason there is no attachment governs what they
-    may do next, and it is lost here.
-    """
-    lookup = look_up_owner(auth_root, profile, config, wait_seconds=wait_seconds)
-    if lookup.state is not OwnerState.ATTACHABLE:
-        # The state at INFO, the detail at DEBUG. A reason can quote a path or
-        # host out of the descriptor, and "no daemon was usable" is the part
-        # that belongs in a log a user pastes into an issue report.
-        logger.info("Not attaching to a daemon (%s)", lookup.state.value)
-        logger.debug("Daemon lookup detail: %s", lookup.reason)
-    return lookup.attachment
 
 
 def daemon_would_be_used(config: AppConfig) -> bool:
