@@ -166,10 +166,12 @@ def harden_file(path: Path) -> None:
         raise PrivateStateError(f"{path} could not be opened to harden: {exc}") from exc
 
     try:
-        # The whole descriptor half is inside the translation, not just the
-        # path work before it: fchmod, fstat, the access list calls and the
-        # close can each fail with an OSError of their own. Measured with
-        # fchmod made to answer EIO: it crossed the boundary as itself.
+        # The work is inside the translation, not just the path checks before
+        # it: fstat, fchmod and the access list calls each fail with an OSError
+        # of their own. Measured with fchmod made to answer EIO: it crossed the
+        # boundary as itself. The close below is the exception, and
+        # deliberately: it runs in a finally, where raising would replace
+        # whatever sent us there with a less useful error.
         with _as_private_state_error(path, "make private"):
             # Asked again of the descriptor, not the name. The check above was
             # made before the open, so it says what the path was then; this

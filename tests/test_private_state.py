@@ -355,10 +355,10 @@ class TestRefusals:
     def test_a_failure_while_hardening_is_this_module_s_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # The descriptor half can fail too: fchmod, fstat, the access list
-        # calls and the close each have their own OSError. Measured with fchmod
-        # answering EIO before the translation covered them: it crossed the
-        # boundary as itself.
+        # The descriptor half can fail too: fstat, fchmod and the access list
+        # calls each have their own OSError. Measured with fchmod answering EIO
+        # before the translation covered them: it crossed the boundary as
+        # itself.
         target = tmp_path / "token"
         target.touch()
 
