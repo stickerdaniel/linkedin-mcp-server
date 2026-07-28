@@ -42,9 +42,13 @@ class TestServerRoles:
         # this would corrupt the session rather than merely run slowly.
         for role in ServerRole:
             mcp = create_mcp_server(role=role)
+            serializes = _has_middleware(mcp, SequentialToolExecutionMiddleware)
 
-            assert role.drives_browser
-            assert _has_middleware(mcp, SequentialToolExecutionMiddleware), role
+            # Stated as the conditional it is. Asserting that every role drives
+            # a browser would pass today and fail the moment the forwarding
+            # role arrives, for the entirely legitimate reason that one does
+            # not, which is a test failing at the wrong thing.
+            assert serializes == role.drives_browser, role
 
     def test_the_update_notice_goes_only_where_a_user_reads_it(self):
         # Appended to one tool result per process. On a server shared by many
