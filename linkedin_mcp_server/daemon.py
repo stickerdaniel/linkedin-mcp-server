@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -195,7 +196,18 @@ def look_up_owner(
     Callers pass a wait only when they have reason to think that is happening,
     which in practice means having just lost the lock race: somebody holds it,
     so somebody is starting. With the default of no wait this is a single read.
+
+    Raises:
+        ValueError: *wait_seconds* is not finite.
     """
+    # A NaN or infinite budget makes `monotonic() >= deadline` false forever,
+    # so the stdio process would never finish starting. Refused rather than
+    # clamped: an infinite wait is a plausible thing for a caller to mean and a
+    # ruinous thing to grant, and the configuration parsers refuse non-finite
+    # timeouts on the same grounds. A negative wait is merely no wait.
+    if not math.isfinite(wait_seconds):
+        raise ValueError(f"wait_seconds must be a finite number, got {wait_seconds}")
+
     deadline = time.monotonic() + max(wait_seconds, 0.0)
     while True:
         try:

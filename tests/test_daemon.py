@@ -235,6 +235,29 @@ class TestWaitingForAStartingOwner:
         assert attachment is None
         assert time.monotonic() - started >= 0.3
 
+    @pytest.mark.parametrize("budget", [float("nan"), float("inf")])
+    def test_a_wait_that_never_ends_is_refused(self, tmp_path: Path, budget: float):
+        # `monotonic() >= nan` is false forever and so is `>= inf`, so either
+        # one turns the poll into a process that never finishes starting.
+        # Refused rather than clamped: an unbounded wait is a plausible thing
+        # to mean and a ruinous thing to grant.
+        profile = tmp_path / "profile"
+        profile.mkdir()
+
+        with pytest.raises(ValueError):
+            look_up_owner(tmp_path, profile, _config(profile), wait_seconds=budget)
+
+    def test_a_negative_wait_is_simply_no_wait(self, tmp_path: Path):
+        # Unlike a non-finite budget, this one has an obvious reading.
+        profile = tmp_path / "profile"
+        profile.mkdir()
+
+        started = time.monotonic()
+        lookup = look_up_owner(tmp_path, profile, _config(profile), wait_seconds=-5.0)
+
+        assert lookup.state is OwnerState.ABSENT
+        assert time.monotonic() - started < 0.2
+
     def test_not_waiting_is_the_default(self, tmp_path: Path):
         # Callers that only want to know the current state must not pay for a
         # wait they did not ask for.
