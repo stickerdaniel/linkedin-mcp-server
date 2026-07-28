@@ -46,11 +46,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
 import socket
 import stat
+import unicodedata
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -263,13 +265,18 @@ def _auth_root_identity(auth_root: Path) -> bytes:
             f"The authentication root is not a directory: {canonical}"
         )
 
+    # Creating and then reading it back are one operation as far as a caller is
+    # concerned, and both can fail in ways the operating system describes in its
+    # own vocabulary. Measured: an auth root that vanished between the two
+    # surfaced as FileNotFoundError, several layers from anything that could
+    # explain it as a descriptor problem.
     try:
         secure_mkdir(canonical, mode=0o700)
+        info = canonical.stat()
     except OSError as exc:
         raise DescriptorError(
-            f"The authentication root {canonical} could not be created: {exc}"
+            f"The authentication root {canonical} could not be prepared: {exc}"
         ) from exc
-    info = canonical.stat()
 
     if not stat.S_ISDIR(info.st_mode):
         raise DescriptorError(
@@ -334,8 +341,12 @@ def profile_identity(profile: Path) -> str:
     # volume, once with both present and once with only the sibling: two
     # distinct profiles shared an identity, which would have served a client
     # the other one's logged-in session.
+    # Folded and normalised. casefold settles case; NFC settles composition,
+    # which is a separate axis macOS also collapses: an accented name written
+    # decomposed and composed is one directory there, and comparing the two
+    # spellings without normalising gave them different identities.
     wanted = canonical.name
-    folded = wanted.casefold()
+    folded = unicodedata.normalize("NFC", wanted).casefold()
     try:
         entries = [entry.name for entry in os.scandir(canonical.parent)]
     except OSError:
@@ -344,7 +355,7 @@ def profile_identity(profile: Path) -> str:
         entries = []
     if wanted not in entries:
         for name in entries:
-            if name.casefold() != folded:
+            if unicodedata.normalize("NFC", name).casefold() != folded:
                 continue
             # samefile answers what folding only guesses at, and it is safe to
             # ask here: the candidate exists by definition, and the profile
@@ -658,10 +669,22 @@ class DaemonDescriptor:
         # passed as loopback while getaddrinfo refused them outright; and it
         # accepts "localhost" by name, which says nothing about where the
         # resolver on this machine actually sends it.
+        hostname = parsed.hostname or ""
         try:
-            resolved = socket.getaddrinfo(
-                parsed.hostname, self.port, type=socket.SOCK_STREAM
-            )
+            # An address literal is its own answer, and asking the resolver
+            # about one would be a needless trip through a component that can
+            # hang: getaddrinfo takes no deadline, so a wedged NSS or mDNS
+            # responder blocks for as long as it likes. Measured with a stalled
+            # resolver: two seconds for a two second stall, and unbounded in
+            # principle. This is what a daemon publishes for itself, so the
+            # common path never reaches the call below.
+            ipaddress.ip_address(hostname)
+            return
+        except ValueError:
+            pass
+
+        try:
+            resolved = socket.getaddrinfo(hostname, self.port, type=socket.SOCK_STREAM)
         except (OSError, UnicodeError) as exc:
             raise DescriptorError(
                 f"The daemon descriptor names host {self.host!r}, which does "
@@ -714,9 +737,19 @@ def publish(
     harden_directory(daemon_state_root())
     harden_directory(directory)
 
+    # secure_write_text already creates the file 0600, inside a directory this
+    # just made 0700, so the token is never on disk under wider permissions.
+    # harden_file is what establishes that rather than assuming it: it reads
+    # the mode, the owner and the access list back, and on Windows replaces the
+    # access list outright. If it refuses, the token it refused to vouch for
+    # goes away again rather than staying behind as state nothing verified.
     token_file = token_path(auth_root, descriptor.instance_id)
     secure_write_text(token_file, token)
-    harden_file(token_file)
+    try:
+        harden_file(token_file)
+    except BaseException:
+        token_file.unlink(missing_ok=True)
+        raise
 
     descriptor_file = descriptor_path(auth_root)
     secure_write_text(descriptor_file, descriptor.to_json())

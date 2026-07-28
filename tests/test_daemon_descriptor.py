@@ -652,6 +652,29 @@ class TestProfileIdentityStability:
         profile.mkdir()
         assert profile_identity(profile) == before
 
+    @pytest.mark.parametrize("variant", ["case", "unicode"])
+    def test_an_alias_of_the_profile_name_itself_matches(
+        self, tmp_path: Path, variant: str
+    ):
+        # The alias tests above vary a parent segment. This varies the profile's
+        # own name, which is the part the identity carries as text: measured, a
+        # decomposed and a composed accent named one directory and produced two
+        # identities, because casefold settles case and says nothing about
+        # composition.
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir()
+        if variant == "case":
+            first, second = "Profile", "profile"
+        else:
+            first = "profile" + unicodedata.normalize("NFC", "é")
+            second = "profile" + unicodedata.normalize("NFD", "é")
+        (auth_root / first).mkdir()
+        alias = auth_root / second
+        if not alias.exists():
+            pytest.skip("this volume keeps the two spellings apart")
+
+        assert profile_identity(auth_root / first) == profile_identity(alias)
+
     def test_case_distinct_siblings_do_not_collide(self, tmp_path: Path):
         # On a case-insensitive volume Profile and profile name one directory,
         # which is what the fold is for. On a case-sensitive one they are two,
