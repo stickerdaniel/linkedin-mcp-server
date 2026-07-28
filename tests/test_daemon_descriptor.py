@@ -521,10 +521,16 @@ class TestEndpointSpelling:
         "host,path",
         [
             ("[::1] ", "/mcp"),
+            (" 127.0.0.1 ", "/mcp"),
             ("[127.0.0.1]", "/mcp"),
             ("127.0.0.1\r", "/mcp"),
+            ("127.0.0.1\x01", "/mcp"),
+            ("127.0.0.1\x7f", "/mcp"),
+            ("127.0.0.1\xa0", "/mcp"),
             ("127.0.0.1", "/mcp\n"),
             ("127.0.0.1", "/mcp\ta"),
+            ("127.0.0.1", "/mcp\x0b"),
+            ("127.0.0.1", "/mcp\udcff"),
         ],
     )
     def test_an_endpoint_that_composes_into_nothing_usable_is_refused(
@@ -556,6 +562,19 @@ class TestEndpointSpelling:
         httpx.URL(descriptor.url)
 
 
+class TestAuthRootShape:
+    def test_a_file_where_the_auth_root_belongs_is_refused(self, tmp_path: Path):
+        # The check for this existed but sat after secure_mkdir, which refuses
+        # a non-directory itself with a NotADirectoryError that reaches the
+        # caller instead of the error this module is read through. Measured
+        # before the reorder: NotADirectoryError.
+        occupied = tmp_path / "auth"
+        occupied.write_text("a file, not a directory")
+
+        with pytest.raises(DescriptorError, match="not a directory"):
+            daemon_dir(occupied)
+
+
 class TestDigestFields:
     @pytest.mark.parametrize("field", ["token_sha256", "config_fingerprint"])
     @pytest.mark.parametrize("value", ["é" * 64, "z" * 64, "abc", "a" * 63, "a" * 65])
@@ -577,6 +596,28 @@ class TestDigestFields:
 
 
 class TestProfileIdentityStability:
+    def test_a_missing_profile_does_not_borrow_a_siblings_identity(
+        self, tmp_path: Path
+    ):
+        # The profile does not exist before the first login. Where a sibling
+        # differs only in case, folding onto it would give the two the same
+        # identity, and on a case-sensitive volume they really are two
+        # directories. Measured there: the identity collided before the login
+        # and then changed once the directory appeared.
+        auth_root = tmp_path / "auth"
+        auth_root.mkdir()
+        sibling = auth_root / "Profile"
+        sibling.mkdir()
+        profile = auth_root / "profile"
+        if profile.exists():
+            pytest.skip("this volume is case-insensitive, so these are one directory")
+
+        before = profile_identity(profile)
+
+        assert before != profile_identity(sibling)
+        profile.mkdir()
+        assert profile_identity(profile) == before
+
     def test_case_distinct_siblings_do_not_collide(self, tmp_path: Path):
         # On a case-insensitive volume Profile and profile name one directory,
         # which is what the fold is for. On a case-sensitive one they are two,

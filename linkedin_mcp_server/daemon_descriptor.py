@@ -249,7 +249,22 @@ def _auth_root_identity(auth_root: Path) -> bytes:
     profile inside it cannot, and :func:`profile_identity` says why.
     """
     canonical = auth_root.expanduser().resolve()
-    secure_mkdir(canonical, mode=0o700)
+    # Checked before creating, not after. secure_mkdir refuses an existing
+    # non-directory itself, with a NotADirectoryError that reaches the caller
+    # instead of the DescriptorError this module is read through, and the check
+    # below could then never run: measured, a file where the auth root belongs
+    # surfaced as NotADirectoryError.
+    if canonical.exists() and not canonical.is_dir():
+        raise DescriptorError(
+            f"The authentication root is not a directory: {canonical}"
+        )
+
+    try:
+        secure_mkdir(canonical, mode=0o700)
+    except OSError as exc:
+        raise DescriptorError(
+            f"The authentication root {canonical} could not be created: {exc}"
+        ) from exc
     info = canonical.stat()
 
     if not stat.S_ISDIR(info.st_mode):
@@ -307,13 +322,14 @@ def profile_identity(profile: Path) -> str:
     # matching its own profile. Measured, with the auth root non-empty so the
     # scan had something to walk: serves() went from True to False across the
     # login that created the directory.
-    # An exact match wins over a case-insensitive one, and that order is the
-    # whole point. On a case-insensitive volume the listing holds one spelling,
-    # so Profile and profile find each other and agree, which is what this is
-    # for. On a case-sensitive one they are two directories that both exist,
-    # and folding without preferring the exact name gave them the same identity:
-    # measured on a case-sensitive APFS volume, two distinct siblings both
-    # keyed as Profile, which would have handed a client the other's session.
+    # The name as the filesystem holds it, which is only a different name from
+    # the caller's where the filesystem says the two are one directory. Asking
+    # it directly rather than folding on principle: on a case-sensitive volume
+    # Profile and profile are two directories, and treating a fold match as the
+    # same entry there is wrong twice over. Measured on a case-sensitive APFS
+    # volume, once with both present and once with only the sibling: two
+    # distinct profiles shared an identity, which would have served a client
+    # the other one's logged-in session.
     wanted = canonical.name
     folded = wanted.casefold()
     try:
@@ -323,7 +339,19 @@ def profile_identity(profile: Path) -> str:
         # the caller gave still identifies it well enough to compare.
         entries = []
     if wanted not in entries:
-        wanted = next((name for name in entries if name.casefold() == folded), wanted)
+        for name in entries:
+            if name.casefold() != folded:
+                continue
+            # samefile answers what folding only guesses at, and it is safe to
+            # ask here: the candidate exists by definition, and the profile
+            # need not, which is the case that made an earlier version of this
+            # fall back to a path and change its answer at the first login.
+            try:
+                if canonical.parent.joinpath(name).samefile(canonical):
+                    wanted = name
+            except OSError:
+                pass
+            break
     return f"under\0{info.st_dev}\0{info.st_ino}\0{wanted}"
 
 
@@ -354,10 +382,12 @@ def token_path(auth_root: Path, instance_id: str) -> Path:
     and, following the discovery rules, call it corruption instead of a restart.
 
     The identifier is checked to be a UUID before it becomes part of a path.
-    It arrives from a file anything with write access to the auth root can
-    edit, and building a filename from it unchecked would let ``..`` walk out
-    of the daemon directory and turn any readable file into what this client
-    sends to the endpoint as its bearer token.
+    It arrives from a file, and a file is only ever as trustworthy as what can
+    write to it. The state directory is owner-only now, so that is this account
+    and whatever runs as it, but building a filename from the identifier
+    unchecked would let ``..`` walk out of the daemon directory and turn any
+    readable file into what this client sends to the endpoint as its bearer
+    token. The check costs one parse.
     """
     return daemon_dir(auth_root) / f"token-{_checked_instance_id(instance_id)}"
 
@@ -552,10 +582,13 @@ class DaemonDescriptor:
     def check_endpoint_is_local(self) -> None:
         """Refuse an endpoint that is not this machine, before sending a token.
 
-        The descriptor is a file on disk, so it can be edited. Reading a host
-        from it and posting a bearer token there without checking would turn any
-        write access to the auth root into a way to collect the token and,
-        through it, the LinkedIn session behind it.
+        The descriptor is a file on disk, so it says what was last written to
+        it rather than what this process believes. Reading a host from it and
+        posting a bearer token there unchecked would turn a corrupted or
+        stale file into a way to hand over the token and, through it, the
+        LinkedIn session behind it. The file lives in owner-only state, so this
+        is about what has gone wrong rather than about another account, and it
+        is cheap enough to check either way.
         """
         if not is_loopback_host(self.host):
             raise DescriptorError(
@@ -570,38 +603,44 @@ class DaemonDescriptor:
         if not self.path.startswith("/"):
             raise DescriptorError("The daemon descriptor has no usable path")
 
-        # A request line is one line. A control character in any of these ends
-        # up in the URL and, in the wrong place, would let a descriptor written
-        # by something else decide where one header stops and the next begins.
-        # urlsplit is happy to carry them, so they are refused here.
+        # A URL is printable ASCII. Stated as a rule rather than as a list of
+        # the characters that happened to come up: an earlier version banned
+        # CR, LF, tab and NUL by name and left thirty-six other code points
+        # that were accepted here and rejected by the client, which is exactly
+        # the shape of failure this check exists to move. Anything outside the
+        # printable range goes, whether it is a control character, a
+        # non-breaking space, or a lone surrogate.
         for name, value in (("host", self.host), ("path", self.path)):
-            if any(character in value for character in "\r\n\t\x00"):
+            if any(character < "\x21" or character > "\x7e" for character in value):
                 raise DescriptorError(
-                    f"The daemon descriptor's {name} contains a control "
-                    f"character, so it cannot name an endpoint"
+                    f"The daemon descriptor's {name} contains a character that "
+                    f"cannot appear in a URL, so it cannot name an endpoint"
                 )
 
         # The fields are individually plausible; whether they compose into
         # something a client can use is a separate question, and the only one
-        # that finally matters. is_loopback_host trims before classifying, for
-        # instance, so a host with whitespace around it is loopback by that
-        # measure and produces a URL that parses as a bad port. Measured
-        # accepting three such descriptors: "[::1] ", a bracketed IPv4, and a
-        # path with a newline, each failing later in the client rather than
-        # here where it could be explained as a descriptor this did not write.
+        # that finally matters. Measured accepting three such descriptors:
+        # "[::1] ", a bracketed IPv4, and a path with a newline, each failing
+        # later in the client rather than here where it could be explained as a
+        # descriptor this did not write.
         #
         # urlsplit rather than an HTTP client's parser: this has no business
-        # depending on which client the caller happens to use, and reading the
-        # port back is what catches a host that ran into it.
+        # depending on which client the caller happens to use.
         try:
             parsed = urlsplit(self.url)
-            reachable = parsed.port == self.port and parsed.scheme == "http"
+            port_survived = parsed.port == self.port
+            host_survived = (parsed.hostname or "") == self.host.strip("[]").lower()
         except ValueError as exc:
             raise DescriptorError(
                 f"The daemon descriptor describes an endpoint that cannot be "
                 f"used to reach anything: {exc}"
             ) from exc
-        if not reachable:
+        # The host is read back, not just the port. is_loopback_host was asked
+        # about the field; this asks about the string a client will actually
+        # connect to, and the two came apart: a space-padded address passed as
+        # loopback and produced a host of "%20127.0.0.1%20", so what was
+        # verified and what would be contacted were not the same name.
+        if not port_survived or not host_survived or parsed.scheme != "http":
             raise DescriptorError(
                 f"The daemon descriptor's host, port and path do not compose "
                 f"into a usable address: {self.url!r}"
