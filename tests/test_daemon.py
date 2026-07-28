@@ -18,8 +18,10 @@ import linkedin_mcp_server.daemon as daemon_module
 import linkedin_mcp_server.daemon_descriptor as daemon_descriptor_module
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import (
+    OwnerState,
     daemon_would_be_used,
     find_owner,
+    look_up_owner,
 )
 from linkedin_mcp_server.daemon_descriptor import (
     build,
@@ -227,6 +229,89 @@ class TestWaitingForAStartingOwner:
         find_owner(tmp_path, profile, _config(profile))
 
         assert time.monotonic() - started < 0.2
+
+
+class TestTellingTheRefusalsApart:
+    """Why one verdict is not enough.
+
+    "No attachment" covers a first start, an owner still binding, an owner
+    running for someone else, and a descriptor that cannot be trusted. Only the
+    first of those is licence to open a browser on the profile, so collapsing
+    them is how a second Chromium ends up on a live session.
+    """
+
+    def test_nothing_published_is_the_only_case_that_may_elect_itself(
+        self, tmp_path: Path
+    ):
+        profile = tmp_path / "profile"
+        profile.mkdir()
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert lookup.state is OwnerState.ABSENT
+        assert lookup.may_elect_itself
+
+    def test_a_live_incompatible_owner_may_not_be_displaced(self, tmp_path: Path):
+        # The lock is per auth root, so this client cannot take the position
+        # either. Electing itself would put a second browser on the auth root
+        # the running daemon owns.
+        theirs = tmp_path / "their-profile"
+        ours = tmp_path / "our-profile"
+        ours.mkdir()
+        _publish_owner(tmp_path, theirs, config=_config(ours))
+
+        lookup = look_up_owner(tmp_path, ours, _config(ours))
+
+        assert lookup.state is OwnerState.LIVE_INCOMPATIBLE
+        assert not lookup.may_elect_itself
+
+    def test_an_untrusted_descriptor_may_not_be_displaced(self, tmp_path: Path):
+        # Beside a held lock this is a live daemon we cannot talk to. Treating
+        # it as absence is the reading that opens a browser on a profile
+        # someone else is driving.
+        profile = tmp_path / "profile"
+        _publish_owner(tmp_path, profile)
+        descriptor_path(tmp_path).write_text("{not json", encoding="utf-8")
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert lookup.state is OwnerState.UNTRUSTED
+        assert not lookup.may_elect_itself
+
+    def test_an_incompatible_owner_is_not_waited_out(self, tmp_path: Path):
+        # Waiting is for an owner that is still starting. A daemon serving
+        # another profile is not a phase, so polling would only stall a client
+        # for an answer that cannot change.
+        theirs = tmp_path / "their-profile"
+        ours = tmp_path / "our-profile"
+        ours.mkdir()
+        _publish_owner(tmp_path, theirs, config=_config(ours))
+
+        started = time.monotonic()
+        lookup = look_up_owner(tmp_path, ours, _config(ours), wait_seconds=5.0)
+
+        assert lookup.state is OwnerState.LIVE_INCOMPATIBLE
+        assert time.monotonic() - started < 1.0
+
+    def test_the_refusal_reason_carries_no_secret(self, tmp_path: Path):
+        # The shared configuration includes a proxy password. A mismatch has to
+        # say enough to act on and nothing more.
+        profile = tmp_path / "profile"
+        _publish_owner(
+            tmp_path,
+            profile,
+            config=_config(
+                profile,
+                proxy_server="http://proxy.example:8080",
+                proxy_password="hunter2-not-in-logs",
+            ),
+        )
+
+        lookup = look_up_owner(tmp_path, profile, _config(profile))
+
+        assert lookup.state is OwnerState.LIVE_INCOMPATIBLE
+        assert "hunter2-not-in-logs" not in lookup.reason
+        assert "proxy.example" not in lookup.reason
 
 
 class TestWhetherTheDaemonAppliesAtAll:

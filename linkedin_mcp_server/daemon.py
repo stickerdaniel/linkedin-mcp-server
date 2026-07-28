@@ -21,6 +21,7 @@ two clients starting together would normally hit.
 
 from __future__ import annotations
 
+import enum
 import logging
 import time
 from dataclasses import dataclass
@@ -45,6 +46,34 @@ _ATTACH_WAIT_SECONDS = 10.0
 _ATTACH_POLL_SECONDS = 0.1
 
 
+class OwnerState(enum.Enum):
+    """What the published descriptor says, in the terms a caller must act on.
+
+    One verdict rather than "an owner or not", because the right response
+    differs and some of these are permanent. A client that reduced them all to
+    "nobody to attach to" would treat "an owner is starting" and "an owner is
+    running that I may not use" the same way, and only one of those is a reason
+    to open a second browser.
+    """
+
+    #: Nothing published. The ordinary first start.
+    ABSENT = "absent"
+
+    #: Published and usable. Attach.
+    ATTACHABLE = "attachable"
+
+    #: An owner exists and is running, but not for us: it serves a different
+    #: profile, or a configuration this client did not ask for. Permanent, not
+    #: a phase — the lock is per auth root, so sibling profiles share one
+    #: election and this client can neither attach nor elect itself.
+    LIVE_INCOMPATIBLE = "live_incompatible"
+
+    #: A descriptor exists that cannot be trusted. Never an absence: beside a
+    #: held lock it means a live daemon this client cannot talk to, and opening
+    #: a browser on that assumption is the corruption the lease exists to stop.
+    UNTRUSTED = "untrusted"
+
+
 @dataclass(frozen=True)
 class Attachment:
     """An owner worth talking to, and the credential for doing so."""
@@ -53,32 +82,57 @@ class Attachment:
     token: str
 
 
-def _usable_attachment(
-    auth_root: Path, profile: Path, config: AppConfig
-) -> Attachment | None:
-    """Whether the published descriptor describes a daemon we may attach to.
+@dataclass(frozen=True)
+class OwnerLookup:
+    """The verdict, and the attachment when there is one."""
 
-    Order matters. The cheap, local checks come first and the ones that touch
-    the endpoint come last, so a descriptor that is merely stale is rejected
-    without a connection attempt.
+    state: OwnerState
+    attachment: Attachment | None = None
+    #: Why, in words worth logging. Never carries a token or a config value.
+    reason: str = ""
+
+    @property
+    def may_elect_itself(self) -> bool:
+        """Whether this client is free to become the owner.
+
+        Only true when nobody holds the position. An untrusted descriptor is
+        deliberately excluded: it may be sitting beside a held lock, and the
+        election attempt itself is what settles that safely.
+        """
+        return self.state is OwnerState.ABSENT
+
+
+def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
+    """Read the descriptor once and say what it means.
+
+    Order matters. The cheap, local checks come first, so a descriptor that
+    already disqualifies itself is rejected before the token is read.
     """
     descriptor = daemon_descriptor.read(auth_root)
     if descriptor is None:
-        return None
+        return OwnerLookup(state=OwnerState.ABSENT, reason="no daemon is published")
 
     # Not enforced by read(), deliberately: it is the caller who knows which
     # runtime it belongs to. A host attaching to a container's daemon would be
     # handed a browser in a different filesystem namespace.
+    #
+    # Incompatible rather than absent, and that distinction is the point: the
+    # container's daemon holds the lock on the shared auth root, so this client
+    # cannot take the position either.
     if descriptor.runtime_id != get_runtime_id():
-        logger.debug("Daemon belongs to another runtime; not attaching")
-        return None
+        return OwnerLookup(
+            state=OwnerState.LIVE_INCOMPATIBLE,
+            reason="the running daemon belongs to another runtime",
+        )
 
     # The lock is per auth root, but a profile is what a browser opens. Two
     # profiles side by side elect one owner between them, so an owner exists
-    # that is not *our* owner.
+    # that is not *our* owner — permanently, not while it starts up.
     if not descriptor.serves(profile):
-        logger.debug("Daemon serves a different profile; not attaching")
-        return None
+        return OwnerLookup(
+            state=OwnerState.LIVE_INCOMPATIBLE,
+            reason="the running daemon serves a different profile",
+        )
 
     # No endpoint check here: `from_mapping` already refuses a non-local host
     # while parsing, so `read` above cannot return one. Repeating it would read
@@ -90,10 +144,50 @@ def _usable_attachment(
     if descriptor.config_fingerprint != daemon_descriptor.config_fingerprint(
         config, key=token
     ):
-        logger.debug("Daemon runs a different configuration; not attaching")
-        return None
+        return OwnerLookup(
+            state=OwnerState.LIVE_INCOMPATIBLE,
+            # Names no values: the shared fields include a proxy password and
+            # the path to someone's profile.
+            reason="the running daemon uses a different configuration",
+        )
 
-    return Attachment(descriptor=descriptor, token=token)
+    return OwnerLookup(
+        state=OwnerState.ATTACHABLE,
+        attachment=Attachment(descriptor=descriptor, token=token),
+        reason="attached to the running daemon",
+    )
+
+
+def look_up_owner(
+    auth_root: Path,
+    profile: Path,
+    config: AppConfig,
+    *,
+    wait_seconds: float = 0.0,
+) -> OwnerLookup:
+    """Say what owner is out there, waiting only while that could still change.
+
+    Waiting is for exactly one state. ABSENT can become ATTACHABLE, because an
+    owner publishes only once it is listening and a client can arrive in that
+    window. LIVE_INCOMPATIBLE cannot: the lock is per auth root, so a daemon
+    serving another profile or configuration is not a phase this client can
+    wait out. Polling it would only delay an answer that will not change.
+    """
+    deadline = time.monotonic() + max(wait_seconds, 0.0)
+    while True:
+        try:
+            lookup = _inspect(auth_root, profile, config)
+        except DescriptorError as exc:
+            # Not an absence. Beside a held lock this is a live daemon this
+            # client cannot talk to, so the caller must not read it as licence
+            # to open a browser on the profile.
+            return OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
+
+        if lookup.state is not OwnerState.ABSENT:
+            return lookup
+        if time.monotonic() >= deadline:
+            return lookup
+        time.sleep(_ATTACH_POLL_SECONDS)
 
 
 def find_owner(
@@ -103,26 +197,16 @@ def find_owner(
     *,
     wait_seconds: float = 0.0,
 ) -> Attachment | None:
-    """Find an owner to attach to, optionally waiting for one to finish starting.
+    """The attachment alone, for callers that only want to talk to an owner.
 
-    A :class:`DescriptorError` is not an absence. A descriptor that exists but
-    cannot be trusted, sitting beside a held lock, means a live daemon this
-    client cannot talk to, and treating that as "nobody is there" would start a
-    second browser on the profile the daemon is using.
+    Callers deciding what this process should *be* want
+    :func:`look_up_owner`: the reason there is no attachment governs what they
+    may do next, and it is lost here.
     """
-    deadline = time.monotonic() + max(wait_seconds, 0.0)
-    while True:
-        try:
-            attachment = _usable_attachment(auth_root, profile, config)
-        except DescriptorError as exc:
-            logger.info("Not attaching to the running daemon: %s", exc)
-            return None
-
-        if attachment is not None:
-            return attachment
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(_ATTACH_POLL_SECONDS)
+    lookup = look_up_owner(auth_root, profile, config, wait_seconds=wait_seconds)
+    if lookup.state is not OwnerState.ATTACHABLE:
+        logger.info("Not attaching to a daemon: %s", lookup.reason)
+    return lookup.attachment
 
 
 def daemon_would_be_used(config: AppConfig) -> bool:
