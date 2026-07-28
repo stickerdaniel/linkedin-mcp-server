@@ -146,6 +146,19 @@ class TestRefusals:
         with pytest.raises(DescriptorError, match="not valid JSON"):
             read(tmp_path)
 
+    def test_a_number_too_long_to_parse_is_refused(self, tmp_path: Path):
+        # Well under the size limit, and still unparseable: Python refuses an
+        # integer with more digits than sys.int_max_str_digits allows, and does
+        # it with a plain ValueError from inside the parser. Measured with five
+        # thousand digits: it crossed the boundary before anything could call
+        # it a bad descriptor.
+        token = new_token()
+        publish(tmp_path, _descriptor(tmp_path, token), token)
+        descriptor_path(tmp_path).write_text('{"port": ' + "9" * 5000 + "}")
+
+        with pytest.raises(DescriptorError, match="not valid JSON"):
+            read(tmp_path)
+
     def test_a_missing_field_is_refused(self, tmp_path: Path):
         token = new_token()
         publish(tmp_path, _descriptor(tmp_path, token), token)

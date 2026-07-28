@@ -860,7 +860,13 @@ def read(auth_root: Path) -> DaemonDescriptor | None:
 
     try:
         parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # ValueError rather than JSONDecodeError alone: a number with more
+        # digits than sys.int_max_str_digits allows raises a plain ValueError
+        # from inside the parser, and a file well under the size limit can
+        # carry one. Measured with a five thousand digit integer: it crossed
+        # the boundary as ValueError before anything could call it a bad
+        # descriptor. JSONDecodeError is a ValueError, so this covers both.
         raise DescriptorError(
             f"The daemon descriptor is not valid JSON: {exc}"
         ) from exc
