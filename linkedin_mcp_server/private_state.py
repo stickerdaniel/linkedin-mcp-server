@@ -71,7 +71,10 @@ def _as_private_state_error(path: Path, action: str) -> Iterator[None]:
         yield
     except PrivateStateError:
         raise
-    except OSError as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
+        # RuntimeError and ValueError alongside OSError: a home directory that
+        # cannot be determined raises the first, an embedded NUL the second,
+        # and both arrive from a path a caller was entitled to hand over.
         raise PrivateStateError(f"Could not {action} {path}: {exc}") from exc
 
 
@@ -92,6 +95,18 @@ def harden_directory(path: Path) -> None:
     and lands in a directory this hardens first.
     """
     with _as_private_state_error(path, "prepare the private directory"):
+        # An unexpanded tilde means expanduser could not resolve it, which
+        # happens for a user this system does not know. Left alone it becomes a
+        # directory literally named "~something" wherever the process happens
+        # to be running: measured, one appeared in the working directory. A
+        # path that was meant to be somewhere else is not somewhere to keep a
+        # secret.
+        if str(path).startswith("~"):
+            raise PrivateStateError(
+                f"{path} still begins with a tilde, so the home directory it "
+                f"names could not be resolved"
+            )
+
         if path.exists() and not path.is_dir():
             raise PrivateStateError(f"Not a directory: {path}")
 

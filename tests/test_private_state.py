@@ -370,6 +370,21 @@ class TestRefusals:
         with pytest.raises(PrivateStateError, match="make private"):
             harden_file(target)
 
+    @pytest.mark.parametrize(
+        "path",
+        [Path("~definitely-no-such-user-xyz/state"), Path("/tmp/state\x00x")],
+    )
+    def test_a_path_that_cannot_be_resolved_is_refused(self, path: Path):
+        # Both arrive from configuration a caller was entitled to supply, and
+        # both used to leave this module as somebody else's exception: an
+        # embedded NUL as ValueError, and an unknown user as a directory
+        # literally named "~something" created wherever the process was
+        # running. Measured: one appeared in the working directory.
+        with pytest.raises(PrivateStateError):
+            harden_directory(path)
+
+        assert not path.exists()
+
     def test_a_file_where_a_directory_belongs_refuses(self, tmp_path: Path):
         occupied = tmp_path / "daemon"
         occupied.write_text("not a directory")
