@@ -44,6 +44,7 @@ directory of their own.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import ipaddress
@@ -361,12 +362,19 @@ def profile_identity(profile: Path) -> str:
             # ask here: the candidate exists by definition, and the profile
             # need not, which is the case that made an earlier version of this
             # fall back to a path and change its answer at the first login.
+            #
+            # Keep looking when it says no. Several entries can fold alike on a
+            # volume that distinguishes them, so stopping at the first
+            # candidate would settle on a directory the filesystem had just
+            # denied was the same one: measured with É and é present and é
+            # asked for, the scan met É first, was told they differ, and gave
+            # up before reaching the entry that did match.
             try:
                 if canonical.parent.joinpath(name).samefile(canonical):
                     wanted = name
+                    break
             except OSError:
-                pass
-            break
+                continue
     return f"under\0{info.st_dev}\0{info.st_ino}\0{wanted}"
 
 
@@ -748,7 +756,13 @@ def publish(
     try:
         harden_file(token_file)
     except BaseException:
-        token_file.unlink(missing_ok=True)
+        # Best effort, and quiet about its own failure: this runs while another
+        # error is on its way out, and replacing that one with a complaint
+        # about the tidying would hide what actually went wrong. Measured with
+        # the unlink refused: the caller saw PermissionError instead of the
+        # verification failure that caused it.
+        with contextlib.suppress(OSError):
+            token_file.unlink(missing_ok=True)
         raise
 
     descriptor_file = descriptor_path(auth_root)
