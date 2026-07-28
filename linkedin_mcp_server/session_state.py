@@ -156,6 +156,32 @@ def _normalize_arch(machine: str) -> str:
 
 
 def _is_container_runtime() -> bool:
+    """Whether *this* process runs inside a container.
+
+    Every signal here has to describe our own process. That sounds obvious and
+    is exactly what an earlier version got wrong: it searched ``mountinfo`` and
+    ``cgroup`` for the substrings ``docker``, ``containerd`` and friends
+    anywhere in the file. Those files list what the *namespace* can see, not
+    what we are, so an ordinary Linux workstation running a Docker daemon for
+    unrelated services — a local Postgres, a Redis — matched every time. The
+    misdetection was permanent and unrecoverable: it sends
+    ``get_runtime_policy`` to DOCKER, which answers every tool call with "run
+    --login on the host machine" no matter how valid the session on disk is.
+
+    A false negative is the worse failure, so the remaining signals are the
+    conservative ones rather than the clever ones: a container that believed it
+    was a host would try to auto-import from a browser keychain that is not
+    there and offer login flows it cannot run.
+
+    ``LINKEDIN_MCP_CONTAINER`` overrides the whole thing. Detection is a
+    heuristic over other people's kernels, so it will be wrong somewhere, and
+    without an override being wrong means editing installed source: the
+    misdetection blocks every tool call and no flag reaches it.
+    """
+    override = _container_override()
+    if override is not None:
+        return override
+
     if any(
         path.exists()
         for path in (
@@ -166,34 +192,110 @@ def _is_container_runtime() -> bool:
     ):
         return True
 
-    markers = ("docker", "containerd", "kubepods", "podman", "libpod")
-    for probe in (
-        Path("/proc/1/cgroup"),
-        Path("/proc/self/cgroup"),
-    ):
-        if _path_contains_markers(probe, markers):
+    for probe in _CGROUP_PROBES:
+        if _cgroup_path_is_containerised(probe):
             return True
 
-    for probe in (
-        Path("/proc/1/mountinfo"),
-        Path("/proc/self/mountinfo"),
-    ):
-        if _path_contains_markers(probe, markers) or _root_mount_uses_overlay(probe):
+    for probe in _MOUNTINFO_PROBES:
+        if _root_mount_uses_overlay(probe):
             return True
 
     return False
 
 
-def _path_contains_markers(path: Path, markers: tuple[str, ...]) -> bool:
+#: Escape hatch for a machine this detection gets wrong. Spelled the same way
+#: as every other boolean environment variable this server reads
+#: (``config/loaders.py``), but read here rather than through the config
+#: layer: runtime identity is resolved before a configuration exists, and
+#: importing the loaders would close a cycle.
+_CONTAINER_OVERRIDE_ENV = "LINKEDIN_MCP_CONTAINER"
+_OVERRIDE_TRUE = ("1", "true", "yes", "on")
+_OVERRIDE_FALSE = ("0", "false", "no", "off")
+
+#: Named rather than inlined so a test can point the decision at a fixture.
+#: Both pid 1 and self are read: a process can be in a different namespace than
+#: init, and either being containerised is enough.
+_CGROUP_PROBES = (Path("/proc/1/cgroup"), Path("/proc/self/cgroup"))
+_MOUNTINFO_PROBES = (Path("/proc/1/mountinfo"), Path("/proc/self/mountinfo"))
+
+
+def _container_override() -> bool | None:
+    """An explicit answer from the operator, or None to keep detecting."""
+    raw = os.environ.get(_CONTAINER_OVERRIDE_ENV)
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value in _OVERRIDE_TRUE:
+        return True
+    if value in _OVERRIDE_FALSE:
+        return False
+    # An unreadable value is not a decision. Falling through to detection beats
+    # guessing, and beats crashing at import time over an environment variable.
+    logger.warning(
+        "Ignoring %s=%r: expected one of %s",
+        _CONTAINER_OVERRIDE_ENV,
+        raw,
+        ", ".join(_OVERRIDE_TRUE + _OVERRIDE_FALSE),
+    )
+    return None
+
+
+#: Whole cgroup path segments that mean a container runtime owns this process.
+#: Matched as segments rather than substrings, which is the entire point: a
+#: systemd unit called ``app-docker\x2ddesktop.scope`` on an ordinary desktop
+#: contains "docker" and is not a container.
+_CONTAINER_CGROUP_SEGMENTS = frozenset(
+    {"docker", "containerd", "kubepods", "kubepods.slice", "podman", "machine"}
+)
+
+#: Segment *prefixes* for runtimes that name the segment after the instance.
+#: Podman writes ``libpod-<id>`` and ``libpod_parent``, so there is no bare
+#: segment to match.
+_CONTAINER_CGROUP_PREFIXES = ("libpod-", "libpod_", "crio-", "docker-")
+
+
+def _cgroup_path_is_containerised(path: Path) -> bool:
+    """Whether our own cgroup path sits under a container runtime's hierarchy.
+
+    A cgroup line is ``hierarchy:controllers:path``. Only the path describes
+    where this process sits; the rest is the kernel's bookkeeping. Reading the
+    whole line as text is what let an unrelated controller name pass as
+    evidence.
+
+    Two host cases have to keep reading as *not* a container, and both are
+    ordinary:
+
+    * ``0::/system.slice/docker.service`` — the Docker daemon itself. It is a
+      normal service on a normal host, and it is the very machine that has
+      other containers' mounts visible.
+    * ``app-docker\\x2ddesktop.scope`` — systemd escapes dashes, so a desktop
+      app's unit contains the word.
+    """
     if not path.exists():
         return False
 
     try:
-        text = path.read_text(encoding="utf-8", errors="ignore").lower()
+        text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False
 
-    return any(marker in text for marker in markers)
+    for line in text.splitlines():
+        fields = line.split(":", maxsplit=2)
+        if len(fields) < 3:
+            continue
+        for raw in fields[2].split("/"):
+            segment = raw.replace("\\x2d", "-").lower()
+            # A unit is a host service, not a container: docker.service is the
+            # daemon that *runs* containers.
+            if segment.endswith((".service", ".socket", ".mount")):
+                continue
+            segment = segment.removesuffix(".scope")
+            if segment in _CONTAINER_CGROUP_SEGMENTS:
+                return True
+            if segment.startswith(_CONTAINER_CGROUP_PREFIXES):
+                return True
+
+    return False
 
 
 def _root_mount_uses_overlay(path: Path) -> bool:

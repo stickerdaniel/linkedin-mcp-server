@@ -212,6 +212,10 @@ while a container is running.
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
 - Users on slow connections may need higher values for either.
 
+**Told to run `--login` on the host when you already did:**
+
+- If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
+
 **Using a proxy:**
 
 > **Most people should not use one.** LinkedIn's own guidance for reducing
@@ -279,6 +283,10 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 - *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
 - Users on slow connections may need higher values for either.
+
+**Told to run `--login` on the host when you already did:**
+
+- If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
 
 </details>
 
@@ -421,6 +429,10 @@ belongs behind something that provides it.
 - *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
 - Users on slow connections may need higher values for either.
+
+**Told to run `--login` on the host when you already did:**
+
+- If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
 
 **Using a proxy:**
 
@@ -566,6 +578,10 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 - *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
 - Users on slow connections may need higher values for either.
+
+**Told to run `--login` on the host when you already did:**
+
+- If tool calls answer "No valid LinkedIn session is available in Docker" on a machine that is *not* a container, the runtime was misdetected. This happened on Linux hosts running a Docker daemon for unrelated services. Set `LINKEDIN_MCP_CONTAINER=false` to override the detection; `true` forces the opposite.
 
 **Using a proxy:**
 
