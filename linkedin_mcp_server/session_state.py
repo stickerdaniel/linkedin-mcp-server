@@ -11,6 +11,7 @@ import logging
 import os
 import platform
 from pathlib import Path
+import re
 import shutil
 import socket
 from collections.abc import Callable, Iterator
@@ -245,13 +246,26 @@ def _container_override() -> bool | None:
 #: systemd unit called ``app-docker\x2ddesktop.scope`` on an ordinary desktop
 #: contains "docker" and is not a container.
 _CONTAINER_CGROUP_SEGMENTS = frozenset(
-    {"docker", "containerd", "kubepods", "kubepods.slice", "podman", "machine"}
+    {
+        "docker",
+        "containerd",
+        "kubepods",
+        "kubepods.slice",
+        "podman",
+        "machine",
+        # containerd's default namespace, which is what a plain `ctr run` and
+        # anything built on moby writes.
+        "moby",
+    }
 )
 
-#: Segment *prefixes* for runtimes that name the segment after the instance.
-#: Podman writes ``libpod-<id>`` and ``libpod_parent``, so there is no bare
-#: segment to match.
-_CONTAINER_CGROUP_PREFIXES = ("libpod-", "libpod_", "crio-", "docker-")
+#: Runtimes that name the cgroup segment after the container instance, so there
+#: is no bare segment to match. The identifier is required, not just the
+#: prefix: ``docker-backup.scope`` is a perfectly ordinary host service, and an
+#: earlier version of this read it as a container. Measured on a real host.
+_CONTAINER_CGROUP_INSTANCE = re.compile(
+    r"^(?:libpod-|libpod_|crio-|docker-|containerd-)[0-9a-f]{12,}$"
+)
 
 
 def _cgroup_path_is_containerised(path: Path) -> bool:
@@ -292,13 +306,38 @@ def _cgroup_path_is_containerised(path: Path) -> bool:
             segment = segment.removesuffix(".scope")
             if segment in _CONTAINER_CGROUP_SEGMENTS:
                 return True
-            if segment.startswith(_CONTAINER_CGROUP_PREFIXES):
+            if _CONTAINER_CGROUP_INSTANCE.match(segment):
                 return True
 
     return False
 
 
+#: Substrings that only appear in a *root* mount when a container runtime put
+#: it there. Applied to our own ``/`` line alone, never to the whole file:
+#: these same strings are all over a Docker host's mountinfo, describing other
+#: people's containers, which is the bug this module exists to not have.
+_CONTAINER_ROOT_SOURCES = (
+    "/var/lib/docker/",
+    "/var/lib/containerd/",
+    "/var/lib/containers/",
+    "/var/lib/rancher/",
+    "/run/containerd/",
+)
+
+
 def _root_mount_uses_overlay(path: Path) -> bool:
+    """Whether our own ``/`` was assembled by a container runtime.
+
+    Named for the common case, but overlay is not the only shape. A containerd
+    container using the ``native`` snapshotter gets a plain bind mount from
+    ``/var/lib/containerd/...`` on whatever filesystem the host uses — btrfs in
+    the case this was measured on — so a type check alone reads it as a host.
+    That is a false negative, and those are the dangerous direction: the
+    container would then look for a browser keychain that is not there.
+
+    So the root line is judged two ways: its filesystem type, and where its
+    source comes from. Both are read from the ``/`` line only.
+    """
     if not path.exists():
         return False
 
@@ -315,7 +354,14 @@ def _root_mount_uses_overlay(path: Path) -> bool:
         right_fields = right.split()
         if len(left_fields) < 5 or not right_fields:
             continue
-        if left_fields[4] == "/" and right_fields[0] == "overlay":
+        if left_fields[4] != "/":
+            continue
+        if right_fields[0] == "overlay":
+            return True
+        # The mount root (field 4 of the left half) and the source device carry
+        # the runtime's storage path for non-overlay snapshotters.
+        haystack = f"{left_fields[3]} {' '.join(right_fields[1:2])}".lower()
+        if any(marker in haystack for marker in _CONTAINER_ROOT_SOURCES):
             return True
 
     return False

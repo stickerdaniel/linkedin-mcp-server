@@ -593,6 +593,13 @@ class TestContainerDetection:
             # runs everyone else's containers.
             ("the docker daemon itself", "0::/system.slice/docker.service\n"),
             ("the containerd service", "0::/system.slice/containerd.service\n"),
+            # A host service that merely starts with the runtime's name. An
+            # earlier cut of this fix matched any "docker-" prefix and read
+            # this as a container; found on a real host.
+            (
+                "a backup job named after docker",
+                "0::/system.slice/docker-backup.scope\n",
+            ),
             (
                 "cgroup v1 with no container",
                 "12:pids:/user.slice\n1:name=systemd:/user.slice/session-2.scope\n",
@@ -614,17 +621,22 @@ class TestContainerDetection:
             ("docker, cgroup v2", "0::/docker/3f2abc\n"),
             (
                 "docker with the systemd cgroup driver",
-                "0::/system.slice/docker-3f2abc.scope\n",
+                "0::/system.slice/docker-3f2abc9d8e7f6a5b4c3d2e1f0a9b8c7d.scope\n",
             ),
             ("kubernetes", "0::/kubepods/besteffort/pod123/abc\n"),
             (
                 "kubernetes on systemd",
                 "0::/kubepods.slice/kubepods-burstable.slice/x.scope\n",
             ),
-            ("podman", "0::/libpod_parent/libpod-abc123\n"),
-            ("rootless podman", "0::/user.slice/user-1000.slice/libpod-abc.scope\n"),
+            ("podman", "0::/libpod_parent/libpod-abc123def456\n"),
+            (
+                "rootless podman",
+                "0::/user.slice/user-1000.slice/libpod-abc123def4567.scope\n",
+            ),
             ("containerd", "0::/containerd/abcdef\n"),
-            ("cri-o", "0::/system.slice/crio-abc123.scope\n"),
+            ("cri-o", "0::/system.slice/crio-abc123def4567890.scope\n"),
+            # containerd's default namespace, which a plain `ctr run` writes.
+            ("raw containerd", "0::/moby/some-container-name\n"),
         ],
     )
     def test_a_container_is_still_detected(self, tmp_path, label, cgroup):
@@ -643,6 +655,37 @@ class TestContainerDetection:
             "30 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n"
             "900 30 0:70 / /var/lib/docker/overlay2/abc/merged rw shared:400 - overlay overlay rw\n"
             "901 30 0:71 / /var/lib/docker/containers/dead/mounts/shm rw shared:401 - tmpfs shm rw\n",
+            encoding="utf-8",
+        )
+
+        assert not _root_mount_uses_overlay(path)
+
+    def test_a_non_overlay_container_root_still_counts(self, tmp_path):
+        # containerd with the native snapshotter bind-mounts the rootfs from
+        # its own storage onto whatever filesystem the host uses — btrfs here.
+        # Checking only for an overlay filesystem type read this as a host,
+        # which is the dangerous direction: the container would then hunt for a
+        # browser keychain that does not exist. Measured on a real container.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "1 0 0:5 /var/lib/containerd/io.containerd.snapshotter.v1.native"
+            "/snapshots/12 / rw,relatime - btrfs /dev/vda1 rw,subvol=/@\n",
+            encoding="utf-8",
+        )
+
+        assert _root_mount_uses_overlay(path)
+
+    def test_a_host_root_on_the_same_filesystem_does_not(self, tmp_path):
+        # The mirror image, and the reason the check reads the root line only:
+        # this host has containerd storage on it, just not as its own root.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "30 1 0:5 / / rw,relatime shared:1 - btrfs /dev/vda1 rw,subvol=/@\n"
+            "900 30 0:70 /var/lib/containerd/snapshots/9 /run/x rw - overlay overlay rw\n",
             encoding="utf-8",
         )
 
