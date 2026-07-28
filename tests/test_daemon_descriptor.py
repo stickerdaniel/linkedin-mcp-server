@@ -690,9 +690,9 @@ class TestProfileIdentityStability:
 class TestInstanceIdentity:
     def test_an_instance_id_cannot_escape_the_daemon_directory(self, tmp_path: Path):
         # The identifier becomes part of a filename, and it arrives from a file
-        # anything with write access to the auth root can edit. Unchecked, a
-        # descriptor naming ".." would turn some other readable file into what
-        # this client sends to the endpoint as its bearer token.
+        # rather than from this process. Unchecked, a descriptor naming ".."
+        # would turn some other readable file into what this client sends to
+        # the endpoint as its bearer token.
         with pytest.raises(DescriptorError, match="not a UUID"):
             token_path(tmp_path, "../../../../etc/hosts")
 
