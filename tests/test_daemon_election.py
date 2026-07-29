@@ -299,6 +299,47 @@ class TestFailingFast:
         # And promptly: the point is recovery, not that it eventually happens.
         assert time.monotonic() - began < 10
 
+    def test_a_child_that_never_reads_its_configuration_does_not_block_the_spawn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The handshake timeout is reached only if the spawn gets that far. The
+        # configuration is written to the child's pipe first, and a pipe buffer
+        # is small — 64 KiB on Linux — while the configuration has no size limit
+        # at all: user_agent, proxy_bypass and the paths are free-form strings.
+        # A child that neither reads nor exits blocks that write indefinitely,
+        # before any budget applies, with both processes holding the lock.
+        #
+        # Reproduced with a 10 MiB user agent and a child that only sleeps: the
+        # outer process timeout fired and the wait was never entered.
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        config.browser.user_agent = "x" * (10 * 1024 * 1024)
+        auth_root = profile.parent
+
+        sleepers: list[subprocess.Popen[Any]] = []
+        real = subprocess.Popen
+
+        def deaf(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+            child = real([command[0], "-c", "import time; time.sleep(600)"], **kwargs)
+            sleepers.append(child)
+            return child
+
+        monkeypatch.setattr(election_module.subprocess, "Popen", deaf)
+
+        began = time.monotonic()
+        attempt = election_module._start_owner(auth_root, profile, config, timeout=0.5)
+        elapsed = time.monotonic() - began
+
+        try:
+            assert elapsed < 10, f"the spawn blocked for {elapsed:.1f}s"
+            # Alive and holding the lock, so it may still come up: the same
+            # verdict a silent handshake gets.
+            assert attempt is _Attempt.CONTENDED
+        finally:
+            for sleeper in sleepers:
+                sleeper.kill()
+                sleeper.wait(timeout=30)
+
     def test_a_child_that_is_merely_slow_is_not_called_a_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

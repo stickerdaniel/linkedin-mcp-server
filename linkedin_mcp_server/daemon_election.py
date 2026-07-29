@@ -566,12 +566,70 @@ def _spawn(
 
     try:
         assert child.stdin is not None and child.stdout is not None
-        with child.stdin as handed:
-            handed.write(daemon_config.encode(config).encode())
-        return _await_ready(child, timeout=timeout)
+        started = time.monotonic()
+        try:
+            _hand_over_config(child, config, timeout=timeout)
+        except TimeoutError:
+            # The same verdict a silent handshake gets, and for the same reason:
+            # the child is alive and holds the lock, so it may yet come up. It
+            # simply has not read its configuration, which is what a machine
+            # under load looks like from here.
+            logger.warning("The daemon has not read its configuration yet")
+            return _Started.STILL_TRYING
+        # One budget across both halves. Handing the configuration over and
+        # waiting for the verdict are two ways of waiting on the same child, and
+        # giving each the full budget would let a slow one spend twice what the
+        # caller allowed.
+        return _await_ready(child, timeout=timeout - (time.monotonic() - started))
     finally:
         _release_handshake(child)
         _reap(child)
+
+
+def _hand_over_config(
+    child: subprocess.Popen[bytes], config: AppConfig, *, timeout: float
+) -> None:
+    """Write the configuration to the child, without waiting on it forever.
+
+    The obvious ``child.stdin.write(...)`` blocks once the pipe buffer is full,
+    and the buffer is small — 64 KiB on Linux, less on some platforms — while
+    the configuration has no size limit at all: ``user_agent``, ``proxy_bypass``
+    and the paths are free-form strings. A child that neither reads nor exits
+    therefore blocks this write indefinitely, *before* the handshake timeout is
+    ever reached. Reproduced with a 10 MiB user agent and a child that only
+    sleeps: the outer process timeout fired and the wait below was never
+    entered. Both processes hold the daemon lock while that happens.
+
+    Written on a thread for the same reason the verdict is read on one: it is
+    the one mechanism that bounds a blocking pipe operation on every platform.
+    The thread is a daemon, so a write that never completes cannot keep the
+    frontend from exiting, and the descriptor it holds is closed by the caller.
+    """
+    stream = child.stdin
+    assert stream is not None
+    payload = daemon_config.encode(config).encode()
+
+    done: queue.Queue[BaseException | None] = queue.Queue()
+
+    def hand_over() -> None:
+        try:
+            with stream:
+                stream.write(payload)
+        except BaseException as exc:  # noqa: BLE001 - reported to the caller
+            done.put(exc)
+        else:
+            done.put(None)
+
+    writer = threading.Thread(target=hand_over, name="daemon-config", daemon=True)
+    writer.start()
+    try:
+        failure = done.get(timeout=max(timeout, 0.0))
+    except queue.Empty:
+        raise TimeoutError(
+            "The daemon did not read its configuration in time"
+        ) from None
+    if failure is not None:
+        raise failure
 
 
 def _spawn_command(*, lock_fd: int | None) -> list[str]:
