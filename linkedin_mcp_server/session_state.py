@@ -352,6 +352,14 @@ _CONTAINER_ROOT_LAYOUTS = (
     "/var/lib/containers/",
     "/var/lib/rancher/",
     "/run/containerd/",
+    # LXC and LXD. Measured on LXC 5.0.3: the advertised ``lxc.payload.<name>``
+    # cgroup prefix does not appear when the host is itself containerised —
+    # both the outer machine and the nested container read ``0::/.lxc`` — but
+    # the kernel's mount root still separates them, because only the nested one
+    # is rooted under the container's rootfs.
+    "/var/lib/lxc/",
+    "/var/lib/lxd/",
+    "/var/snap/lxd/",
 )
 
 #: A remote filesystem is somebody else's namespace by definition, so its paths

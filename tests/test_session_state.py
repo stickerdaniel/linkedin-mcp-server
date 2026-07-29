@@ -770,6 +770,38 @@ class TestContainerDetection:
 
         assert state._is_container_runtime() is False
 
+    def test_a_nested_lxc_container_is_found_by_its_root(self, tmp_path):
+        # Measured on LXC 5.0.3 inside an OrbStack machine: the documented
+        # lxc.payload.<name> cgroup prefix does not appear when the host is
+        # itself containerised — outer machine and nested container both read
+        # 0::/.lxc. The kernel's mount root still separates them, because only
+        # the nested one is rooted under the container's rootfs.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "1 0 0:5 /scon/containers/orb1/rootfs/var/lib/lxc/demo/rootfs / "
+            "rw,relatime - btrfs /dev/vdb1 rw,subvol=/@\n",
+            encoding="utf-8",
+        )
+
+        assert _root_mount_uses_overlay(path)
+
+    def test_the_machine_hosting_that_lxc_container_is_not_one(self, tmp_path):
+        # The other half, and the reason the systemd marker is not consulted:
+        # this reports container=lxc while being a full system with its own
+        # systemd and a persistent disk. Believing it blocked every tool call.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "1 0 0:5 /scon/containers/orb1/rootfs / rw,relatime "
+            "- btrfs /dev/vdb1 rw,subvol=/@\n",
+            encoding="utf-8",
+        )
+
+        assert not _root_mount_uses_overlay(path)
+
     def test_an_nfs_root_is_not_a_container(self, tmp_path):
         # The mount source is whatever the far end calls its export. A server
         # exporting /var/lib/containers/workstations/alice is describing
