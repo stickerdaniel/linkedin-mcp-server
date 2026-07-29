@@ -48,6 +48,7 @@ import logging
 import os
 import socket
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, TextIO
@@ -383,6 +384,12 @@ async def _serve(
 #: and keeps the request itself free of any dependency on the serving loop.
 _STAND_DOWN_POLL_SECONDS = 0.1
 
+#: How long a standing-down owner may take to shut down before it exits anyway.
+#: Comfortably past uvicorn's own five second connection grace, so an ordinary
+#: shutdown is never cut short, and short enough that a hung one does not hold
+#: the lock for a user's whole session.
+_STAND_DOWN_SHUTDOWN_SECONDS = 30.0
+
 
 async def _serve_until_stopped(
     server: Any, serving: asyncio.Task[None], turnover: list[str]
@@ -398,28 +405,67 @@ async def _serve_until_stopped(
         if turnover:
             logger.info("A newer build asked for the browser; standing down")
             server.should_exit = True
-            # Graceful: uvicorn finishes the requests in flight, the lifespan
-            # runs, and the browser is closed on the way out. Only after that
-            # does this process exit and the kernel free the daemon lock, which
-            # is what lets the replacement start without ever overlapping.
-            await serving
+            # Graceful, but not unconditionally. Uvicorn finishes the requests
+            # in flight and runs the lifespan, which closes the browser, and
+            # only then does this process exit and the kernel free the lock.
+            #
+            # Bounded, because that shutdown is not guaranteed to finish:
+            # ``timeout_graceful_shutdown`` bounds the connection tasks and
+            # nothing bounds the lifespan behind them. An owner stuck there
+            # would hold the daemon lock forever, having already promised a
+            # frontend that it was standing down — every later election would
+            # find the position occupied by a process that is no longer serving.
+            # Giving up the wait and exiting is the lesser harm: the lock is
+            # freed by the exit either way.
+            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
             return
         await asyncio.sleep(_STAND_DOWN_POLL_SECONDS)
     await serving
 
 
-async def _await_started(server: object, serving: asyncio.Task[None]) -> None:
+async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
+    """Let the server finish shutting down, and stop waiting if it will not."""
+    try:
+        await asyncio.wait_for(asyncio.shield(serving), seconds)
+    except TimeoutError:
+        logger.warning(
+            "The daemon did not finish shutting down in %.0fs; exiting anyway so "
+            "the lock is released",
+            seconds,
+        )
+    except Exception:
+        logger.warning("The daemon endpoint stopped with an error", exc_info=True)
+
+
+async def _await_started(
+    server: object,
+    serving: asyncio.Task[None],
+    *,
+    timeout: float = _STARTUP_PROBE_SECONDS,
+) -> None:
     """Wait until uvicorn reports it is serving, or until it gives up.
 
     Polled rather than awaited on an event, because uvicorn exposes only the
     flag. Watching the serving task alongside it is what turns a server that
     died during startup into an error instead of a wait that never ends.
+
+    Bounded as well, because "died" is not the only way startup fails. An ASGI
+    lifespan that hangs leaves the task pending and the flag false forever, and
+    by this point the child already holds the daemon lock: the frontend would
+    time out and move on while this process kept the position occupied without
+    ever serving anything. Raising here runs the failure path, which stops the
+    server and lets the process exit, and the kernel frees the lock with it.
     """
+    deadline = time.monotonic() + timeout
     while not getattr(server, "started", False):
         if serving.done():
             # Re-raises whatever killed it, or reports the silent exit.
             await serving
             raise RuntimeError("The daemon endpoint stopped before it started serving")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"The daemon endpoint did not start within {timeout:.0f}s"
+            )
         await asyncio.sleep(0.02)
 
 

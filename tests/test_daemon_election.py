@@ -1160,6 +1160,80 @@ class TestVersionSkew:
         assert _matches_token("  the-token  ", "the-token")
 
 
+class TestNotHoldingTheLockForever:
+    """An owner that cannot serve must not keep the position occupied.
+
+    Both waits below are on the owner's side, after it already holds the daemon
+    lock. Unbounded, either one turns a hung dependency into a profile nothing
+    can ever elect an owner for again: the frontend times out and moves on, and
+    the lock stays held by a process that is not serving anything.
+    """
+
+    def test_a_startup_that_never_completes_gives_up(self):
+        # `server.started` never turning true is not the same as the server
+        # dying, and only the second case was handled. An ASGI lifespan that
+        # hangs leaves the task pending and the flag false for good.
+        import asyncio
+
+        from linkedin_mcp_server import daemon_owner
+
+        class NeverStarts:
+            started = False
+            should_exit = False
+
+            async def serve(self, sockets: object = None) -> None:
+                await asyncio.sleep(3600)
+
+        async def exercise() -> None:
+            server = NeverStarts()
+            serving = asyncio.create_task(server.serve())
+            try:
+                with pytest.raises(TimeoutError):
+                    await daemon_owner._await_started(server, serving, timeout=0.5)
+            finally:
+                serving.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await serving
+
+        asyncio.run(exercise())
+
+    def test_a_shutdown_that_never_completes_stops_waiting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Uvicorn's `timeout_graceful_shutdown` bounds the connection tasks and
+        # nothing bounds the lifespan behind them. An owner stuck there has
+        # already told a frontend it was standing down, so every later election
+        # finds the position held by a process that will never serve again.
+        import asyncio
+
+        from linkedin_mcp_server import daemon_owner
+
+        class NeverStops:
+            started = True
+            should_exit = False
+
+            async def serve(self, sockets: object = None) -> None:
+                await asyncio.sleep(3600)
+
+        monkeypatch.setattr(daemon_owner, "_STAND_DOWN_SHUTDOWN_SECONDS", 0.5)
+
+        async def exercise() -> float:
+            server = NeverStops()
+            serving = asyncio.create_task(server.serve())
+            began = time.monotonic()
+            try:
+                await daemon_owner._serve_until_stopped(server, serving, ["asked"])
+                return time.monotonic() - began
+            finally:
+                serving.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await serving
+
+        elapsed = asyncio.run(exercise())
+
+        assert elapsed < 5, f"the stand-down wait took {elapsed:.1f}s"
+
+
 class TestPublishingLast:
     """Nothing is discoverable until it has been proved to work."""
 
