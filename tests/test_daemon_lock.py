@@ -204,7 +204,7 @@ posix_handoff = pytest.mark.skipif(
 class TestHandoff:
     @posix_handoff
     def test_a_duplicate_survives_the_original_being_closed(self, tmp_path: Path):
-        # How a supervisor is launched: it inherits a copy, and the process that
+        # How an owner is launched: it inherits a copy, and the process that
         # elected it lets go. If the lock did not survive that, another client
         # would see it free and elect a second owner against a live browser.
         lock = DaemonLock(tmp_path)
@@ -222,7 +222,7 @@ class TestHandoff:
     @posix_handoff
     def test_the_copy_is_inheritable(self, tmp_path: Path):
         # The original is opened close-on-exec so a launched Chromium cannot
-        # hold the lock open. That same flag would stop a supervisor inheriting
+        # hold the lock open. That same flag would stop an owner inheriting
         # it, so the duplicate has to clear it explicitly.
         lock = DaemonLock(tmp_path)
         assert lock.try_acquire()
@@ -378,7 +378,7 @@ class TestHandoff:
     def test_adopting_a_descriptor_that_holds_no_lock_still_excludes(
         self, tmp_path: Path
     ):
-        # A supervisor launched with a descriptor that was never locked, or
+        # An owner launched with a descriptor that was never locked, or
         # whose lock was already released. Measured before the fix: it reported
         # ownership while daemon_is_running said no daemon was there and a
         # contender took the lock alongside it. Adoption now asks for the lock,
@@ -401,7 +401,7 @@ class TestHandoff:
 
     @posix_handoff
     def test_an_adopted_lock_is_held_without_reacquiring(self, tmp_path: Path):
-        # A supervisor is launched already holding a copy. Acquiring again would
+        # An owner is launched already holding a copy. Acquiring again would
         # fail on POSIX, where the process already holds it, so adoption records
         # ownership rather than taking it.
         original = DaemonLock(tmp_path)
@@ -409,13 +409,13 @@ class TestHandoff:
         inherited = original.inheritable_copy()
         original.release()
 
-        supervisor = DaemonLock(tmp_path)
-        supervisor.adopt(inherited)
+        owner = DaemonLock(tmp_path)
+        owner.adopt(inherited)
         try:
-            assert supervisor.held
+            assert owner.held
             assert daemon_is_running(tmp_path)
         finally:
-            supervisor.release()
+            owner.release()
 
         assert not daemon_is_running(tmp_path)
 
@@ -552,7 +552,7 @@ class TestReleaseSemantics:
     def test_releasing_closes_rather_than_unlocks(self, tmp_path: Path):
         # The measured trap. flock belongs to the open file description, which
         # every inherited copy shares, so unlocking would release the lock for
-        # the supervisor too. Closing drops only this descriptor.
+        # the owner too. Closing drops only this descriptor.
         lock = DaemonLock(tmp_path)
         assert lock.try_acquire()
         inherited = lock.inheritable_copy()
@@ -573,7 +573,7 @@ class TestLiveness:
 
     def test_probing_does_not_disturb_the_holder(self, tmp_path: Path):
         # Discovery calls this on every cold start, so it must not briefly
-        # exclude a supervisor that is starting up.
+        # exclude an owner that is starting up.
         lock = DaemonLock(tmp_path)
         assert lock.try_acquire()
         try:

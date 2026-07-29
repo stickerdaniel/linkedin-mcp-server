@@ -99,6 +99,55 @@ class TestServerRoles:
         assert server_module.ServerRole is ServerRole
 
 
+class TestOwnerAuthentication:
+    """Only the shared owner authenticates, and it does so with one token.
+
+    The owner listens on a loopback port, which every process on the machine can
+    reach and which a browser reaches on behalf of any page the user visits. The
+    token is what stands between that and a logged-in LinkedIn session.
+    """
+
+    def test_an_owner_with_a_token_requires_one(self):
+        owner = create_mcp_server(role=ServerRole.OWNER, auth_token="a-token")
+
+        assert owner.auth is not None
+
+    def test_a_server_without_a_token_stays_unauthenticated(self):
+        # The stdio server has no port to protect, and adding an auth provider
+        # there would advertise metadata for a flow nothing performs.
+        assert create_mcp_server().auth is None
+        assert create_mcp_server(role=ServerRole.OWNER).auth is None
+
+    def test_a_token_on_a_role_that_cannot_use_one_is_refused(self):
+        # Passing a token to a stdio server is a caller that believes it built
+        # the owner. Ignoring it quietly would leave an endpoint that was meant
+        # to be authenticated serving anyone who finds it.
+        with pytest.raises(ValueError, match="daemon owner"):
+            create_mcp_server(role=ServerRole.DIRECT, auth_token="a-token")
+
+    async def test_the_wrong_token_is_refused_and_the_right_one_accepted(self):
+        owner = create_mcp_server(role=ServerRole.OWNER, auth_token="the-token")
+        verifier = owner.auth
+        assert verifier is not None
+
+        assert await verifier.verify_token("the-token") is not None
+        assert await verifier.verify_token("the-tokeN") is None
+        assert await verifier.verify_token("") is None
+        # A prefix must not pass. A comparison that stopped at the shorter
+        # length would accept every prefix of the real token, which turns
+        # guessing into a character-at-a-time search.
+        assert await verifier.verify_token("the-toke") is None
+
+    def test_the_token_does_not_survive_in_the_verifier(self):
+        # The owner's own repr and any process dump would otherwise carry the
+        # credential. Only its digest is kept.
+        token = "a-secret-token"
+        owner = create_mcp_server(role=ServerRole.OWNER, auth_token=token)
+
+        assert token not in repr(owner.auth)
+        assert token not in repr(vars(owner.auth))
+
+
 class TestSequentialToolExecutionMiddleware:
     async def test_create_mcp_server_registers_sequential_tool_middleware(self):
         mcp = create_mcp_server()

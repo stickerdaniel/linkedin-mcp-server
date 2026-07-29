@@ -6,10 +6,17 @@ person profiles, company data, job information, and session management capabilit
 """
 
 import asyncio
+import hashlib
+import hmac
 import logging
 from typing import Any, AsyncIterator
 
 from fastmcp import FastMCP
+
+# fastmcp's own AccessToken, not the SDK's: it subclasses it to carry the JWT
+# claims (`fastmcp/server/auth/auth.py:54`), and returning the base class from
+# an override narrows what every caller downstream was promised.
+from fastmcp.server.auth.auth import AccessToken, TokenVerifier
 from fastmcp.server.lifespan import lifespan
 
 from linkedin_mcp_server import __version__
@@ -37,6 +44,37 @@ from linkedin_mcp_server.tools.person import register_person_tools
 from linkedin_mcp_server.tools.post import register_post_tools
 
 logger = logging.getLogger(__name__)
+
+
+class _StaticTokenAuth(TokenVerifier):
+    """Accepts exactly the one token the owner published, and nothing else.
+
+    A whole OAuth flow would be ceremony here: both ends are this installation,
+    the token is minted at startup, never reused, and written to a file only
+    this account can read. What it has to be is unguessable and compared without
+    leaking where two tokens diverge, which is what the digest comparison below
+    is for.
+    """
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        # A digest rather than the token, so the verifier's own repr does not
+        # carry the credential — the surrounding code logs whole objects at
+        # DEBUG and users paste those logs into issue reports.
+        #
+        # Deliberately not claimed: that this keeps the token out of the
+        # process. It does not. The owner holds it to serve the stand-down
+        # route, and every accepted request builds an AccessToken around it.
+        # Anything able to read this process's memory has already won, and the
+        # token is the least of what it finds there.
+        self._expected = hashlib.sha256(token.encode()).digest()
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not hmac.compare_digest(
+            self._expected, hashlib.sha256(token.encode()).digest()
+        ):
+            return None
+        return AccessToken(token=token, client_id="linkedin-mcp-frontend", scopes=[])
 
 
 @lifespan
@@ -91,18 +129,33 @@ def create_mcp_server(
     *,
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     role: ServerRole = ServerRole.DIRECT,
+    auth_token: str | None = None,
 ) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools.
 
     *role* selects which parts belong to this process. It defaults to
     :attr:`ServerRole.DIRECT`, which is exactly the historical server, so every
     existing caller keeps what it had.
+
+    *auth_token* is the bearer token a daemon owner requires. Only an owner has
+    one: it listens on a loopback port that every process on the machine can
+    reach, and a browser the user merely points at a page can reach it too.
     """
+    if auth_token is not None and role is not ServerRole.OWNER:
+        # A token on a stdio server protects nothing — there is no port to
+        # protect — and passing one is a caller that believes it built the
+        # owner. Refused rather than ignored, because the mistake it describes
+        # is an endpoint that was meant to be authenticated.
+        raise ValueError(
+            f"Only a daemon owner authenticates requests, not {role.value}"
+        )
+
     mcp = FastMCP(
         "mcp-server-linkedin",
         version=__version__,
         lifespan=browser_lifespan,
         mask_error_details=True,
+        auth=_StaticTokenAuth(auth_token) if auth_token is not None else None,
     )
     # Profile ownership belongs to whoever launches Chromium. A process that
     # only forwards calls must not take the lease: it would either block itself

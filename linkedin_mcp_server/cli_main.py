@@ -14,6 +14,7 @@ from linkedin_mcp_server.bootstrap import (
 from linkedin_mcp_server.core import AuthenticationError
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.drivers.browser import (
     experimental_persist_derived_runtime,
     close_browser,
@@ -282,6 +283,57 @@ def profile_info_and_exit() -> None:
     sys.exit(1)
 
 
+def _elect_daemon_owner_if_enabled(config: AppConfig) -> None:
+    """Make sure one shared owner is running, when the daemon is switched on.
+
+    Off by default, and inert when off. What it establishes when on is the half
+    of the daemon that has to work before forwarding can be built: exactly one
+    owner process per profile, reachable, with the lock held by the process that
+    actually serves.
+
+    This process still runs its own tools, because the forwarding role does not
+    exist yet. So an enabled daemon costs an idle owner beside the ordinary
+    server and buys nothing, which is why the flag stays experimental and off.
+
+    That also means two processes can reach the same profile while the flag is
+    on, and what keeps them off each other is the profile lease from #598, not
+    anything here: the owner takes it when it opens Chromium and hands it over
+    when another process announces itself
+    (``drivers/browser.py:881-901``). The daemon lock decides who *owns* the
+    browser; the lease decides who is driving it right now, and only the second
+    question is being asked while this server still runs its own tools.
+
+    Never fatal. Every failure inside is a reason to serve this client the way
+    the server always has, and a client that could not start because a shared
+    browser could not be elected would be a worse outcome than not sharing one.
+    Once forwarding lands, a failed election stops being survivable this way and
+    the decision moves with it.
+    """
+    from linkedin_mcp_server.daemon import daemon_would_be_used
+
+    if not daemon_would_be_used(config):
+        return
+
+    try:
+        from linkedin_mcp_server.daemon_election import obtain_owner
+        from linkedin_mcp_server.session_state import auth_root_dir
+
+        profile = get_profile_dir()
+        outcome = obtain_owner(auth_root_dir(profile), profile, config)
+    except Exception:
+        logger.warning("The shared browser owner is unavailable", exc_info=True)
+        return
+
+    if outcome.worth_connecting:
+        logger.info("A shared browser owner is running")
+    else:
+        logger.warning(
+            "No shared browser owner could be started (%s); this server will "
+            "drive its own browser",
+            outcome.attachment_lookup.state.value,
+        )
+
+
 def get_version() -> str:
     """Get version from installed metadata with a source fallback."""
     try:
@@ -384,6 +436,13 @@ def main() -> None:
                 # rules that were skipped when the value said stdio.
                 config.server.transport = transport
                 config.validate()
+
+            # Get a shared owner running before building this process's server.
+            # Nothing downstream depends on the result yet: the frontend still
+            # runs its own tools. What this establishes is that exactly one
+            # owner exists per profile and that a client can reach it, which is
+            # what the forwarding half will attach to.
+            _elect_daemon_owner_if_enabled(config)
 
             # Create and run the MCP server
             mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
