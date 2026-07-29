@@ -76,10 +76,15 @@ FAILED = "failed"
 #: give two installations a way to disagree.
 MCP_PATH = "/mcp"
 
-#: How long the startup probe may take before the owner gives up and reports a
-#: failed election. Generous, because it covers the first import of the whole
-#: server graph on a cold page cache, and bounded because the frontend is
-#: blocked on the handshake for exactly this long.
+#: How long the owner has to get from a bound socket to a proved endpoint, for
+#: both stages together. Generous, because it covers the first import of the
+#: whole server graph on a cold page cache.
+#:
+#: It must stay comfortably below the frontend's own election budget
+#: (``daemon_election.DEFAULT_ELECTION_SECONDS``), and a test enforces that. The
+#: frontend stops a child that has said nothing by the time its budget runs out,
+#: so an owner allowed to take longer would be killed on a slow machine while
+#: still inside its own rules.
 _STARTUP_PROBE_SECONDS = 30.0
 
 _LOG_FILE = "daemon.log"
@@ -355,12 +360,20 @@ async def _serve(
 
     serving = asyncio.create_task(server.serve(sockets=[sock]), name="daemon-endpoint")
     try:
-        await _await_started(server, serving)
+        # One budget across both halves of startup, not one each. They are two
+        # stages of the same thing from the frontend's side, and it waits on the
+        # total: an allowance each let an owner take twice what the frontend
+        # would ever wait for, so it could be following its own rules and still
+        # be written off as silent and stopped.
+        deadline = time.monotonic() + _STARTUP_PROBE_SECONDS
+        await _await_started(server, serving, timeout=_STARTUP_PROBE_SECONDS)
         # Built before it is proved, and proved through its own ``url``: a probe
         # against a URL assembled here would pass while the one clients actually
         # use was malformed. An IPv6 endpoint is exactly that case, since the
         # literal has to be bracketed.
-        await asyncio.wait_for(_probe(descriptor.url, token), _STARTUP_PROBE_SECONDS)
+        await asyncio.wait_for(
+            _probe(descriptor.url, token), max(deadline - time.monotonic(), 0.0)
+        )
 
         daemon_descriptor.publish(auth_root, descriptor, token)
         # Only now, and only while the lock is held: a token file that is not

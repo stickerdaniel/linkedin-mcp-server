@@ -376,26 +376,36 @@ class TestFailingFast:
                     sleeper.kill()
                     sleeper.wait(timeout=30)
 
-    def test_a_child_that_is_merely_slow_is_not_called_a_failure(
+    def test_a_child_that_says_nothing_does_not_keep_the_lock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # Silence is not failure, and conflating the two is the worst outcome
-        # this module can produce. A child that has neither answered nor exited
-        # is still coming up and still holds the lock it adopted. Reported as
-        # "could not serve", the caller concludes nobody is coming and goes off
-        # to drive its own browser against the profile that child is about to
-        # open — two browsers on one profile, caused by a slow machine.
+        # A child that has neither answered nor exited by the end of the budget
+        # is stopped, and the reasoning took two passes to get right.
+        #
+        # The first version called this "still trying" and left the child alone,
+        # on the grounds that it might yet come up and that killing it could
+        # leave the caller driving a second browser. The first half is true and
+        # the second is not: an owner opens no browser before it answers, and on
+        # POSIX the frontend holds its own lock until the spawn returns. What
+        # the leniency actually bought was a child holding the inherited lock
+        # while never serving — measured, the lock was still held afterwards,
+        # and every later election would contend against it forever.
+        #
+        # This test asserted the lenient behaviour and then killed the child in
+        # its own teardown, with a comment saying the lock would otherwise be
+        # held for the rest of the run. That comment was the bug report.
         profile = _profile(tmp_path)
         config = _config(profile)
         auth_root = profile.parent
 
-        # A child that starts and then says nothing at all, which is exactly
-        # what a cold interpreter on a loaded machine looks like.
+        # An ordinary configuration, so the handover succeeds and the silence
+        # happens at the handshake. The large-configuration case reaches the
+        # same wedge by blocking the write instead, and is covered separately.
         real = subprocess.Popen
         started: list[subprocess.Popen[Any]] = []
 
         def mute(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
-            child = real([command[0], "-c", "import time; time.sleep(30)"], **kwargs)
+            child = real([command[0], "-c", "import time; time.sleep(600)"], **kwargs)
             started.append(child)
             return child
 
@@ -406,22 +416,27 @@ class TestFailingFast:
         elapsed = time.monotonic() - began
 
         try:
-            assert attempt is _Attempt.CONTENDED, (
-                "a child that is still starting was reported as a failure"
+            assert attempt is _Attempt.FAILED
+
+            # The half that matters. Nothing in production kills this child for
+            # us, which is exactly what the old teardown was standing in for.
+            probe = DaemonLock(auth_root)
+            assert probe.try_acquire(), (
+                "the silent child kept the daemon lock for this profile"
             )
-            # And it came back on time. The timeout above bounds the *wait*, and
-            # the cleanup after it used to hand that bound straight back:
-            # `child.stdout.close()` waits on the reader thread's I/O lock, so
-            # it blocked for exactly as long as the child stayed silent.
-            # Measured at 29.27s against a 30s sleeper, and forever against a
-            # child that never speaks or exits.
+            probe.release()
+            assert all(child.poll() is not None for child in started)
+
+            # And on time. The timeout bounds the *wait*, and the cleanup after
+            # it used to hand that bound straight back: `child.stdout.close()`
+            # waits on the reader thread's I/O lock, so it blocked for as long
+            # as the child stayed silent — 29.27s against a 30s sleeper.
             assert elapsed < 5, f"the bounded wait took {elapsed:.1f}s"
         finally:
-            # It sleeps for half a minute by design, so leaving it behind would
-            # hold the daemon lock it inherited for the rest of the run.
             for child in started:
-                child.kill()
-                child.wait(timeout=30)
+                if child.poll() is None:  # pragma: no cover - the stop worked
+                    child.kill()
+                    child.wait(timeout=30)
 
     def test_losing_the_lock_race_waits_instead_of_giving_up(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1360,6 +1375,33 @@ class TestVersionSkew:
         assert not _matches_token("\udcff", "the-token")
         assert _matches_token("the-token", "the-token")
         assert _matches_token("  the-token  ", "the-token")
+
+
+class TestBudgets:
+    def test_the_owner_may_not_take_longer_than_the_frontend_will_wait(self):
+        # The frontend now stops a child that has said nothing by the end of its
+        # budget, which makes the relationship between the two numbers load
+        # bearing rather than cosmetic: an owner allowed to take longer would be
+        # killed while still following its own rules, on a slow machine, and the
+        # user would see an election that never succeeds.
+        #
+        # They were out of step. The owner spent its full allowance twice, once
+        # waiting for uvicorn and again probing, so it could legitimately answer
+        # at 60s while the frontend gave up at 45. The two stages share one
+        # deadline now, and this pins the remaining margin.
+        from linkedin_mcp_server import daemon_owner
+
+        assert (
+            daemon_owner._STARTUP_PROBE_SECONDS
+            < election_module.DEFAULT_ELECTION_SECONDS
+        ), "an owner can now outlast the frontend that is waiting for it"
+
+        # With room to spare, because the frontend spends part of its budget on
+        # the configuration handover and on lock attempts before the owner's
+        # clock even starts.
+        assert daemon_owner._STARTUP_PROBE_SECONDS <= (
+            election_module.DEFAULT_ELECTION_SECONDS / 2
+        )
 
 
 class TestNotHoldingTheLockForever:

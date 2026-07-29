@@ -61,10 +61,16 @@ from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
 logger = logging.getLogger(__name__)
 
 #: How long a frontend waits for an owner to become attachable before giving up
-#: and reporting what it last saw. Covers a cold start of the whole server graph
-#: plus the owner's own startup probe, and is what bounds the delay a user sees
-#: when something goes wrong rather than when it goes right.
-DEFAULT_ELECTION_SECONDS = 45.0
+#: and reporting what it last saw. It is what bounds the delay a user sees when
+#: something goes wrong rather than when it goes right.
+#:
+#: Comfortably more than twice the owner's own startup allowance
+#: (``daemon_owner._STARTUP_PROBE_SECONDS``), and that ordering is enforced by a
+#: test. A frontend now stops a child that has said nothing by the time this
+#: runs out, so an owner permitted to take longer would be killed on a slow
+#: machine while still inside its own rules. The remainder covers handing the
+#: configuration over and the lock attempts before the owner's clock starts.
+DEFAULT_ELECTION_SECONDS = 90.0
 
 #: How long a published owner has to answer before it is treated as leftovers.
 #: This is a loopback request to a process that is either serving or gone, so
@@ -393,21 +399,24 @@ def _log_hint(auth_root: Path) -> Path:
 
 
 class _Started(enum.Enum):
-    """What the startup handshake said, in the three ways it can end.
+    """What the startup handshake said.
 
-    Silence is its own answer and must not be folded into failure. A child that
-    has neither answered nor exited is still coming up and still holds the lock
-    it adopted; calling that a failure sends the caller off to drive its own
-    browser against the profile that child is about to open.
+    Silence is a third answer while the wait is running, and ``_spawn`` resolves
+    it rather than passing it on: a child that has said nothing by the end of
+    the budget is stopped, so what reaches the caller is only ever "it serves"
+    or "it does not". Leaving silence as an outcome is what let a child keep the
+    inherited lock while never serving.
     """
 
     #: The endpoint answered and the descriptor is published.
     YES = "yes"
 
-    #: The child said it could not serve, or died trying.
+    #: The child could not serve, said so, died trying, or was stopped for
+    #: having said nothing at all.
     NO = "no"
 
-    #: Neither, within the budget. It may still succeed.
+    #: Neither, within the budget — used only inside ``_spawn``, which decides
+    #: what to do about it before returning.
     STILL_TRYING = "still_trying"
 
 
@@ -465,14 +474,10 @@ def _start_holding_the_lock(
     try:
         duplicate = lock.inheritable_copy()
         try:
-            started = _spawn(auth_root, config, lock_fd=duplicate, timeout=timeout)
-            if started is _Started.YES:
+            if _spawn(auth_root, config, lock_fd=duplicate, timeout=timeout) is (
+                _Started.YES
+            ):
                 outcome = _Attempt.STARTED
-            elif started is _Started.STILL_TRYING:
-                # The child is alive and holds the lock this process is about to
-                # let go of, so from here it is indistinguishable from any other
-                # owner coming up: wait for it rather than conclude anything.
-                outcome = _Attempt.CONTENDED
         finally:
             # Closed whether or not the child got going. It shares the kernel
             # lock, so a leaked copy would hold the daemon lock for this
@@ -593,7 +598,32 @@ def _spawn(
         # waiting for the verdict are two ways of waiting on the same child, and
         # giving each the full budget would let a slow one spend twice what the
         # caller allowed.
-        return _await_ready(child, timeout=timeout - (time.monotonic() - started))
+        verdict = _await_ready(child, timeout=timeout - (time.monotonic() - started))
+        if verdict is _Started.STILL_TRYING:
+            # Stopped, not left to itself, and this is the last of the lock
+            # wedges. "Still trying" reads as generous — the child may yet come
+            # up — but by now it has had the whole budget and said nothing, and
+            # on POSIX it holds the inherited lock descriptor. Left alone it
+            # keeps that lock while never serving, and every later election
+            # contends against a process that will never publish.
+            #
+            # Measured with an ordinary configuration and a child that only
+            # sleeps: the lock was still held afterwards. The kill path added
+            # for the configuration timeout only covered the case where the
+            # *write* blocked, which needs a configuration large enough to fill
+            # a pipe; this is the same wedge reached by the ordinary route.
+            #
+            # Safe for the same reason: an owner opens no browser before it
+            # answers, so nothing is interrupted mid-flight. And on POSIX the
+            # frontend still holds its own lock until this returns, so the
+            # position cannot be taken by anyone else in between.
+            logger.warning(
+                "The daemon did not finish starting; stopping it so the lock is "
+                "not held by a process that never served"
+            )
+            _stop_child(child)
+            return _Started.NO
+        return verdict
     finally:
         _release_handshake(child)
         _reap(child)
