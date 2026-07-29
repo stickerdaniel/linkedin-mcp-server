@@ -50,16 +50,49 @@ class TestRoundTrip:
             original, key=key
         )
 
+    def test_every_browser_setting_crosses_unchanged(self):
+        # The fingerprint check above is necessary and not sufficient: it only
+        # covers SHARED_CONFIG_FIELDS, and a field left at its default produces
+        # the same digest whether it crossed or was dropped. So the whole
+        # section is compared field by field, which is what would actually
+        # notice a setting quietly going missing from the codec.
+        original = _config(
+            headless=False,
+            slow_mo=25,
+            user_agent="Mozilla/5.0 (test)",
+            viewport_width=1920,
+            viewport_height=1080,
+            default_timeout=9000,
+            proxy_server="http://proxy.example:8080",
+            proxy_username="user",
+            proxy_password="secret",
+            proxy_bypass="localhost",
+            login_timeout_seconds=900.0,
+            login_inline_wait_seconds=10.0,
+            browser_wait_seconds=30.0,
+            browser_min_hold_seconds=5.0,
+            browser_idle_timeout_seconds=120.0,
+            auto_import_from_browser=False,
+            eager_full_chromium=True,
+        )
+
+        restored = daemon_config.decode(daemon_config.encode(original))
+
+        assert restored.browser == original.browser
+
     def test_settings_outside_the_fingerprint_survive_too(self):
         # The fingerprint says which differences stop two clients sharing an
         # owner. It does not say which settings the owner needs to do its job:
-        # the handoff and wait timings are not in it, and an owner left on
-        # defaults would hand the browser around on a schedule the user did not
-        # choose.
-        # Values that survive validate() untouched, so this pins the transport
-        # rather than the clamping. The wait has a 45 second ceiling and the
-        # minimum hold has to leave room inside it, and both clamps are correct:
-        # picking values they act on would make this a test of the validator.
+        # `browser_wait_seconds` and `browser_min_hold_seconds` are not in
+        # SHARED_CONFIG_FIELDS at all, so an owner left on their defaults would
+        # hand the browser around on a schedule the user did not choose while
+        # every fingerprint still matched. (`browser_idle_timeout_seconds` *is*
+        # in that list and is included here only as a third value to carry.)
+        #
+        # The values chosen survive validate() untouched, so this pins the
+        # transport rather than the clamping: the wait has a 45 second ceiling
+        # and the minimum hold has to leave room inside it, and picking values
+        # those clamps act on would make this a test of the validator.
         original = _config(
             browser_wait_seconds=30.0,
             browser_min_hold_seconds=5.0,
@@ -153,7 +186,13 @@ class TestRefusing:
     def test_a_configuration_the_frontend_would_reject_is_rejected_here_too(self):
         # The owner is the process that opens the browser, so a value refused at
         # the frontend must not reach Chromium through this back door.
-        with pytest.raises(Exception):
+        #
+        # The specific error, not a bare Exception: this is asserting that
+        # `validate()` ran, and any decoder bug at all would satisfy a looser
+        # check while the validation it names had quietly stopped happening.
+        from linkedin_mcp_server.config.schema import ConfigurationError
+
+        with pytest.raises(ConfigurationError, match="tool_timeout_seconds"):
             daemon_config.decode(
                 json.dumps({"browser": {}, "server": {"tool_timeout_seconds": -1.0}})
             )

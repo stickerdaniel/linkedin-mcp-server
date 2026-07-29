@@ -1,8 +1,16 @@
 """The process that holds the browser and serves it over loopback.
 
-Started detached by a frontend that has just won the election, and from then on
-independent of it: it holds the daemon lock for its lifetime, listens on an
-ephemeral loopback port, and drives the one Chromium every client shares.
+Started by a frontend that wants a shared browser, and from then on independent
+of it: it holds the daemon lock for its lifetime, listens on an ephemeral
+loopback port, and drives the one Chromium every client shares.
+
+"Independent" is a POSIX measurement, not a promise on every platform. There the
+child leads its own session, and after ``SIGKILL`` to the frontend's whole
+process group it was still running and had reparented to pid 1. Windows has no
+equivalent in this code: ``start_new_session`` is POSIX-only
+(``subprocess.py:795``), so nothing there detaches the child from a job object
+that takes its parent down. That is worth revisiting before the flag is turned
+on by default, and it is not a regression today, since the feature is opt-in.
 
 Three orderings in here are load-bearing, and each of them is a way the daemon
 would otherwise wedge:
@@ -188,9 +196,10 @@ def create_owner_server(
     and blocks with no handle to stop it (``fastmcp/server/mixins/transport.py``,
     the ``server.serve`` at the end of ``run_http_async``). This process needs
     all three: the port before it can publish, the started flag before it can
-    probe, and a way to shut down for the idle exit that follows. Verified
-    against the installed 3.4.4, including that a lifespan still runs both ways
-    round when driving uvicorn like this.
+    probe, and a handle to stop with — used here by the stand-down turnover, and
+    by the idle exit when that is built. Verified against the installed 3.4.4,
+    including that a lifespan still runs both ways round when driving uvicorn
+    like this.
     """
     import uvicorn
     from starlette.requests import Request

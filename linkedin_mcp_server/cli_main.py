@@ -291,14 +291,23 @@ def _elect_daemon_owner_if_enabled(config: AppConfig) -> None:
     owner process per profile, reachable, with the lock held by the process that
     actually serves.
 
-    This process still runs its own tools. Until the forwarding role exists, an
-    enabled daemon therefore costs an idle owner beside the ordinary server and
-    buys nothing, which is why the flag stays experimental and off. Nothing here
-    can make things worse for a user who leaves it alone.
+    This process still runs its own tools, because the forwarding role does not
+    exist yet. So an enabled daemon costs an idle owner beside the ordinary
+    server and buys nothing, which is why the flag stays experimental and off.
+
+    That also means two processes can reach the same profile while the flag is
+    on, and what keeps them off each other is the profile lease from #598, not
+    anything here: the owner takes it when it opens Chromium and hands it over
+    when another process announces itself
+    (``drivers/browser.py:881-901``). The daemon lock decides who *owns* the
+    browser; the lease decides who is driving it right now, and only the second
+    question is being asked while this server still runs its own tools.
 
     Never fatal. Every failure inside is a reason to serve this client the way
     the server always has, and a client that could not start because a shared
     browser could not be elected would be a worse outcome than not sharing one.
+    Once forwarding lands, a failed election stops being survivable this way and
+    the decision moves with it.
     """
     from linkedin_mcp_server.daemon import daemon_would_be_used
 

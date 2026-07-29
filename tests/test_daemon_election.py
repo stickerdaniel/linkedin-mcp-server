@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -200,10 +201,12 @@ class TestLiveness:
             auth_root, profile, config, deadline_seconds=1.0, connect=never_answers
         )
 
-        # Once for the corpse. Anything more means the same instance was tried
-        # again after being proved dead.
-        instances = {attachment.descriptor.instance_id for attachment in probes}
-        assert len(probes) == len(instances)
+        # Exactly once for the corpse. Stated as a count rather than as
+        # "no instance appears twice", which is the weaker claim it started as:
+        # that version also passed when the probe was never called at all, so an
+        # implementation that skipped reachability entirely would have looked
+        # correct here.
+        assert len(probes) == 1, [p.descriptor.instance_id for p in probes]
 
 
 class TestFailingFast:
@@ -239,6 +242,44 @@ class TestFailingFast:
         # out the budget, not that it returns in any particular millisecond.
         assert elapsed < 5, elapsed
 
+    def test_a_child_that_is_merely_slow_is_not_called_a_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Silence is not failure, and conflating the two is the worst outcome
+        # this module can produce. A child that has neither answered nor exited
+        # is still coming up and still holds the lock it adopted. Reported as
+        # "could not serve", the caller concludes nobody is coming and goes off
+        # to drive its own browser against the profile that child is about to
+        # open — two browsers on one profile, caused by a slow machine.
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+
+        # A child that starts and then says nothing at all, which is exactly
+        # what a cold interpreter on a loaded machine looks like.
+        real = subprocess.Popen
+        started: list[subprocess.Popen[Any]] = []
+
+        def mute(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+            child = real([command[0], "-c", "import time; time.sleep(30)"], **kwargs)
+            started.append(child)
+            return child
+
+        monkeypatch.setattr(election_module.subprocess, "Popen", mute)
+
+        attempt = election_module._start_owner(auth_root, profile, config, timeout=0.5)
+
+        try:
+            assert attempt is _Attempt.CONTENDED, (
+                "a child that is still starting was reported as a failure"
+            )
+        finally:
+            # It sleeps for half a minute by design, so leaving it behind would
+            # hold the daemon lock it inherited for the rest of the run.
+            for child in started:
+                child.kill()
+                child.wait(timeout=30)
+
     def test_losing_the_lock_race_waits_instead_of_giving_up(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -259,15 +300,22 @@ class TestFailingFast:
 
         monkeypatch.setattr(election_module, "_start_owner", contended)
 
+        started = time.monotonic()
         obtain_owner(
             auth_root,
             profile,
             config,
-            deadline_seconds=0.3,
+            deadline_seconds=1.0,
             connect=lambda attachment: False,
         )
+        elapsed = time.monotonic() - started
 
-        assert attempts >= 1
+        # Both halves, and the second one is what makes this a test. `attempts
+        # >= 1` was the whole assertion at first, and it passes just as well for
+        # an implementation that gives up after the first CONTENDED — which is
+        # exactly the behaviour this test is named against.
+        assert attempts > 1, "it stopped looking after the first contended attempt"
+        assert elapsed >= 0.9, f"it gave up after {elapsed:.2f}s of a 1.0s budget"
 
 
 # Deliberately unindented, and run as it stands rather than through

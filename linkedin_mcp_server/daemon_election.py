@@ -195,22 +195,21 @@ def obtain_owner(
         # A started owner has already published by the time it reports ready, so
         # this re-read normally succeeds at once. The wait is for the other
         # branch: this process lost the lock race, so somebody else is coming up
-        # and the descriptor is not there yet. Bounded by the shared deadline,
-        # so a winner that dies silently does not hold the client here forever.
+        # and the descriptor is not there yet.
+        #
+        # Bounded per pass rather than by the whole remaining budget, and that is
+        # not a detail. Waiting out the full budget here consumes it inside a
+        # single read, so the loop's own deadline check fires on the way back and
+        # the lock is attempted exactly once — measured: one attempt against a
+        # one second budget, in the case this loop exists to keep retrying. The
+        # holder may also release without ever publishing, which only another
+        # lock attempt can discover.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return ElectionOutcome(look(), started_owner=started)
-        lookup = look(remaining)
+        lookup = look(min(_RETRY_SECONDS, remaining))
         if lookup.worth_connecting or time.monotonic() >= deadline:
             return ElectionOutcome(lookup, started_owner=started)
-
-        # Pause before going round again. The wait above only sleeps while the
-        # descriptor is unreadable, and the case that brought this loop back here
-        # is the opposite one: a descriptor that is perfectly readable and known
-        # unusable, belonging to an owner that is on its way out. Without a pause
-        # this spins at full speed on the lock until that owner has finished
-        # closing its browser.
-        time.sleep(min(_RETRY_SECONDS, max(deadline - time.monotonic(), 0.0)))
 
 
 def _live_lookup(
@@ -390,6 +389,25 @@ def _log_hint(auth_root: Path) -> Path:
     return daemon_owner.daemon_log_path(auth_root)
 
 
+class _Started(enum.Enum):
+    """What the startup handshake said, in the three ways it can end.
+
+    Silence is its own answer and must not be folded into failure. A child that
+    has neither answered nor exited is still coming up and still holds the lock
+    it adopted; calling that a failure sends the caller off to drive its own
+    browser against the profile that child is about to open.
+    """
+
+    #: The endpoint answered and the descriptor is published.
+    YES = "yes"
+
+    #: The child said it could not serve, or died trying.
+    NO = "no"
+
+    #: Neither, within the budget. It may still succeed.
+    STILL_TRYING = "still_trying"
+
+
 class _Attempt(enum.Enum):
     """What came of trying to start an owner, in the three ways it can end.
 
@@ -402,11 +420,12 @@ class _Attempt(enum.Enum):
     #: An owner is up and has published. Ready to attach.
     STARTED = "started"
 
-    #: Another process holds the lock, so somebody else is starting. Wait.
+    #: Somebody is starting: another process holds the lock, or the child this
+    #: process started has not answered yet and is still holding one. Wait.
     CONTENDED = "contended"
 
-    #: This process was the one that may, and the child could not serve. Nobody
-    #: else is coming, so waiting is pure delay.
+    #: The child this process started said it could not serve. Nothing is
+    #: holding the lock on its behalf, so waiting on it specifically is delay.
     FAILED = "failed"
 
 
@@ -443,8 +462,14 @@ def _start_holding_the_lock(
     try:
         duplicate = lock.inheritable_copy()
         try:
-            if _spawn(auth_root, config, lock_fd=duplicate, timeout=timeout):
+            started = _spawn(auth_root, config, lock_fd=duplicate, timeout=timeout)
+            if started is _Started.YES:
                 outcome = _Attempt.STARTED
+            elif started is _Started.STILL_TRYING:
+                # The child is alive and holds the lock this process is about to
+                # let go of, so from here it is indistinguishable from any other
+                # owner coming up: wait for it rather than conclude anything.
+                outcome = _Attempt.CONTENDED
         finally:
             # Closed whether or not the child got going. It shares the kernel
             # lock, so a leaked copy would hold the daemon lock for this
@@ -474,14 +499,14 @@ def _start_contending_for_the_lock(
     coming and avoids giving up while a rival owner is still starting. The
     frontend on this platform has no better information to act on.
     """
-    if _spawn(auth_root, config, lock_fd=None, timeout=timeout):
+    if _spawn(auth_root, config, lock_fd=None, timeout=timeout) is _Started.YES:
         return _Attempt.STARTED
     return _Attempt.CONTENDED
 
 
 def _spawn(
     auth_root: Path, config: AppConfig, *, lock_fd: int | None, timeout: float
-) -> bool:
+) -> _Started:
     """Start the detached owner and wait for its ready handshake.
 
     The owner has to outlive the client that caused it to start, or the whole
@@ -563,7 +588,7 @@ def _reap(child: subprocess.Popen[bytes]) -> None:
         child.poll()
 
 
-def _await_ready(child: subprocess.Popen[bytes], *, timeout: float) -> bool:
+def _await_ready(child: subprocess.Popen[bytes], *, timeout: float) -> _Started:
     """Wait for the child's verdict, or for it to die trying.
 
     Three outcomes, and the third is why this is a pipe rather than a file.
@@ -617,13 +642,20 @@ def _await_ready(child: subprocess.Popen[bytes], *, timeout: float) -> bool:
     try:
         verdict = verdicts.get(timeout=max(timeout, 0.0))
     except queue.Empty:
-        logger.warning("The daemon did not finish starting in time")
-        return False
+        # Not a failure, and the difference matters. The child said nothing and
+        # did not exit, so it is still starting and still holds the lock it
+        # adopted. Reporting this as "the child could not serve" would send the
+        # caller off to drive its own browser against the profile the child is
+        # about to open — two browsers, from a slow machine rather than a bug.
+        logger.warning(
+            "The daemon has not finished starting; leaving it to come up on its own"
+        )
+        return _Started.STILL_TRYING
 
     if verdict is None:
         logger.info("The daemon exited before it was ready")
-        return False
+        return _Started.NO
     if verdict == daemon_owner.FAILED:
         logger.info("The daemon reported that it could not start")
-        return False
-    return True
+        return _Started.NO
+    return _Started.YES
