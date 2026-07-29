@@ -267,12 +267,21 @@ class TestFailingFast:
 
         monkeypatch.setattr(election_module.subprocess, "Popen", mute)
 
+        began = time.monotonic()
         attempt = election_module._start_owner(auth_root, profile, config, timeout=0.5)
+        elapsed = time.monotonic() - began
 
         try:
             assert attempt is _Attempt.CONTENDED, (
                 "a child that is still starting was reported as a failure"
             )
+            # And it came back on time. The timeout above bounds the *wait*, and
+            # the cleanup after it used to hand that bound straight back:
+            # `child.stdout.close()` waits on the reader thread's I/O lock, so
+            # it blocked for exactly as long as the child stayed silent.
+            # Measured at 29.27s against a 30s sleeper, and forever against a
+            # child that never speaks or exits.
+            assert elapsed < 5, f"the bounded wait took {elapsed:.1f}s"
         finally:
             # It sleeps for half a minute by design, so leaving it behind would
             # hold the daemon lock it inherited for the rest of the run.
@@ -1076,6 +1085,61 @@ class TestVersionSkew:
         assert without_status == 401
         assert wrong_status == 401
         assert stopped == ["asked"]
+
+    def test_the_token_never_goes_through_a_configured_proxy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Every request the daemon makes carries the bearer token for a server
+        # driving a logged-in LinkedIn session, and every one is addressed to
+        # loopback. httpx honours HTTP_PROXY by default and does so even for
+        # 127.0.0.1 unless NO_PROXY happens to say otherwise — reproduced
+        # against a capture proxy, which received the absolute loopback URL and
+        # `Authorization: Bearer <token>` in full.
+        #
+        # A user with a corporate proxy configured is the ordinary case, not an
+        # exotic one, and the browser's own proxy setting is deliberately about
+        # LinkedIn's traffic rather than the server's.
+        import socket
+        import threading
+
+        from linkedin_mcp_server import daemon_owner
+
+        received: list[bytes] = []
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(5)
+        proxy_port = listener.getsockname()[1]
+
+        def capture() -> None:
+            with contextlib.suppress(OSError):
+                connection, _ = listener.accept()
+                received.append(connection.recv(4096))
+                connection.close()
+
+        watcher = threading.Thread(target=capture, daemon=True)
+        watcher.start()
+
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy_port}")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+
+        try:
+            # Port 9 is discard: nothing listens, so this fails either way. What
+            # is being tested is *where* it was addressed.
+            with daemon_owner.direct_http_client(timeout=2) as client:
+                with contextlib.suppress(Exception):
+                    client.post(
+                        "http://127.0.0.1:9/control/stand-down",
+                        headers={"Authorization": "Bearer SUPERSECRET"},
+                    )
+            watcher.join(timeout=3)
+        finally:
+            listener.close()
+
+        assert not received, "the request was routed through the proxy"
+        assert not any(b"SUPERSECRET" in seen for seen in received)
 
     def test_a_non_ascii_token_is_refused_rather_than_raising(self):
         # `hmac.compare_digest` raises TypeError when either *string* holds a

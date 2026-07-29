@@ -320,16 +320,15 @@ def _ask_to_stand_down(attachment: Attachment) -> None:
     Whether the owner *complied* is never assumed. The lock is what says the
     browser is free, and this function never claims otherwise.
     """
-    import httpx
 
     descriptor = attachment.descriptor
     url = f"http://{descriptor.host if ':' not in descriptor.host else f'[{descriptor.host}]'}:{descriptor.port}{daemon_owner.STAND_DOWN_PATH}"
     try:
-        response = httpx.post(
-            url,
-            headers={"Authorization": f"Bearer {attachment.token}"},
-            timeout=_STAND_DOWN_SECONDS,
-        )
+        with daemon_owner.direct_http_client(timeout=_STAND_DOWN_SECONDS) as client:
+            response = client.post(
+                url,
+                headers={"Authorization": f"Bearer {attachment.token}"},
+            )
     except Exception:
         logger.debug("The stale daemon could not be asked to stand down", exc_info=True)
         return
@@ -362,7 +361,11 @@ def _reachable(attachment: Attachment) -> bool:
         try:
             async with Client(
                 StreamableHttpTransport(
-                    attachment.descriptor.url, auth=attachment.token
+                    attachment.descriptor.url,
+                    auth=attachment.token,
+                    # Never through a proxy: this is a loopback hop carrying the
+                    # token to a logged-in session. See ``direct_http_client``.
+                    httpx_client_factory=daemon_owner.direct_async_http_client,
                 )
             ) as client:
                 await client.ping()
@@ -562,12 +565,44 @@ def _spawn(
             handed.write(daemon_config.encode(config).encode())
         return _await_ready(child, timeout=timeout)
     finally:
-        # Closed once the verdict is in. The child has redirected its own
-        # standard output to the log by then and writes nothing more here, so
-        # this cannot cost it a broken pipe.
-        if child.stdout is not None:
-            child.stdout.close()
+        _release_handshake(child)
         _reap(child)
+
+
+def _release_handshake(child: subprocess.Popen[bytes]) -> None:
+    """Stop listening to the child, without waiting for it to stop talking.
+
+    ``child.stdout.close()`` is the obvious call and it is a trap. The reader
+    thread is parked inside iteration holding the buffered reader's I/O lock,
+    and ``BufferedReader.close()`` waits for that lock — so closing here blocks
+    for exactly as long as the child stays silent. Measured: a child that said
+    nothing for thirty seconds made this call block 29.27 of them, and one that
+    neither answers nor exits would block forever. That is the timeout above
+    being handed straight back, in the one case it exists for.
+
+    So the *descriptor* is closed instead. That is not held by the reader
+    thread: the pending read fails, the thread unwinds, and the caller is free.
+
+    ``detach()`` first, so the buffer gives up the descriptor instead of trying
+    to close it again later, and then close the raw file object it hands back
+    rather than the bare number. Closing the number directly leaves that raw
+    object owning a descriptor that no longer exists, and its finalizer prints
+    ``Bad file descriptor`` from a context nothing can catch. Both variants were
+    tried; this is the one that is quiet.
+    """
+    stream, child.stdout = child.stdout, None
+    if stream is None:
+        return
+    # `Popen.stdout` is declared as a plain `IO`, which has no `detach`; the
+    # object is a BufferedReader in practice, and the fallback covers a caller
+    # that handed us something else rather than assuming.
+    detach = getattr(stream, "detach", None)
+    try:
+        raw = detach() if callable(detach) else stream
+        raw.close()
+    except (OSError, ValueError):
+        # Already gone, which is the ordinary case for a child that exited.
+        logger.debug("The handshake pipe was already closed", exc_info=True)
 
 
 def _reap(child: subprocess.Popen[bytes]) -> None:

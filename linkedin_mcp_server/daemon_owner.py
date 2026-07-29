@@ -52,6 +52,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, TextIO
 
+import httpx
+
 from linkedin_mcp_server import __version__, daemon_config, daemon_descriptor
 from linkedin_mcp_server.config import set_config
 from linkedin_mcp_server.config.schema import AppConfig
@@ -140,6 +142,57 @@ def _endpoint_host(sock: socket.socket) -> str:
     return str(address)
 
 
+def direct_http_client(*, timeout: float) -> httpx.Client:
+    """An HTTP client that talks to this machine and nowhere else.
+
+    Every request the daemon makes carries the bearer token for a server driving
+    a logged-in LinkedIn session, and every one of them is addressed to
+    loopback. httpx honours ``HTTP_PROXY`` by default, and it does so even for
+    ``127.0.0.1`` unless ``NO_PROXY`` happens to say otherwise. Reproduced
+    against a capture proxy: a request to ``http://127.0.0.1:9/...`` arrived at
+    the proxy complete with ``Authorization: Bearer <token>``.
+
+    So proxies are refused rather than avoided by hoping the environment is
+    configured well. ``trust_env=False`` also drops ``.netrc`` and environment
+    certificate settings, none of which have any business on a loopback hop.
+
+    This is the same distinction the browser configuration already draws: the
+    user's proxy is for LinkedIn's traffic, not for the server's own
+    (``config/schema.py:105-107``).
+    """
+    return httpx.Client(trust_env=False, timeout=timeout)
+
+
+def direct_async_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+    **extra: Any,
+) -> httpx.AsyncClient:
+    """The asynchronous counterpart, shaped as FastMCP's client factory.
+
+    The three named parameters are the ``McpHttpClientFactory`` protocol
+    (``mcp/shared/_httpx_utils.py``). ``**extra`` is there because the protocol
+    is not the whole contract: FastMCP's own transport passes
+    ``follow_redirects`` on top of it and marks the call ``type: ignore``
+    itself (``fastmcp/client/transports/http.py:176-181``), while the SDK's path
+    passes exactly the three. A factory that accepted only the documented
+    signature failed at connect time with an unexpected keyword — measured, and
+    it took every real-owner test with it.
+
+    ``trust_env`` is the one thing a caller may not override, so it is set after
+    the passthrough rather than merged into it.
+    """
+    extra.pop("trust_env", None)
+    return httpx.AsyncClient(
+        headers=headers,
+        timeout=timeout if timeout is not None else httpx.Timeout(30.0),
+        auth=auth,
+        trust_env=False,
+        **extra,
+    )
+
+
 async def _probe(url: str, token: str) -> None:
     """Prove the endpoint answers this token before anything is published.
 
@@ -152,7 +205,11 @@ async def _probe(url: str, token: str) -> None:
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
-    async with Client(StreamableHttpTransport(url, auth=token)) as client:
+    async with Client(
+        StreamableHttpTransport(
+            url, auth=token, httpx_client_factory=direct_async_http_client
+        )
+    ) as client:
         await client.ping()
 
 
