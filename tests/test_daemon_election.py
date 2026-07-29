@@ -332,13 +332,30 @@ class TestFailingFast:
 
         try:
             assert elapsed < 10, f"the spawn blocked for {elapsed:.1f}s"
-            # Alive and holding the lock, so it may still come up: the same
-            # verdict a silent handshake gets.
-            assert attempt is _Attempt.CONTENDED
+            # Reported as a failure, not as "somebody is starting". A child that
+            # never took its configuration is not coming up, and on POSIX it
+            # already holds the inherited lock descriptor — so it is stopped
+            # rather than left alone.
+            assert attempt is _Attempt.FAILED
+
+            # And the lock it inherited is free. This is the half that matters:
+            # measured with the child merely abandoned, the lock stayed held
+            # forever by a process that could never serve, and every later
+            # election contended against it.
+            probe = DaemonLock(auth_root)
+            assert probe.try_acquire(), (
+                "the abandoned child kept the daemon lock for this profile"
+            )
+            probe.release()
+
+            assert all(sleeper.poll() is not None for sleeper in sleepers), (
+                "the child that could not serve was left running"
+            )
         finally:
             for sleeper in sleepers:
-                sleeper.kill()
-                sleeper.wait(timeout=30)
+                if sleeper.poll() is None:  # pragma: no cover - the stop worked
+                    sleeper.kill()
+                    sleeper.wait(timeout=30)
 
     def test_a_child_that_is_merely_slow_is_not_called_a_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

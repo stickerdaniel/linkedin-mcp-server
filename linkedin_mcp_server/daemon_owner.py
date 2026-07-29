@@ -59,6 +59,7 @@ from linkedin_mcp_server import __version__, daemon_config, daemon_descriptor
 from linkedin_mcp_server.config import set_config
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
+from linkedin_mcp_server.drivers.browser import set_headless
 from linkedin_mcp_server.logging_config import configure_logging
 from linkedin_mcp_server.server_role import ServerRole
 from linkedin_mcp_server.session_state import auth_root_dir, get_runtime_id
@@ -664,6 +665,17 @@ def main(argv: list[str] | None = None) -> int:
         raise
 
     set_config(config)
+    # Installing the configuration is not enough: the browser mode lives in a
+    # module global that defaults to headless (``drivers/browser.py:63``), and
+    # ``_make_browser`` reads that global rather than the configuration
+    # (``drivers/browser.py:265-283``). The frontend's own entry point sets it
+    # explicitly for the same reason (``cli_main.py:391``).
+    #
+    # Without this, an owner started with ``--no-headless`` publishes a
+    # fingerprint that says so — the frontend compares it and attaches happily —
+    # and then opens headless anyway. A user who asked to watch the browser
+    # would get no window and no error.
+    set_headless(config.browser.headless)
     configure_logging(log_level=config.server.log_level, json_format=True)
 
     profile = Path(config.browser.user_data_dir).expanduser().resolve()

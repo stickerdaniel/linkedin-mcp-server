@@ -207,6 +207,47 @@ class TestRefusing:
                 json.dumps({"browser": {}, "server": {"tool_timeout_seconds": -1.0}})
             )
 
+    def test_the_owner_applies_the_browser_mode_it_was_handed(self):
+        # Installing the configuration is not enough. The browser mode lives in
+        # a module global that defaults to headless, and `_make_browser` reads
+        # that global rather than the configuration — the frontend's own entry
+        # point sets it explicitly for exactly this reason.
+        #
+        # Without it, an owner started with `--no-headless` publishes a
+        # fingerprint saying so, the frontend compares it and attaches happily,
+        # and the browser opens headless anyway: no window, no error, and a user
+        # who asked to watch it left wondering.
+        #
+        # Driven through `main`, and asserted against the global the launcher
+        # actually reads. Calling `set_headless` directly here would only prove
+        # that setter works; what was broken is that the owner never called it.
+        import io
+        import sys
+
+        import linkedin_mcp_server.drivers.browser as browser_module
+        from linkedin_mcp_server import daemon_owner
+
+        visible = AppConfig()
+        visible.browser.user_data_dir = "~/p/profile"
+        visible.browser.headless = False
+
+        original = browser_module.current_headless()
+        stdin = sys.stdin
+        browser_module.set_headless(True)
+        sys.stdin = io.StringIO(daemon_config.encode(visible))
+        try:
+            # It gets as far as taking the lock, which fails on the deliberately
+            # invalid descriptor and is reported rather than raised. That is
+            # well past the point where the browser mode is settled.
+            assert daemon_owner.main(["--lock-fd", "-1"]) == 1
+
+            assert browser_module.current_headless() is False, (
+                "the owner ignored the browser mode it was handed"
+            )
+        finally:
+            sys.stdin = stdin
+            browser_module.set_headless(original)
+
     def test_the_owner_refuses_to_start_without_a_configuration(self):
         # The owner reads its settings from standard input and must not fall
         # back to parsing its own command line: `load_config` would then see the

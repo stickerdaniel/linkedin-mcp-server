@@ -570,12 +570,25 @@ def _spawn(
         try:
             _hand_over_config(child, config, timeout=timeout)
         except TimeoutError:
-            # The same verdict a silent handshake gets, and for the same reason:
-            # the child is alive and holds the lock, so it may yet come up. It
-            # simply has not read its configuration, which is what a machine
-            # under load looks like from here.
-            logger.warning("The daemon has not read its configuration yet")
-            return _Started.STILL_TRYING
+            # Killed rather than left to itself, and the difference is a wedge
+            # that never heals. A child still waiting on its configuration is
+            # inside ``sys.stdin.read()``, which comes *before* it adopts the
+            # lock — but on POSIX it already inherited the descriptor, so the
+            # kernel lock is alive through it. Walking away leaves that child
+            # holding the daemon lock forever while never serving anything, and
+            # every later election contends against it.
+            #
+            # Safe precisely because of that ordering: a child that has not
+            # finished reading cannot have reached ``_take_lock``, so nothing is
+            # being interrupted mid-adoption. Waiting longer is not an option
+            # either, since the thing being waited on is a process that is not
+            # reading.
+            logger.warning(
+                "The daemon never read its configuration; stopping it so the "
+                "lock is not held by a process that cannot serve"
+            )
+            _stop_child(child)
+            return _Started.NO
         # One budget across both halves. Handing the configuration over and
         # waiting for the verdict are two ways of waiting on the same child, and
         # giving each the full budget would let a slow one spend twice what the
@@ -584,6 +597,33 @@ def _spawn(
     finally:
         _release_handshake(child)
         _reap(child)
+
+
+#: How long a child gets to notice it has been asked to stop before it is killed
+#: outright. It has not read its configuration at this point, so there is
+#: nothing for it to clean up and nothing to preserve.
+_STOP_CHILD_SECONDS = 5.0
+
+
+def _stop_child(child: subprocess.Popen[bytes]) -> None:
+    """End a child that never took its configuration, and collect it.
+
+    Terminate first, kill if that is ignored, and wait either way: an
+    uncollected child is a zombie, and one that is merely signalled has not
+    necessarily let go of the lock descriptor it inherited. The wait is what
+    makes "the lock is free" true before this returns.
+    """
+    with contextlib.suppress(OSError):
+        child.terminate()
+    try:
+        child.wait(timeout=_STOP_CHILD_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        logger.warning("The daemon ignored the request to stop; killing it")
+    with contextlib.suppress(OSError):
+        child.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        child.wait(timeout=_STOP_CHILD_SECONDS)
 
 
 def _hand_over_config(
