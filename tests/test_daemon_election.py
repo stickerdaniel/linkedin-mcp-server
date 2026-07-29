@@ -320,7 +320,21 @@ class TestFailingFast:
         real = subprocess.Popen
 
         def deaf(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
-            child = real([command[0], "-c", "import time; time.sleep(600)"], **kwargs)
+            # Ignores SIGTERM as well as never reading stdin. Both halves
+            # matter: the second is the defect, and the first is what makes the
+            # timing assertion below meaningful. A terminate-then-kill stop
+            # would spend its whole grace period here, *after* the caller's
+            # budget was already gone.
+            child = real(
+                [
+                    command[0],
+                    "-c",
+                    "import signal, time\n"
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    "time.sleep(600)\n",
+                ],
+                **kwargs,
+            )
             sleepers.append(child)
             return child
 
@@ -331,7 +345,12 @@ class TestFailingFast:
         elapsed = time.monotonic() - began
 
         try:
-            assert elapsed < 10, f"the spawn blocked for {elapsed:.1f}s"
+            # Close to the budget rather than merely finite. Stopping the child
+            # happens after that budget is spent, so a grace period there is
+            # time added to a deadline the caller was promised: terminate-first
+            # turned this half-second election into five and a half against a
+            # child that ignores SIGTERM. Measured at 0.6s as it stands.
+            assert elapsed < 3, f"the spawn took {elapsed:.1f}s of a 0.5s budget"
             # Reported as a failure, not as "somebody is starting". A child that
             # never took its configuration is not coming up, and on POSIX it
             # already holds the inherited lock descriptor — so it is stopped

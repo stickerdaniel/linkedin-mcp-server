@@ -599,31 +599,42 @@ def _spawn(
         _reap(child)
 
 
-#: How long a child gets to notice it has been asked to stop before it is killed
-#: outright. It has not read its configuration at this point, so there is
-#: nothing for it to clean up and nothing to preserve.
-_STOP_CHILD_SECONDS = 5.0
+#: How long to wait for a killed child to be collected. Short by design: this
+#: follows ``SIGKILL``, which the process cannot decline, so anything but a
+#: prompt exit means the process is stuck in the kernel and no amount of waiting
+#: here will change that.
+_STOP_CHILD_SECONDS = 2.0
 
 
 def _stop_child(child: subprocess.Popen[bytes]) -> None:
     """End a child that never took its configuration, and collect it.
 
-    Terminate first, kill if that is ignored, and wait either way: an
-    uncollected child is a zombie, and one that is merely signalled has not
-    necessarily let go of the lock descriptor it inherited. The wait is what
-    makes "the lock is free" true before this returns.
+    Killed outright rather than asked politely first. The usual courtesy buys a
+    process time to clean up, and this one has nothing to clean up: it never
+    read its configuration, so it has opened no browser and holds no state
+    beyond the lock descriptor it inherited and must give back.
+
+    The courtesy is not free either. A ``SIGTERM`` grace period is time added
+    *after* the caller's budget is already spent, so a child that ignores the
+    signal turns a half-second election into five and a half, and the documented
+    ceiling stops being a ceiling.
+
+    The wait is what makes "the lock is free" true before this returns: a
+    signalled process has not necessarily been reaped, and until it is, the
+    descriptor may still be open.
     """
     with contextlib.suppress(OSError):
-        child.terminate()
+        child.kill()
     try:
         child.wait(timeout=_STOP_CHILD_SECONDS)
-        return
     except subprocess.TimeoutExpired:
-        logger.warning("The daemon ignored the request to stop; killing it")
-    with contextlib.suppress(OSError):
-        child.kill()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        child.wait(timeout=_STOP_CHILD_SECONDS)
+        # Uninterruptible sleep, or a kernel that has not finished with it.
+        # Reported rather than waited out, since the caller has a deadline and
+        # this is not something a longer wait resolves.
+        logger.warning(
+            "The daemon has not exited after being killed; the profile may stay "
+            "locked until it does"
+        )
 
 
 def _hand_over_config(
