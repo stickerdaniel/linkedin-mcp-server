@@ -571,13 +571,22 @@ class TestRealOwner:
         # The worst interleaving in the whole handoff. The frontend takes the
         # lock, hands a duplicate to the child, and releases its own copy the
         # moment the child has it — so from then on the lock exists *only* in a
-        # process that has not yet proved it can serve. If that process dies
-        # there, the lock has to come free on its own, because nothing else is
-        # holding a reference that could release it.
+        # process that has not yet proved it can serve. A child that dies there
+        # must leave the profile electable, or the daemon is permanently wedged
+        # by a single bad start.
         #
         # Exercised with a child that really adopts and then exits, rather than
         # one that fails earlier: a child that never got as far as `adopt` would
-        # pass this test while proving nothing about the case it is named for.
+        # pass this test while proving nothing about the case it is named for,
+        # which is why the marker is asserted.
+        #
+        # What this cannot fail on: the kernel reclaims a dead process's
+        # descriptors whatever the code did, so no mutation to `adopt` or
+        # `release` makes it go red — both were tried. It is an end-to-end
+        # statement that this sequence leaves a usable profile, not a test of
+        # the release logic, and it earns its place by covering the composition
+        # (adopt, die, elect again) that the unit-level tests each cover only
+        # half of.
         child = tmp_path / "adopting_child.py"
         marker = tmp_path / "adopted"
         child.write_text(
@@ -592,12 +601,21 @@ class TestRealOwner:
 
         profile = real_state_root
         auth_root = profile.parent
+        # The substitution only rewrites the daemon's own command line and
+        # forwards everything else untouched. Replacing `subprocess.Popen`
+        # outright looks equivalent and is not: on Linux `ctypes.util
+        # .find_library` shells out to `ldconfig` from deep inside the private
+        # state hardening this very call performs, so an unconditional rewrite
+        # tried to turn *that* into the daemon and failed the test on CI while
+        # passing on macOS, where find_library takes another route.
         frontend = (
             "import sys\n"
             "from pathlib import Path\n"
             "import linkedin_mcp_server.daemon_election as election\n"
             "real = election.subprocess.Popen\n"
             "def substitute(command, **kwargs):\n"
+            "    if '--lock-fd' not in command:\n"
+            "        return real(command, **kwargs)\n"
             "    fd = command[command.index('--lock-fd') + 1]\n"
             "    return real(\n"
             "        [command[0], sys.argv[2], fd, sys.argv[3], sys.argv[4]],\n"
@@ -637,6 +655,14 @@ class TestRealOwner:
             "elect an owner for this profile again"
         )
         probe.release()
+        # What this does *not* establish: that the frontend released its own
+        # copy. The frontend here is a subprocess that has exited by now, so the
+        # kernel closed its descriptors whatever the code did — verified by
+        # mutation, with `lock.release()` removed this still passed.
+        # `test_the_lock_frees_while_the_frontend_is_still_running` is the one
+        # that pins the release, by keeping the frontend alive across the kill.
+        # This test's own subject is the child: adopting the lock and then dying
+        # must not strand it.
 
         # And an ordinary election works afterwards, which is the outcome the
         # user actually needs.
