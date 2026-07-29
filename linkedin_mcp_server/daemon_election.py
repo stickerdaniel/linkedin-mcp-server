@@ -577,18 +577,27 @@ def _spawn(
 def _spawn_command(*, lock_fd: int | None) -> list[str]:
     """How the owner is invoked.
 
-    ``-P`` keeps the working directory off ``sys.path``. Without it, a directory
-    containing ``linkedin_mcp_server/daemon_owner.py`` is imported in preference
-    to the installed package, and an MCP client started in such a workspace
-    would hand that code the inherited lock descriptor and the whole
-    configuration on standard input, ``proxy_password`` included. Reproduced
-    with this project's own interpreter from a temporary directory: the local
-    file ran instead of the installed module.
+    ``-I`` is isolated mode: it keeps the working directory *and* ``PYTHONPATH``
+    off ``sys.path``. Without it, a directory containing
+    ``linkedin_mcp_server/daemon_owner.py`` is imported in preference to the
+    installed package, and an MCP client started in such a workspace would hand
+    that code the inherited lock descriptor and the whole configuration on
+    standard input, ``proxy_password`` included.
+
+    ``-P`` alone is not enough, which is worth stating because it is the obvious
+    choice and it looks sufficient: it drops the implicit working directory and
+    leaves ``PYTHONPATH`` in force, so the very common ``PYTHONPATH=.`` puts the
+    workspace back at the front. Both were measured from a prepared directory
+    with this project's own interpreter — ``-P`` loaded the local file, ``-I``
+    loaded the installed module.
 
     That is also what makes ``daemon_config``'s "both ends are the same
-    installation" true rather than hopeful.
+    installation" true rather than hopeful. Isolated mode is safe for the owner
+    because it needs nothing from the environment's import configuration: it is
+    the same interpreter and the same installation, and everything it is
+    configured with arrives on standard input.
     """
-    command = [sys.executable, "-P", "-m", "linkedin_mcp_server.daemon_owner"]
+    command = [sys.executable, "-I", "-m", "linkedin_mcp_server.daemon_owner"]
     if lock_fd is not None:
         command += ["--lock-fd", str(lock_fd)]
     return command
@@ -599,7 +608,13 @@ def _spawn_command(*, lock_fd: int | None) -> list[str]:
 #: the exposure the stdin channel exists to avoid, held for the owner's whole
 #: lifetime rather than the frontend's. ``/proc/<pid>/environ`` is readable by
 #: this account, and ``ps e`` shows it on the BSDs.
-_SECRETS_TO_DROP = ("PROXY_PASSWORD", "PROXY_USERNAME")
+#:
+#: ``PROXY_SERVER`` belongs here despite its name. The documented form accepts
+#: embedded credentials — ``http://user:password@host:port`` — which
+#: ``BrowserConfig.validate`` splits out into the separate fields
+#: (``config/schema.py:242-253``). It splits them out of the *configuration*; the
+#: environment variable still holds the original string.
+_SECRETS_TO_DROP = ("PROXY_PASSWORD", "PROXY_USERNAME", "PROXY_SERVER")
 
 
 def _owner_environment() -> dict[str, str]:

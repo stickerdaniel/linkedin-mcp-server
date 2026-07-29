@@ -370,8 +370,13 @@ async def _serve(
         ready.succeed()
     except BaseException:
         server.should_exit = True
-        with contextlib.suppress(BaseException):
-            await asyncio.wait_for(serving, timeout=10)
+        # Through the same bounded stop as the stand-down path, and for the same
+        # reason: `wait_for` waits for the cancellation it requested to finish,
+        # so a task that suppresses cancellation makes this line unbounded no
+        # matter what timeout it is given. `suppress` only helps once the await
+        # returns. This process holds the daemon lock by now, so a failed
+        # startup that never exits is a profile nothing can elect an owner for.
+        await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
         raise
 
     del lock  # held for the process lifetime; named to say so
@@ -389,6 +394,11 @@ _STAND_DOWN_POLL_SECONDS = 0.1
 #: shutdown is never cut short, and short enough that a hung one does not hold
 #: the lock for a user's whole session.
 _STAND_DOWN_SHUTDOWN_SECONDS = 30.0
+
+#: The same bound for a startup that failed. Shorter, because nothing is being
+#: preserved: no client was ever told this owner existed, and the descriptor was
+#: never published.
+_FAILED_STARTUP_SHUTDOWN_SECONDS = 10.0
 
 
 async def _serve_until_stopped(
@@ -424,17 +434,50 @@ async def _serve_until_stopped(
 
 
 async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
-    """Let the server finish shutting down, and stop waiting if it will not."""
+    """Let the server finish shutting down, and stop the process if it will not.
+
+    Ending the *wait* is not the same as ending the process, and the difference
+    is the whole point here. Returning from this leaves the serving task pending;
+    ``asyncio.run`` then cancels it on the way out and waits, without any bound,
+    for that cancellation to complete. A task that suppresses cancellation
+    therefore keeps the interpreter alive, holding the daemon lock, after every
+    timeout above it has already fired.
+
+    That is not a hypothetical shape. ``close_browser`` deliberately holds
+    cancellation back until teardown finishes (``drivers/browser.py:736-757``),
+    because interrupting it half way leaves a Chromium nobody owns, and the
+    export it waits on first is itself unbounded. An unresponsive browser is
+    exactly the case where a stand-down must still end.
+
+    So the last resort is a hard exit. It skips interpreter cleanup, which here
+    means skipping the very teardown that is already stuck; the kernel closes
+    the descriptors and frees the lock, which is what the next election needs.
+    Measured before this existed: the helper returned on time and the process
+    never came out of ``asyncio.run``.
+    """
     try:
         await asyncio.wait_for(asyncio.shield(serving), seconds)
+        return
     except TimeoutError:
-        logger.warning(
-            "The daemon did not finish shutting down in %.0fs; exiting anyway so "
-            "the lock is released",
+        logger.error(
+            "The daemon did not finish shutting down in %.0fs; exiting hard so "
+            "the lock is released for the next owner",
             seconds,
         )
     except Exception:
         logger.warning("The daemon endpoint stopped with an error", exc_info=True)
+        return
+
+    _exit_hard()
+
+
+def _exit_hard() -> int:  # pragma: no cover - the process does not come back
+    """Leave immediately, without running interpreter cleanup.
+
+    Separated so a test can substitute it. Nothing after this returns.
+    """
+    logging.shutdown()  # flush the log file; the traceback above is the record
+    os._exit(1)
 
 
 async def _await_started(

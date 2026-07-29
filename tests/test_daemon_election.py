@@ -1228,7 +1228,12 @@ class TestVersionSkew:
             capture_output=True,
             text=True,
             cwd=workspace,
-            env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+            # `PYTHONPATH=.` on purpose, and it is the whole point of the test.
+            # `-P` alone drops only the *implicit* working directory and leaves
+            # PYTHONPATH in force, so this very common setting puts the
+            # workspace back at the front — measured, it loaded the local file.
+            # Isolated mode is what refuses both.
+            env={**os.environ, "PYTHONPATH": "."},
             timeout=60,
         )
 
@@ -1336,6 +1341,12 @@ class TestNotHoldingTheLockForever:
                 await asyncio.sleep(3600)
 
         monkeypatch.setattr(daemon_owner, "_STAND_DOWN_SHUTDOWN_SECONDS", 0.5)
+        # The real one calls `os._exit`, which would take this test runner with
+        # it. Substituted so the *wait* can be observed here; that it really
+        # ends the process is the separate real-process test below, which is the
+        # only way to see that at all.
+        exited: list[bool] = []
+        monkeypatch.setattr(daemon_owner, "_exit_hard", lambda: exited.append(True))
 
         async def exercise() -> float:
             server = NeverStops()
@@ -1352,6 +1363,76 @@ class TestNotHoldingTheLockForever:
         elapsed = asyncio.run(exercise())
 
         assert elapsed < 5, f"the stand-down wait took {elapsed:.1f}s"
+        assert exited, "the wait ended without asking the process to end"
+
+    def test_a_shutdown_that_resists_cancellation_still_ends_the_process(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Ending the *wait* is not ending the process, and only the second frees
+        # the lock. Returning from the bounded wait leaves the serving task
+        # pending; `asyncio.run` then cancels it and waits, unbounded, for that
+        # cancellation to finish. A task that suppresses cancellation therefore
+        # keeps the interpreter alive after every timeout above it has fired.
+        #
+        # Not a hypothetical shape: `close_browser` holds cancellation back
+        # until teardown finishes by design, and the export it waits on first is
+        # unbounded, so an unresponsive Chromium produces exactly this.
+        #
+        # Run as a real process, because what is being tested is that the
+        # process ends — which is precisely what an in-process test cannot see.
+        # Not `tmp_path / "home"`, which the isolation fixture already made.
+        home = tmp_path / "child-home"
+        home.mkdir()
+        auth_root = tmp_path / "child-auth"
+        auth_root.mkdir()
+
+        script = tmp_path / "wedged_owner.py"
+        script.write_text(
+            "import asyncio, os, sys\n"
+            "from pathlib import Path\n"
+            "import linkedin_mcp_server.daemon_descriptor as descriptor\n"
+            "descriptor._account_home = lambda: Path(sys.argv[1])\n"
+            "from linkedin_mcp_server import daemon_owner\n"
+            "from linkedin_mcp_server.daemon_lock import DaemonLock\n"
+            "lock = DaemonLock(Path(sys.argv[2]))\n"
+            "assert lock.try_acquire()\n"
+            "daemon_owner._STAND_DOWN_SHUTDOWN_SECONDS = 0.5\n"
+            "class Stubborn:\n"
+            "    started = True\n"
+            "    should_exit = False\n"
+            "    async def serve(self, sockets=None):\n"
+            "        try:\n"
+            "            await asyncio.sleep(3600)\n"
+            "        except asyncio.CancelledError:\n"
+            "            await asyncio.sleep(3600)\n"
+            "async def main():\n"
+            "    server = Stubborn()\n"
+            "    serving = asyncio.create_task(server.serve())\n"
+            "    await daemon_owner._serve_until_stopped(server, serving, ['asked'])\n"
+            "asyncio.run(main())\n"
+            "print('THE PROCESS SURVIVED')\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(script), str(home), str(auth_root)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+            # Generous next to the half-second grace the child is given, and far
+            # below the forever this guards against.
+            timeout=60,
+        )
+
+        assert "THE PROCESS SURVIVED" not in result.stdout, (
+            "the interpreter outlived a shutdown it had already given up on"
+        )
+        # And the lock it held is free, which is the outcome the next election
+        # depends on. Asked with the child's own state root, which is where the
+        # lock file it took actually lives.
+        monkeypatch.setattr(daemon_descriptor_module, "_account_home", lambda: home)
+        probe = DaemonLock(auth_root)
+        assert probe.try_acquire(), "the wedged owner kept the lock"
+        probe.release()
 
 
 class TestPublishingLast:
