@@ -158,6 +158,27 @@ class TestRefusing:
                 json.dumps({"browser": {}, "server": {"tool_timeout_seconds": -1.0}})
             )
 
+    def test_the_owner_refuses_to_start_without_a_configuration(self):
+        # The owner reads its settings from standard input and must not fall
+        # back to parsing its own command line: `load_config` would then see the
+        # daemon's argv, and the browser it opened would be configured by
+        # accident rather than by the client that asked for it.
+        #
+        # Exercised through `main`, which is otherwise reached only inside a
+        # spawned process where coverage cannot see it.
+        import io
+        import sys
+
+        from linkedin_mcp_server import daemon_owner
+
+        original = sys.stdin
+        sys.stdin = io.StringIO("   \n")
+        try:
+            with pytest.raises(ValueError, match="without a configuration"):
+                daemon_owner.main([])
+        finally:
+            sys.stdin = original
+
     def test_something_that_is_not_a_configuration_is_refused(self):
         with pytest.raises(ValueError, match="not valid JSON"):
             daemon_config.decode("not json at all")
