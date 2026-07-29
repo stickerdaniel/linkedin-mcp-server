@@ -554,9 +554,15 @@ def _spawn(
             # only ever handed over where that works.
             pass_fds=() if lock_fd is None else (lock_fd,),
             # Its own session, so a signal aimed at the client's process group
-            # does not take the owner with it.
+            # does not take the owner with it. POSIX-only, which is why the
+            # Windows equivalent is passed separately below rather than assumed.
             start_new_session=True,
             close_fds=True,
+            # Zero on POSIX, where `subprocess` ignores it, and the real
+            # detachment on Windows, where `start_new_session` is what gets
+            # ignored. Passed positionally rather than unpacked from a mapping,
+            # which would defeat the overload the type checker resolves against.
+            creationflags=_detachment_flags(),
         )
 
     try:
@@ -567,6 +573,32 @@ def _spawn(
     finally:
         _release_handshake(child)
         _reap(child)
+
+
+def _detachment_flags() -> int:
+    """What it takes on this platform to survive the client that started us.
+
+    ``start_new_session`` is POSIX-only. CPython's Windows implementation names
+    the parameter ``unused_start_new_session`` and ignores it outright
+    (``subprocess.py:1461``), so passing it there detaches nothing: a console
+    ``Ctrl+C``, or a client that cleans up its process tree, would take the
+    owner down with it — the opposite of what the owner is for.
+
+    The Windows equivalent is a creation flag. ``CREATE_NEW_PROCESS_GROUP``
+    removes the child from the console group that receives ``Ctrl+C`` and
+    ``Ctrl+Break``, and ``DETACHED_PROCESS`` gives it no console at all, which
+    is right for a process whose output already goes to a log file.
+
+    Unmeasured, unlike the POSIX side, and said so where it matters: nothing in
+    this repository runs Windows outside CI, and a job object that kills its
+    tree ignores both flags. This is the documented mechanism rather than a
+    verified outcome.
+    """
+    if os.name != "nt":
+        return 0
+    return (  # pragma: no cover - exercised on the Windows runner
+        subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    )
 
 
 def _release_handshake(child: subprocess.Popen[bytes]) -> None:

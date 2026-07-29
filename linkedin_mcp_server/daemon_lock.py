@@ -18,10 +18,21 @@ Two things it must never do, both of which cost the lock silently:
   releases it for all. Measured on both POSIX and Windows: unlock-then-close
   left the lock free while a live process believed it held it. The kernel
   bookkeeping behind that differs by platform, but the rule does not.
-* It must not treat a free lock as proof that nothing is running. Chromium
-  outlives the process that started it, measured at over twenty seconds after a
-  kill, and the kernel frees the lock at the instant of death. The two facts are
-  true at the same time.
+* It must not treat a free lock as proof that nothing is running. The kernel
+  frees the lock at the instant of death, and Chromium can still be shutting
+  down. The margin is much smaller than an earlier note here claimed: that said
+  "over twenty seconds", and re-measuring found 13-38 ms on this machine and
+  11-103 ms independently, because Chromium is wired to its driver by
+  ``--remote-debugging-pipe`` and exits when the pipe breaks. A direct collision
+  test, five rounds with a successor pre-armed and spinning, produced no round
+  with two live browsers on one profile.
+
+  The rule stands regardless of the number, because it is about which question a
+  lock answers: ownership and profile-idleness are separate, and what actually
+  keeps two processes off one profile is the lease next door. The old figure is
+  recorded here because it was load-bearing in the design that produced this
+  file, and leaving it unqualified invites conclusions the measurement does not
+  support.
 
 Handing a held lock to another process works only on POSIX. Measured on
 Windows: a child that inherited the handle through the documented mechanism did
