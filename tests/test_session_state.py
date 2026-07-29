@@ -747,30 +747,26 @@ class TestContainerDetection:
         assert state._container_override() is None
         assert get_runtime_id().endswith("-container")
 
-    def test_a_container_manager_that_declares_itself_is_believed(
+    def test_a_systemd_container_marker_is_not_trusted_on_its_own(
         self, tmp_path, monkeypatch
     ):
-        # systemd's container interface. LXC and systemd-nspawn are only
-        # reachable this way: their cgroup paths carry a user-chosen container
-        # name, so matching on the name is matching on nothing.
+        # systemd's container interface answers "is there a boundary", which is
+        # not the question. An OrbStack Linux machine reports lxc there and is
+        # a full system with its own systemd and a persistent disk — measured.
+        # Believing the marker classified it as a container and put it back
+        # into "run --login on the host machine", which is this bug again.
         import linkedin_mcp_server.session_state as state
 
-        marker = tmp_path / "container"
-        marker.write_text("lxc\n", encoding="utf-8")
-        monkeypatch.setattr(state, "_SYSTEMD_CONTAINER_MARKER", marker)
-        monkeypatch.setattr(state, "_CGROUP_PROBES", ())
-        monkeypatch.setattr(state, "_MOUNTINFO_PROBES", ())
-
-        assert state._is_container_runtime() is True
-
-    def test_an_empty_systemd_marker_is_not_evidence(self, tmp_path, monkeypatch):
-        import linkedin_mcp_server.session_state as state
-
-        marker = tmp_path / "container"
-        marker.write_text("\n", encoding="utf-8")
-        monkeypatch.setattr(state, "_SYSTEMD_CONTAINER_MARKER", marker)
-        monkeypatch.setattr(state, "_CGROUP_PROBES", ())
-        monkeypatch.setattr(state, "_MOUNTINFO_PROBES", ())
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/.lxc\n", encoding="utf-8")
+        mountinfo = tmp_path / "mountinfo"
+        mountinfo.write_text(
+            "30 1 0:5 /scon/containers/abc/rootfs / rw,relatime "
+            "- btrfs /dev/vdb1 rw,subvol=/@\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(state, "_CGROUP_PROBES", (cgroup,))
+        monkeypatch.setattr(state, "_MOUNTINFO_PROBES", (mountinfo,))
 
         assert state._is_container_runtime() is False
 

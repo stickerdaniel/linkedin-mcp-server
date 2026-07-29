@@ -174,6 +174,18 @@ def _is_container_runtime() -> bool:
     was a host would try to auto-import from a browser keychain that is not
     there and offer login flows it cannot run.
 
+    Deliberately *not* consulted: ``/run/systemd/container``, systemd's
+    documented container interface. It answers a different question than this
+    one. An OrbStack Linux machine reports ``lxc`` there, yet it is a full
+    system with its own systemd, a persistent disk and a desktop-class user —
+    everything the DOCKER policy assumes is missing. Trusting the marker
+    classified it as a container and put it straight back into "run --login on
+    the host machine", which is this bug wearing a different hat. What this
+    module needs to know is not "is there a boundary" but "is there a browser
+    and a keychain on the other side of it", and no single flag answers that.
+    LXC and nspawn therefore stay reachable only through their cgroup layout,
+    and where that is not enough, ``LINKEDIN_MCP_CONTAINER=true`` is.
+
     ``LINKEDIN_MCP_CONTAINER`` overrides the whole thing. Detection is a
     heuristic over other people's kernels, so it will be wrong somewhere, and
     without an override being wrong means editing installed source: the
@@ -191,16 +203,6 @@ def _is_container_runtime() -> bool:
             Path("/run/containerenv"),
         )
     ):
-        return True
-
-    # systemd's container interface: a container manager sets ``container=``
-    # for pid 1, and systemd copies it here. It is the one signal every
-    # runtime agrees on, and unlike a path heuristic it describes this
-    # process. LXC and systemd-nspawn are only reachable through it — their
-    # cgroup paths embed a user-chosen container name, so a name like
-    # ``lxc.payload.docker-builder`` was matching for entirely the wrong
-    # reason before this module stopped reading names.
-    if _systemd_reports_a_container():
         return True
 
     for probe in _CGROUP_PROBES:
@@ -228,29 +230,6 @@ _OVERRIDE_FALSE = ("0", "false", "no", "off")
 #: init, and either being containerised is enough.
 _CGROUP_PROBES = (Path("/proc/1/cgroup"), Path("/proc/self/cgroup"))
 _MOUNTINFO_PROBES = (Path("/proc/1/mountinfo"), Path("/proc/self/mountinfo"))
-
-
-#: Written by systemd when a container manager declares itself, holding the
-#: manager's name (``lxc``, ``systemd-nspawn``, ``docker``…). Present and
-#: non-empty is the whole test; the value is only ever informational.
-_SYSTEMD_CONTAINER_MARKER = Path("/run/systemd/container")
-
-
-def _systemd_reports_a_container() -> bool:
-    """Whether a container manager declared itself through systemd."""
-    if not _SYSTEMD_CONTAINER_MARKER.exists():
-        return False
-    try:
-        value = _SYSTEMD_CONTAINER_MARKER.read_text(
-            encoding="utf-8", errors="ignore"
-        ).strip()
-    except OSError:
-        # Present but unreadable is not evidence either way.
-        return False
-    # One short token naming the manager ("lxc", "systemd-nspawn", "docker").
-    # Length-bounded and single-line so a file that is not this one cannot be
-    # mistaken for a declaration.
-    return bool(value) and "\n" not in value and len(value) <= 64
 
 
 def _container_override() -> bool | None:
