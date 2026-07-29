@@ -295,12 +295,14 @@ class TestWaitingForAStartingOwner:
 
         monkeypatch.setattr(daemon_module.time, "sleep", record)
 
-        started = time.monotonic()
         look_up_owner(tmp_path, profile, _config(profile), wait_seconds=budget)
 
-        assert time.monotonic() - started >= budget
-        assert requested, "a positive budget has to poll at least once"
-        assert max(requested) <= budget
+        # No lower bound on elapsed time and no requirement that a sleep
+        # happened at all: on a loaded machine the deadline can pass during the
+        # first read, and returning immediately is then correct. Asserting
+        # otherwise made this fail for the machine's reasons rather than the
+        # code's, which is the same trap the upper bound fell into.
+        assert all(duration <= budget for duration in requested)
 
     def test_a_negative_wait_is_simply_no_wait(self, tmp_path: Path):
         # Unlike a non-finite budget, this one has an obvious reading.

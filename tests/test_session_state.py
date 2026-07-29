@@ -249,6 +249,36 @@ def test_get_runtime_id_ignores_non_root_overlay_mounts(monkeypatch):
     assert get_runtime_id() == "linux-amd64-host"
 
 
+def test_get_runtime_id_ignores_other_containers_on_the_host(monkeypatch):
+    # The reported failure (#621). The test above already asserted that a
+    # non-root overlay mount proves nothing, but it used a path under
+    # /var/lib/containers, which contains no marker word — so it passed either
+    # way. A Docker host's mountinfo says "docker" outright, and that is what
+    # the substring scan tripped over.
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.platform.system", lambda: "Linux"
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.platform.machine", lambda: "x86_64"
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.Path.exists",
+        lambda self: str(self) == "/proc/1/mountinfo",
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.session_state.Path.read_text",
+        lambda self, *args, **kwargs: (
+            "30 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n"
+            "900 30 0:70 / /var/lib/docker/overlay2/abc/merged rw shared:400 "
+            "- overlay overlay rw,lowerdir=/var/lib/docker/overlay2/l/X\n"
+            "901 30 0:71 / /var/lib/docker/containers/dead/mounts/shm rw "
+            "shared:401 - tmpfs shm rw\n"
+        ),
+    )
+
+    assert get_runtime_id() == "linux-amd64-host"
+
+
 def _seed_session(profile_dir, *, machine_id: str = "4663753") -> None:
     """Write the four artifacts a live source session consists of."""
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -532,3 +562,299 @@ def test_socket_and_cookie_links_are_not_read_as_owners(isolate_profile_dir):
     (profile_dir / "SingletonCookie").symlink_to("10001647406132631536")
 
     assert rotate_source_profile(profile_dir) is not None
+
+
+class TestContainerDetection:
+    """Whether this process is inside a container, and what it costs to be wrong.
+
+    Both directions are damaging and neither is symmetric. Reading a host as a
+    container is unrecoverable for the user: every tool call answers "run
+    --login on the host machine" while a perfectly valid session sits on disk,
+    and no flag reached that decision before this. Reading a container as a
+    host sends it looking for a browser keychain that is not there.
+    """
+
+    def _probe(self, tmp_path, content: str):
+        path = tmp_path / "cgroup"
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    @pytest.mark.parametrize(
+        ("label", "cgroup"),
+        [
+            ("a user session", "0::/user.slice/user-1000.slice/session-3.scope\n"),
+            # The reported bug. systemd escapes dashes, so an ordinary desktop
+            # app's unit contains the word "docker".
+            (
+                "an app whose unit is named after docker",
+                "0::/user.slice/user-1000.slice/app-docker\\x2ddesktop.scope\n",
+            ),
+            # The machine most likely to be misread: it runs the daemon that
+            # runs everyone else's containers.
+            ("the docker daemon itself", "0::/system.slice/docker.service\n"),
+            ("the containerd service", "0::/system.slice/containerd.service\n"),
+            # A host service that merely starts with the runtime's name. An
+            # earlier cut of this fix matched any "docker-" prefix and read
+            # this as a container; found on a real host.
+            (
+                "a backup job named after docker",
+                "0::/system.slice/docker-backup.scope\n",
+            ),
+            # Contrived, but it is what a length bound has to survive: every
+            # letter happens to be a-f. Real runtimes write a full container
+            # id, measured at 64 characters for a Docker systemd scope.
+            (
+                "a host unit whose name is accidentally hex",
+                "0::/system.slice/docker-beefcafedeadbeef.scope\n",
+            ),
+            (
+                "cgroup v1 with no container",
+                "12:pids:/user.slice\n1:name=systemd:/user.slice/session-2.scope\n",
+            ),
+        ],
+    )
+    def test_a_host_is_not_read_as_a_container(self, tmp_path, label, cgroup):
+        from linkedin_mcp_server.session_state import _cgroup_path_is_containerised
+
+        assert not _cgroup_path_is_containerised(self._probe(tmp_path, cgroup)), label
+
+    @pytest.mark.parametrize(
+        ("label", "cgroup"),
+        [
+            (
+                "docker, cgroup v1",
+                "12:pids:/docker/3f2a\n1:name=systemd:/docker/3f2a\n",
+            ),
+            ("docker, cgroup v2", "0::/docker/3f2abc\n"),
+            (
+                "docker with the systemd cgroup driver",
+                "0::/system.slice/docker-" + "3f2a" * 16 + ".scope\n",
+            ),
+            ("kubernetes", "0::/kubepods/besteffort/pod123/abc\n"),
+            (
+                "kubernetes on systemd",
+                "0::/kubepods.slice/kubepods-burstable.slice/x.scope\n",
+            ),
+            ("podman", "0::/libpod_parent/libpod-" + "ab12" * 16 + "\n"),
+            (
+                "rootless podman",
+                "0::/user.slice/user-1000.slice/libpod-" + "ab12" * 16 + ".scope\n",
+            ),
+            ("containerd", "0::/containerd/abcdef\n"),
+            ("cri-o", "0::/system.slice/crio-" + "cd34" * 16 + ".scope\n"),
+            # containerd's default namespace, which a plain `ctr run` writes.
+            ("raw containerd", "0::/moby/some-container-name\n"),
+            # LXC and nspawn name the segment after the container. Before this
+            # module stopped reading names, an LXC container called
+            # "docker-builder" matched for entirely the wrong reason — and a
+            # plainly named one did not match at all.
+            ("lxc", "0::/lxc.payload.web/init.scope\n"),
+            ("lxc named after docker", "0::/lxc.payload.docker-builder/init.scope\n"),
+            ("systemd-nspawn", "0::/machine.slice/machine-demo.scope\n"),
+        ],
+    )
+    def test_a_container_is_still_detected(self, tmp_path, label, cgroup):
+        from linkedin_mcp_server.session_state import _cgroup_path_is_containerised
+
+        assert _cgroup_path_is_containerised(self._probe(tmp_path, cgroup)), label
+
+    def test_mounts_belonging_to_other_containers_prove_nothing(self, tmp_path):
+        # The root cause. mountinfo lists everything the namespace can see, so
+        # a workstation running unrelated containers for a local database has
+        # their overlay mounts in the file. Only our own root mount counts.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "30 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n"
+            "900 30 0:70 / /var/lib/docker/overlay2/abc/merged rw shared:400 - overlay overlay rw\n"
+            "901 30 0:71 / /var/lib/docker/containers/dead/mounts/shm rw shared:401 - tmpfs shm rw\n",
+            encoding="utf-8",
+        )
+
+        assert not _root_mount_uses_overlay(path)
+
+    def test_a_non_overlay_container_root_still_counts(self, tmp_path):
+        # containerd with the native snapshotter bind-mounts the rootfs from
+        # its own storage onto whatever filesystem the host uses — btrfs here.
+        # Checking only for an overlay filesystem type read this as a host,
+        # which is the dangerous direction: the container would then hunt for a
+        # browser keychain that does not exist. Measured on a real container.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "1 0 0:5 /var/lib/containerd/io.containerd.snapshotter.v1.native"
+            "/snapshots/12 / rw,relatime - btrfs /dev/vda1 rw,subvol=/@\n",
+            encoding="utf-8",
+        )
+
+        assert _root_mount_uses_overlay(path)
+
+    def test_a_host_root_on_the_same_filesystem_does_not(self, tmp_path):
+        # The mirror image, and the reason the check reads the root line only:
+        # this host has containerd storage on it, just not as its own root.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "30 1 0:5 / / rw,relatime shared:1 - btrfs /dev/vda1 rw,subvol=/@\n"
+            "900 30 0:70 /var/lib/containerd/snapshots/9 /run/x rw - overlay overlay rw\n",
+            encoding="utf-8",
+        )
+
+        assert not _root_mount_uses_overlay(path)
+
+    def test_our_own_overlay_root_is_a_container(self, tmp_path):
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "1 0 0:70 / / rw,relatime - overlay overlay rw,lowerdir=/var/lib/docker/overlay2/l/X\n",
+            encoding="utf-8",
+        )
+
+        assert _root_mount_uses_overlay(path)
+
+    @pytest.mark.parametrize("value", ["true", "1", "yes", "on"])
+    def test_the_override_can_force_container(self, monkeypatch, value):
+        monkeypatch.setenv("LINKEDIN_MCP_CONTAINER", value)
+
+        assert get_runtime_id().endswith("-container")
+
+    @pytest.mark.parametrize("value", ["false", "0", "no", "off"])
+    def test_the_override_can_force_host(self, monkeypatch, value):
+        # The half that unblocks the reported bug without editing source.
+        monkeypatch.setenv("LINKEDIN_MCP_CONTAINER", value)
+
+        assert get_runtime_id().endswith("-host")
+
+    def test_an_unreadable_override_falls_back_to_detection(
+        self, tmp_path, monkeypatch
+    ):
+        # Refusing to guess beats crashing the server over a typo in an
+        # environment variable. Asserted against a known-container fixture:
+        # every runtime id ends in -host or -container, so accepting either
+        # would pass no matter what the override did.
+        import linkedin_mcp_server.session_state as state
+
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/docker/3f2abc\n", encoding="utf-8")
+        monkeypatch.setattr(state, "_CGROUP_PROBES", (cgroup,))
+        monkeypatch.setattr(state, "_MOUNTINFO_PROBES", ())
+        monkeypatch.setenv("LINKEDIN_MCP_CONTAINER", "maybe")
+
+        assert state._container_override() is None
+        assert get_runtime_id().endswith("-container")
+
+    def test_a_systemd_container_marker_is_not_trusted_on_its_own(
+        self, tmp_path, monkeypatch
+    ):
+        # systemd's container interface answers "is there a boundary", which is
+        # not the question. An OrbStack Linux machine reports lxc there and is
+        # a full system with its own systemd and a persistent disk — measured.
+        # Believing the marker classified it as a container and put it back
+        # into "run --login on the host machine", which is this bug again.
+        import linkedin_mcp_server.session_state as state
+
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/.lxc\n", encoding="utf-8")
+        mountinfo = tmp_path / "mountinfo"
+        mountinfo.write_text(
+            "30 1 0:5 /scon/containers/abc/rootfs / rw,relatime "
+            "- btrfs /dev/vdb1 rw,subvol=/@\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(state, "_CGROUP_PROBES", (cgroup,))
+        monkeypatch.setattr(state, "_MOUNTINFO_PROBES", (mountinfo,))
+
+        assert state._is_container_runtime() is False
+
+    def test_a_nested_lxc_container_is_found_by_its_root(self, tmp_path):
+        # Measured on LXC 5.0.3 inside an OrbStack machine: the documented
+        # lxc.payload.<name> cgroup prefix does not appear when the host is
+        # itself containerised — outer machine and nested container both read
+        # 0::/.lxc. The kernel's mount root still separates them, because only
+        # the nested one is rooted under the container's rootfs.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "1 0 0:5 /scon/containers/orb1/rootfs/var/lib/lxc/demo/rootfs / "
+            "rw,relatime - btrfs /dev/vdb1 rw,subvol=/@\n",
+            encoding="utf-8",
+        )
+
+        assert _root_mount_uses_overlay(path)
+
+    def test_the_machine_hosting_that_lxc_container_is_not_one(self, tmp_path):
+        # The other half, and the reason the systemd marker is not consulted:
+        # this reports container=lxc while being a full system with its own
+        # systemd and a persistent disk. Believing it blocked every tool call.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "1 0 0:5 /scon/containers/orb1/rootfs / rw,relatime "
+            "- btrfs /dev/vdb1 rw,subvol=/@\n",
+            encoding="utf-8",
+        )
+
+        assert not _root_mount_uses_overlay(path)
+
+    def test_an_nfs_root_is_not_a_container(self, tmp_path):
+        # The mount source is whatever the far end calls its export. A server
+        # exporting /var/lib/containers/workstations/alice is describing
+        # somebody's laptop, and reading it turned a legitimate host into the
+        # exact misdetection this fix exists to remove.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "30 1 0:42 / / rw,relatime - nfs4 "
+            "nas:/var/lib/containers/workstations/alice rw\n",
+            encoding="utf-8",
+        )
+
+        assert not _root_mount_uses_overlay(path)
+
+    def test_the_whole_decision_survives_a_host_running_containers(
+        self, tmp_path, monkeypatch
+    ):
+        # The reported machine, end to end through the function that actually
+        # decides, rather than through its helpers. A Linux workstation whose
+        # kernel files mention docker only because unrelated containers run on
+        # it must come out as a host.
+        import linkedin_mcp_server.session_state as state
+
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text(
+            "0::/user.slice/user-1000.slice/session-3.scope\n", encoding="utf-8"
+        )
+        mountinfo = tmp_path / "mountinfo"
+        mountinfo.write_text(
+            "30 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n"
+            "900 30 0:70 / /var/lib/docker/overlay2/abc/merged rw shared:400 - overlay overlay rw\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(state, "_CGROUP_PROBES", (cgroup,))
+        monkeypatch.setattr(state, "_MOUNTINFO_PROBES", (mountinfo,))
+
+        assert state._is_container_runtime() is False
+
+    def test_the_whole_decision_still_finds_a_real_container(
+        self, tmp_path, monkeypatch
+    ):
+        import linkedin_mcp_server.session_state as state
+
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/docker/3f2abc\n", encoding="utf-8")
+        mountinfo = tmp_path / "mountinfo"
+        mountinfo.write_text(
+            "30 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(state, "_CGROUP_PROBES", (cgroup,))
+        monkeypatch.setattr(state, "_MOUNTINFO_PROBES", (mountinfo,))
+
+        assert state._is_container_runtime() is True

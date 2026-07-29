@@ -11,6 +11,7 @@ import logging
 import os
 import platform
 from pathlib import Path
+import re
 import shutil
 import socket
 from collections.abc import Callable, Iterator
@@ -156,6 +157,44 @@ def _normalize_arch(machine: str) -> str:
 
 
 def _is_container_runtime() -> bool:
+    """Whether *this* process runs inside a container.
+
+    Every signal here has to describe our own process. That sounds obvious and
+    is exactly what an earlier version got wrong: it searched ``mountinfo`` and
+    ``cgroup`` for the substrings ``docker``, ``containerd`` and friends
+    anywhere in the file. Those files list what the *namespace* can see, not
+    what we are, so an ordinary Linux workstation running a Docker daemon for
+    unrelated services — a local Postgres, a Redis — matched every time. The
+    misdetection was permanent and unrecoverable: it sends
+    ``get_runtime_policy`` to DOCKER, which answers every tool call with "run
+    --login on the host machine" no matter how valid the session on disk is.
+
+    A false negative is the worse failure, so the remaining signals are the
+    conservative ones rather than the clever ones: a container that believed it
+    was a host would try to auto-import from a browser keychain that is not
+    there and offer login flows it cannot run.
+
+    Deliberately *not* consulted: ``/run/systemd/container``, systemd's
+    documented container interface. It answers a different question than this
+    one. An OrbStack Linux machine reports ``lxc`` there, yet it is a full
+    system with its own systemd, a persistent disk and a desktop-class user —
+    everything the DOCKER policy assumes is missing. Trusting the marker
+    classified it as a container and put it straight back into "run --login on
+    the host machine", which is this bug wearing a different hat. What this
+    module needs to know is not "is there a boundary" but "is there a browser
+    and a keychain on the other side of it", and no single flag answers that.
+    LXC and nspawn therefore stay reachable only through their cgroup layout,
+    and where that is not enough, ``LINKEDIN_MCP_CONTAINER=true`` is.
+
+    ``LINKEDIN_MCP_CONTAINER`` overrides the whole thing. Detection is a
+    heuristic over other people's kernels, so it will be wrong somewhere, and
+    without an override being wrong means editing installed source: the
+    misdetection blocks every tool call and no flag reaches it.
+    """
+    override = _container_override()
+    if override is not None:
+        return override
+
     if any(
         path.exists()
         for path in (
@@ -166,37 +205,183 @@ def _is_container_runtime() -> bool:
     ):
         return True
 
-    markers = ("docker", "containerd", "kubepods", "podman", "libpod")
-    for probe in (
-        Path("/proc/1/cgroup"),
-        Path("/proc/self/cgroup"),
-    ):
-        if _path_contains_markers(probe, markers):
+    for probe in _CGROUP_PROBES:
+        if _cgroup_path_is_containerised(probe):
             return True
 
-    for probe in (
-        Path("/proc/1/mountinfo"),
-        Path("/proc/self/mountinfo"),
-    ):
-        if _path_contains_markers(probe, markers) or _root_mount_uses_overlay(probe):
+    for probe in _MOUNTINFO_PROBES:
+        if _root_mount_uses_overlay(probe):
             return True
 
     return False
 
 
-def _path_contains_markers(path: Path, markers: tuple[str, ...]) -> bool:
+#: Escape hatch for a machine this detection gets wrong. Spelled the same way
+#: as every other boolean environment variable this server reads
+#: (``config/loaders.py``), but read here rather than through the config
+#: layer: runtime identity is resolved before a configuration exists, and
+#: importing the loaders would close a cycle.
+_CONTAINER_OVERRIDE_ENV = "LINKEDIN_MCP_CONTAINER"
+_OVERRIDE_TRUE = ("1", "true", "yes", "on")
+_OVERRIDE_FALSE = ("0", "false", "no", "off")
+
+#: Named rather than inlined so a test can point the decision at a fixture.
+#: Both pid 1 and self are read: a process can be in a different namespace than
+#: init, and either being containerised is enough.
+_CGROUP_PROBES = (Path("/proc/1/cgroup"), Path("/proc/self/cgroup"))
+_MOUNTINFO_PROBES = (Path("/proc/1/mountinfo"), Path("/proc/self/mountinfo"))
+
+
+def _container_override() -> bool | None:
+    """An explicit answer from the operator, or None to keep detecting."""
+    raw = os.environ.get(_CONTAINER_OVERRIDE_ENV)
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value in _OVERRIDE_TRUE:
+        return True
+    if value in _OVERRIDE_FALSE:
+        return False
+    # An unreadable value is not a decision. Falling through to detection beats
+    # guessing, and beats crashing at import time over an environment variable.
+    logger.warning(
+        "Ignoring %s=%r: expected one of %s",
+        _CONTAINER_OVERRIDE_ENV,
+        raw,
+        ", ".join(_OVERRIDE_TRUE + _OVERRIDE_FALSE),
+    )
+    return None
+
+
+#: Whole cgroup path segments that mean a container runtime owns this process.
+#: Matched as segments rather than substrings, which is the entire point: a
+#: systemd unit called ``app-docker\x2ddesktop.scope`` on an ordinary desktop
+#: contains "docker" and is not a container.
+_CONTAINER_CGROUP_SEGMENTS = frozenset(
+    {
+        "docker",
+        "containerd",
+        "kubepods",
+        "kubepods.slice",
+        "podman",
+        "machine",
+        # containerd's default namespace, which is what a plain `ctr run` and
+        # anything built on moby writes.
+        "moby",
+    }
+)
+
+#: Runtimes that name the cgroup segment after the container instance, so there
+#: is no bare segment to match. The identifier is required, not just the
+#: prefix: ``docker-backup.scope`` is a perfectly ordinary host service, and an
+#: earlier version of this read it as a container. Measured on a real host.
+#:
+#: 32 hex minimum rather than a token length. These runtimes write a full
+#: container id — measured at 64 characters for a Docker systemd scope — while
+#: a service someone names by hand does not reach that even when every letter
+#: happens to be a-f. ``docker-beefcafedeadbeef.scope`` is contrived but would
+#: pass a shorter bound.
+_CONTAINER_CGROUP_INSTANCE = re.compile(
+    r"^(?:libpod-|libpod_|crio-|docker-|containerd-)[0-9a-f]{32,}$"
+)
+
+#: LXC and systemd-nspawn name the segment after the container, so there is no
+#: id to require. The *prefix* is the runtime's, though, and a host does not
+#: write it: ``lxc.payload.<name>`` and ``machine-<name>.scope`` under
+#: ``machine.slice``. Kept separate from the id regex because these carry
+#: arbitrary user text after the prefix.
+_CONTAINER_CGROUP_NAMED = ("lxc.payload.", "lxc.monitor.", "machine-")
+
+
+def _cgroup_path_is_containerised(path: Path) -> bool:
+    """Whether our own cgroup path sits under a container runtime's hierarchy.
+
+    A cgroup line is ``hierarchy:controllers:path``. Only the path describes
+    where this process sits; the rest is the kernel's bookkeeping. Reading the
+    whole line as text is what let an unrelated controller name pass as
+    evidence.
+
+    Two host cases have to keep reading as *not* a container, and both are
+    ordinary:
+
+    * ``0::/system.slice/docker.service`` — the Docker daemon itself. It is a
+      normal service on a normal host, and it is the very machine that has
+      other containers' mounts visible.
+    * ``app-docker\\x2ddesktop.scope`` — systemd escapes dashes, so a desktop
+      app's unit contains the word.
+    """
     if not path.exists():
         return False
 
     try:
-        text = path.read_text(encoding="utf-8", errors="ignore").lower()
+        text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False
 
-    return any(marker in text for marker in markers)
+    for line in text.splitlines():
+        fields = line.split(":", maxsplit=2)
+        if len(fields) < 3:
+            continue
+        for raw in fields[2].split("/"):
+            segment = raw.replace("\\x2d", "-").lower()
+            # A unit is a host service, not a container: docker.service is the
+            # daemon that *runs* containers.
+            if segment.endswith((".service", ".socket", ".mount")):
+                continue
+            segment = segment.removesuffix(".scope")
+            if segment in _CONTAINER_CGROUP_SEGMENTS:
+                return True
+            if _CONTAINER_CGROUP_INSTANCE.match(segment):
+                return True
+            if segment.startswith(_CONTAINER_CGROUP_NAMED):
+                return True
+
+    return False
+
+
+#: Directory layouts a container runtime creates for a rootfs it hands out.
+#: Compared against the *mount root* — the subtree of the device that got
+#: mounted, which the kernel reports — and never against the mount source. The
+#: source is a label the other end chooses: an NFS server exporting
+#: ``nas:/var/lib/containers/workstations/alice`` describes somebody's laptop,
+#: not a container, and reading it turned a legitimate host into the very
+#: misdetection this module exists to prevent.
+_CONTAINER_ROOT_LAYOUTS = (
+    "/var/lib/docker/",
+    "/var/lib/containerd/",
+    "/var/lib/containers/",
+    "/var/lib/rancher/",
+    "/run/containerd/",
+    # LXC and LXD. Measured on LXC 5.0.3: the advertised ``lxc.payload.<name>``
+    # cgroup prefix does not appear when the host is itself containerised —
+    # both the outer machine and the nested container read ``0::/.lxc`` — but
+    # the kernel's mount root still separates them, because only the nested one
+    # is rooted under the container's rootfs.
+    "/var/lib/lxc/",
+    "/var/lib/lxd/",
+    "/var/snap/lxd/",
+)
+
+#: A remote filesystem is somebody else's namespace by definition, so its paths
+#: say nothing about ours.
+_NETWORK_FILESYSTEMS = frozenset(
+    {"nfs", "nfs4", "cifs", "smb3", "afs", "ceph", "fuse.sshfs", "9p", "virtiofs"}
+)
 
 
 def _root_mount_uses_overlay(path: Path) -> bool:
+    """Whether our own ``/`` was assembled by a container runtime.
+
+    Named for the common case, but overlay is not the only shape. A containerd
+    container using the ``native`` snapshotter gets a plain bind mount from
+    ``/var/lib/containerd/...`` on whatever filesystem the host uses — btrfs in
+    the case this was measured on — so a type check alone reads it as a host.
+    That is a false negative, and those are the dangerous direction: the
+    container would then look for a browser keychain that is not there.
+
+    Everything is read from the ``/`` line, and from the fields on it the
+    kernel controls: the filesystem type and the mount root.
+    """
     if not path.exists():
         return False
 
@@ -213,7 +398,16 @@ def _root_mount_uses_overlay(path: Path) -> bool:
         right_fields = right.split()
         if len(left_fields) < 5 or not right_fields:
             continue
-        if left_fields[4] == "/" and right_fields[0] == "overlay":
+        if left_fields[4] != "/":
+            continue
+
+        fstype = right_fields[0].lower()
+        if fstype == "overlay":
+            return True
+        if fstype in _NETWORK_FILESYSTEMS:
+            continue
+        mount_root = left_fields[3].lower()
+        if any(layout in mount_root for layout in _CONTAINER_ROOT_LAYOUTS):
             return True
 
     return False
