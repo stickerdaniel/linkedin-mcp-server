@@ -80,11 +80,13 @@ MCP_PATH = "/mcp"
 #: both stages together. Generous, because it covers the first import of the
 #: whole server graph on a cold page cache.
 #:
-#: It must stay comfortably below the frontend's own election budget
-#: (``daemon_election.DEFAULT_ELECTION_SECONDS``), and a test enforces that. The
-#: frontend stops a child that has said nothing by the time its budget runs out,
-#: so an owner allowed to take longer would be killed on a slow machine while
-#: still inside its own rules.
+#: At most half the frontend's own election budget
+#: (``daemon_election.DEFAULT_ELECTION_SECONDS``), which is what the test
+#: enforces. The frontend stops a child that has said nothing by the time its
+#: budget runs out, so an owner allowed to take longer would be killed on a slow
+#: machine while still inside its own rules. The margin covers what the frontend
+#: spends before this clock even starts: handing the configuration over, and any
+#: lock attempts before that.
 _STARTUP_PROBE_SECONDS = 30.0
 
 _LOG_FILE = "daemon.log"

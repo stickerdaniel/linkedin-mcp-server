@@ -64,12 +64,12 @@ logger = logging.getLogger(__name__)
 #: and reporting what it last saw. It is what bounds the delay a user sees when
 #: something goes wrong rather than when it goes right.
 #:
-#: Comfortably more than twice the owner's own startup allowance
-#: (``daemon_owner._STARTUP_PROBE_SECONDS``), and that ordering is enforced by a
-#: test. A frontend now stops a child that has said nothing by the time this
-#: runs out, so an owner permitted to take longer would be killed on a slow
-#: machine while still inside its own rules. The remainder covers handing the
-#: configuration over and the lock attempts before the owner's clock starts.
+#: At least twice the owner's own startup allowance
+#: (``daemon_owner._STARTUP_PROBE_SECONDS``), which a test enforces. A frontend
+#: stops a child that has said nothing by the time this runs out, so an owner
+#: permitted to take longer would be killed on a slow machine while still inside
+#: its own rules. The remainder covers what is spent before the owner's clock
+#: starts: handing the configuration over, and the lock attempts before that.
 DEFAULT_ELECTION_SECONDS = 90.0
 
 #: How long a published owner has to answer before it is treated as leftovers.
