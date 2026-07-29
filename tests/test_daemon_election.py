@@ -19,6 +19,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -370,6 +371,31 @@ class TestFailingFast:
             assert all(sleeper.poll() is not None for sleeper in sleepers), (
                 "the child that could not serve was left running"
             )
+
+            # Nothing of the abandoned attempt is left in this process either.
+            # These three are asserted together because the argument that the
+            # cleanup is safe on Windows rests on all of them: the child is
+            # confirmed dead *before* the handshake pipe is released, so the
+            # blocked reader gets an end of file rather than needing a
+            # cross-thread close, and the writer holds only the stdin stream —
+            # never a lock descriptor — so a broken pipe is enough to end it.
+            #
+            # That argument is reasoned rather than measured on Windows, which
+            # is why it is asserted here: this test runs on the Windows CI job,
+            # where the reasoning would otherwise stand unchecked.
+            #
+            # What it does not do is prove the *ordering*. Moving the release
+            # ahead of the stop leaves this green on POSIX, because `detach()`
+            # never blocks here whatever the child is doing. On Windows the same
+            # change is the difference between an end of file and a wait on a
+            # live reader, and CI is the only place that distinction is
+            # observed at all.
+            assert all(
+                sleeper.stdin is None or sleeper.stdin.closed for sleeper in sleepers
+            ), "the configuration pipe was left open"
+            assert not any(
+                "daemon-config" in thread.name for thread in threading.enumerate()
+            ), "the writer thread outlived the child it was writing to"
         finally:
             for sleeper in sleepers:
                 if sleeper.poll() is None:  # pragma: no cover - the stop worked
@@ -426,6 +452,14 @@ class TestFailingFast:
             )
             probe.release()
             assert all(child.poll() is not None for child in started)
+            # Same three post-conditions as the blocked-write path next door,
+            # for the same Windows reasoning: the child is confirmed dead before
+            # the handshake pipe is released, so nothing has to interrupt a live
+            # reader, and the writer holds no lock descriptor.
+            assert all(child.stdin is None or child.stdin.closed for child in started)
+            assert not any(
+                "daemon-config" in thread.name for thread in threading.enumerate()
+            )
 
             # And on time. The timeout bounds the *wait*, and the cleanup after
             # it used to hand that bound straight back: `child.stdout.close()`
