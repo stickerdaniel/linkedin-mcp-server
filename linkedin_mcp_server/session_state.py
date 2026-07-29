@@ -193,6 +193,16 @@ def _is_container_runtime() -> bool:
     ):
         return True
 
+    # systemd's container interface: a container manager sets ``container=``
+    # for pid 1, and systemd copies it here. It is the one signal every
+    # runtime agrees on, and unlike a path heuristic it describes this
+    # process. LXC and systemd-nspawn are only reachable through it — their
+    # cgroup paths embed a user-chosen container name, so a name like
+    # ``lxc.payload.docker-builder`` was matching for entirely the wrong
+    # reason before this module stopped reading names.
+    if _systemd_reports_a_container():
+        return True
+
     for probe in _CGROUP_PROBES:
         if _cgroup_path_is_containerised(probe):
             return True
@@ -218,6 +228,29 @@ _OVERRIDE_FALSE = ("0", "false", "no", "off")
 #: init, and either being containerised is enough.
 _CGROUP_PROBES = (Path("/proc/1/cgroup"), Path("/proc/self/cgroup"))
 _MOUNTINFO_PROBES = (Path("/proc/1/mountinfo"), Path("/proc/self/mountinfo"))
+
+
+#: Written by systemd when a container manager declares itself, holding the
+#: manager's name (``lxc``, ``systemd-nspawn``, ``docker``…). Present and
+#: non-empty is the whole test; the value is only ever informational.
+_SYSTEMD_CONTAINER_MARKER = Path("/run/systemd/container")
+
+
+def _systemd_reports_a_container() -> bool:
+    """Whether a container manager declared itself through systemd."""
+    if not _SYSTEMD_CONTAINER_MARKER.exists():
+        return False
+    try:
+        value = _SYSTEMD_CONTAINER_MARKER.read_text(
+            encoding="utf-8", errors="ignore"
+        ).strip()
+    except OSError:
+        # Present but unreadable is not evidence either way.
+        return False
+    # One short token naming the manager ("lxc", "systemd-nspawn", "docker").
+    # Length-bounded and single-line so a file that is not this one cannot be
+    # mistaken for a declaration.
+    return bool(value) and "\n" not in value and len(value) <= 64
 
 
 def _container_override() -> bool | None:
@@ -273,6 +306,13 @@ _CONTAINER_CGROUP_INSTANCE = re.compile(
     r"^(?:libpod-|libpod_|crio-|docker-|containerd-)[0-9a-f]{32,}$"
 )
 
+#: LXC and systemd-nspawn name the segment after the container, so there is no
+#: id to require. The *prefix* is the runtime's, though, and a host does not
+#: write it: ``lxc.payload.<name>`` and ``machine-<name>.scope`` under
+#: ``machine.slice``. Kept separate from the id regex because these carry
+#: arbitrary user text after the prefix.
+_CONTAINER_CGROUP_NAMED = ("lxc.payload.", "lxc.monitor.", "machine-")
+
 
 def _cgroup_path_is_containerised(path: Path) -> bool:
     """Whether our own cgroup path sits under a container runtime's hierarchy.
@@ -314,20 +354,31 @@ def _cgroup_path_is_containerised(path: Path) -> bool:
                 return True
             if _CONTAINER_CGROUP_INSTANCE.match(segment):
                 return True
+            if segment.startswith(_CONTAINER_CGROUP_NAMED):
+                return True
 
     return False
 
 
-#: Substrings that only appear in a *root* mount when a container runtime put
-#: it there. Applied to our own ``/`` line alone, never to the whole file:
-#: these same strings are all over a Docker host's mountinfo, describing other
-#: people's containers, which is the bug this module exists to not have.
-_CONTAINER_ROOT_SOURCES = (
+#: Directory layouts a container runtime creates for a rootfs it hands out.
+#: Compared against the *mount root* — the subtree of the device that got
+#: mounted, which the kernel reports — and never against the mount source. The
+#: source is a label the other end chooses: an NFS server exporting
+#: ``nas:/var/lib/containers/workstations/alice`` describes somebody's laptop,
+#: not a container, and reading it turned a legitimate host into the very
+#: misdetection this module exists to prevent.
+_CONTAINER_ROOT_LAYOUTS = (
     "/var/lib/docker/",
     "/var/lib/containerd/",
     "/var/lib/containers/",
     "/var/lib/rancher/",
     "/run/containerd/",
+)
+
+#: A remote filesystem is somebody else's namespace by definition, so its paths
+#: say nothing about ours.
+_NETWORK_FILESYSTEMS = frozenset(
+    {"nfs", "nfs4", "cifs", "smb3", "afs", "ceph", "fuse.sshfs", "9p", "virtiofs"}
 )
 
 
@@ -341,8 +392,8 @@ def _root_mount_uses_overlay(path: Path) -> bool:
     That is a false negative, and those are the dangerous direction: the
     container would then look for a browser keychain that is not there.
 
-    So the root line is judged two ways: its filesystem type, and where its
-    source comes from. Both are read from the ``/`` line only.
+    Everything is read from the ``/`` line, and from the fields on it the
+    kernel controls: the filesystem type and the mount root.
     """
     if not path.exists():
         return False
@@ -362,12 +413,14 @@ def _root_mount_uses_overlay(path: Path) -> bool:
             continue
         if left_fields[4] != "/":
             continue
-        if right_fields[0] == "overlay":
+
+        fstype = right_fields[0].lower()
+        if fstype == "overlay":
             return True
-        # The mount root (field 4 of the left half) and the source device carry
-        # the runtime's storage path for non-overlay snapshotters.
-        haystack = f"{left_fields[3]} {' '.join(right_fields[1:2])}".lower()
-        if any(marker in haystack for marker in _CONTAINER_ROOT_SOURCES):
+        if fstype in _NETWORK_FILESYSTEMS:
+            continue
+        mount_root = left_fields[3].lower()
+        if any(layout in mount_root for layout in _CONTAINER_ROOT_LAYOUTS):
             return True
 
     return False

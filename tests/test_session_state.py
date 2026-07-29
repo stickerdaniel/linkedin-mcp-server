@@ -644,6 +644,13 @@ class TestContainerDetection:
             ("cri-o", "0::/system.slice/crio-" + "cd34" * 16 + ".scope\n"),
             # containerd's default namespace, which a plain `ctr run` writes.
             ("raw containerd", "0::/moby/some-container-name\n"),
+            # LXC and nspawn name the segment after the container. Before this
+            # module stopped reading names, an LXC container called
+            # "docker-builder" matched for entirely the wrong reason — and a
+            # plainly named one did not match at all.
+            ("lxc", "0::/lxc.payload.web/init.scope\n"),
+            ("lxc named after docker", "0::/lxc.payload.docker-builder/init.scope\n"),
+            ("systemd-nspawn", "0::/machine.slice/machine-demo.scope\n"),
         ],
     )
     def test_a_container_is_still_detected(self, tmp_path, label, cgroup):
@@ -722,12 +729,66 @@ class TestContainerDetection:
 
         assert get_runtime_id().endswith("-host")
 
-    def test_an_unreadable_override_falls_back_to_detection(self, monkeypatch):
+    def test_an_unreadable_override_falls_back_to_detection(
+        self, tmp_path, monkeypatch
+    ):
         # Refusing to guess beats crashing the server over a typo in an
-        # environment variable.
+        # environment variable. Asserted against a known-container fixture:
+        # every runtime id ends in -host or -container, so accepting either
+        # would pass no matter what the override did.
+        import linkedin_mcp_server.session_state as state
+
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/docker/3f2abc\n", encoding="utf-8")
+        monkeypatch.setattr(state, "_CGROUP_PROBES", (cgroup,))
+        monkeypatch.setattr(state, "_MOUNTINFO_PROBES", ())
         monkeypatch.setenv("LINKEDIN_MCP_CONTAINER", "maybe")
 
-        assert get_runtime_id().endswith(("-host", "-container"))
+        assert state._container_override() is None
+        assert get_runtime_id().endswith("-container")
+
+    def test_a_container_manager_that_declares_itself_is_believed(
+        self, tmp_path, monkeypatch
+    ):
+        # systemd's container interface. LXC and systemd-nspawn are only
+        # reachable this way: their cgroup paths carry a user-chosen container
+        # name, so matching on the name is matching on nothing.
+        import linkedin_mcp_server.session_state as state
+
+        marker = tmp_path / "container"
+        marker.write_text("lxc\n", encoding="utf-8")
+        monkeypatch.setattr(state, "_SYSTEMD_CONTAINER_MARKER", marker)
+        monkeypatch.setattr(state, "_CGROUP_PROBES", ())
+        monkeypatch.setattr(state, "_MOUNTINFO_PROBES", ())
+
+        assert state._is_container_runtime() is True
+
+    def test_an_empty_systemd_marker_is_not_evidence(self, tmp_path, monkeypatch):
+        import linkedin_mcp_server.session_state as state
+
+        marker = tmp_path / "container"
+        marker.write_text("\n", encoding="utf-8")
+        monkeypatch.setattr(state, "_SYSTEMD_CONTAINER_MARKER", marker)
+        monkeypatch.setattr(state, "_CGROUP_PROBES", ())
+        monkeypatch.setattr(state, "_MOUNTINFO_PROBES", ())
+
+        assert state._is_container_runtime() is False
+
+    def test_an_nfs_root_is_not_a_container(self, tmp_path):
+        # The mount source is whatever the far end calls its export. A server
+        # exporting /var/lib/containers/workstations/alice is describing
+        # somebody's laptop, and reading it turned a legitimate host into the
+        # exact misdetection this fix exists to remove.
+        from linkedin_mcp_server.session_state import _root_mount_uses_overlay
+
+        path = tmp_path / "mountinfo"
+        path.write_text(
+            "30 1 0:42 / / rw,relatime - nfs4 "
+            "nas:/var/lib/containers/workstations/alice rw\n",
+            encoding="utf-8",
+        )
+
+        assert not _root_mount_uses_overlay(path)
 
     def test_the_whole_decision_survives_a_host_running_containers(
         self, tmp_path, monkeypatch
