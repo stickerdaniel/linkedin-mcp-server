@@ -564,6 +564,50 @@ class TestRealOwner:
         finally:
             _stop(second.get("pid"))
 
+    @_POSIX_ONLY
+    def test_the_owner_outlives_the_client_that_started_it(self, real_state_root: Path):
+        # The premise of the whole feature. An owner that died with its first
+        # client would give every later client a cold start plus a fresh
+        # ``/feed/`` validation, which is the traffic this exists to remove.
+        #
+        # Killed by process *group*, not by pid, because that is how a client
+        # shutdown reaches a server it spawned — and a child that merely had its
+        # own pid would still be caught by it. ``start_new_session`` is what puts
+        # the owner in a group of its own.
+        import json
+
+        profile = real_state_root
+
+        frontend = subprocess.Popen(
+            [sys.executable, "-c", _LINGERING_FRONTEND, str(profile)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+            cwd=_REPO_ROOT,
+            # The test process needs a group of its own too, or the killpg below
+            # takes pytest with it. Found the direct way.
+            start_new_session=True,
+        )
+        owner_pid = None
+        try:
+            assert frontend.stdout is not None
+            owner_pid = json.loads(frontend.stdout.readline())["pid"]
+            assert isinstance(owner_pid, int), "no owner was elected"
+
+            os.killpg(os.getpgid(frontend.pid), signal.SIGKILL)
+            frontend.wait(timeout=30)
+
+            # Given a moment, because a group signal is not instantaneous and a
+            # check that raced it would pass for the wrong reason.
+            time.sleep(1.0)
+            assert _alive(owner_pid), "the owner died with the client that started it"
+        finally:
+            _stop(owner_pid)
+            if frontend.poll() is None:  # pragma: no cover - the kill worked
+                frontend.kill()
+                frontend.wait(timeout=30)
+
     def test_an_older_owner_hands_over_to_a_newer_build(self, real_state_root: Path):
         # The turnover, end to end against a live owner rather than a mock. Both
         # halves have to hold: the old process actually exits, and a replacement

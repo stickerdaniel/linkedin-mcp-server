@@ -484,11 +484,21 @@ def _spawn(
 ) -> bool:
     """Start the detached owner and wait for its ready handshake.
 
-    Detached deliberately, and this is the one piece of the issue's process-model
-    advice that survived measurement: a child started with ``start_new_session``
-    alone is still killed when the MCP client shuts down, and only a
-    double-forked child survives. An owner that dies with its first client would
-    reduce this whole feature to a slower version of what it replaces.
+    The owner has to outlive the client that caused it to start, or the whole
+    feature degrades to a slower version of what it replaces. ``start_new_session``
+    is what buys that: the child leads its own session and process group, so a
+    signal aimed at the client's group does not reach it.
+
+    Measured on this tree rather than assumed, because the issue claims otherwise
+    — that only a double-forked child survives and ``start_new_session`` is not
+    enough. On macOS it is: after ``SIGKILL`` to the frontend's entire process
+    group, the owner was still running and had reparented to pid 1. A double fork
+    would add a layer whose only job is to be exited, so it is not done here.
+
+    Not measured: Windows, and Linux under a supervisor that kills a whole
+    cgroup rather than a process group. The second is the one that could still
+    take the owner down, and it is worth revisiting if a Linux user reports the
+    daemon dying with their client.
     """
     log_path = daemon_owner.daemon_log_path(auth_root)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -532,6 +542,25 @@ def _spawn(
         # this cannot cost it a broken pipe.
         if child.stdout is not None:
             child.stdout.close()
+        _reap(child)
+
+
+def _reap(child: subprocess.Popen[bytes]) -> None:
+    """Collect a child that has already exited, without waiting for one that has not.
+
+    A successful election leaves a *running* owner, and this process must never
+    wait for it: outliving this process is the point. The other outcomes leave a
+    child that has exited, and ``poll`` collects exactly those.
+
+    Belt and braces rather than a fix for something observed. ``subprocess``
+    keeps its own registry of abandoned children and reaps them when the next one
+    is created, and a failed election measured here left no zombie with this call
+    removed. It is kept because that behaviour is an implementation detail of the
+    standard library, and this is the one place that knowingly walks away from a
+    child.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        child.poll()
 
 
 def _await_ready(child: subprocess.Popen[bytes], *, timeout: float) -> bool:
