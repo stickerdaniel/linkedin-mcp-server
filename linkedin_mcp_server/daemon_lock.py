@@ -61,8 +61,8 @@ _DAEMON_LOCK_FILE = "daemon.lock"
 #: parent had closed its handles and exited: a third process acquired the byte
 #: range in 20 of 20 runs. Within one process a duplicate does keep the lock
 #: alive, which is why this is easy to get wrong from a single-process test.
-#: Ownership here has to be taken by the supervisor itself rather than passed
-#: to it.
+#: So on Windows the elected process has to take the lock itself rather than be
+#: handed one.
 #:
 #: The measurement closed and exited together, so it does not say which of the
 #: two released the region. That distinction would matter for a design that
@@ -119,7 +119,7 @@ def daemon_lock_path(auth_root: Path) -> Path:
 class DaemonLock:
     """Exclusive ownership of one auth root's daemon, for as long as it is held.
 
-    Not a context manager by default, because the normal case is a supervisor
+    Not a context manager by default, because the normal case is a daemon owner
     that takes it at startup and holds it until it has finished cleaning up. Use
     :meth:`hold` when a scope really is the right shape, which is mainly tests
     and the one-shot maintenance commands.
@@ -173,8 +173,8 @@ class DaemonLock:
         """Give up the lock by closing our descriptor, never by unlocking it.
 
         Closing drops only this descriptor; the lock survives in any copy a
-        supervisor inherited. Unlocking would release it for all of them at
-        once, so a supervisor that had already adopted the handoff would lose
+        owner inherited. Unlocking would release it for all of them at
+        once, so an owner that had already adopted the handoff would lose
         the lock without anything saying so, and the next client would elect a
         second owner against a live browser.
         """
@@ -191,23 +191,23 @@ class DaemonLock:
         logger.debug("Daemon lock released for %s", self._auth_root)
 
     def inheritable_copy(self) -> int:
-        """Duplicate the descriptor so a launched supervisor can inherit it.
+        """Duplicate the descriptor so a launched owner can inherit it.
 
         POSIX only, and refused elsewhere rather than quietly returning
         something that does not mean what it says.
 
         The original is opened close-on-exec, so it would not survive the exec
-        that starts the supervisor. Handing over a duplicate rather than
-        releasing and letting the supervisor take the lock itself is what closes
+        that starts the owner. Handing over a duplicate rather than
+        releasing and letting the owner take the lock itself is what closes
         the window in between, during which another client would see a free lock
         and elect a second owner.
 
-        The caller closes the copy once the supervisor confirms it has it.
+        The caller closes the copy once the owner confirms it has it.
         """
         if not _INHERITED_LOCKS_TRANSFER:
             raise DaemonLockError(
                 "Handing a held lock to another process is a POSIX mechanism. "
-                "On this platform the supervisor has to take the lock itself."
+                "On this platform the owner has to take the lock itself."
             )
         if self._fd is None:
             raise DaemonLockError("Cannot hand over a lock this process does not hold")
@@ -229,7 +229,7 @@ class DaemonLock:
         """Take ownership of an inherited locked descriptor.
 
         POSIX only, like its counterpart, and for the measured reason above.
-        Called by a supervisor that was launched holding a copy.
+        Called by an owner that was launched holding a copy.
 
         Adoption is the one path that would otherwise take a caller's word for
         what it was handed, so the descriptor is checked to be this lock's own
@@ -249,7 +249,7 @@ class DaemonLock:
         if not _INHERITED_LOCKS_TRANSFER:
             raise DaemonLockError(
                 "An inherited lock cannot be adopted on this platform. "
-                "The supervisor has to take the lock itself."
+                "The owner has to take the lock itself."
             )
         self._discard_if_forked()
         if self._fd is not None:
@@ -300,7 +300,7 @@ class DaemonLock:
             raise DaemonLockError(
                 "The lock file was replaced while the inherited descriptor was "
                 "being adopted, so it now locks an inode nothing refers to. "
-                "Start the supervisor again."
+                "Start the owner again."
             )
         # Made non-inheritable again straight away. It was marked inheritable
         # for exactly one launch, and leaving it that way would let any later
