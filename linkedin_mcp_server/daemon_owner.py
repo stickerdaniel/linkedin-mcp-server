@@ -34,6 +34,7 @@ import argparse
 import asyncio
 import contextlib
 import errno
+import hashlib
 import hmac
 import logging
 import os
@@ -152,6 +153,26 @@ async def _probe(url: str, token: str) -> None:
 STAND_DOWN_PATH = "/control/stand-down"
 
 
+def _matches_token(presented: str, expected: str) -> bool:
+    """Whether a presented bearer token is the expected one.
+
+    Through digests rather than by comparing the strings directly, and that is
+    not belt and braces. ``hmac.compare_digest`` refuses two *strings* when
+    either contains a non-ASCII character, and the presented one arrives in an
+    HTTP header from anything that can reach the port. Compared directly, a
+    header of ``Bearer töken`` raises ``TypeError`` inside the route and the
+    caller gets a 500 where it should get a 401 — an unauthenticated request
+    turned into a way to provoke an error. Found by trying it.
+
+    Digesting first also makes the comparison length-independent, so nothing
+    about the real token's length is observable.
+    """
+    return hmac.compare_digest(
+        hashlib.sha256(presented.strip().encode("utf-8", "surrogatepass")).digest(),
+        hashlib.sha256(expected.encode("utf-8")).digest(),
+    )
+
+
 def create_owner_server(
     *,
     config: AppConfig,
@@ -198,9 +219,7 @@ def create_owner_server(
             """
             header = request.headers.get("authorization", "")
             scheme, _, presented = header.partition(" ")
-            if scheme.lower() != "bearer" or not hmac.compare_digest(
-                presented.strip(), token
-            ):
+            if scheme.lower() != "bearer" or not _matches_token(presented, token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             stand_down()
             return JSONResponse({"standing_down": True})

@@ -564,6 +564,52 @@ class TestRealOwner:
         finally:
             _stop(second.get("pid"))
 
+    def test_many_clients_starting_at_once_elect_exactly_one_owner(
+        self, real_state_root: Path
+    ):
+        # The property the whole feature is for, under the condition that
+        # actually produces races: several MCP clients launching together, each
+        # spawning its own stdio server, all of them arriving at an empty state
+        # directory at the same moment.
+        #
+        # Two browsers on one profile is the failure this must never have. The
+        # single-frontend tests cannot see it, because nothing contends there.
+        import json
+
+        profile = real_state_root
+        clients = 8
+
+        running = [
+            subprocess.Popen(
+                [sys.executable, "-c", _INSPECT_OWNER, str(profile)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+                cwd=_REPO_ROOT,
+            )
+            for _ in range(clients)
+        ]
+
+        results = []
+        for frontend in running:
+            out, err = frontend.communicate(timeout=300)
+            assert frontend.returncode == 0, err[-2000:]
+            results.append(json.loads(out.strip().splitlines()[-1]))
+
+        owners = {result["pid"] for result in results}
+        try:
+            assert None not in owners, "a client ended up with no owner"
+            assert len(owners) == 1, f"more than one owner was elected: {owners}"
+            # Exactly one of them did the starting; the rest attached to it.
+            assert sum(1 for r in results if r["started"]) == 1, results
+            assert all(r["state"] == OwnerState.ATTACHABLE.value for r in results)
+            # And none of them kept the lock they may have taken on the way.
+            assert not any(r["frontend_holds_lock"] for r in results)
+        finally:
+            for pid in owners:
+                _stop(pid)
+
     @_POSIX_ONLY
     def test_the_owner_outlives_the_client_that_started_it(self, real_state_root: Path):
         # The premise of the whole feature. An owner that died with its first
@@ -858,6 +904,7 @@ class TestVersionSkew:
                         url, headers={"Authorization": "Bearer nope"}
                     )
                     assert not stopped, "an unauthenticated caller stopped the daemon"
+
                     good = await client.post(
                         url, headers={"Authorization": "Bearer the-token"}
                     )
@@ -873,6 +920,24 @@ class TestVersionSkew:
         assert without_status == 401
         assert wrong_status == 401
         assert stopped == ["asked"]
+
+    def test_a_non_ascii_token_is_refused_rather_than_raising(self):
+        # `hmac.compare_digest` raises TypeError when either *string* holds a
+        # character above ASCII, and the presented one arrives in a header from
+        # anything that can reach the port. Compared as strings the route
+        # answered 500, which turns an unauthenticated request into a way to
+        # provoke an error rather than a refusal. Found by trying it.
+        #
+        # Tested against the comparison rather than over HTTP, because httpx
+        # refuses to encode such a header and so cannot send the request at all.
+        # That is a property of one client library, not of the endpoint, which
+        # is reachable by anything on the machine.
+        from linkedin_mcp_server.daemon_owner import _matches_token
+
+        assert not _matches_token("töken", "the-token")
+        assert not _matches_token("\udcff", "the-token")
+        assert _matches_token("the-token", "the-token")
+        assert _matches_token("  the-token  ", "the-token")
 
 
 class TestPublishingLast:
