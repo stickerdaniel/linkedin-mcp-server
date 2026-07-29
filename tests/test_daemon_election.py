@@ -564,6 +564,88 @@ class TestRealOwner:
         finally:
             _stop(second.get("pid"))
 
+    @_POSIX_ONLY
+    def test_a_child_that_dies_after_adopting_the_lock_leaves_it_free(
+        self, real_state_root: Path, tmp_path: Path
+    ):
+        # The worst interleaving in the whole handoff. The frontend takes the
+        # lock, hands a duplicate to the child, and releases its own copy the
+        # moment the child has it — so from then on the lock exists *only* in a
+        # process that has not yet proved it can serve. If that process dies
+        # there, the lock has to come free on its own, because nothing else is
+        # holding a reference that could release it.
+        #
+        # Exercised with a child that really adopts and then exits, rather than
+        # one that fails earlier: a child that never got as far as `adopt` would
+        # pass this test while proving nothing about the case it is named for.
+        child = tmp_path / "adopting_child.py"
+        marker = tmp_path / "adopted"
+        child.write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "import linkedin_mcp_server.daemon_lock as daemon_lock\n"
+            "lock = daemon_lock.DaemonLock(Path(sys.argv[2]))\n"
+            "lock.adopt(int(sys.argv[1]))\n"
+            "Path(sys.argv[3]).write_text('adopted')\n"
+            "raise SystemExit(7)\n"
+        )
+
+        profile = real_state_root
+        auth_root = profile.parent
+        frontend = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "import linkedin_mcp_server.daemon_election as election\n"
+            "real = election.subprocess.Popen\n"
+            "def substitute(command, **kwargs):\n"
+            "    fd = command[command.index('--lock-fd') + 1]\n"
+            "    return real(\n"
+            "        [command[0], sys.argv[2], fd, sys.argv[3], sys.argv[4]],\n"
+            "        **kwargs,\n"
+            "    )\n"
+            "election.subprocess.Popen = substitute\n"
+            "from linkedin_mcp_server.config.schema import AppConfig\n"
+            "profile = Path(sys.argv[1])\n"
+            "config = AppConfig()\n"
+            "config.browser.user_data_dir = str(profile)\n"
+            "election.obtain_owner(\n"
+            "    profile.parent, profile, config, deadline_seconds=15\n"
+            ")\n"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                frontend,
+                str(profile),
+                str(child),
+                str(auth_root),
+                str(marker),
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+            cwd=_REPO_ROOT,
+            timeout=200,
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert marker.exists(), "the child never reached the adoption being tested"
+
+        probe = DaemonLock(auth_root)
+        assert probe.try_acquire(), (
+            "the lock survived the only process holding it, so nothing can ever "
+            "elect an owner for this profile again"
+        )
+        probe.release()
+
+        # And an ordinary election works afterwards, which is the outcome the
+        # user actually needs.
+        recovered = _run_frontend(profile)
+        try:
+            assert recovered["state"] == OwnerState.ATTACHABLE.value, recovered
+        finally:
+            _stop(recovered.get("pid"))
+
     def test_many_clients_starting_at_once_elect_exactly_one_owner(
         self, real_state_root: Path
     ):
