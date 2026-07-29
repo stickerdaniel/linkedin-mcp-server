@@ -242,6 +242,63 @@ class TestFailingFast:
         # out the budget, not that it returns in any particular millisecond.
         assert elapsed < 5, elapsed
 
+    def test_a_frontend_that_lost_the_race_takes_over_when_the_winner_dies(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The recovery this loop exists for, and the one a plain "wait for a
+        # descriptor" cannot provide. A wins the lock, its child adopts it and
+        # then dies without ever publishing; B lost the race and is waiting.
+        # Nothing will ever appear on disk, so only another lock attempt can
+        # discover that the position came free.
+        #
+        # A loser that waits out its budget on the descriptor alone ends the
+        # election with no owner at all, having had the lock available to it the
+        # whole time.
+        import threading
+
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+
+        # The winner, holding the lock and releasing it shortly after.
+        winner = DaemonLock(auth_root)
+        assert winner.try_acquire()
+        releasing = threading.Timer(1.0, winner.release)
+        releasing.start()
+
+        took_over: list[float] = []
+
+        def contend(
+            auth_root: Path, profile: Path, config: AppConfig, *, timeout: float
+        ) -> _Attempt:
+            contender = DaemonLock(auth_root)
+            if not contender.try_acquire():
+                return _Attempt.CONTENDED
+            took_over.append(time.monotonic())
+            _publish_stale_owner(auth_root, profile, config)
+            contender.release()
+            return _Attempt.STARTED
+
+        monkeypatch.setattr(election_module, "_start_owner", contend)
+
+        began = time.monotonic()
+        try:
+            outcome = obtain_owner(
+                auth_root,
+                profile,
+                config,
+                deadline_seconds=20,
+                connect=lambda attachment: True,
+            )
+        finally:
+            releasing.cancel()
+            winner.release()
+
+        assert took_over, "the loser never retried the lock the winner freed"
+        assert outcome.worth_connecting
+        # And promptly: the point is recovery, not that it eventually happens.
+        assert time.monotonic() - began < 10
+
     def test_a_child_that_is_merely_slow_is_not_called_a_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -1140,6 +1197,69 @@ class TestVersionSkew:
 
         assert not received, "the request was routed through the proxy"
         assert not any(b"SUPERSECRET" in seen for seen in received)
+
+    def test_the_owner_is_not_started_from_the_working_directory(self, tmp_path: Path):
+        # `python -m` puts the inherited working directory first on sys.path, so
+        # a workspace containing linkedin_mcp_server/daemon_owner.py is imported
+        # in preference to the installed package. That code would receive the
+        # inherited lock descriptor and the whole configuration on standard
+        # input, proxy_password included — merely because an MCP client happened
+        # to be started in that directory.
+        #
+        # Exercised against a real interpreter rather than by inspecting the
+        # command, because what matters is which module actually loads.
+        workspace = tmp_path / "workspace"
+        shadow = workspace / "linkedin_mcp_server"
+        shadow.mkdir(parents=True)
+        (shadow / "__init__.py").write_text("")
+        (shadow / "daemon_owner.py").write_text("print('HIJACKED')\n")
+
+        # The real command, with `-m <module>` swapped for a `-c` that reports
+        # which file that module resolved to. Everything before it — the
+        # interpreter and its flags — is exactly what production uses.
+        command = election_module._spawn_command(lock_fd=None)
+        assert command[-2:] == ["-m", "linkedin_mcp_server.daemon_owner"], command
+        result = subprocess.run(
+            [
+                *command[:-2],
+                "-c",
+                "import linkedin_mcp_server.daemon_owner as m; print(m.__file__)",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=workspace,
+            env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+            timeout=60,
+        )
+
+        assert result.returncode == 0, result.stderr[-1000:]
+        loaded = result.stdout.strip()
+        assert "HIJACKED" not in result.stdout, "the working directory won"
+        assert loaded.startswith(str(_REPO_ROOT)), loaded
+
+    def test_the_owner_does_not_inherit_the_proxy_password(self):
+        # The configuration travels on standard input specifically so that a
+        # password is not left in a readable environment. That is only half done
+        # while the child inherits the frontend's environment unchanged: the
+        # documented way to configure a proxy is PROXY_PASSWORD, so the owner
+        # would hold the raw value in /proc/<pid>/environ for its whole life,
+        # which is far longer than the frontend's.
+        import os as os_module
+
+        original = dict(os_module.environ)
+        os_module.environ["PROXY_PASSWORD"] = "hunter2"
+        os_module.environ["PROXY_USERNAME"] = "someone"
+        try:
+            handed = election_module._owner_environment()
+        finally:
+            os_module.environ.clear()
+            os_module.environ.update(original)
+
+        assert "PROXY_PASSWORD" not in handed
+        assert "PROXY_USERNAME" not in handed
+        # And the rest of the environment still crosses: the owner needs PATH,
+        # HOME and the rest to run at all.
+        assert "PATH" in handed
 
     def test_a_non_ascii_token_is_refused_rather_than_raising(self):
         # `hmac.compare_digest` raises TypeError when either *string* holds a

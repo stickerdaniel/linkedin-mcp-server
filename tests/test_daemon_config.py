@@ -10,6 +10,7 @@ to use it, because the fingerprint it compares covers exactly these fields.
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 
 import pytest
 
@@ -76,9 +77,18 @@ class TestRoundTrip:
             eager_full_chromium=True,
         )
 
-        restored = daemon_config.decode(daemon_config.encode(original))
+        carried = daemon_config.encode(original)
+        restored = daemon_config.decode(carried)
 
         assert restored.browser == original.browser
+        # And every field was actually sent, not merely restored to a default
+        # that happened to match. The comparison above cannot tell those apart
+        # for any field left at its default — `chrome_path` is one, and so is
+        # every field added in future. Checking the serialised keys against the
+        # dataclass is what makes the name of this test true.
+        assert set(json.loads(carried)["browser"]) == {
+            field.name for field in fields(original.browser)
+        }
 
     def test_settings_outside_the_fingerprint_survive_too(self):
         # The fingerprint says which differences stop two clients sharing an

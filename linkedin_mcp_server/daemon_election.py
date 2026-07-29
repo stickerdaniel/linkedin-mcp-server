@@ -531,15 +531,14 @@ def _spawn(
     log_path = daemon_owner.daemon_log_path(auth_root)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    command = [sys.executable, "-m", "linkedin_mcp_server.daemon_owner"]
-    if lock_fd is not None:
-        command += ["--lock-fd", str(lock_fd)]
+    command = _spawn_command(lock_fd=lock_fd)
 
     # Opened append, so a restart adds to the record rather than erasing the
     # reason the last owner died.
     with open(log_path, "a", encoding="utf-8") as log:
         child = subprocess.Popen(
             command,
+            env=_owner_environment(),
             stdin=subprocess.PIPE,
             # The handshake channel. Not a separate inherited descriptor,
             # because ``pass_fds`` is POSIX-only (``subprocess.py:1464``) and
@@ -573,6 +572,54 @@ def _spawn(
     finally:
         _release_handshake(child)
         _reap(child)
+
+
+def _spawn_command(*, lock_fd: int | None) -> list[str]:
+    """How the owner is invoked.
+
+    ``-P`` keeps the working directory off ``sys.path``. Without it, a directory
+    containing ``linkedin_mcp_server/daemon_owner.py`` is imported in preference
+    to the installed package, and an MCP client started in such a workspace
+    would hand that code the inherited lock descriptor and the whole
+    configuration on standard input, ``proxy_password`` included. Reproduced
+    with this project's own interpreter from a temporary directory: the local
+    file ran instead of the installed module.
+
+    That is also what makes ``daemon_config``'s "both ends are the same
+    installation" true rather than hopeful.
+    """
+    command = [sys.executable, "-P", "-m", "linkedin_mcp_server.daemon_owner"]
+    if lock_fd is not None:
+        command += ["--lock-fd", str(lock_fd)]
+    return command
+
+
+#: Environment variables carrying a secret that the owner has no use for. It
+#: receives every setting it needs on standard input, so keeping these would be
+#: the exposure the stdin channel exists to avoid, held for the owner's whole
+#: lifetime rather than the frontend's. ``/proc/<pid>/environ`` is readable by
+#: this account, and ``ps e`` shows it on the BSDs.
+_SECRETS_TO_DROP = ("PROXY_PASSWORD", "PROXY_USERNAME")
+
+
+def _owner_environment() -> dict[str, str]:
+    """The environment to start the owner in, minus what it must not keep.
+
+    ``daemon_config`` hands the configuration over on standard input precisely
+    so that a password does not sit in a readable environment. That is only half
+    the job while the child inherits the frontend's environment unchanged: the
+    documented way to configure a proxy is ``PROXY_PASSWORD``
+    (``config/loaders.py:107-108``), so the owner would hold the raw value for
+    as long as it runs, which is far longer than the process it came from.
+
+    Dropped rather than emptied. An empty ``PROXY_USERNAME`` is meaningful to
+    the configuration parser (``daemon_descriptor.py:480``), and the owner is
+    told the real values through the channel that was built for them.
+    """
+    environment = dict(os.environ)
+    for name in _SECRETS_TO_DROP:
+        environment.pop(name, None)
+    return environment
 
 
 def _detachment_flags() -> int:

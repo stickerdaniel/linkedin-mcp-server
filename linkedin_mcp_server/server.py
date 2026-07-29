@@ -58,8 +58,15 @@ class _StaticTokenAuth(TokenVerifier):
 
     def __init__(self, token: str) -> None:
         super().__init__()
-        # Kept as a digest rather than the token, so a process dump or a repr
-        # of the running server does not carry the credential itself.
+        # A digest rather than the token, so the verifier's own repr does not
+        # carry the credential — the surrounding code logs whole objects at
+        # DEBUG and users paste those logs into issue reports.
+        #
+        # Deliberately not claimed: that this keeps the token out of the
+        # process. It does not. The owner holds it to serve the stand-down
+        # route, and every accepted request builds an AccessToken around it.
+        # Anything able to read this process's memory has already won, and the
+        # token is the least of what it finds there.
         self._expected = hashlib.sha256(token.encode()).digest()
 
     async def verify_token(self, token: str) -> AccessToken | None:
