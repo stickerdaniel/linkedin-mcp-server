@@ -208,7 +208,7 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
-          name: "LinkedIn MCP Server v${{ env.VERSION }}"
+          name: "v${{ env.VERSION }}"
           body_path: RELEASE_NOTES.md
 
       - name: Summary
