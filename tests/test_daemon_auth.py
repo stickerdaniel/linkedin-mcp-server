@@ -171,6 +171,19 @@ class TestTheMarkerSurvivesTheHop:
 class TestTheFrontendActsOnTheMarker:
     """Repairing and replaying are separate decisions, and both can go wrong."""
 
+    @pytest.fixture(autouse=True)
+    def _a_real_config(self):
+        """The replay reads its deadline from the configuration.
+
+        Built rather than left to the default, because ``get_config`` parses
+        ``sys.argv`` when nothing has been set, which under pytest is pytest's
+        own command line.
+        """
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        set_config(AppConfig())
+
     def _repair(self):
         """Watch the login without running one."""
         return patch(
@@ -581,6 +594,52 @@ class TestTheRepairRunsForReal:
         )
         assert result.is_error is True
         assert len(calls) == 1
+
+    async def test_a_replay_that_runs_long_does_not_hang_the_client(self):
+        """Waiting bounded and replaying unbounded still overruns the deadline.
+
+        Nothing under this middleware bounds the whole path: the forwarded call
+        gets its own deadline per hop, so the first call, the wait and the replay
+        each stay inside one while their sum stays inside nothing. A sign-in
+        finishing near the end of the wait, followed by a slow replay, put the
+        client past its deadline with the answer already in hand.
+
+        The owner's readable failure is the right answer then: the session now
+        exists, so the next call succeeds, and a bare transport error would say
+        none of that.
+        """
+        from linkedin_mcp_server.config import get_config
+
+        owner = FastMCP("owner", mask_error_details=True)
+        calls: list[int] = []
+
+        @owner.tool
+        async def scrape() -> str:
+            calls.append(1)
+            if len(calls) == 1:
+                raise_tool_error(
+                    AuthMissingOnOwnerError("no session", nothing_ran_yet=True),
+                    "scrape",
+                )
+            await asyncio.sleep(30)  # a replay that outlives the call
+            return "scraped ok"
+
+        owner.add_middleware(OwnerAuthSignalMiddleware())
+        get_config().server.tool_timeout_seconds = 1.0
+
+        with (
+            self._profile_is_free(),
+            self._a_login_that(takes=0.05),
+            patch("linkedin_mcp_server.daemon_auth._MINIMUM_REPLAY_SECONDS", 0.2),
+        ):
+            async with Client(_proxy_to(owner)) as client:
+                result = await client.call_tool("scrape", raise_on_error=False)
+
+        assert len(calls) == 2, "the replay never ran"
+        # The owner's own words, not a timeout: the client is told what happened
+        # and that retrying now works.
+        assert result.is_error is True
+        assert "no session" in result.content[0].text
 
 
 class TestWhichRolesGetWhichHalf:

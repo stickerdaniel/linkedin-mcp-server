@@ -43,6 +43,7 @@ one ``except`` clause.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -61,6 +62,11 @@ from linkedin_mcp_server.exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The least a replay is given, however little of the call is left. Short enough
+#: that it cannot be what overruns a client's deadline, long enough that the
+#: replay is a real attempt rather than a formality.
+_MINIMUM_REPLAY_SECONDS = 5.0
 
 
 def _how_long_to_wait_for_the_sign_in(already_spent: float) -> float:
@@ -81,6 +87,21 @@ def _how_long_to_wait_for_the_sign_in(already_spent: float) -> float:
 
     budget = get_config().server.tool_timeout_seconds * AUTH_REPAIR_LOGIN_WAIT_FRACTION
     return max(0.0, budget - already_spent)
+
+
+def _what_is_left_of_this_call(already_spent: float) -> float:
+    """How much of the client's deadline the replay may still use.
+
+    The whole budget rather than the fraction above: waiting deliberately leaves
+    a share for this, and by here that share is whatever has not been spent. A
+    floor keeps a call that has already overrun from being handed a zero or
+    negative deadline, which would fail the replay before it started for a
+    session that now exists.
+    """
+    from linkedin_mcp_server.config import get_config
+
+    budget = get_config().server.tool_timeout_seconds
+    return max(_MINIMUM_REPLAY_SECONDS, budget - already_spent)
 
 
 #: Namespaced so a future fastmcp key cannot shadow it. Measured: a custom key
@@ -244,8 +265,7 @@ class FrontendAuthRepairMiddleware(Middleware):
             # every login a person actually performs.
             #
             # So wait the login out here. This is the process that has somewhere
-            # to show it, the client is waiting on this one call, and the tool
-            # timeout above bounds how long that can last.
+            # to show it, and the client is waiting on this one call.
             left = _how_long_to_wait_for_the_sign_in(time.monotonic() - began)
             if not await _wait_for_the_sign_in(left):
                 logger.info("The sign-in did not finish in time; not replaying")
@@ -266,7 +286,22 @@ class FrontendAuthRepairMiddleware(Middleware):
             return result
 
         logger.info("Signed in; running the call again")
-        return await call_next(context)
+        # Bounded by what is left of this call, not given a fresh budget. Nothing
+        # below this middleware bounds the whole path: the forwarded call has its
+        # own deadline per hop (`daemon_proxy.create_proxy_provider`), so the
+        # first call, the wait and the replay each stay inside one, while their
+        # sum is not bounded by anything. Measured shape: a sign-in finishing
+        # near the end of the wait, followed by a replay taking a full budget of
+        # its own, put the client past its deadline with the answer already in
+        # hand. Timing out here instead spends the last of the budget on the
+        # answer and, when it does not arrive, returns the owner's readable
+        # failure rather than a bare transport error.
+        remaining = _what_is_left_of_this_call(time.monotonic() - began)
+        try:
+            return await asyncio.wait_for(call_next(context), timeout=remaining)
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.info("The replayed call ran out of time; reporting the failure")
+            return result
 
 
 def _readable_marker(result: ToolResult) -> dict[str, Any] | None:
