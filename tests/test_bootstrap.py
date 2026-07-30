@@ -109,7 +109,7 @@ class TestBootstrap:
             await ensure_tool_ready_or_raise("search_jobs")
 
     async def test_missing_auth_starts_login(self, monkeypatch):
-        async def fake_start_login(ctx=None) -> None:
+        async def fake_start_login(ctx=None, **_kwargs) -> None:
             raise AuthenticationStartedError(
                 "No valid LinkedIn session was found. A login browser window has been opened. Sign in with your LinkedIn credentials there, then retry this tool."
             )
@@ -2314,3 +2314,72 @@ class TestTheAutoImportInheritsTheGuard:
             await _start_login_if_needed(superseded_by="the-broken-one")
 
         assert seen.get("superseded_by") == "the-broken-one"
+
+
+class TestTheAutomaticPathCarriesWhatItObserved:
+    """A login a tool call started is not somebody insisting at a terminal.
+
+    The readiness gate has just looked at the profile, so it knows which session
+    it found wanting. Passing that on lets the login stand down if a peer signs in
+    while this one is still getting there. `--login` deliberately keeps the
+    unguarded default, which is what makes it an override rather than a request.
+    """
+
+    async def test_the_gate_hands_on_the_generation_it_just_read(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        # A session that exists on disk but is about to be found unusable: the
+        # gate reads this generation and must pass exactly it on.
+        (isolate_profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (isolate_profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(isolate_profile_dir).write_text("[]")
+        observed = write_source_state(isolate_profile_dir).login_generation
+
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        # Installed rather than loaded: the gate calls get_config(), which parses
+        # sys.argv, and under pytest that is pytest's own command line.
+        config = AppConfig()
+        config.browser.user_data_dir = str(isolate_profile_dir)
+        set_config(config)
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+
+        seen: dict[str, object] = {}
+
+        async def capture(ctx=None, **kwargs):
+            seen.update(kwargs)
+
+        monkeypatch.setattr(bootstrap, "_start_login_if_needed", capture)
+        monkeypatch.setattr(bootstrap, "_auth_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: True)
+
+        # Both branches of the gate, because they are separate call sites: a
+        # configured Chrome executable skips the managed-binary path entirely and
+        # reaches its own. Mutating one and not the other went unnoticed until
+        # this covered both.
+        for custom_chrome in (False, True):
+            seen.clear()
+            monkeypatch.setattr(bootstrap, "_uses_custom_chrome", lambda: custom_chrome)
+
+            await bootstrap.ensure_tool_ready_or_raise("get_person_profile")
+
+            assert seen.get("superseded_by") == observed, custom_chrome
+
+    async def test_an_explicit_login_stays_unguarded(self):
+        # `--login` reaches interactive_login directly, with no generation, so it
+        # always signs in. Asserted on the signature default rather than by
+        # driving a browser: the default is the contract.
+        import inspect
+
+        from linkedin_mcp_server.setup import UNGUARDED, interactive_login
+
+        default = inspect.signature(interactive_login).parameters["superseded_by"]
+
+        assert default.default is UNGUARDED

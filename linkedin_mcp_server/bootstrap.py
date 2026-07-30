@@ -596,7 +596,7 @@ async def ensure_tool_ready_or_raise(
         if _auth_ready():
             _state.auth_state = AuthState.READY
             return
-        await _start_login_if_needed(ctx)
+        await _start_login_if_needed(ctx, superseded_by=current_login_generation())
         return
 
     if _browser_setup_ready():
@@ -628,7 +628,12 @@ async def ensure_tool_ready_or_raise(
         _state.auth_state = AuthState.READY
         return
 
-    await _start_login_if_needed(ctx)
+    # The generation goes with it, because this call has just looked: whatever is
+    # on disk now is what it found wanting. A login started automatically by a
+    # tool call is not somebody at a terminal insisting, so if a peer signs in
+    # while this one is still getting there, standing down is right. `--login`
+    # keeps its unguarded default, which is what makes it an override.
+    await _start_login_if_needed(ctx, superseded_by=current_login_generation())
 
 
 def _raise_if_docker_auth_missing() -> None:
