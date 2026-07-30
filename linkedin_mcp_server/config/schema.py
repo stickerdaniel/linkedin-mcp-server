@@ -52,19 +52,21 @@ BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
 # tune it, and an unused setting is a support burden.
 PROFILE_HANDOVER_WAIT_SECONDS: float = 60.0
 
-# How long a frontend repairing the shared browser's auth waits for the sign-in
-# it started before answering the call without it.
+# What fraction of a tool call a frontend may spend waiting for the sign-in it
+# started, before answering without it.
 #
-# Bounded by the tool timeout above it, not by how long a person takes: the
-# client is blocked on one call for the whole wait, and a wait that outlives the
-# call is spent for nothing. 150 leaves a margin under the 180-second default for
-# the replayed call to run in. Somebody still typing when it runs out loses
-# nothing but this attempt, because the login keeps running and the next call
-# finds the session it wrote.
+# A fraction rather than a number of seconds, because the bound that matters is
+# the call this wait is spent inside, and ``tool_timeout_seconds`` is something
+# the user sets. A fixed value was measured against ``TOOL_TIMEOUT=60``: the
+# client's call was cut short while the middleware was still waiting, so instead
+# of the readable "sign-in still in progress" the user got a bare timeout. The
+# login survived it and the next call succeeded, so nothing was lost but the
+# explanation -- which is the part a person acts on.
 #
-# Deliberately not configurable, like its neighbour: it is derived from a value
-# the user can already set rather than a knob of its own.
-AUTH_REPAIR_LOGIN_WAIT_SECONDS: float = 150.0
+# Five sixths leaves the remaining sixth for the replayed call, which is the
+# whole point of having waited. Somebody still typing when it runs out loses only
+# this attempt: the login keeps running and the next call finds what it wrote.
+AUTH_REPAIR_LOGIN_WAIT_FRACTION: float = 5 / 6
 
 # Close an idle browser and release the profile after this long with no calls.
 # A backstop only — the handoff signal does the real work — so it is deliberately

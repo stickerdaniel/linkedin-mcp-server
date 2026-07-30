@@ -44,13 +44,14 @@ one ``except`` clause.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
-from linkedin_mcp_server.config.schema import AUTH_REPAIR_LOGIN_WAIT_SECONDS
+from linkedin_mcp_server.config.schema import AUTH_REPAIR_LOGIN_WAIT_FRACTION
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
@@ -61,8 +62,26 @@ from linkedin_mcp_server.exceptions import (
 
 logger = logging.getLogger(__name__)
 
-#: Local alias so the wait and its reasoning read together at the call site.
-_LOGIN_WAIT_SECONDS = AUTH_REPAIR_LOGIN_WAIT_SECONDS
+
+def _how_long_to_wait_for_the_sign_in(already_spent: float) -> float:
+    """How much of this call is left to spend waiting for the login.
+
+    Read per call rather than fixed at import, because the budget it comes from
+    is a user setting: a fixed value was measured to outlive the call it was
+    spent inside once ``TOOL_TIMEOUT`` was lowered, replacing a readable answer
+    with a bare timeout.
+
+    *already_spent* is subtracted rather than ignored, and measuring caught that
+    too: the fraction alone still overran, because the owner call and the inline
+    login wait had gone before this is reached, and both come out of the same
+    budget. Never negative, so an already-overrun call skips the wait and answers
+    rather than waiting on a deadline that has passed.
+    """
+    from linkedin_mcp_server.config import get_config
+
+    budget = get_config().server.tool_timeout_seconds * AUTH_REPAIR_LOGIN_WAIT_FRACTION
+    return max(0.0, budget - already_spent)
+
 
 #: Namespaced so a future fastmcp key cannot shadow it. Measured: a custom key
 #: coexists with fastmcp's own ``{'fastmcp': {...}}`` entry as a separate
@@ -188,6 +207,7 @@ class FrontendAuthRepairMiddleware(Middleware):
         context: MiddlewareContext[mt.CallToolRequestParams],
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
+        began = time.monotonic()
         result = await call_next(context)
         marker = _readable_marker(result)
         if marker is None:
@@ -226,7 +246,8 @@ class FrontendAuthRepairMiddleware(Middleware):
             # So wait the login out here. This is the process that has somewhere
             # to show it, the client is waiting on this one call, and the tool
             # timeout above bounds how long that can last.
-            if not await _wait_for_the_sign_in(_LOGIN_WAIT_SECONDS):
+            left = _how_long_to_wait_for_the_sign_in(time.monotonic() - began)
+            if not await _wait_for_the_sign_in(left):
                 logger.info("The sign-in did not finish in time; not replaying")
                 return result
             logger.info("The sign-in finished")

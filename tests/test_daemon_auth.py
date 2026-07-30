@@ -20,6 +20,7 @@ from fastmcp.server.middleware import Middleware
 from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider
 from fastmcp.tools import ToolResult
 
+from linkedin_mcp_server import daemon_auth
 from linkedin_mcp_server.daemon_auth import (
     MARKER_KEY,
     MARKER_VERSION,
@@ -466,8 +467,11 @@ class TestTheRepairRunsForReal:
 
         config = AppConfig()
         config.browser.login_inline_wait_seconds = 0.2
+        # The repair wait is a fraction of this, so setting the real budget is
+        # what scales it, and the test exercises that derivation rather than
+        # patching over it.
+        config.server.tool_timeout_seconds = 6.0
         set_config(config)
-        monkeypatch.setattr("linkedin_mcp_server.daemon_auth._LOGIN_WAIT_SECONDS", 5.0)
 
     async def test_a_stale_session_is_replayed_once_the_login_succeeds(self):
         """The path that never replayed: this one raises immediately, always."""
@@ -520,20 +524,63 @@ class TestTheRepairRunsForReal:
         Giving up costs only this attempt: the login keeps running, and the next
         call finds the session it writes.
         """
+        from linkedin_mcp_server.config import get_config
+
         owner, calls = _owner_that_fails_with(
             AuthMissingOnOwnerError("no session", nothing_ran_yet=True)
         )
+        get_config().server.tool_timeout_seconds = 0.4
 
-        with (
-            self._profile_is_free(),
-            self._a_login_that(takes=5.0),
-            patch("linkedin_mcp_server.daemon_auth._LOGIN_WAIT_SECONDS", 0.3),
-        ):
+        with self._profile_is_free(), self._a_login_that(takes=5.0):
             async with Client(_proxy_to(owner)) as client:
                 result = await client.call_tool("scrape", raise_on_error=False)
 
         assert len(calls) == 1
         assert result.is_error is True
+
+    async def test_the_wait_stays_inside_a_shortened_tool_budget(self):
+        """A user who lowers TOOL_TIMEOUT must still get the readable answer.
+
+        The wait was a fixed 150 seconds once. Measured against
+        ``TOOL_TIMEOUT=60``: the client's call was cut short while the middleware
+        was still waiting, so the user got a bare timeout instead of "sign-in
+        still in progress". Nothing was corrupted -- the login survived and the
+        next call worked -- but the explanation is the part a person acts on.
+
+        The budget asked for is asserted rather than the wall clock it produces.
+        A first version timed the whole call and compared against the timeout: it
+        passed alone and failed inside the full suite at 1.22s against 1.2s,
+        because everything else in the call is also on that clock and a loaded
+        machine stretches all of it. That measures the runner, not the code.
+        """
+        from linkedin_mcp_server.config import get_config
+
+        owner, calls = _owner_that_fails_with(
+            AuthMissingOnOwnerError("no session", nothing_ran_yet=True)
+        )
+        get_config().server.tool_timeout_seconds = 1.2
+        asked_for: list[float] = []
+
+        real_wait = daemon_auth._wait_for_the_sign_in
+
+        async def record(timeout: float) -> bool:
+            asked_for.append(timeout)
+            return await real_wait(timeout)
+
+        with (
+            self._profile_is_free(),
+            self._a_login_that(takes=30.0),
+            patch.object(daemon_auth, "_wait_for_the_sign_in", record),
+        ):
+            async with Client(_proxy_to(owner)) as client:
+                result = await client.call_tool("scrape", raise_on_error=False)
+
+        assert asked_for, "the sign-in was never waited for"
+        assert asked_for[0] < 1.2, (
+            f"the wait asked for {asked_for[0]:.2f}s of a 1.2s call"
+        )
+        assert result.is_error is True
+        assert len(calls) == 1
 
 
 class TestWhichRolesGetWhichHalf:
