@@ -912,3 +912,54 @@ class TestALateImportDoesNotUndoALogin:
         )
 
         assert committed == [True]
+
+
+class TestAMomentaryHolderDoesNotCancelTheRepair:
+    """A profile held for a moment must not defeat the wait built to survive it.
+
+    `invalidate_auth_and_trigger_relogin` retires the dead session before it
+    starts a login. That rotation takes the profile, and it does not wait for it,
+    so a holder anywhere else made it fail. Refusing the login there was right
+    when the login also demanded the profile outright; now that it waits, refusing
+    throws away the wait before it happens.
+    """
+
+    async def test_the_login_still_starts_while_another_process_holds_it(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from unittest.mock import AsyncMock
+
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.exceptions import AuthenticationStartedError
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        config = AppConfig()
+        config.browser.user_data_dir = str(isolate_profile_dir)
+        set_config(config)
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+
+        # A complete session, so the rotation has something to move and really
+        # reaches for the profile.
+        (isolate_profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (isolate_profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(isolate_profile_dir).write_text("[]")
+        write_source_state(isolate_profile_dir)
+
+        holder = _hold_profile(get_profile_lease(isolate_profile_dir).auth_root, 1.5)
+        monkeypatch.setattr(bootstrap, "_run_login_flow", AsyncMock())
+
+        try:
+            # Started, not refused. Before this, the rotation raised "the browser
+            # profile is in use" and no login was ever attempted.
+            with pytest.raises(AuthenticationStartedError):
+                await bootstrap.invalidate_auth_and_trigger_relogin()
+        finally:
+            holder.wait(timeout=10)
+
+        assert bootstrap.get_bootstrap_state().login_task is not None

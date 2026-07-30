@@ -1163,7 +1163,31 @@ async def invalidate_auth_and_trigger_relogin(
                 )
 
         # Force-move stale profile files (skip _auth_ready() guard).
-        _force_move_auth_state_aside()
+        #
+        # A failure here used to stop the login, and that reasoning has expired.
+        # It made sense when the login demanded the profile outright: if the
+        # rotation could not take it, neither could the login, and saying so beat
+        # claiming a browser had opened. Now the login *waits* for the profile,
+        # so a momentary holder is precisely the case it handles, and refusing
+        # here throws away the wait before it happens. Measured: with a lease held
+        # for 1.5 seconds, this raised "the browser profile is in use" and the
+        # 60-second wait was never reached.
+        #
+        # The rotation itself is not lost. `interactive_login` rotates under the
+        # profile it waited for (`setup.py`, `rotate_shielded`), which is the
+        # better place for it anyway: this one runs without holding anything, so
+        # its result was never guaranteed to survive to the login. What is lost by
+        # skipping it is only that `_auth_ready()` keeps reporting the dead
+        # session until the login retires it, and the quiescence latch on an owner
+        # already covers that window.
+        try:
+            _force_move_auth_state_aside()
+        except AuthenticationBootstrapFailedError as exc:
+            logger.info(
+                "Could not retire the stale session yet (%s); the login will "
+                "wait for the profile and retire it there",
+                exc,
+            )
 
         # A force-move starts a fresh no-session episode; allow auto-import to
         # be re-attempted on the next tool call (the prior latch was for the
