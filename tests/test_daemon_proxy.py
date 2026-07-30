@@ -292,6 +292,13 @@ class TestServingTheOwnersTools:
         auth_root = tmp_path / "state"
         elected = _attachment(tmp_path)
 
+        # Published state is keyed by auth root but *stored* under the account's
+        # own private directory, so a tmp_path auth root alone does not isolate
+        # anything: without this the test left a directory behind in the real
+        # ~/.mcp-server-linkedin/daemon. Caught by counting entries before and
+        # after a run.
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
+
         # Only the socket is stood in for. A client reaches the owner when the
         # address it carries is the one currently published, and fails otherwise,
         # so what decides the outcome is the address production code chose rather
