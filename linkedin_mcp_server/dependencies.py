@@ -22,6 +22,7 @@ from linkedin_mcp_server.drivers.browser import (
 )
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
+    AuthStaleOnOwnerError,
     BrowserBinaryMissingError,
     BrowserShutdownUnconfirmedError,
     DockerHostLoginRequiredError,
@@ -58,11 +59,22 @@ def _is_browser_binary_missing_error(error: Exception) -> bool:
 async def handle_auth_error(
     error: AuthenticationError,
     ctx: Context | None,
+    *,
+    nothing_ran_yet: bool = False,
 ) -> NoReturn:
     """Close the stale browser and trigger interactive re-login.
 
     In Docker mode a GUI browser cannot be opened, so we raise
     ``DockerHostLoginRequiredError`` for a consistent user message.
+
+    *nothing_ran_yet* says whether the tool had done any work before the failure,
+    which decides whether a client may safely run the call again after signing in.
+    Only :func:`get_ready_extractor` can answer yes: it is the first statement of
+    every tool body, so a failure there means nothing has been scraped. The 18
+    catch sites in the tool bodies leave it at the default, because by then the
+    scrape may be part done, and some of these tools send messages and connection
+    requests. A 19th added later is non-replayable until someone says otherwise,
+    which is the safe direction for a default to point.
     """
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         raise DockerHostLoginRequiredError(
@@ -105,6 +117,12 @@ async def handle_auth_error(
         # Recorded before raising so the next forwarded call is answered from the
         # latch rather than by opening Chromium again.
         go_auth_quiescent(broken_generation)
+        raise AuthStaleOnOwnerError(
+            "The shared LinkedIn browser's session stopped working, and it "
+            "cannot sign in by itself. Retry this tool: the client will open a "
+            "login window.",
+            nothing_ran_yet=nothing_ran_yet,
+        ) from error
 
     await invalidate_auth_and_trigger_relogin(ctx)  # always raises
 
@@ -121,7 +139,10 @@ async def get_ready_extractor(
         await ensure_authenticated()
         return LinkedInExtractor(browser.page)
     except AuthenticationError as e:
-        await handle_auth_error(e, ctx)  # always raises
+        # The first statement of every tool body, so a failure here means the
+        # scrape has not started and the client may safely run the call again once
+        # it has signed in.
+        await handle_auth_error(e, ctx, nothing_ran_yet=True)  # always raises
     except Exception as e:
         if isinstance(e, NetworkError) and _is_browser_binary_missing_error(e):
             invalidate_browser_setup()

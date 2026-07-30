@@ -839,7 +839,10 @@ async def _start_login_if_needed(ctx: Context | None = None) -> None:
         raise AuthMissingOnOwnerError(
             "The shared LinkedIn browser has no usable session, and it cannot "
             "sign in by itself. Retry this tool: the client will open a login "
-            "window."
+            "window.",
+            # The readiness gate runs before the tool body, so nothing has been
+            # scraped and the client may run the call again once it has signed in.
+            nothing_ran_yet=True,
         )
 
     # Cheap check-and-claim under the lock; the slow work (auto-import browser
@@ -1027,7 +1030,9 @@ def _raise_if_auth_quiescent() -> None:
     raise AuthStaleOnOwnerError(
         "The shared LinkedIn browser's session stopped working, and it cannot "
         "sign in by itself. Retry this tool: the client will open a login "
-        "window."
+        "window.",
+        # Raised from the readiness gate, ahead of the tool body.
+        nothing_ran_yet=True,
     )
 
 
@@ -1054,6 +1059,9 @@ async def invalidate_auth_and_trigger_relogin(
         # nowhere to appear. The caller has already closed the browser and
         # recorded the generation it found, which is what `go_auth_quiescent`
         # needs, so all that is left is to say so.
+        # Reached only if something calls this directly; `handle_auth_error`
+        # raises its own first, carrying whether any work had run. Conservative
+        # here, because a direct caller has told us nothing about that.
         raise AuthStaleOnOwnerError(
             "The shared LinkedIn browser's session stopped working, and it "
             "cannot sign in by itself. Retry this tool: the client will open a "

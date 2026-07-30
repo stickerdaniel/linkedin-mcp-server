@@ -72,7 +72,21 @@ class OwnerCannotAuthenticateError(LinkedInMCPError):
 
     Subclasses rather than one class with a field: they are raised from different
     places and the distinction has to survive being caught by type.
+
+    ``nothing_ran_yet`` is carried separately from which subclass this is, because
+    the two are independent and conflating them costs correctness. Whether the
+    session is missing or stale says what has to be repaired; whether any work has
+    happened says whether the call may be run again afterwards. Both combinations
+    occur: a stale session is usually found by the readiness check before a tool
+    has done anything, and only the owner can tell, because by the time a failure
+    reaches a client every origin looks the same.
+
+    It defaults to False so a path that has not thought about it is not replayed.
     """
+
+    def __init__(self, message: str, *, nothing_ran_yet: bool = False) -> None:
+        super().__init__(message)
+        self.nothing_ran_yet = nothing_ran_yet
 
 
 class AuthMissingOnOwnerError(OwnerCannotAuthenticateError):

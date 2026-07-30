@@ -30,6 +30,10 @@ from linkedin_mcp_server.drivers.browser import (
     close_browser,
     watch_for_handoff_requests,
 )
+from linkedin_mcp_server.daemon_auth import (
+    FrontendAuthRepairMiddleware,
+    OwnerAuthSignalMiddleware,
+)
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
@@ -191,6 +195,17 @@ def create_mcp_server(
         mask_error_details=True,
         auth=_StaticTokenAuth(auth_token) if auth_token is not None else None,
     )
+    # Added before the serializing middleware below, which makes it the outer one.
+    # An inner position would work: `close_browser` does not consult the in-flight
+    # count, so quiescence succeeds from there, and the lease reference the inner
+    # layer holds is released in its own `finally`. Outside is preferred because
+    # the marker reports whether the profile is still held, and from inside that
+    # answer would describe the layer below rather than the process.
+    if role is ServerRole.OWNER:
+        mcp.add_middleware(OwnerAuthSignalMiddleware())
+    # The other half, and only ever on the process that has a user in front of it.
+    if role is ServerRole.PROXY:
+        mcp.add_middleware(FrontendAuthRepairMiddleware())
     # Profile ownership belongs to whoever launches Chromium. A process that
     # only forwards calls must not take the lease: it would either block itself
     # until its own timeout, or take the lease and leave the process that
