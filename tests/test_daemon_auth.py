@@ -60,12 +60,24 @@ def _owner_that_fails_with(
     return owner, calls
 
 
-def _proxy_to(owner: FastMCP, *, repairing: bool = True) -> FastMCP:
-    """A frontend forwarding to *owner* in memory, wired as production does."""
+def _proxy_to(
+    owner: FastMCP, *, repairing: bool = True, tool_timeout: float | None = None
+) -> FastMCP:
+    """A frontend forwarding to *owner* in memory, wired as production does.
+
+    *tool_timeout* is handed to the middleware the way ``create_mcp_server`` does,
+    rather than left to the configuration: the repair budgets itself from what
+    its server was built with, so a test that set only the config would be
+    measuring a number the production path never reads.
+    """
     front = FastMCP("front", mask_error_details=True)
     front.add_provider(ProxyProvider(lambda: ProxyClient(owner)))
     if repairing:
-        front.add_middleware(FrontendAuthRepairMiddleware())
+        front.add_middleware(
+            FrontendAuthRepairMiddleware(
+                **({} if tool_timeout is None else {"tool_timeout": tool_timeout})
+            )
+        )
     return front
 
 
@@ -545,7 +557,7 @@ class TestTheRepairRunsForReal:
         get_config().server.tool_timeout_seconds = 0.4
 
         with self._profile_is_free(), self._a_login_that(takes=5.0):
-            async with Client(_proxy_to(owner)) as client:
+            async with Client(_proxy_to(owner, tool_timeout=0.4)) as client:
                 result = await client.call_tool("scrape", raise_on_error=False)
 
         assert len(calls) == 1
@@ -565,19 +577,25 @@ class TestTheRepairRunsForReal:
         passed alone and failed inside the full suite at 1.22s against 1.2s,
         because everything else in the call is also on that clock and a loaded
         machine stretches all of it. That measures the runner, not the code.
-        """
-        from linkedin_mcp_server.config import get_config
 
+        Both halves of the arithmetic are checked. Asserting only "less than the
+        timeout" left the subtraction untested: dropping ``- already_spent``
+        yields five sixths of the budget, which is still under it, and the test
+        stayed green while the overrun it exists for came back.
+        """
+        budget = 1.2
         owner, calls = _owner_that_fails_with(
             AuthMissingOnOwnerError("no session", nothing_ran_yet=True)
         )
-        get_config().server.tool_timeout_seconds = 1.2
         asked_for: list[float] = []
+        spent_by_then: list[float] = []
 
         real_wait = daemon_auth._wait_for_the_sign_in
+        began = asyncio.get_running_loop().time()
 
         async def record(timeout: float) -> bool:
             asked_for.append(timeout)
+            spent_by_then.append(asyncio.get_running_loop().time() - began)
             return await real_wait(timeout)
 
         with (
@@ -585,13 +603,18 @@ class TestTheRepairRunsForReal:
             self._a_login_that(takes=30.0),
             patch.object(daemon_auth, "_wait_for_the_sign_in", record),
         ):
-            async with Client(_proxy_to(owner)) as client:
+            async with Client(_proxy_to(owner, tool_timeout=budget)) as client:
                 result = await client.call_tool("scrape", raise_on_error=False)
 
         assert asked_for, "the sign-in was never waited for"
-        assert asked_for[0] < 1.2, (
-            f"the wait asked for {asked_for[0]:.2f}s of a 1.2s call"
+        share = budget * 5 / 6
+        # What was already spent is gone from the budget, so the wait has to be
+        # measurably shorter than the share itself.
+        assert asked_for[0] < share - spent_by_then[0] + 0.05, (
+            f"the wait asked for {asked_for[0]:.2f}s having already spent "
+            f"{spent_by_then[0]:.2f}s of a {budget}s call"
         )
+        assert asked_for[0] < share, "the spent time was not subtracted"
         assert result.is_error is True
         assert len(calls) == 1
 
@@ -608,8 +631,6 @@ class TestTheRepairRunsForReal:
         exists, so the next call succeeds, and a bare transport error would say
         none of that.
         """
-        from linkedin_mcp_server.config import get_config
-
         owner = FastMCP("owner", mask_error_details=True)
         calls: list[int] = []
 
@@ -625,14 +646,12 @@ class TestTheRepairRunsForReal:
             return "scraped ok"
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
-        get_config().server.tool_timeout_seconds = 1.0
-
         with (
             self._profile_is_free(),
             self._a_login_that(takes=0.05),
             patch("linkedin_mcp_server.daemon_auth._MINIMUM_REPLAY_SECONDS", 0.2),
         ):
-            async with Client(_proxy_to(owner)) as client:
+            async with Client(_proxy_to(owner, tool_timeout=1.0)) as client:
                 result = await client.call_tool("scrape", raise_on_error=False)
 
         assert len(calls) == 2, "the replay never ran"

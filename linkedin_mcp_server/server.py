@@ -205,7 +205,14 @@ def create_mcp_server(
         mcp.add_middleware(OwnerAuthSignalMiddleware())
     # The other half, and only ever on the process that has a user in front of it.
     if role is ServerRole.PROXY:
-        mcp.add_middleware(FrontendAuthRepairMiddleware())
+        # Handed the same budget every tool here is given, rather than reading it
+        # from the configuration singleton. The two agree for a server `cli_main`
+        # built, which loaded that configuration first, and need not for one
+        # constructed directly: measured at `tool_timeout=1.2` with no
+        # configuration loaded, the repair budgeted itself 149.8 seconds of a
+        # 1.2-second call, and the first read of an unloaded singleton parses
+        # whatever `sys.argv` happens to hold.
+        mcp.add_middleware(FrontendAuthRepairMiddleware(tool_timeout=tool_timeout))
     # Profile ownership belongs to whoever launches Chromium. A process that
     # only forwards calls must not take the lease: it would either block itself
     # until its own timeout, or take the lease and leave the process that

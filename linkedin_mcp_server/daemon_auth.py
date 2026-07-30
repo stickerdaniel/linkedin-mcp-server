@@ -52,7 +52,10 @@ import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
-from linkedin_mcp_server.config.schema import AUTH_REPAIR_LOGIN_WAIT_FRACTION
+from linkedin_mcp_server.config.schema import (
+    AUTH_REPAIR_LOGIN_WAIT_FRACTION,
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
+)
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
@@ -69,27 +72,26 @@ logger = logging.getLogger(__name__)
 _MINIMUM_REPLAY_SECONDS = 5.0
 
 
-def _how_long_to_wait_for_the_sign_in(already_spent: float) -> float:
+def _how_long_to_wait_for_the_sign_in(budget: float, already_spent: float) -> float:
     """How much of this call is left to spend waiting for the login.
 
-    Read per call rather than fixed at import, because the budget it comes from
-    is a user setting: a fixed value was measured to outlive the call it was
-    spent inside once ``TOOL_TIMEOUT`` was lowered, replacing a readable answer
-    with a bare timeout.
+    A fraction of *budget* rather than a fixed number of seconds, because the
+    bound that matters is the call this is spent inside: a fixed 150 seconds was
+    measured to outlive its own call once ``TOOL_TIMEOUT`` was lowered, replacing
+    a readable answer with a bare timeout.
 
     *already_spent* is subtracted rather than ignored, and measuring caught that
     too: the fraction alone still overran, because the owner call and the inline
     login wait had gone before this is reached, and both come out of the same
     budget. Never negative, so an already-overrun call skips the wait and answers
-    rather than waiting on a deadline that has passed.
+    rather than waiting on a deadline that has passed. Zero still reaches the
+    readiness check below it, which is what notices a login that finished in
+    exactly this race.
     """
-    from linkedin_mcp_server.config import get_config
-
-    budget = get_config().server.tool_timeout_seconds * AUTH_REPAIR_LOGIN_WAIT_FRACTION
-    return max(0.0, budget - already_spent)
+    return max(0.0, budget * AUTH_REPAIR_LOGIN_WAIT_FRACTION - already_spent)
 
 
-def _what_is_left_of_this_call(already_spent: float) -> float:
+def _what_is_left_of_this_call(budget: float, already_spent: float) -> float:
     """How much of the client's deadline the replay may still use.
 
     The whole budget rather than the fraction above: waiting deliberately leaves
@@ -98,9 +100,6 @@ def _what_is_left_of_this_call(already_spent: float) -> float:
     negative deadline, which would fail the replay before it started for a
     session that now exists.
     """
-    from linkedin_mcp_server.config import get_config
-
-    budget = get_config().server.tool_timeout_seconds
     return max(_MINIMUM_REPLAY_SECONDS, budget - already_spent)
 
 
@@ -223,6 +222,19 @@ class FrontendAuthRepairMiddleware(Middleware):
     that does.
     """
 
+    def __init__(self, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> None:
+        """*tool_timeout* is the deadline a client's call is answered within.
+
+        Taken as an argument rather than read from the configuration singleton,
+        because the two can disagree. ``create_mcp_server`` is handed the budget
+        every tool it registers gets, and a server built directly rather than by
+        ``cli_main`` may never have loaded a configuration at all: measured at
+        ``tool_timeout=1.2`` with none loaded, this budgeted itself 149.8 seconds
+        of a 1.2-second call, because the unloaded singleton falls back to
+        parsing ``sys.argv``.
+        """
+        self._tool_timeout = tool_timeout
+
     async def on_call_tool(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
@@ -266,7 +278,9 @@ class FrontendAuthRepairMiddleware(Middleware):
             #
             # So wait the login out here. This is the process that has somewhere
             # to show it, and the client is waiting on this one call.
-            left = _how_long_to_wait_for_the_sign_in(time.monotonic() - began)
+            left = _how_long_to_wait_for_the_sign_in(
+                self._tool_timeout, time.monotonic() - began
+            )
             if not await _wait_for_the_sign_in(left):
                 logger.info("The sign-in did not finish in time; not replaying")
                 return result
@@ -296,7 +310,9 @@ class FrontendAuthRepairMiddleware(Middleware):
         # hand. Timing out here instead spends the last of the budget on the
         # answer and, when it does not arrive, returns the owner's readable
         # failure rather than a bare transport error.
-        remaining = _what_is_left_of_this_call(time.monotonic() - began)
+        remaining = _what_is_left_of_this_call(
+            self._tool_timeout, time.monotonic() - began
+        )
         try:
             return await asyncio.wait_for(call_next(context), timeout=remaining)
         except (TimeoutError, asyncio.TimeoutError):
