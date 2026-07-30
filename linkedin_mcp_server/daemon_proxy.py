@@ -52,9 +52,12 @@ _TIMEOUT_MARGIN_SECONDS = 30.0
 #: be a newer one than this build would have registered locally. That is the
 #: intended trade, and it still does not make the list change underneath us.
 #:
-#: Measured against ``cache_ttl=0``: 88ms versus 122ms per forwarded call, for a
-#: list that cannot go stale. The TTL only affects single lookups either way; an
-#: explicit ``tools/list`` always re-fetches.
+#: Measured against ``cache_ttl=0`` over a real loopback owner on this machine:
+#: about 23ms versus 42ms per forwarded call, for a list that cannot go stale.
+#: Both are far below the seconds a browser reopen costs, so the number to take
+#: from this is the ordering rather than the absolute figures. The TTL only
+#: affects single lookups either way; an explicit ``tools/list`` always
+#: re-fetches.
 _COMPONENT_CACHE_SECONDS = 300.0
 
 
@@ -101,8 +104,8 @@ def _client_factory(
         )
 
     # ProxyClient rather than a plain Client, and that is not a preference:
-    # a plain client installs no progress handler, so every progress update the
-    # tools report is silently dropped. Measured both ways.
+    # a plain client installs no progress handler, so the progress every
+    # browser-backed tool reports is silently dropped. Measured both ways.
     return open_client
 
 

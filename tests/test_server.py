@@ -344,8 +344,15 @@ class TestOwnerAuthentication:
         # Passing a token to a stdio server is a caller that believes it built
         # the owner. Ignoring it quietly would leave an endpoint that was meant
         # to be authenticated serving anyone who finds it.
-        with pytest.raises(ValueError, match="daemon owner"):
-            create_mcp_server(role=ServerRole.DIRECT, auth_token="a-token")
+        #
+        # A proxy is the case worth spelling out, because it is the one role that
+        # legitimately handles a token — the owner's, outbound. Accepting one
+        # here would be a caller confusing the credential it *presents* with the
+        # one an owner *demands*, and narrowing this guard to DIRECT alone would
+        # let that through.
+        for role in (ServerRole.DIRECT, ServerRole.PROXY):
+            with pytest.raises(ValueError, match="daemon owner"):
+                create_mcp_server(role=role, auth_token="a-token")
 
     async def test_the_wrong_token_is_refused_and_the_right_one_accepted(self):
         owner = create_mcp_server(role=ServerRole.OWNER, auth_token="the-token")

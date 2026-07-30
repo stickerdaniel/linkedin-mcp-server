@@ -307,8 +307,19 @@ def _obtain_shared_owner(config: AppConfig) -> "Attachment | None":
     What keeps two processes off one profile on that fallback path is the profile
     lease from #598, not anything here: the owner takes it when it opens Chromium
     and hands it over when another process announces itself
-    (``drivers/browser.py:881-901``). The daemon lock decides who *owns* the
-    browser; the lease decides who is driving it right now.
+    (``drivers/browser.watch_for_handoff_requests``). The daemon lock decides who
+    *owns* the browser; the lease decides who is driving it right now.
+
+    That safety net carries more weight on Windows than elsewhere, which is worth
+    knowing before the flag becomes the default. A frontend there takes no lock
+    at all and starts a child that competes for one
+    (``daemon_election._start_contending_for_the_lock``), so a local spawn
+    failure is indistinguishable from a rival owner that holds the lock and has
+    not published yet: ``obtain_owner`` returns at once and this process falls
+    back while an owner may in fact be coming up. On POSIX the equivalent
+    outcomes are terminal, because the frontend held the lock itself. Windows
+    already carries platform gaps that gate the default flip, and this is one of
+    them.
     """
     from linkedin_mcp_server.daemon import daemon_would_be_used
 
