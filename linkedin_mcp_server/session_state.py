@@ -775,9 +775,14 @@ def rotate_source_profile(
     on it.
 
     Returns the quarantine directory, or ``None`` when there was nothing to
-    retire, including when a peer's session is found in place.
+    retire.
 
     Raises:
+        PeerSessionInPlaceError: Another client signed in first, so its session
+            is on disk and this rotation must not touch it. Distinct from the
+            ``None`` above, and the distinction is load-bearing: both mean "did
+            not rotate", but only one of them means a usable session now exists.
+            Conflated, the caller promised a login window it never opened.
         RuntimeError: Another process holds the profile. Rotating underneath a
             live Chromium corrupts both the old and the new session.
         OSError: A move failed. Whatever had already moved is put back first, so

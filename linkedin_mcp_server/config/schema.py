@@ -52,6 +52,20 @@ BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
 # tune it, and an unused setting is a support burden.
 PROFILE_HANDOVER_WAIT_SECONDS: float = 60.0
 
+# How long a frontend repairing the shared browser's auth waits for the sign-in
+# it started before answering the call without it.
+#
+# Bounded by the tool timeout above it, not by how long a person takes: the
+# client is blocked on one call for the whole wait, and a wait that outlives the
+# call is spent for nothing. 150 leaves a margin under the 180-second default for
+# the replayed call to run in. Somebody still typing when it runs out loses
+# nothing but this attempt, because the login keeps running and the next call
+# finds the session it wrote.
+#
+# Deliberately not configurable, like its neighbour: it is derived from a value
+# the user can already set rather than a knob of its own.
+AUTH_REPAIR_LOGIN_WAIT_SECONDS: float = 150.0
+
 # Close an idle browser and release the profile after this long with no calls.
 # A backstop only — the handoff signal does the real work — so it is deliberately
 # long: a reopen costs one more LinkedIn request. 0 disables it.

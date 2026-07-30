@@ -8,6 +8,8 @@ lose the signal or act on it wrongly.
 
 from __future__ import annotations
 
+import asyncio
+
 from unittest.mock import AsyncMock, patch
 
 import mcp.types as mt
@@ -403,6 +405,135 @@ class TestTheFrontendActsOnTheMarker:
         assert len(calls) == 2
         assert result.is_error is False
         assert result.content[0].text == "scraped ok"
+
+
+class TestTheRepairRunsForReal:
+    """The same replay, with the production repair instead of a stand-in.
+
+    Every test above replaces ``_repair_auth_locally`` with a mock that returns
+    or raises on command. That is the right shape for asking what the middleware
+    does with an outcome, and the wrong one for asking whether the outcome ever
+    occurs: both functions behind it report a *started* login by raising, while
+    the window is still open. Mocked away, the middleware was measured to abandon
+    every repair one step before it worked, on both paths, and the tests above
+    stayed green throughout.
+
+    So these stub only the login itself -- the one thing a test cannot do -- and
+    let the real bootstrap code run in between.
+    """
+
+    def _profile_is_free(self):
+        return patch(
+            "linkedin_mcp_server.daemon_auth._browser_still_holds_the_profile",
+            return_value=False,
+        )
+
+    def _a_login_that(self, *, takes: float, succeeds: bool = True):
+        """Stub the login flow, and with it what readiness reports afterwards.
+
+        *takes* is what separates the two cases that matter: a login finishing
+        inside the inline budget returns through the normal path, while a slower
+        one leaves ``_start_login_if_needed`` raising "in progress" -- which is
+        every login a person actually performs.
+        """
+        done: list[bool] = []
+
+        async def login() -> None:
+            await asyncio.sleep(takes)
+            if succeeds:
+                done.append(True)
+
+        return patch.multiple(
+            "linkedin_mcp_server.bootstrap",
+            _run_login_flow=AsyncMock(side_effect=login),
+            _force_move_auth_state_aside=lambda *a, **k: None,
+            _move_invalid_auth_state_aside=lambda *a, **k: None,
+            _auto_import_allowed=lambda *a, **k: False,
+            # A login that succeeded has written a session; one that failed has
+            # not. This is what the wait reads to decide whether to replay.
+            _auth_ready=lambda *a, **k: bool(done),
+        )
+
+    @pytest.fixture(autouse=True)
+    def _short_budget(self, monkeypatch):
+        """Scale the inline wait down, keeping the shape of the real timings.
+
+        Built rather than read: ``get_config`` parses ``sys.argv``, which under
+        pytest is pytest's own command line.
+        """
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        config.browser.login_inline_wait_seconds = 0.2
+        set_config(config)
+        monkeypatch.setattr("linkedin_mcp_server.daemon_auth._LOGIN_WAIT_SECONDS", 5.0)
+
+    async def test_a_stale_session_is_replayed_once_the_login_succeeds(self):
+        """The path that never replayed: this one raises immediately, always."""
+        owner, calls = _owner_that_fails_with(
+            AuthStaleOnOwnerError("dead", nothing_ran_yet=True, generation="g-old")
+        )
+
+        with self._profile_is_free(), self._a_login_that(takes=0.05):
+            async with Client(_proxy_to(owner)) as client:
+                result = await client.call_tool("scrape", raise_on_error=False)
+
+        assert len(calls) == 2, "the call was never run again"
+        assert result.is_error is False
+        assert result.content[0].text == "scraped ok"
+
+    async def test_a_slow_sign_in_is_still_replayed(self):
+        """A login outlasting the inline budget, which is every human one.
+
+        The missing path used to pass only because the stub finished at once.
+        Give it a login somebody has to type into and it raised "in progress",
+        which the frontend read as a failed repair.
+        """
+        owner, calls = _owner_that_fails_with(
+            AuthMissingOnOwnerError("no session", nothing_ran_yet=True)
+        )
+
+        with self._profile_is_free(), self._a_login_that(takes=0.6):
+            async with Client(_proxy_to(owner)) as client:
+                result = await client.call_tool("scrape", raise_on_error=False)
+
+        assert len(calls) == 2, "a login slower than the budget was not waited out"
+        assert result.is_error is False
+
+    async def test_a_login_that_fails_is_not_replayed(self):
+        """Waiting is not the same as assuming success."""
+        owner, calls = _owner_that_fails_with(
+            AuthMissingOnOwnerError("no session", nothing_ran_yet=True)
+        )
+
+        with self._profile_is_free(), self._a_login_that(takes=0.05, succeeds=False):
+            async with Client(_proxy_to(owner)) as client:
+                result = await client.call_tool("scrape", raise_on_error=False)
+
+        assert len(calls) == 1, "the call was replayed with no session to serve it"
+        assert result.is_error is True
+
+    async def test_a_sign_in_slower_than_the_wait_gives_up_without_replaying(self):
+        """The client is blocked on this call, so the wait cannot be unbounded.
+
+        Giving up costs only this attempt: the login keeps running, and the next
+        call finds the session it writes.
+        """
+        owner, calls = _owner_that_fails_with(
+            AuthMissingOnOwnerError("no session", nothing_ran_yet=True)
+        )
+
+        with (
+            self._profile_is_free(),
+            self._a_login_that(takes=5.0),
+            patch("linkedin_mcp_server.daemon_auth._LOGIN_WAIT_SECONDS", 0.3),
+        ):
+            async with Client(_proxy_to(owner)) as client:
+                result = await client.call_tool("scrape", raise_on_error=False)
+
+        assert len(calls) == 1
+        assert result.is_error is True
 
 
 class TestWhichRolesGetWhichHalf:

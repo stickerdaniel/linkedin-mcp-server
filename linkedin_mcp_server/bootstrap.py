@@ -990,6 +990,33 @@ async def start_login_if_needed(
     await _start_login_if_needed(ctx, superseded_by=superseded_by)
 
 
+async def wait_for_login_to_finish(timeout: float) -> bool:
+    """Wait for a login this process started, and say whether one now exists.
+
+    The two functions that start a login both report "started" by raising, and
+    they raise while the browser is still open, because the person at it has not
+    typed anything yet. That is the right answer for a tool call, which cannot
+    hold a client for half an hour. It is the wrong answer for the frontend
+    repairing auth on the owner's behalf: there the raise arrives as a *failure*
+    to sign in, and the call that could now be served is refused instead.
+
+    So this is the one place that waits it out. It reads the task rather than
+    polling readiness, because a login that fails must end the wait as surely as
+    one that succeeds; and it returns filesystem truth rather than the task's
+    result, because "a session exists" is the question the caller actually has.
+
+    Returns False when the wait runs out, which leaves the login running: it owns
+    the profile and cancelling it would strand a half-finished sign-in.
+    """
+    task = _state.login_task
+    if task is not None and not task.done():
+        # `wait`, never `wait_for`: the latter cancels on timeout, and this task
+        # is a browser window somebody may be typing into.
+        await asyncio.wait({task}, timeout=timeout)
+    await _refresh_background_task_state()
+    return _auth_ready()
+
+
 def current_login_generation() -> str | None:
     """Which login generation is on disk now, or ``None`` when there is none.
 
@@ -1095,8 +1122,9 @@ async def invalidate_auth_and_trigger_relogin(
     Raises:
         AuthenticationStartedError: Login browser opened.
         AuthenticationInProgressError: Login already running from a prior call.
-        AuthenticationBootstrapFailedError: Someone else's fresh session is now on
-            disk, so there is nothing to invalidate and no login to start.
+        PeerSessionInPlaceError: Someone else's fresh session is now on disk, so
+            there is nothing to invalidate and no login to start. The caller may
+            simply use it.
         AuthStaleOnOwnerError: This process is the shared owner, so it reports
             rather than rotating the profile and opening a login nobody could
             answer.

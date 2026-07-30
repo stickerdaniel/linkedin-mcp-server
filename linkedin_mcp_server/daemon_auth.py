@@ -50,13 +50,19 @@ import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
+from linkedin_mcp_server.config.schema import AUTH_REPAIR_LOGIN_WAIT_SECONDS
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.exceptions import (
+    AuthenticationInProgressError,
+    AuthenticationStartedError,
     AuthMissingOnOwnerError,
     OwnerCannotAuthenticateError,
 )
 
 logger = logging.getLogger(__name__)
+
+#: Local alias so the wait and its reasoning read together at the call site.
+_LOGIN_WAIT_SECONDS = AUTH_REPAIR_LOGIN_WAIT_SECONDS
 
 #: Namespaced so a future fastmcp key cannot shadow it. Measured: a custom key
 #: coexists with fastmcp's own ``{'fastmcp': {...}}`` entry as a separate
@@ -206,6 +212,24 @@ class FrontendAuthRepairMiddleware(Middleware):
             # failed repair would refuse the replay and send the user back for a
             # retry that was not needed.
             logger.info("Another client already signed in; using its session")
+        except (AuthenticationStartedError, AuthenticationInProgressError):
+            # Also not a failure, and the one that mattered most. Both functions
+            # behind `_repair_auth_locally` report a *started* login by raising,
+            # while the window is still open and nobody has typed anything yet.
+            # Read as a failure, every repair this middleware exists to perform
+            # was abandoned one step before it worked: measured on the stale path
+            # with a login that finished successfully, the owner was called once
+            # and the client still got the error. The missing path did the same
+            # as soon as signing in took longer than the inline budget, which is
+            # every login a person actually performs.
+            #
+            # So wait the login out here. This is the process that has somewhere
+            # to show it, the client is waiting on this one call, and the tool
+            # timeout above bounds how long that can last.
+            if not await _wait_for_the_sign_in(_LOGIN_WAIT_SECONDS):
+                logger.info("The sign-in did not finish in time; not replaying")
+                return result
+            logger.info("The sign-in finished")
         except Exception:
             # The login path reports itself through its own exceptions, which the
             # tool layer turns into readable messages. Whatever happened, the
@@ -250,6 +274,18 @@ def _readable_marker(result: ToolResult) -> dict[str, Any] | None:
     if not isinstance(marker.get("generation"), (str, type(None))):
         return None
     return marker
+
+
+async def _wait_for_the_sign_in(timeout: float) -> bool:
+    """Whether a session exists once the login this process started has run.
+
+    Imported at the call rather than at module scope, like the repair below and
+    for the same reason: the login path pulls in the browser stack, and this
+    module is imported whenever a server is assembled.
+    """
+    from linkedin_mcp_server.bootstrap import wait_for_login_to_finish
+
+    return await wait_for_login_to_finish(timeout)
 
 
 async def _repair_auth_locally(reason: str, generation: str | None) -> None:
