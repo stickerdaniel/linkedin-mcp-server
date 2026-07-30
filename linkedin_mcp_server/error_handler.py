@@ -68,6 +68,9 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     Known exceptions are mapped to user-friendly messages via ToolError.
     Unknown exceptions are re-raised as-is so mask_error_details can mask them.
+    A ToolError has already been shaped, so it keeps its cause instead of being
+    re-derived, unless its message carries proxy credentials and has to be
+    rewritten.
 
     Args:
         exception: The exception that occurred
@@ -78,6 +81,42 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         Exception: Re-raises unknown exceptions as-is
     """
     ctx = f" in {context}" if context else ""
+
+    if isinstance(exception, ToolError):
+        # Already shaped, by an inner call to this very function. A tool wraps its
+        # body in `except Exception` while the helpers it calls shape their own
+        # failures, so one failure arrives here twice: once as the domain
+        # exception, then again as the ToolError that produced. 16 of the 18 tool
+        # catch sites are like that; `search_people` and `search_posts` already
+        # guard with their own `except ToolError` (`tools/person.py:175`,
+        # `tools/post.py:106`), which is the same conclusion reached one tool at a
+        # time.
+        #
+        # The second pass matched none of the branches below and fell through to
+        # the catch-all, whose `raise ... from None` severs the chain. Middleware
+        # that classifies a failure by walking `__cause__` then sees a bare
+        # ToolError. Measured through a real tool: a failure wrapped twice arrived
+        # as ['ToolError'] where the same one wrapped once arrived as
+        # ['ToolError', <the cause>]. The catch-all also logs it a second time as
+        # an unexpected error.
+        #
+        # Redaction still has to happen, and skipping it here was a real leak
+        # rather than a theoretical one. Measured with a proxy password in a
+        # ToolError message: passing the exception straight through published the
+        # credential in clear text where the catch-all had been redacting it.
+        # `mask_error_details` does not save this, because FastMCP logs the
+        # exception and its traceback before masking the client-facing reply.
+        #
+        # So the cause is preserved only where it costs nothing:
+        # `redacted_copy` returns the *same object* when the text needs no
+        # rewriting (`core/proxy_errors.py:128-129`), which is the ordinary case.
+        # When it does need rewriting there is no way to keep both, and the
+        # credential boundary wins.
+        safe = redacted_copy(exception)
+        if safe is exception:
+            raise exception
+        logger.warning("Redacted an already-shaped tool error%s", ctx)
+        raise safe from None
 
     if isinstance(exception, CredentialsNotFoundError):
         logger.warning("Credentials not found%s: %s", ctx, exception)
