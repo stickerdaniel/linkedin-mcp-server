@@ -36,6 +36,7 @@ from linkedin_mcp_server.bootstrap import (
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import NetworkError
 from linkedin_mcp_server.exceptions import (
+    AuthenticationBootstrapFailedError,
     AuthenticationInProgressError,
     AuthenticationStartedError,
     BrowserSetupInProgressError,
@@ -2125,3 +2126,130 @@ class TestTheOwnerStaysQuiescentUntilANewSessionLands:
         # Through the real pre-tool gate, which is what a forwarded call hits.
         with pytest.raises(AuthStaleOnOwnerError):
             await ensure_tool_ready_or_raise("get_person_profile")
+
+
+class TestTwoClientsMeetingOneDeadSession:
+    """Only one of them may retire it, and `_lock` cannot arrange that.
+
+    Two frontends can be told to sign in for the same dead session. The lock
+    around this function is process-local, so it serializes each process against
+    itself and knows nothing about the other one.
+    """
+
+    def _write_session(self, profile_dir):
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(profile_dir).write_text("[]")
+        write_source_state(profile_dir)
+
+    async def test_without_the_generation_the_second_client_destroys_the_first(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """The damage, reproduced first, so the fix below is not asserting thin air.
+
+        This is the shipped behaviour of the unguarded path: rotation is safe
+        against a *concurrent* login, because it takes the profile lease, but
+        nothing stops a client that arrives after one has finished.
+        """
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import load_source_state
+
+        self._write_session(isolate_profile_dir)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_login_flow", AsyncMock()
+        )
+
+        # A finishes a login: a fresh session, and a generation to go with it.
+        self._write_session(isolate_profile_dir)
+        fresh = bootstrap.current_login_generation()
+
+        # B arrives holding no generation at all, which is the old call shape.
+        with pytest.raises(AuthenticationStartedError):
+            await invalidate_auth_and_trigger_relogin()
+
+        # A's session is gone, rotated into quarantine by a client that was
+        # complaining about a session already replaced.
+        assert load_source_state(isolate_profile_dir) is None
+        assert fresh is not None
+
+    async def test_the_generation_stops_the_second_client(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import load_source_state
+
+        self._write_session(isolate_profile_dir)
+        stale = bootstrap.current_login_generation()
+
+        login = AsyncMock()
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._run_login_flow", login)
+
+        # A finishes its login, writing a different generation.
+        self._write_session(isolate_profile_dir)
+        fresh = bootstrap.current_login_generation()
+        assert fresh != stale
+
+        # B arrives with the generation it was told about, which has moved on.
+        with pytest.raises(
+            AuthenticationBootstrapFailedError, match="already signed in"
+        ):
+            await invalidate_auth_and_trigger_relogin(stale_generation=stale)
+
+        # Intact, and no second login window opened on top of the first.
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is not None
+        assert surviving.login_generation == fresh
+        login.assert_not_called()
+
+    async def test_the_first_client_still_retires_the_session_it_found(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        # The guard must not stop the client that is actually right about the
+        # session being dead, which is every ordinary case.
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import load_source_state
+
+        self._write_session(isolate_profile_dir)
+        stale = bootstrap.current_login_generation()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_login_flow", AsyncMock()
+        )
+
+        with pytest.raises(AuthenticationStartedError):
+            await invalidate_auth_and_trigger_relogin(stale_generation=stale)
+
+        assert load_source_state(isolate_profile_dir) is None
+
+    async def test_an_abandoned_first_attempt_does_not_block_the_second_client(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """A different generation is not on its own proof that anyone succeeded.
+
+        An abandoned login leaves the profile rotated and nothing written, so the
+        generation reads as None: different from the stale one, and yet no session
+        exists. A guard that asked only whether the generation had moved would tell
+        the next client "another client already signed in" and never start the login
+        it is asking for. Measured, that is exactly what the half-guard does.
+        """
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import rotate_source_profile
+
+        self._write_session(isolate_profile_dir)
+        stale = bootstrap.current_login_generation()
+        login = AsyncMock()
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._run_login_flow", login)
+
+        # A starts a login and the user closes the window: rotated, nothing new.
+        rotate_source_profile(isolate_profile_dir)
+        assert bootstrap.current_login_generation() is None
+
+        # B has to be allowed through, and has to open a login.
+        with pytest.raises(AuthenticationStartedError):
+            await invalidate_auth_and_trigger_relogin(stale_generation=stale)
+
+        login.assert_called_once()

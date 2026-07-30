@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.schema import PROFILE_HANDOVER_WAIT_SECONDS
 from linkedin_mcp_server.core import (
     BrowserManager,
     goto_reporting_proxy_errors,
@@ -63,7 +64,17 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
     # moment cookies are written, and another process could launch against it
     # while this browser is still open.
     lease = get_profile_lease(user_data_dir)
-    if not lease.try_acquire():
+    # Waited for rather than demanded outright, because this is also the path a
+    # frontend takes when the shared browser asks it to sign in. A proxy holds no
+    # lease of its own to reuse, so a momentary holder anywhere else would leave
+    # the user with a login that refuses to open and no way to make it.
+    #
+    # The wait is bounded by how long a *handover* takes, not by how long a person
+    # takes at the window: the holder notices a waiter on a one-second poll and
+    # gives the profile up after at most `browser_min_hold_seconds`. Past that,
+    # the holder is a process that is not going to release, and failing is more
+    # use than hanging.
+    if not await lease.acquire(timeout=PROFILE_HANDOVER_WAIT_SECONDS):
         raise BrowserBusyError(
             "Another LinkedIn MCP client is using the browser, so a login "
             "cannot start. Close it and try again."

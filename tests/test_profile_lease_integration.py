@@ -534,3 +534,71 @@ class TestConfirmedClose:
                 await browser_module.close_browser()
 
         assert not lease.held
+
+
+class TestALoginWaitsForTheProfile:
+    """A login asks for the profile and waits, rather than demanding it at once.
+
+    This is also the path a frontend takes when the shared browser asks it to sign
+    in, and a proxy holds no lease of its own to reuse. Left non-blocking, any
+    momentary holder anywhere on the machine leaves the user with a login that
+    refuses to open and nothing they can do about it.
+    """
+
+    async def test_it_waits_for_a_real_holder_to_let_go(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.setup import interactive_login
+
+        auth_root = isolate_profile_dir.parent
+        # A real second process, because the lease is a kernel lock: an in-process
+        # stand-in would be reference-counted and simply succeed.
+        holder = _hold_profile(auth_root, seconds=1.5)
+
+        opened: list[bool] = []
+
+        async def login_once_we_have_the_profile(user_data_dir, lease, state):
+            opened.append(True)
+            return True
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.setup._login_holding_the_profile",
+            login_once_we_have_the_profile,
+        )
+        monkeypatch.setattr("linkedin_mcp_server.setup.close_browser", AsyncMock())
+
+        try:
+            assert await interactive_login(isolate_profile_dir) is True
+        finally:
+            holder.wait(timeout=10)
+
+        assert opened == [True]
+
+    async def test_it_still_gives_up_on_a_holder_that_never_releases(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        # Bounded, not indefinite. Past the handover window the holder is a process
+        # that is not going to release, and hanging would be worse than saying so.
+        from linkedin_mcp_server.exceptions import BrowserBusyError
+        from linkedin_mcp_server.setup import interactive_login
+
+        auth_root = isolate_profile_dir.parent
+        holder = _hold_profile(auth_root, seconds=30)
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.setup.PROFILE_HANDOVER_WAIT_SECONDS", 0.3
+        )
+        monkeypatch.setattr("linkedin_mcp_server.setup.close_browser", AsyncMock())
+        never = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.setup._login_holding_the_profile", never
+        )
+
+        try:
+            with pytest.raises(BrowserBusyError):
+                await interactive_login(isolate_profile_dir)
+        finally:
+            holder.kill()
+            holder.wait(timeout=10)
+
+        never.assert_not_called()

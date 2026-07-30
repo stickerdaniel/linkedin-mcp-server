@@ -116,6 +116,12 @@ class OwnerAuthSignalMiddleware(Middleware):
                 else "stale",
                 "replayable": failure.nothing_ran_yet,
                 "browser_open": _browser_still_holds_the_profile(),
+                # Which session the owner found broken, so the frontend can tell
+                # "this is still the dead one" from "somebody else already fixed
+                # it". Two frontends meeting one dead session would otherwise both
+                # rotate, and the second would destroy the first's fresh login.
+                # None is a value: a rotated profile has no generation at all.
+                "generation": _broken_generation(),
             }
             logger.info(
                 "Asking the client to sign in (%s, replayable=%s)",
@@ -179,7 +185,7 @@ class FrontendAuthRepairMiddleware(Middleware):
             return result
 
         try:
-            await _repair_auth_locally(marker["reason"])
+            await _repair_auth_locally(marker["reason"], marker["generation"])
         except Exception:
             # The login path reports itself through its own exceptions, which the
             # tool layer turns into readable messages. Whatever happened, the
@@ -221,10 +227,12 @@ def _readable_marker(result: ToolResult) -> dict[str, Any] | None:
         marker.get("browser_open"), bool
     ):
         return None
+    if not isinstance(marker.get("generation"), (str, type(None))):
+        return None
     return marker
 
 
-async def _repair_auth_locally(reason: str) -> None:
+async def _repair_auth_locally(reason: str, generation: str | None) -> None:
     """Get a usable session onto disk, in this process.
 
     Imported here rather than at module scope: this module is imported when a
@@ -239,6 +247,26 @@ async def _repair_auth_locally(reason: str) -> None:
         # The old session is still on disk and still does not work, so readiness
         # would keep passing it. This is the path that retires it first, and it
         # always raises: the login it starts is what the caller waits on.
-        await invalidate_auth_and_trigger_relogin()
+        #
+        # The generation goes with it so a frontend arriving late does not rotate
+        # away a session another one has already established.
+        await invalidate_auth_and_trigger_relogin(stale_generation=generation)
     else:
         await start_login_if_needed()
+
+
+def _broken_generation() -> str | None:
+    """Which login generation the owner is complaining about.
+
+    Read here rather than carried on the exception, because by this point the
+    browser has closed and the owner has latched onto exactly this value: reading
+    it in one place keeps the marker and the latch from ever disagreeing about
+    which session was the bad one.
+    """
+    from linkedin_mcp_server.bootstrap import current_login_generation
+
+    try:
+        return current_login_generation()
+    except Exception:  # noqa: BLE001 - a marker must not fail on a probe
+        logger.debug("Could not read the login generation", exc_info=True)
+        return None

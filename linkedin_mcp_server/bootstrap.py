@@ -1038,6 +1038,8 @@ def _raise_if_auth_quiescent() -> None:
 
 async def invalidate_auth_and_trigger_relogin(
     ctx: Context | None = None,
+    *,
+    stale_generation: str | None = None,
 ) -> NoReturn:
     """Force-invalidate stale auth state and trigger interactive login.
 
@@ -1046,12 +1048,21 @@ async def invalidate_auth_and_trigger_relogin(
     being present on disk.  The check-task → force-move → start-login sequence
     is atomic under ``_lock`` so an in-flight login is never corrupted.
 
+    *stale_generation* is the login generation the caller found broken, when it
+    knows. Passing it is what keeps two frontends from destroying each other's
+    work: ``_lock`` is process-local, so it says nothing about the other process,
+    and the rotation below is skipped when the generation on disk has moved on
+    from the one being complained about. Without it the second frontend rotates
+    away the session the first has just created.
+
     Raises:
         AuthenticationStartedError: Login browser opened.
         AuthenticationInProgressError: Login already running from a prior call.
+        AuthenticationBootstrapFailedError: Someone else's fresh session is now on
+            disk, so there is nothing to invalidate and no login to start.
         AuthStaleOnOwnerError: This process is the shared owner, so it reports
-            rather than rotating the profile and opening a window it has no
-            desktop session for.
+            rather than rotating the profile and opening a login nobody could
+            answer.
     """
     if process_role() is ServerRole.OWNER:
         # Never reaches the rotation below. Retiring the session here would race
@@ -1085,6 +1096,36 @@ async def invalidate_auth_and_trigger_relogin(
                 "already in progress in a browser window. Complete login there, "
                 "then retry this tool."
             )
+
+        # Checked here, after the lock and immediately before the rotation, which
+        # is the only place it means anything. Two frontends can meet the same
+        # dead session, and `_lock` is process-local: it serializes this function
+        # against itself in *this* interpreter and knows nothing about the other
+        # process.
+        #
+        # Measured. Rotation itself is safe, because it takes the profile lease
+        # (`session_state.py:727`), so nobody can rotate while a login holds it.
+        # The exposed window is afterwards: A finishes a login and writes a
+        # generation, B arrives with the *old* one still in hand, finds the lease
+        # free, and rotates. `load_source_state` then returned None, and A's fresh
+        # session was gone.
+        #
+        # Comparing generations closes it, because one is only written by a login
+        # or import that has already validated its session (`setup.py:269`). A
+        # generation different from the one being complained about therefore means
+        # somebody else's repair succeeded, and the right move is to stop.
+        if stale_generation is not None:
+            on_disk = current_login_generation()
+            if on_disk != stale_generation and _auth_ready():
+                logger.info(
+                    "Another client already signed in (generation %s); leaving "
+                    "its session alone",
+                    on_disk,
+                )
+                raise AuthenticationBootstrapFailedError(
+                    "Another LinkedIn MCP client has already signed in. Retry "
+                    "this tool to use the new session."
+                )
 
         # Force-move stale profile files (skip _auth_ready() guard).
         _force_move_auth_state_aside()

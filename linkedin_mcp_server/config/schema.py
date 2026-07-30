@@ -37,6 +37,17 @@ DEFAULT_BROWSER_MIN_HOLD_SECONDS: float = 20.0
 # notices on a one-second poll and then has to tear Chromium down (~0.7s
 # measured). Without it a waiter gives up moments before the handover lands.
 BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
+# How long a one-shot operation waits for another process to hand the profile
+# over. Not a tool-call budget and not a human's budget: the holder notices a
+# waiter on a one-second poll (`drivers/browser.py`) and releases after at most
+# browser_min_hold_seconds plus a Chromium teardown of roughly a second, so this
+# is comfortably past the worst cooperative case. Beyond it the holder is a
+# process that will not release, where failing beats hanging.
+#
+# Deliberately not configurable. Nothing measured suggests a user would need to
+# tune it, and an unused setting is a support burden.
+PROFILE_HANDOVER_WAIT_SECONDS: float = 60.0
+
 # Close an idle browser and release the profile after this long with no calls.
 # A backstop only — the handoff signal does the real work — so it is deliberately
 # long: a reopen costs one more LinkedIn request. 0 disables it.

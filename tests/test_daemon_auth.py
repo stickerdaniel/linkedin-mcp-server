@@ -88,6 +88,7 @@ class TestTheMarkerSurvivesTheHop:
             "reason": "missing",
             "replayable": True,
             "browser_open": False,
+            "generation": None,
         }
 
     async def test_the_marker_reaches_the_outer_client_through_the_proxy(self):
@@ -189,7 +190,7 @@ class TestTheFrontendActsOnTheMarker:
             async with Client(_proxy_to(owner)) as client:
                 result = await client.call_tool("scrape", raise_on_error=False)
 
-        repair.assert_awaited_once_with("missing")
+        repair.assert_awaited_once_with("missing", None)
         # Twice on the owner: the failure, then the replay. Not three times, which
         # is what a retry loop without a bound would give.
         assert len(calls) == 2
@@ -209,7 +210,7 @@ class TestTheFrontendActsOnTheMarker:
                 result = await client.call_tool("scrape", raise_on_error=False)
 
         # Repaired, because the next call should succeed, but not replayed.
-        repair.assert_awaited_once_with("stale")
+        repair.assert_awaited_once_with("stale", None)
         assert len(calls) == 1
         assert result.is_error is True
 
@@ -255,6 +256,7 @@ class TestTheFrontendActsOnTheMarker:
                             "reason": "missing",
                             "replayable": True,
                             "browser_open": False,
+                            "generation": None,
                         }
                     },
                     is_error=True,
@@ -290,6 +292,7 @@ class TestTheFrontendActsOnTheMarker:
                             "reason": "missing",
                             "replayable": "yes",
                             "browser_open": False,
+                            "generation": None,
                         }
                     },
                     is_error=True,
