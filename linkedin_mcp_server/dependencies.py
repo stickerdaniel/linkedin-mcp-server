@@ -7,8 +7,10 @@ from fastmcp import Context
 
 from linkedin_mcp_server.bootstrap import (
     RuntimePolicy,
+    current_login_generation,
     ensure_tool_ready_or_raise,
     get_runtime_policy,
+    go_auth_quiescent,
     invalidate_auth_and_trigger_relogin,
     invalidate_browser_setup,
 )
@@ -21,10 +23,13 @@ from linkedin_mcp_server.drivers.browser import (
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
     BrowserBinaryMissingError,
+    BrowserShutdownUnconfirmedError,
     DockerHostLoginRequiredError,
     LinuxBrowserDependencyError,
 )
+from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.scraping import LinkedInExtractor
+from linkedin_mcp_server.server_role import ServerRole, process_role
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +71,41 @@ async def handle_auth_error(
             "then retry this tool."
         ) from error
 
+    # Read before the close rather than after it, deliberately, though the
+    # ordering is defensive rather than load-bearing today. On the forwarded tool
+    # path `SequentialToolExecutionMiddleware` holds a lease reference of its own
+    # from before the tool body until after this function returns
+    # (`sequential_tool_middleware.py:116-130`), and `close_browser` releases only
+    # the browser's reference, so no other process can write a generation in
+    # between. What the order costs is nothing, and what it buys is not depending
+    # on that: any future caller reaching here without the middleware, or any
+    # change that releases the lease sooner, would otherwise latch onto a
+    # generation written by the login it is about to ask for.
+    broken_generation = (
+        current_login_generation() if process_role() is ServerRole.OWNER else None
+    )
+
     logger.warning("Stale session detected; closing browser and triggering re-login")
     try:
         await close_browser()
     except Exception as close_exc:
         logger.warning("Failed to close stale browser (ignored): %s", close_exc)
+
+    if process_role() is ServerRole.OWNER:
+        if get_profile_lease().browser_open:
+            # The teardown could not be confirmed, so Chromium may still be on the
+            # profile and the lease is deliberately kept until this process exits
+            # (`drivers/browser.py:786-798`). Asking a client to sign in now would
+            # send it after a lease it can never take, and latching would then
+            # answer every later call from a state only a restart clears. Reported
+            # as what it is instead.
+            raise BrowserShutdownUnconfirmedError() from error
+
+        # The browser is down and the lease is free, so the client can take over.
+        # Recorded before raising so the next forwarded call is answered from the
+        # latch rather than by opening Chromium again.
+        go_auth_quiescent(broken_generation)
+
     await invalidate_auth_and_trigger_relogin(ctx)  # always raises
 
 

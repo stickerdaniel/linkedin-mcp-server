@@ -13,6 +13,7 @@ from linkedin_mcp_server.core.exceptions import (
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.exceptions import (
     AuthenticationStartedError,
+    AuthStaleOnOwnerError,
     DockerHostLoginRequiredError,
 )
 
@@ -225,3 +226,120 @@ class TestGetReadyExtractor:
             mock_handle.assert_awaited_once()
             # First arg should be the AuthenticationError
             assert isinstance(mock_handle.call_args[0][0], AuthenticationError)
+
+
+class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
+    """The owner closes the browser, records what it found, and reports."""
+
+    async def test_the_broken_generation_is_read_before_the_browser_closes(self):
+        """The ordering is the whole point, so it is asserted rather than assumed.
+
+        A confirmed close releases the profile lease, which is exactly what lets
+        another process log in. If the generation were read afterwards, a login
+        that landed in that gap would be recorded as the broken one, and the owner
+        would then hold its latch against the very session it asked for.
+        """
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        set_process_role(ServerRole.OWNER)
+        order: list[str] = []
+
+        async def closing() -> None:
+            order.append("close")
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                side_effect=lambda: (order.append("read"), "gen-1")[1],
+            ),
+            patch("linkedin_mcp_server.dependencies.close_browser", closing),
+            patch(
+                "linkedin_mcp_server.dependencies.go_auth_quiescent",
+                side_effect=lambda gen: order.append(f"latch:{gen}"),
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+                side_effect=AuthStaleOnOwnerError("owner cannot sign in"),
+            ),
+        ):
+            with pytest.raises(AuthStaleOnOwnerError):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        assert order == ["read", "close", "latch:gen-1"]
+
+    async def test_a_direct_server_neither_reads_nor_latches(self):
+        # The historical path has no owner state to keep, and touching it would
+        # make a single-process server refuse its own logins.
+        latched = MagicMock()
+        read = MagicMock(return_value="gen-1")
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch("linkedin_mcp_server.dependencies.current_login_generation", read),
+            patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
+            patch("linkedin_mcp_server.dependencies.go_auth_quiescent", latched),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+                side_effect=AuthenticationStartedError("login opened"),
+            ),
+        ):
+            with pytest.raises(AuthenticationStartedError):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        # Both halves, as the name says. An earlier version asserted only the
+        # latch, so reading the generation unconditionally went unnoticed, and a
+        # DIRECT server would touch owner state it has no use for.
+        read.assert_not_called()
+        latched.assert_not_called()
+
+    async def test_an_unconfirmed_close_is_reported_instead_of_latching(self):
+        """A teardown that could not be confirmed must not invite a login.
+
+        ``close_browser`` keeps the profile lease when Chromium's shutdown times
+        out, deliberately, because it may still be running
+        (``drivers/browser.py:786-798``). Telling a client to sign in then sends it
+        after a lease it can never take, and latching would answer every later call
+        from a state only an owner restart clears.
+
+        Reproduced before this guard existed: the owner said "retry, the client
+        will open a login window" while holding the lease with ``browser_open``
+        still set.
+        """
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        set_process_role(ServerRole.OWNER)
+        latched = MagicMock()
+        lease = MagicMock()
+        lease.browser_open = True  # what an unconfirmed close leaves behind
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="gen-1",
+            ),
+            patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
+            patch(
+                "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+            patch("linkedin_mcp_server.dependencies.go_auth_quiescent", latched),
+        ):
+            with pytest.raises(BrowserShutdownUnconfirmedError, match="Restart"):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        # Not latched: a latch here is the wedge, because nothing can clear it.
+        latched.assert_not_called()

@@ -35,6 +35,7 @@ from linkedin_mcp_server.exceptions import (
     DockerHostLoginRequiredError,
     LinuxBrowserDependencyError,
     LinkedInMCPError,
+    OwnerCannotAuthenticateError,
     SessionExpiredError,
 )
 from linkedin_mcp_server.error_diagnostics import (
@@ -146,6 +147,16 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     elif isinstance(exception, AuthenticationBootstrapFailedError):
         logger.warning("Authentication bootstrap failed%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    # Its own branch rather than the LinkedInMCPError catch-all, which appends an
+    # issue-report template. A shared browser that cannot log in by itself is the
+    # designed behaviour, not a bug, and inviting a bug report for it would send
+    # users to the tracker for something working as intended. The two
+    # Authentication*Error branches above are diagnostics-free for the same
+    # reason.
+    elif isinstance(exception, OwnerCannotAuthenticateError):
+        logger.info("The shared browser needs this client to log in%s", ctx)
         raise ToolError(str(exception)) from exception
 
     # Contention, not a bug: no issue diagnostics, following RateLimitError.

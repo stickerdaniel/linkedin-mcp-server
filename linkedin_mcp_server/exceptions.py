@@ -51,6 +51,38 @@ class AuthenticationBootstrapFailedError(LinkedInMCPError):
     """Interactive LinkedIn login could not be completed."""
 
 
+class OwnerCannotAuthenticateError(LinkedInMCPError):
+    """The shared browser owner found bad auth and cannot fix it itself.
+
+    A detached owner has nobody in front of it. It can open a browser, and does
+    when configured to run headed, but an interactive login is different in kind:
+    it waits for someone to type credentials and answer a challenge, and no client
+    is attached to this process to do that. The same goes for a keychain prompt.
+    It also must not move the shared profile aside: the process that will log in
+    needs to find the session state as the owner saw it, and rotating from here
+    would race that login for the same files.
+
+    So the owner reports instead of acting, and the frontend, which is the process
+    an MCP client actually spawned, does the work. These two carry which of the
+    two situations it is, because the frontend's response differs:
+
+    * missing means no usable session on disk, so a plain login is enough;
+    * stale means a session that exists and no longer works, which has to be
+      retired before a new one can replace it.
+
+    Subclasses rather than one class with a field: they are raised from different
+    places and the distinction has to survive being caught by type.
+    """
+
+
+class AuthMissingOnOwnerError(OwnerCannotAuthenticateError):
+    """No usable LinkedIn session exists, and the owner cannot create one."""
+
+
+class AuthStaleOnOwnerError(OwnerCannotAuthenticateError):
+    """The LinkedIn session stopped working, and the owner cannot replace it."""
+
+
 class DockerHostLoginRequiredError(LinkedInMCPError):
     """Docker runtime requires host-side login creation."""
 

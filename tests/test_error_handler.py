@@ -13,6 +13,8 @@ from linkedin_mcp_server.core.exceptions import (
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
+    AuthMissingOnOwnerError,
+    AuthStaleOnOwnerError,
     BrowserBinaryMissingError,
     CredentialsNotFoundError,
     LinkedInMCPError,
@@ -135,6 +137,30 @@ def test_authentication_in_progress_surfaces_poll_friendly_message_verbatim():
     # Plain str() branch, not the LinkedInMCPError catch-all that appends an
     # issue-template diagnostics block.
     assert "issue" not in surfaced.lower()
+
+
+def test_owner_auth_refusal_skips_issue_diagnostics():
+    """A shared browser that cannot sign in is designed behaviour, not a bug.
+
+    The LinkedInMCPError catch-all appends an issue-report template, which would
+    send users to the tracker for something working as intended. Its own branch
+    exists for that.
+
+    Asserted on the surfaced text rather than by patching build_issue_diagnostics:
+    a patched-out builder makes the catch-all fall back to a message with no
+    template, so the mutation of removing the branch survived. Measured, the
+    unbranched path really appends "Diagnostics:" and an issue-template path.
+    """
+    for error in (
+        AuthMissingOnOwnerError("the shared browser has no session"),
+        AuthStaleOnOwnerError("the shared browser's session stopped working"),
+    ):
+        with pytest.raises(ToolError) as caught:
+            raise_tool_error(error, "get_person_profile")
+
+        surfaced = str(caught.value)
+        assert surfaced == str(error)
+        assert "issue" not in surfaced.lower()
 
 
 def test_reraises_unknown_exception():

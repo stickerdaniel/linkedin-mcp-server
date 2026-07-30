@@ -30,13 +30,17 @@ from linkedin_mcp_server.exceptions import (
     AuthenticationBootstrapFailedError,
     AuthenticationInProgressError,
     AuthenticationStartedError,
+    AuthMissingOnOwnerError,
+    AuthStaleOnOwnerError,
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
     DockerHostLoginRequiredError,
 )
+from linkedin_mcp_server.server_role import ServerRole, process_role
 from linkedin_mcp_server.session_state import (
     auth_root_dir,
     get_runtime_id,
+    load_source_state,
     portable_cookie_path,
     profile_exists,
     rotate_source_profile,
@@ -109,16 +113,27 @@ class BootstrapState:
 _state = BootstrapState()
 _lock = asyncio.Lock()
 
+#: Set while this process is the shared owner and has found auth it cannot fix.
+#: Deliberately not on BootstrapState: that is reset wholesale between tests, and
+#: quiescence has its own reset so the two cannot be confused for one another.
+_auth_quiescent = False
+#: The generation that was broken. ``None`` is a value (a rotated profile reads as
+#: exactly that), so it cannot double as "not set"; ``_auth_quiescent`` does that.
+_auth_quiescent_generation: str | None = None
+
 
 def reset_bootstrap_for_testing() -> None:
     """Reset bootstrap singleton state for test isolation."""
     global _state, _lock, _AUTO_IMPORT_ANNOUNCED
+    global _auth_quiescent, _auth_quiescent_generation
     for task in (_state.setup_task, _state.login_task, _state.import_task):
         if task is not None and not task.done():
             task.cancel()
     _state = BootstrapState()
     _lock = asyncio.Lock()
     _AUTO_IMPORT_ANNOUNCED = False
+    _auth_quiescent = False
+    _auth_quiescent_generation = None
     os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
     # Tolerate monkeypatched stand-ins that lack `cache_clear`.
     clear = getattr(_patchright_install_targets, "cache_clear", None)
@@ -556,6 +571,12 @@ async def ensure_tool_ready_or_raise(
     initialize_bootstrap()
     await _refresh_background_task_state()
 
+    # Before any branch that could reach a browser. A quiescent owner has closed
+    # Chromium and is waiting for a client to sign in; every path below would open
+    # it again on the session that just failed, because readiness is decided by
+    # whether the files exist rather than whether they work.
+    _raise_if_auth_quiescent()
+
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         _raise_if_docker_auth_missing()
         return
@@ -650,6 +671,18 @@ def _auto_import_allowed() -> bool:
         return False
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         # No host browser and no keychain inside a container.
+        return False
+    if process_role() is ServerRole.OWNER:
+        # The import runs headless, so the browser is not the problem: rotating
+        # the profile is. It retires the current session before validating a
+        # replacement, and the process that will actually log in needs to find
+        # that session where the owner saw it. On macOS the keychain prompt
+        # would also appear with nobody attached to approve it, so the read
+        # simply times out.
+        #
+        # The frontend does it instead, and it is the better place for both
+        # reasons: it has the desktop session, and it is the process that holds
+        # the profile while it works.
         return False
     if config.browser.proxy_server:
         # The point of configuring a proxy is that LinkedIn sees one address.
@@ -796,6 +829,19 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
 
 
 async def _start_login_if_needed(ctx: Context | None = None) -> None:
+    if process_role() is ServerRole.OWNER:
+        # Ahead of the lock, and ahead of every branch below, because all of them
+        # end somewhere this process cannot go: an auto-import that rotates the
+        # profile, or an interactive login window with nobody attached to answer
+        # it.
+        # Reporting from here leaves the session state exactly as the frontend
+        # will find it, which is what lets the frontend take over cleanly.
+        raise AuthMissingOnOwnerError(
+            "The shared LinkedIn browser has no usable session, and it cannot "
+            "sign in by itself. Retry this tool: the client will open a login "
+            "window."
+        )
+
     # Cheap check-and-claim under the lock; the slow work (auto-import browser
     # launch, then the bounded inline wait) runs AFTER the lock is released so
     # concurrent pollers never serialize on it.
@@ -914,6 +960,77 @@ async def start_login_if_needed(ctx: Context | None = None) -> None:
     await _start_login_if_needed(ctx)
 
 
+def current_login_generation() -> str | None:
+    """Which login generation is on disk now, or ``None`` when there is none.
+
+    ``None`` is a value here rather than an absence: it is exactly what a rotated
+    profile reads as, so the difference between "no session" and "a session I have
+    not seen" has to be carried by something else.
+    """
+    state = load_source_state(get_profile_dir())
+    return None if state is None else state.login_generation
+
+
+def go_auth_quiescent(observed_generation: str | None) -> None:
+    """Stop this owner touching the profile until a new session appears.
+
+    Closing the browser is not enough on its own. ``get_or_create_browser`` opens
+    one whenever ``_browser`` is None, and ``_auth_ready()`` tests whether the
+    files exist rather than whether they work, so the next forwarded call would
+    reopen Chromium on the same dead session, in the middle of the login the
+    frontend is running. Measured before this existed: the call after a confirmed
+    close created a second browser.
+
+    *observed_generation* is the generation this owner found broken. The caller
+    reads it before closing the browser, which is defensive rather than currently
+    necessary: the tool middleware holds a lease reference across the whole call,
+    so nothing else can write a generation in between. It costs nothing and stops
+    a later caller, or a change that frees the lease sooner, from latching onto
+    the generation written by the login it is about to ask for.
+    """
+    global _auth_quiescent_generation, _auth_quiescent
+    _auth_quiescent = True
+    _auth_quiescent_generation = observed_generation
+    logger.warning(
+        "The shared browser cannot sign in; waiting for a client to do it "
+        "(generation %s)",
+        observed_generation or "none",
+    )
+
+
+def _auth_quiescence_lifted() -> bool:
+    """Whether a usable session has replaced the one that caused quiescence.
+
+    Both halves are needed and each alone is wrong. A changed generation alone
+    lifts on an *abandoned* login: the frontend rotates the profile first, which
+    makes the generation read as ``None``, which differs from what was observed,
+    and the owner would open Chromium on a profile with no session at all.
+    ``_auth_ready()`` alone never lifts, because it tests file existence and was
+    already true of the broken session.
+
+    Together they mean what is wanted, because a generation is only written after
+    a login has validated and exported its cookies.
+    """
+    return _auth_ready() and current_login_generation() != _auth_quiescent_generation
+
+
+def _raise_if_auth_quiescent() -> None:
+    """Report instead of opening a browser, until a new session lands."""
+    global _auth_quiescent, _auth_quiescent_generation
+    if not _auth_quiescent:
+        return
+    if _auth_quiescence_lifted():
+        logger.info("A new LinkedIn session appeared; the shared browser resumes")
+        _auth_quiescent = False
+        _auth_quiescent_generation = None
+        return
+    raise AuthStaleOnOwnerError(
+        "The shared LinkedIn browser's session stopped working, and it cannot "
+        "sign in by itself. Retry this tool: the client will open a login "
+        "window."
+    )
+
+
 async def invalidate_auth_and_trigger_relogin(
     ctx: Context | None = None,
 ) -> NoReturn:
@@ -927,7 +1044,22 @@ async def invalidate_auth_and_trigger_relogin(
     Raises:
         AuthenticationStartedError: Login browser opened.
         AuthenticationInProgressError: Login already running from a prior call.
+        AuthStaleOnOwnerError: This process is the shared owner, so it reports
+            rather than rotating the profile and opening a window it has no
+            desktop session for.
     """
+    if process_role() is ServerRole.OWNER:
+        # Never reaches the rotation below. Retiring the session here would race
+        # the frontend's login for the same files, and the login window has
+        # nowhere to appear. The caller has already closed the browser and
+        # recorded the generation it found, which is what `go_auth_quiescent`
+        # needs, so all that is left is to say so.
+        raise AuthStaleOnOwnerError(
+            "The shared LinkedIn browser's session stopped working, and it "
+            "cannot sign in by itself. Retry this tool: the client will open a "
+            "login window."
+        )
+
     logger.warning("Invalidating stale auth state and triggering re-login")
     async with _lock:
         await _refresh_background_task_state()
