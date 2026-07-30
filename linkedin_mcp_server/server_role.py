@@ -28,10 +28,10 @@ class ServerRole(enum.Enum):
     #: Never speaks to an end client, so nothing user-facing belongs here.
     OWNER = "owner"
 
-    # A forwarding role belongs here too, but only once something actually
-    # forwards. Adding it now would mean a server that registers the local
-    # browser-backed tools and then declines to serialize them, which is a
-    # worse starting point than not having the role at all.
+    #: Talks to its own client but drives no browser: every tool call is
+    #: forwarded to the owner over loopback HTTP. Registers none of the local
+    #: browser-backed tools, and serves the owner's instead.
+    PROXY = "proxy"
 
     @property
     def drives_browser(self) -> bool:
@@ -40,5 +40,9 @@ class ServerRole(enum.Enum):
 
     @property
     def faces_a_client(self) -> bool:
-        """Whether an end user reads this server's tool results."""
-        return self is ServerRole.DIRECT
+        """Whether an end user reads this server's tool results.
+
+        A proxy counts. It is the process the MCP client spawned, so its results
+        are the ones a user reads, however little of the work happens here.
+        """
+        return self in (ServerRole.DIRECT, ServerRole.PROXY)

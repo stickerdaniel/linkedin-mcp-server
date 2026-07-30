@@ -9,7 +9,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from fastmcp import FastMCP
 
@@ -42,6 +42,9 @@ from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.messaging import register_messaging_tools
 from linkedin_mcp_server.tools.person import register_person_tools
 from linkedin_mcp_server.tools.post import register_post_tools
+
+if TYPE_CHECKING:
+    from linkedin_mcp_server.daemon import Attachment
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +133,7 @@ def create_mcp_server(
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     role: ServerRole = ServerRole.DIRECT,
     auth_token: str | None = None,
+    proxy_attachment: "Attachment | None" = None,
 ) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools.
 
@@ -140,6 +144,11 @@ def create_mcp_server(
     *auth_token* is the bearer token a daemon owner requires. Only an owner has
     one: it listens on a loopback port that every process on the machine can
     reach, and a browser the user merely points at a page can reach it too.
+
+    *proxy_attachment* is the owner a proxy forwards to. The two credentials are
+    kept apart on purpose and must not be conflated: *auth_token* is what an
+    owner *demands* of callers, while the attachment's token is what a proxy
+    *presents* to one.
     """
     if auth_token is not None and role is not ServerRole.OWNER:
         # A token on a stdio server protects nothing — there is no port to
@@ -149,11 +158,24 @@ def create_mcp_server(
         raise ValueError(
             f"Only a daemon owner authenticates requests, not {role.value}"
         )
+    if role is ServerRole.PROXY and proxy_attachment is None:
+        # A proxy registers no tools of its own, so without an owner it would
+        # serve an empty tool list and look like a server whose tools vanished.
+        raise ValueError(
+            "A proxy has no tools of its own and needs an owner to forward to"
+        )
+    if proxy_attachment is not None and role is not ServerRole.PROXY:
+        # Only a proxy forwards. Accepting an owner here would mean a server that
+        # was handed a bearer token for a shared browser and quietly ignored it.
+        raise ValueError(f"Only a proxy forwards to an owner, not {role.value}")
 
     mcp = FastMCP(
         "mcp-server-linkedin",
         version=__version__,
-        lifespan=browser_lifespan,
+        # Selected here rather than gated inside, because for a proxy every step
+        # of it is wrong: it would install a Chromium this process never opens,
+        # and then claim to be closing a browser it never had.
+        lifespan=browser_lifespan if role.drives_browser else None,
         mask_error_details=True,
         auth=_StaticTokenAuth(auth_token) if auth_token is not None else None,
     )
@@ -170,30 +192,48 @@ def create_mcp_server(
     if role.faces_a_client:
         mcp.add_middleware(UpdateNoticeMiddleware())
 
-    # Register all tools
-    register_person_tools(mcp, tool_timeout=tool_timeout)
-    register_company_tools(mcp, tool_timeout=tool_timeout)
-    register_job_tools(mcp, tool_timeout=tool_timeout)
-    register_messaging_tools(mcp, tool_timeout=tool_timeout)
-    register_feed_tools(mcp, tool_timeout=tool_timeout)
-    register_post_tools(mcp, tool_timeout=tool_timeout)
+    if proxy_attachment is not None:
+        from linkedin_mcp_server.daemon_proxy import create_proxy_provider
 
-    # Register session management tool
-    @mcp.tool(
-        timeout=tool_timeout,
-        title="Close Session",
-        annotations={"destructiveHint": True},
-        tags={"session"},
-    )
-    async def close_session() -> dict[str, Any]:
-        """Close the current browser session and clean up resources."""
-        try:
-            await close_browser()
-            return {
-                "status": "success",
-                "message": "Successfully closed the browser session and cleaned up resources",
-            }
-        except Exception as e:
-            raise_tool_error(e, "close_session")  # NoReturn
+        mcp.add_provider(
+            create_proxy_provider(proxy_attachment, tool_timeout=tool_timeout)
+        )
+        # Not the default, which is "warn": a failing provider is logged and
+        # skipped, and for a server whose *only* provider this is, that turns a
+        # dead owner into an empty tool list with no explanation. Measured on
+        # 3.4.4 — `tools/list` returned `[]` and the call that followed failed as
+        # an unknown tool. A transport failure has to look like one.
+        mcp.provider_error_strategy = "raise"
+
+    # Every local registration below drives Chromium, so a proxy takes none of
+    # them and serves the owner's through the provider above instead.
+    if role.drives_browser:
+        register_person_tools(mcp, tool_timeout=tool_timeout)
+        register_company_tools(mcp, tool_timeout=tool_timeout)
+        register_job_tools(mcp, tool_timeout=tool_timeout)
+        register_messaging_tools(mcp, tool_timeout=tool_timeout)
+        register_feed_tools(mcp, tool_timeout=tool_timeout)
+        register_post_tools(mcp, tool_timeout=tool_timeout)
+
+        # Inside the gate with the rest, and easy to miss because it is the one
+        # tool defined here rather than in a `register_*` call. Left out of the
+        # gate it would collide with the forwarded tool of the same name and
+        # close a browser this process does not have.
+        @mcp.tool(
+            timeout=tool_timeout,
+            title="Close Session",
+            annotations={"destructiveHint": True},
+            tags={"session"},
+        )
+        async def close_session() -> dict[str, Any]:
+            """Close the current browser session and clean up resources."""
+            try:
+                await close_browser()
+                return {
+                    "status": "success",
+                    "message": "Successfully closed the browser session and cleaned up resources",
+                }
+            except Exception as e:
+                raise_tool_error(e, "close_session")  # NoReturn
 
     return mcp

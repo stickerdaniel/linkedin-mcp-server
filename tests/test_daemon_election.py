@@ -1105,6 +1105,97 @@ class TestRealOwner:
         finally:
             _stop(second.get("pid"))
 
+    def test_a_proxy_serves_the_real_owners_tools_over_loopback(
+        self, real_state_root: Path
+    ):
+        """The whole feature, end to end, in the only test that proves it.
+
+        Everything else about the proxy runs in memory against a stand-in owner.
+        This is the one that exercises the published descriptor, the real bearer
+        token and a real socket together, which is where a wrong URL, a
+        mis-scoped credential or a refused loopback hop would actually show up.
+
+        Deliberately no tool is *executed*: the owner has no LinkedIn session and
+        driving a browser is not what this asserts. Serving the owner's list
+        through an authenticated round trip is.
+        """
+        import asyncio
+
+        from fastmcp import Client
+
+        from linkedin_mcp_server.daemon import look_up_owner
+        from linkedin_mcp_server.server import ServerRole, create_mcp_server
+
+        profile = real_state_root
+        result = _run_frontend(profile)
+        try:
+            assert result["state"] == OwnerState.ATTACHABLE.value, result
+
+            # Read the way a frontend does, rather than reusing what the child
+            # returned: the descriptor and token on disk are what a proxy is
+            # built from.
+            lookup = look_up_owner(profile.parent, profile, _config(profile))
+            assert lookup.attachment is not None, lookup.reason
+
+            proxy = create_mcp_server(
+                tool_timeout=30.0,
+                role=ServerRole.PROXY,
+                proxy_attachment=lookup.attachment,
+            )
+
+            async def served() -> set[str]:
+                async with Client(proxy) as client:
+                    return {tool.name for tool in await client.list_tools()}
+
+            names = asyncio.run(served())
+
+            # The owner registers the full local set, so the proxy must show it
+            # all — including `close_session`, the one defined inline rather than
+            # in a `register_*` call.
+            assert "get_person_profile" in names
+            assert "close_session" in names
+            assert len(names) == 19, sorted(names)
+        finally:
+            _stop(result.get("pid"))
+
+    def test_a_proxy_refuses_an_owner_it_has_the_wrong_token_for(
+        self, real_state_root: Path
+    ):
+        """The credential is load-bearing, not decoration.
+
+        The owner listens on a loopback port that every process on the machine
+        can reach, and that a website can reach through the user's own browser.
+        If a wrong token were served anyway, that port would be an open door to a
+        logged-in LinkedIn session.
+        """
+        import asyncio
+        import dataclasses
+
+        from fastmcp import Client
+
+        from linkedin_mcp_server.daemon import look_up_owner
+        from linkedin_mcp_server.server import ServerRole, create_mcp_server
+
+        profile = real_state_root
+        result = _run_frontend(profile)
+        try:
+            lookup = look_up_owner(profile.parent, profile, _config(profile))
+            assert lookup.attachment is not None, lookup.reason
+
+            wrong = dataclasses.replace(lookup.attachment, token="not-the-token")
+            proxy = create_mcp_server(
+                tool_timeout=30.0, role=ServerRole.PROXY, proxy_attachment=wrong
+            )
+
+            async def served() -> None:
+                async with Client(proxy) as client:
+                    await client.list_tools()
+
+            with pytest.raises(Exception):
+                asyncio.run(served())
+        finally:
+            _stop(result.get("pid"))
+
 
 class TestVersionSkew:
     """``@latest`` means two versions can be on one machine at the same time."""
