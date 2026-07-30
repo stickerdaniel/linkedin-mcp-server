@@ -576,3 +576,194 @@ def test_clear_profile_and_exit_clears_all_auth_state(
     assert cleared["profile"] == profile_dir
     captured = capsys.readouterr()
     assert "authentication state cleared" in captured.out.lower()
+
+
+class TestForwardingToASharedOwner:
+    """Which server this process builds, and what it does when there is no owner.
+
+    The flag is off by default, so the ordinary case here is that nothing
+    happens. What these pin is the two ways the daemon can go wrong quietly: a
+    process that elects an owner and then ignores it, and a process that starts
+    an owner when there was never any point.
+    """
+
+    @staticmethod
+    def _outcome(attachment):
+        from linkedin_mcp_server.daemon import OwnerLookup, OwnerState
+        from linkedin_mcp_server.daemon_election import ElectionOutcome
+
+        state = OwnerState.ATTACHABLE if attachment else OwnerState.ABSENT
+        return ElectionOutcome(OwnerLookup(state=state, attachment=attachment))
+
+    def _config(self, *, daemon_enabled: bool, transport="stdio") -> AppConfig:
+        config = _make_config(
+            is_interactive=False,
+            transport=transport,
+            transport_explicitly_set=True,
+        )
+        config.server.daemon_enabled = daemon_enabled
+        return config
+
+    def test_no_owner_is_sought_when_the_daemon_is_switched_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The default. Electing an owner here would cost every user a detached
+        # process for a feature they did not ask for.
+        asked = MagicMock()
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", asked)
+
+        assert cli_main._obtain_shared_owner(self._config(daemon_enabled=False)) is None
+        asked.assert_not_called()
+
+    def test_no_owner_is_sought_for_an_http_server(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # An explicit HTTP bind is already one server for many clients, so there
+        # is nothing left for a daemon to deduplicate.
+        asked = MagicMock()
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", asked)
+        config = self._config(daemon_enabled=True, transport="streamable-http")
+
+        assert cli_main._obtain_shared_owner(config) is None
+        asked.assert_not_called()
+
+    def test_the_elected_owner_is_handed_back_rather_than_discarded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        # The mutation every test that stubs this helper would miss: before this
+        # PR the election ran and its result was thrown away, which looks
+        # identical from the outside until nothing forwards.
+        attachment = MagicMock(name="attachment")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_election.obtain_owner",
+            lambda *_args, **_kwargs: self._outcome(attachment),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.get_profile_dir", lambda: tmp_path / "profile"
+        )
+
+        found = cli_main._obtain_shared_owner(self._config(daemon_enabled=True))
+
+        assert found is attachment
+
+    def test_a_failed_election_leaves_this_process_driving_its_own_browser(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path, caplog
+    ):
+        # Deliberate, and a real trade: falling back means two clients can hand
+        # the profile back and forth per call again, which is the cost #606
+        # exists to remove. A client that refused to start would fail where
+        # nobody reads the reason, so the warning is what has to carry it.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_election.obtain_owner",
+            lambda *_args, **_kwargs: self._outcome(None),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.get_profile_dir", lambda: tmp_path / "profile"
+        )
+
+        with caplog.at_level(logging.WARNING):
+            assert (
+                cli_main._obtain_shared_owner(self._config(daemon_enabled=True)) is None
+            )
+
+        assert "drive its own browser" in caplog.text
+
+    def test_an_election_that_raises_is_never_fatal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("the lock is on a filesystem without locking")
+
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", explode)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.get_profile_dir", lambda: tmp_path / "profile"
+        )
+
+        assert cli_main._obtain_shared_owner(self._config(daemon_enabled=True)) is None
+
+    def test_an_owner_makes_this_process_a_proxy(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from linkedin_mcp_server.server_role import ServerRole
+
+        config = self._config(daemon_enabled=True)
+        _patch_main_dependencies(monkeypatch, config)
+        attachment = MagicMock(name="attachment")
+        # Patched at the election rather than at the helper, so the real helper
+        # runs. Stubbing `_obtain_shared_owner` would let it go on discarding the
+        # outcome — the bug this PR fixes — while this test still passed.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon_election.obtain_owner",
+            lambda *_args, **_kwargs: self._outcome(attachment),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.get_profile_dir", lambda: tmp_path / "profile"
+        )
+        built = {}
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.create_mcp_server",
+            lambda **kwargs: built.update(kwargs) or MagicMock(),
+        )
+
+        cli_main.main()
+
+        assert built["role"] is ServerRole.PROXY
+        assert built["proxy_attachment"] is attachment
+        # The owner's inbound credential must not be reused for the outbound hop.
+        assert "auth_token" not in built
+
+    def test_no_owner_leaves_the_historical_server_untouched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        config = self._config(daemon_enabled=False)
+        _patch_main_dependencies(monkeypatch, config)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main._obtain_shared_owner", lambda _config: None
+        )
+        built = {}
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.create_mcp_server",
+            lambda **kwargs: built.update(kwargs) or MagicMock(),
+        )
+
+        cli_main.main()
+
+        assert set(built) == {"tool_timeout"}
+
+    def test_an_interactively_chosen_http_transport_elects_no_daemon(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The ordering this depends on is easy to break by accident: the
+        # interactive answer is written back into the config, and the election
+        # reads that stored value. Moving the election above the prompt, or
+        # keeping the answer in a local, would start a detached owner for a
+        # server that is already one-for-many — and every other test here would
+        # still pass, because they all set the transport explicitly.
+        config = self._config(daemon_enabled=True, transport="stdio")
+        config.server.transport_explicitly_set = False
+        config.is_interactive = True
+        _patch_main_dependencies(monkeypatch, config)
+
+        # Recorded rather than raised from inside: the helper wraps the election
+        # in `except Exception`, so an assertion thrown there would be swallowed
+        # and this test would pass against the very bug it exists for. Found by
+        # mutating the ordering and watching it pass.
+        called = []
+
+        def record(*_args, **_kwargs):
+            called.append(True)
+            raise RuntimeError("no owner")
+
+        monkeypatch.setattr("linkedin_mcp_server.daemon_election.obtain_owner", record)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.choose_transport_interactive",
+            lambda: "streamable-http",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.create_mcp_server",
+            lambda **_kwargs: MagicMock(),
+        )
+
+        cli_main.main()
+
+        assert called == [], "an HTTP server must not elect a daemon"

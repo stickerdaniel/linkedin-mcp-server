@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import sys
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import inquirer
 
@@ -34,8 +34,11 @@ from linkedin_mcp_server.session_state import (
     runtime_storage_state_path,
     source_state_path,
 )
-from linkedin_mcp_server.server import create_mcp_server
+from linkedin_mcp_server.server import ServerRole, create_mcp_server
 from linkedin_mcp_server.setup import run_profile_creation
+
+if TYPE_CHECKING:
+    from linkedin_mcp_server.daemon import Attachment
 
 logger = logging.getLogger(__name__)
 
@@ -283,36 +286,45 @@ def profile_info_and_exit() -> None:
     sys.exit(1)
 
 
-def _elect_daemon_owner_if_enabled(config: AppConfig) -> None:
-    """Make sure one shared owner is running, when the daemon is switched on.
+def _obtain_shared_owner(config: AppConfig) -> "Attachment | None":
+    """Return the shared owner to forward to, starting one if nobody has.
 
-    Off by default, and inert when off. What it establishes when on is the half
-    of the daemon that has to work before forwarding can be built: exactly one
-    owner process per profile, reachable, with the lock held by the process that
-    actually serves.
+    Off by default, and inert when off. ``None`` means this process serves its
+    own client the way it always has: the flag is off, the transport is HTTP (one
+    server for many clients already, so there is nothing to deduplicate), or no
+    owner could be established at all.
 
-    This process still runs its own tools, because the forwarding role does not
-    exist yet. So an enabled daemon costs an idle owner beside the ordinary
-    server and buys nothing, which is why the flag stays experimental and off.
+    Never fatal, and that is a decision rather than an oversight. A client that
+    refused to start because a shared browser could not be elected would fail
+    where nobody can read the reason — an MCP client reports "server failed to
+    start" and the explanation sits in a log the user has not opened. A working
+    server with a warning beats a dead one with a better excuse while the flag is
+    opt-in. It is a real trade, though: falling back means two clients can hand
+    the profile back and forth per call again, which is the cost #606 exists to
+    remove, so the warning is the only thing that says the feature was lost. The
+    balance changes when the flag becomes the default.
 
-    That also means two processes can reach the same profile while the flag is
-    on, and what keeps them off each other is the profile lease from #598, not
-    anything here: the owner takes it when it opens Chromium and hands it over
-    when another process announces itself
-    (``drivers/browser.py:881-901``). The daemon lock decides who *owns* the
-    browser; the lease decides who is driving it right now, and only the second
-    question is being asked while this server still runs its own tools.
+    What keeps two processes off one profile on that fallback path is the profile
+    lease from #598, not anything here: the owner takes it when it opens Chromium
+    and hands it over when another process announces itself
+    (``drivers/browser.watch_for_handoff_requests``). The daemon lock decides who
+    *owns* the browser; the lease decides who is driving it right now.
 
-    Never fatal. Every failure inside is a reason to serve this client the way
-    the server always has, and a client that could not start because a shared
-    browser could not be elected would be a worse outcome than not sharing one.
-    Once forwarding lands, a failed election stops being survivable this way and
-    the decision moves with it.
+    That safety net carries more weight on Windows than elsewhere, which is worth
+    knowing before the flag becomes the default. A frontend there takes no lock
+    at all and starts a child that competes for one
+    (``daemon_election._start_contending_for_the_lock``), so a local spawn
+    failure is indistinguishable from a rival owner that holds the lock and has
+    not published yet: ``obtain_owner`` returns at once and this process falls
+    back while an owner may in fact be coming up. On POSIX the equivalent
+    outcomes are terminal, because the frontend held the lock itself. Windows
+    already carries platform gaps that gate the default flip, and this is one of
+    them.
     """
     from linkedin_mcp_server.daemon import daemon_would_be_used
 
     if not daemon_would_be_used(config):
-        return
+        return None
 
     try:
         from linkedin_mcp_server.daemon_election import obtain_owner
@@ -322,16 +334,21 @@ def _elect_daemon_owner_if_enabled(config: AppConfig) -> None:
         outcome = obtain_owner(auth_root_dir(profile), profile, config)
     except Exception:
         logger.warning("The shared browser owner is unavailable", exc_info=True)
-        return
+        return None
 
     if outcome.worth_connecting:
-        logger.info("A shared browser owner is running")
-    else:
-        logger.warning(
-            "No shared browser owner could be started (%s); this server will "
-            "drive its own browser",
-            outcome.attachment_lookup.state.value,
-        )
+        logger.info("Forwarding to the shared browser owner")
+        # Handed on as the election verified it. Re-reading the descriptor or the
+        # token from disk would be a second, unproven read of a pair this one
+        # already matched and reached.
+        return outcome.attachment_lookup.attachment
+
+    logger.warning(
+        "No shared browser owner could be started (%s); this server will "
+        "drive its own browser",
+        outcome.attachment_lookup.state.value,
+    )
+    return None
 
 
 def get_version() -> str:
@@ -438,14 +455,25 @@ def main() -> None:
                 config.validate()
 
             # Get a shared owner running before building this process's server.
-            # Nothing downstream depends on the result yet: the frontend still
-            # runs its own tools. What this establishes is that exactly one
-            # owner exists per profile and that a client can reach it, which is
-            # what the forwarding half will attach to.
-            _elect_daemon_owner_if_enabled(config)
+            # It has to come first now: whether this process drives a browser or
+            # forwards to one that does depends on the answer.
+            #
+            # Reads the stored transport rather than the local above, which is
+            # why the interactive prompt writes its answer back into the config
+            # before this runs: `daemon_would_be_used` asks whether this is a
+            # stdio process, and an interactively chosen HTTP server must not
+            # elect a daemon.
+            attachment = _obtain_shared_owner(config)
 
             # Create and run the MCP server
-            mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
+            if attachment is None:
+                mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
+            else:
+                mcp = create_mcp_server(
+                    tool_timeout=config.server.tool_timeout_seconds,
+                    role=ServerRole.PROXY,
+                    proxy_attachment=attachment,
+                )
 
             if transport == "streamable-http":
                 # Validate Host and Origin. Without this a website the user

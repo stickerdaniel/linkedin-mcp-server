@@ -6,8 +6,9 @@ moves on nearly every call, and every move reopens Chromium and revalidates the
 session against ``/feed/``. One long-lived owner removes that traffic entirely.
 
 This module is only the discovery half: it answers "is there an owner I should
-be talking to, and may I trust it with a token". Electing one, spawning it and
-forwarding to it build on this and land with the code that does them.
+be talking to, and may I trust it with a token". Electing one and spawning it
+live in :mod:`linkedin_mcp_server.daemon_election`, and forwarding to what it
+returns in :mod:`linkedin_mcp_server.daemon_proxy`.
 
 Finding an owner takes a wait rather than a single read, because the interesting
 case is neither "an owner exists" nor "none does", but the window in between. An

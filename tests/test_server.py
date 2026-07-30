@@ -5,8 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import mcp.types as mt
 import pytest
-from fastmcp import FastMCP
+from fastmcp import Client, FastMCP
 from fastmcp.server.middleware import MiddlewareContext
+from fastmcp.server.providers.proxy import ProxyClient
 
 import linkedin_mcp_server.server as server_module
 from linkedin_mcp_server import __version__
@@ -19,6 +20,56 @@ from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 
 def _has_middleware(mcp: FastMCP, kind: type) -> bool:
     return any(isinstance(middleware, kind) for middleware in mcp.middleware)
+
+
+def _owner_serving(*tool_names: str) -> FastMCP:
+    """A stand-in owner that serves the named tools and nothing else."""
+    owner = FastMCP("owner")
+    for name in tool_names:
+
+        async def tool() -> dict[str, str]:
+            return {"served": "by the owner"}
+
+        tool.__name__ = name
+        owner.tool(tool)
+    return owner
+
+
+def _an_attachment() -> MagicMock:
+    """Stands in for an elected owner.
+
+    The real one carries a loopback address and a bearer token and needs a
+    published descriptor to build. These tests are about which parts of a server
+    a role gets, so the endpoint is stood in for; the real URL, token, timeout
+    and proxy-environment wiring are covered in ``tests/test_daemon_proxy.py``.
+    """
+    attachment = MagicMock(name="attachment")
+    attachment.descriptor.url = "http://127.0.0.1:1/mcp"
+    attachment.token = "a-token"
+    return attachment
+
+
+def _proxy_to(monkeypatch: pytest.MonkeyPatch, owner: FastMCP, **kwargs) -> FastMCP:
+    """Build a PROXY whose provider reaches *owner* in memory rather than over HTTP."""
+    import linkedin_mcp_server.daemon_proxy as daemon_proxy
+
+    # ProxyClient, matching production: a plain Client would drop the progress
+    # every browser-backed tool reports.
+    monkeypatch.setattr(
+        daemon_proxy,
+        "_client_factory",
+        lambda _a, *, timeout: lambda: ProxyClient(owner),
+    )
+    return create_mcp_server(
+        role=ServerRole.PROXY, proxy_attachment=_an_attachment(), **kwargs
+    )
+
+
+def _extras_for(role: ServerRole) -> dict[str, MagicMock]:
+    """The arguments a role cannot be built without."""
+    if role is ServerRole.PROXY:
+        return {"proxy_attachment": _an_attachment()}
+    return {}
 
 
 class TestServerRoles:
@@ -44,7 +95,7 @@ class TestServerRoles:
         # reach Chromium takes the lease first. A role added later that skips
         # this would corrupt the session rather than merely run slowly.
         for role in ServerRole:
-            mcp = create_mcp_server(role=role)
+            mcp = create_mcp_server(role=role, **_extras_for(role))
             serializes = _has_middleware(mcp, SequentialToolExecutionMiddleware)
 
             # Stated as the conditional it is. Asserting that every role drives
@@ -54,22 +105,36 @@ class TestServerRoles:
             assert serializes == role.drives_browser, role
 
     def test_the_update_notice_goes_only_where_a_user_reads_it(self):
-        # Appended to one tool result per process. On a server shared by many
-        # clients that means the first caller sees it and nobody afterwards
-        # does, however long that server lives.
-        owner = create_mcp_server(role=ServerRole.OWNER)
+        # Appended to one tool result per process, so it belongs wherever a user
+        # reads results and nowhere else. On the shared owner it would reach
+        # whichever client happened to call first and nobody after that, however
+        # many clients attach over its life. A proxy is the opposite case: it is
+        # the process the client spawned, so the notice has to survive there.
+        for role in ServerRole:
+            mcp = create_mcp_server(role=role, **_extras_for(role))
 
-        assert not _has_middleware(owner, UpdateNoticeMiddleware)
+            assert (
+                _has_middleware(mcp, UpdateNoticeMiddleware) == role.faces_a_client
+            ), role
 
-    def test_every_role_serves_the_same_tools(self):
+    def test_every_role_that_drives_a_browser_serves_the_same_tools(self):
         # A tool present in one role and missing from another would disappear
         # from a client's list depending on how its server happened to start.
+        #
+        # A proxy is deliberately not in here: it registers none of these and
+        # serves the owner's instead, which is a different claim and has its own
+        # test below.
         async def tool_names(role: ServerRole) -> set[str]:
             tools = await create_mcp_server(role=role).list_tools()
             return {tool.name for tool in tools}
 
-        served = {role: asyncio.run(tool_names(role)) for role in ServerRole}
+        served = {
+            role: asyncio.run(tool_names(role))
+            for role in ServerRole
+            if role.drives_browser
+        }
 
+        assert len(served) > 1
         assert len(set(map(frozenset, served.values()))) == 1
         assert "get_person_profile" in served[ServerRole.DIRECT]
 
@@ -99,6 +164,163 @@ class TestServerRoles:
         assert server_module.ServerRole is ServerRole
 
 
+class TestProxyRole:
+    """A proxy serves the owner's tools and drives nothing itself.
+
+    The failures pinned here are all quiet ones: a browser installed in a process
+    that never opens one, a local tool shadowing the forwarded tool of the same
+    name, or a server that lost its tools and cannot say why.
+    """
+
+    async def test_a_proxy_serves_the_owners_tools(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        owner = _owner_serving("get_person_profile", "search_jobs")
+        proxy = _proxy_to(monkeypatch, owner)
+
+        async with Client(proxy) as client:
+            served = {tool.name for tool in await client.list_tools()}
+
+        assert served == {"get_person_profile", "search_jobs"}
+
+    async def test_a_proxy_registers_none_of_its_own_tools(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Only what the owner offers, exactly. An owner serving one tool proves
+        # nothing local slipped through, which a comparison against the full
+        # local list could not: that list would match by coincidence.
+        owner = _owner_serving("the_only_tool")
+        proxy = _proxy_to(monkeypatch, owner)
+
+        async with Client(proxy) as client:
+            served = {tool.name for tool in await client.list_tools()}
+
+        assert served == {"the_only_tool"}
+
+    async def test_close_session_is_not_kept_locally_by_a_proxy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The registration that is easiest to miss, because it is the one tool
+        # defined inline rather than in a `register_*` call. Left behind it would
+        # shadow the forwarded tool of the same name and close a browser this
+        # process does not have.
+        proxy = _proxy_to(monkeypatch, _owner_serving("get_person_profile"))
+
+        async with Client(proxy) as client:
+            served = {tool.name for tool in await client.list_tools()}
+
+        assert "close_session" not in served
+
+    async def test_a_proxy_never_runs_the_browser_lifespan(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A proxy opens no browser, so entering this lifespan would install
+        # Chromium in a process that never uses it, poll to hand over a profile
+        # it does not hold, and then claim to close a browser it never had.
+        #
+        # Asserted through the collaborators rather than `proxy.lifespan is None`:
+        # FastMCP substitutes a default lifespan of its own when given none, so
+        # the identity check passed for a server that still had ours.
+        watcher = AsyncMock()
+        bootstrap = MagicMock()
+        browser_setup = AsyncMock()
+        close = AsyncMock()
+        monkeypatch.setattr(server_module, "initialize_bootstrap", bootstrap)
+        monkeypatch.setattr(server_module, "get_runtime_policy", MagicMock())
+        monkeypatch.setattr(
+            server_module, "start_background_browser_setup_if_needed", browser_setup
+        )
+        monkeypatch.setattr(server_module, "watch_for_handoff_requests", watcher)
+        monkeypatch.setattr(server_module, "close_browser", close)
+
+        proxy = _proxy_to(monkeypatch, _owner_serving("get_person_profile"))
+        async with Client(proxy) as client:
+            await client.list_tools()
+
+        bootstrap.assert_not_called()
+        browser_setup.assert_not_awaited()
+        watcher.assert_not_called()
+        close.assert_not_awaited()
+
+    async def test_a_browser_driving_role_does_run_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The other half of the assertion above: without this, deleting the
+        # lifespan outright would satisfy that test.
+        bootstrap = MagicMock()
+        close = AsyncMock()
+        monkeypatch.setattr(server_module, "initialize_bootstrap", bootstrap)
+        monkeypatch.setattr(server_module, "get_runtime_policy", MagicMock())
+        monkeypatch.setattr(
+            server_module, "start_background_browser_setup_if_needed", AsyncMock()
+        )
+        monkeypatch.setattr(server_module, "watch_for_handoff_requests", AsyncMock())
+        monkeypatch.setattr(server_module, "close_browser", close)
+
+        async with Client(create_mcp_server()) as client:
+            await client.list_tools()
+
+        bootstrap.assert_called_once()
+        close.assert_awaited_once()
+
+    async def test_a_dead_owner_is_an_error_rather_than_an_empty_tool_list(self):
+        # FastMCP logs a failing provider and carries on by default. For a proxy
+        # the provider *is* the server, so that default turns an unreachable
+        # owner into a client that sees no tools and no reason why. Measured on
+        # 3.4.4: `tools/list` returned `[]`.
+        proxy = create_mcp_server(
+            role=ServerRole.PROXY, proxy_attachment=_an_attachment()
+        )
+
+        async with Client(proxy) as client:
+            with pytest.raises(Exception, match="connect"):
+                await client.list_tools()
+
+    async def test_the_update_notice_still_reaches_a_forwarded_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The notice is appended by middleware around a call whose work happens in
+        # another process, so it has to survive the hop rather than be dropped
+        # with the local tool it used to ride on.
+        import linkedin_mcp_server.update_check as update_check
+
+        monkeypatch.setattr(update_check, "prime_from_cache", lambda: None)
+        monkeypatch.setattr(update_check, "refresh_latest_version", AsyncMock())
+        monkeypatch.setattr(
+            update_check, "pending_update_notice", lambda: "Update available: 9.9.9"
+        )
+
+        proxy = _proxy_to(monkeypatch, _owner_serving("get_person_profile"))
+
+        async with Client(proxy) as client:
+            result = await client.call_tool("get_person_profile", {})
+
+        texts = [getattr(block, "text", "") for block in result.content]
+        assert any("Update available: 9.9.9" in text for text in texts)
+        # And the owner's own result is still there, not replaced by the notice.
+        assert any("by the owner" in text for text in texts)
+
+    def test_a_proxy_without_an_owner_is_refused(self):
+        # It would serve an empty tool list and look like a server whose tools
+        # disappeared, which is the confusing half of the same bug.
+        with pytest.raises(ValueError, match="needs an owner"):
+            create_mcp_server(role=ServerRole.PROXY)
+
+    def test_only_a_proxy_may_be_given_an_owner(self):
+        # A role that does not forward would be handed a bearer token for a
+        # shared browser and quietly ignore it.
+        for role in (ServerRole.DIRECT, ServerRole.OWNER):
+            with pytest.raises(ValueError, match="Only a proxy forwards"):
+                create_mcp_server(role=role, proxy_attachment=_an_attachment())
+
+    def test_the_owners_inbound_token_is_not_the_proxys_outbound_one(self):
+        # Two credentials pointing opposite ways. Conflating them would either
+        # authenticate a server that has no port, or send an owner's own token
+        # back to itself.
+        with pytest.raises(ValueError, match="daemon owner"):
+            create_mcp_server(role=ServerRole.PROXY, auth_token="a-token")
+
+
 class TestOwnerAuthentication:
     """Only the shared owner authenticates, and it does so with one token.
 
@@ -122,8 +344,15 @@ class TestOwnerAuthentication:
         # Passing a token to a stdio server is a caller that believes it built
         # the owner. Ignoring it quietly would leave an endpoint that was meant
         # to be authenticated serving anyone who finds it.
-        with pytest.raises(ValueError, match="daemon owner"):
-            create_mcp_server(role=ServerRole.DIRECT, auth_token="a-token")
+        #
+        # A proxy is the case worth spelling out, because it is the one role that
+        # legitimately handles a token — the owner's, outbound. Accepting one
+        # here would be a caller confusing the credential it *presents* with the
+        # one an owner *demands*, and narrowing this guard to DIRECT alone would
+        # let that through.
+        for role in (ServerRole.DIRECT, ServerRole.PROXY):
+            with pytest.raises(ValueError, match="daemon owner"):
+                create_mcp_server(role=role, auth_token="a-token")
 
     async def test_the_wrong_token_is_refused_and_the_right_one_accepted(self):
         owner = create_mcp_server(role=ServerRole.OWNER, auth_token="the-token")
