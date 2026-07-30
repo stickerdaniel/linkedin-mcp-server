@@ -75,7 +75,11 @@ def register_messaging_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Conversation",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        # Not read-only, though it reads: resolving a username enumerates the
+        # inbox by click-visiting rows, and LinkedIn marks a visited row as read.
+        # The docstring below has always said so. An unread message the user has
+        # not seen is state, and losing it is not something a reader should do.
+        annotations={"openWorldHint": True},
         tags={"messaging", "scraping"},
         exclude_args=["extractor"],
     )
@@ -154,7 +158,10 @@ def register_messaging_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Search Conversations",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        # Same reason as `get_conversation`: enumerating result rows selects them
+        # in LinkedIn's UI, which can mark them read. Its own `limit` argument is
+        # documented in those terms.
+        annotations={"openWorldHint": True},
         tags={"messaging", "search"},
         exclude_args=["extractor"],
     )

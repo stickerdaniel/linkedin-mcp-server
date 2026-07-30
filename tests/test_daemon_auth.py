@@ -49,7 +49,11 @@ def _owner_that_fails_with(
     owner = FastMCP("owner", mask_error_details=True)
     calls: list[int] = []
 
-    @owner.tool
+    # Annotated read-only, like the scraping tools it stands for. The annotation
+    # is load-bearing rather than decoration: only a tool that declares itself
+    # read-only is ever replayed, because a replay the client never sees the
+    # result of would repeat whatever the tool did.
+    @owner.tool(annotations={"readOnlyHint": True})
     async def scrape() -> str:
         calls.append(1)
         if len(calls) == 1:
@@ -384,7 +388,7 @@ class TestTheFrontendActsOnTheMarker:
         owner = FastMCP("owner", mask_error_details=True)
         calls: list[int] = []
 
-        @owner.tool
+        @owner.tool(annotations={"readOnlyHint": True})
         async def scrape() -> str:
             calls.append(1)
             raise_tool_error(
@@ -663,19 +667,19 @@ class TestTheRepairRunsForReal:
         assert result.is_error is True
         assert "no session" in result.content[0].text
 
-    async def test_a_mutating_replay_is_never_abandoned(self):
-        """Giving up on a mutating replay leaves the owner doing it anyway.
+    async def test_a_tool_that_changes_something_is_never_replayed(self):
+        """Repaired, and left for the caller to run again.
 
-        Cancellation is not forwarded across the hop, which
-        ``daemon_proxy._TIMEOUT_MARGIN_SECONDS`` already records. Timing the
-        replay out therefore does not stop it: measured over a real loopback
-        owner, the client was answered at 0.66s with the old auth failure and the
-        owner appended its effect 0.7s later. The user is told the message was
-        not sent, it was, and retrying sends it twice.
+        No bound on the replay can make this safe, and two attempts showed why.
+        Bounding it locally left the owner finishing the mutation after the
+        frontend had reported failure, because cancellation is not forwarded
+        across the hop: measured over a real loopback owner, the client was
+        answered at 0.66s with an error and the effect landed 0.7s later.
+        Removing the bound only moved the deadline: an MCP client cancelling its
+        own call produced the same orphan, and the retry sent the message twice.
 
-        Waiting past the client's deadline is the lesser harm: the deadline
-        belongs to the client, which can give up by itself, and that leaves one
-        call outstanding rather than a second queued behind it.
+        So the decision goes to the user, who knows whether it happened. Asking
+        costs one retry; guessing wrong sends it twice.
         """
         owner = FastMCP("owner", mask_error_details=True)
         calls: list[int] = []
@@ -689,35 +693,35 @@ class TestTheRepairRunsForReal:
                     AuthMissingOnOwnerError("no session", nothing_ran_yet=True),
                     "send",
                 )
-            await asyncio.sleep(0.4)  # longer than what is left of the call
             sent.append("message")
             return "sent"
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
-        with (
-            self._profile_is_free(),
-            self._a_login_that(takes=0.05),
-            patch("linkedin_mcp_server.daemon_auth._MINIMUM_REPLAY_SECONDS", 0.05),
-        ):
-            async with Client(_proxy_to(owner, tool_timeout=0.2)) as client:
+        with self._profile_is_free(), self._a_login_that(takes=0.05):
+            async with Client(_proxy_to(owner, tool_timeout=5.0)) as client:
                 result = await client.call_tool("send", raise_on_error=False)
+            # Repaired all the same, which is what makes the retry the message
+            # asks for work. Read inside the patch, where readiness reflects the
+            # stubbed login rather than the real filesystem.
+            from linkedin_mcp_server.bootstrap import _auth_ready
 
-        # The answer reflects what happened, which is the whole point: an effect
-        # the client was not told about is one it will repeat.
-        assert sent == ["message"], "the mutation was abandoned mid-flight"
-        assert result.is_error is False
-        assert result.content[0].text == "sent"
+            repaired = _auth_ready()
+
+        assert calls == [1], "a mutating call was run again on its own"
+        assert sent == [], "the message was sent without the user asking twice"
+        assert repaired, "the auth was not repaired either"
+        assert result.is_error is True
+        assert "no session" in result.content[0].text
 
     async def test_an_unannotated_tool_counts_as_mutating(self):
         """A tool that promised nothing is not treated as safe.
 
-        Only ``readOnlyHint`` makes a replay abandonable. Defaulting the other
-        way would make every future tool abandonable until someone remembered to
-        annotate it, and the failure would be silent.
+        Only ``readOnlyHint`` earns a replay. Defaulting the other way would make
+        every future tool replayable until someone remembered to annotate it, and
+        the failure would be silent and irreversible.
         """
         owner = FastMCP("owner", mask_error_details=True)
         calls: list[int] = []
-        sent: list[str] = []
 
         @owner.tool  # no annotations at all
         async def act() -> str:
@@ -727,21 +731,15 @@ class TestTheRepairRunsForReal:
                     AuthMissingOnOwnerError("no session", nothing_ran_yet=True),
                     "act",
                 )
-            await asyncio.sleep(0.4)
-            sent.append("done")
             return "done"
 
         owner.add_middleware(OwnerAuthSignalMiddleware())
-        with (
-            self._profile_is_free(),
-            self._a_login_that(takes=0.05),
-            patch("linkedin_mcp_server.daemon_auth._MINIMUM_REPLAY_SECONDS", 0.05),
-        ):
-            async with Client(_proxy_to(owner, tool_timeout=0.2)) as client:
+        with self._profile_is_free(), self._a_login_that(takes=0.05):
+            async with Client(_proxy_to(owner, tool_timeout=5.0)) as client:
                 result = await client.call_tool("act", raise_on_error=False)
 
-        assert sent == ["done"], "an unannotated tool was abandoned mid-flight"
-        assert result.is_error is False
+        assert calls == [1], "an unannotated tool was replayed"
+        assert result.is_error is True
 
     async def test_the_replay_floor_stays_inside_the_budget(self):
         """The floor must not outlive the call it is a floor for.

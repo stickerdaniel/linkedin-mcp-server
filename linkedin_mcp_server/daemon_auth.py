@@ -306,24 +306,31 @@ class FrontendAuthRepairMiddleware(Middleware):
             logger.info("Signed in; not repeating a call that had already started")
             return result
 
-        logger.info("Signed in; running the call again")
-
         if await _the_tool_changes_something(context):
-            # Never timed out locally, and this is the one case where waiting
-            # longer is the safer answer. Giving up here does not stop the owner:
-            # cancellation is not forwarded across the hop
-            # (`daemon_proxy._TIMEOUT_MARGIN_SECONDS` records the same), so the
-            # frontend would report the old auth failure while the owner went on
-            # to send the message. Measured over a real loopback owner: the
-            # client was answered at 0.66s with an error, and the owner appended
-            # its effect 0.7s later. The user then retries something that already
-            # happened.
+            # Repaired, but not run again. The auth is fixed and the next call
+            # will work; what this one gets is the owner's own message, which
+            # already says to retry.
             #
-            # An overrun client call is the lesser harm: the deadline belongs to
-            # the client, which can give up on its own, and doing so leaves the
-            # same one call outstanding rather than a second one queued behind it.
-            return await call_next(context)
+            # An auto-replay cannot be made safe here, and two rounds of trying
+            # showed why. Bounding it locally left the owner finishing the
+            # mutation after the frontend had reported failure: cancellation is
+            # not forwarded across the hop, which
+            # `daemon_proxy._TIMEOUT_MARGIN_SECONDS` already records. Measured
+            # over a real loopback owner, the client was answered at 0.66s with
+            # an error and the effect landed 0.7s later. Removing the bound only
+            # moved the deadline: an MCP client that gives up on its own call
+            # produces exactly the same orphan, measured as effects `['sent']`
+            # after the cancel and `['sent', 'sent']` after the retry.
+            #
+            # Nothing this process can do closes that, because the deadline that
+            # matters belongs to a client it does not control. So the decision
+            # goes where the information is: the user knows whether the message
+            # was sent, and asking costs one retry, while guessing wrong sends it
+            # twice. Read-only tools keep the replay, which is where it pays.
+            logger.info("Signed in; not repeating a call that could change something")
+            return result
 
+        logger.info("Signed in; running the call again")
         # Read-only, so bounded by what is left of this call rather than given a
         # fresh budget. Nothing below this middleware bounds the whole path: the
         # forwarded call has its own deadline per hop
