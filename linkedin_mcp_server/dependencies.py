@@ -60,6 +60,36 @@ def _is_browser_binary_missing_error(error: Exception) -> bool:
     return any(marker in message for marker in markers)
 
 
+def _ask_a_wedged_owner_to_give_way() -> None:
+    """Ask this process to exit, if it is an owner the profile is stuck on.
+
+    For a single-process server the "restart the server" message is actionable:
+    the client owns it, and restarting frees the lock. For a detached owner it is
+    not. It outlives the client that started it, so restarting the client elects
+    nothing — the next frontend attaches to this same owner and meets the same
+    held profile, and only killing it by hand recovers.
+
+    So it removes itself instead. It holds no state a restart would lose: the
+    session is on disk, the lock is released by the exit, and the next call
+    elects a fresh owner that opens the profile cleanly.
+
+    Reads the lease itself rather than taking the answer as an argument, because
+    it runs from a ``finally`` that a cancellation passes through, where there is
+    no caller left to have worked it out.
+    """
+    if process_role() is not ServerRole.OWNER:
+        return
+    try:
+        if not get_profile_lease().browser_open:
+            return
+    except Exception:  # noqa: BLE001 - a probe must not replace the real failure
+        logger.debug("Could not read the profile lease state", exc_info=True)
+        return
+    ask_this_process_to_stand_down(
+        "the browser did not shut down cleanly, so the profile is held"
+    )
+
+
 async def handle_auth_error(
     error: AuthenticationError,
     ctx: Context | None,
@@ -108,6 +138,22 @@ async def handle_auth_error(
         await close_browser()
     except Exception as close_exc:
         logger.warning("Failed to close stale browser (ignored): %s", close_exc)
+    finally:
+        # In a `finally`, and that is the whole point of it. `close_browser`
+        # defers cancellation until teardown finishes and then re-raises
+        # `CancelledError` (`drivers/browser.py:747-757`), which is a
+        # `BaseException` and passes straight through the `except Exception`
+        # above. A tool timeout landing during the close therefore skipped
+        # everything below, and a wedged owner stayed wedged.
+        #
+        # Measured: `wait_for(handle_auth_error(...), 0.02)` against a close that
+        # defers its cancel left `stand_down_reason()` at None with the lease
+        # still held.
+        #
+        # Only the request is made here. The exception below still has to be
+        # raised on the normal path, and a cancelled call has nobody left to
+        # raise it to, so what has to survive the cancellation is exactly this.
+        _ask_a_wedged_owner_to_give_way()
 
     if get_profile_lease().browser_open:
         # The teardown could not be confirmed, so Chromium may still be on the
@@ -121,20 +167,6 @@ async def handle_auth_error(
         # the reasoning that only a marker could mislead a client. Measured
         # otherwise: the single-process server reported "a login browser window
         # has been opened", opened none, and left a state only a restart clears.
-        if process_role() is ServerRole.OWNER:
-            # For a single-process server the message below is actionable: the
-            # client restarts its server and the lock goes with it. For a
-            # detached owner it is not. This process outlives the client that
-            # started it, so restarting the client elects nothing — the next
-            # frontend attaches to this same owner and meets the same held
-            # profile, and only killing it by hand recovers.
-            #
-            # So it removes itself instead. It holds no state a restart would
-            # lose: the session is on disk, the lock is released by the exit, and
-            # the next call elects a fresh owner that opens the profile cleanly.
-            ask_this_process_to_stand_down(
-                "the browser did not shut down cleanly, so the profile is held"
-            )
         raise BrowserShutdownUnconfirmedError() from error
 
     if process_role() is ServerRole.OWNER:

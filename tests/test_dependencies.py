@@ -2,6 +2,8 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncio
+
 import pytest
 from fastmcp.exceptions import ToolError
 
@@ -447,6 +449,66 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
                 await handle_auth_error(AuthenticationError("expired"), ctx=None)
 
         assert stand_down_reason() is not None, "the wedged owner keeps serving"
+
+    async def test_a_timeout_during_the_close_still_frees_the_owner(self):
+        """The wedge must be noticed even when the call it runs in is cut short.
+
+        ``close_browser`` defers cancellation until teardown finishes and then
+        re-raises ``CancelledError`` (``drivers/browser.py``), which is a
+        ``BaseException`` and passes through ``except Exception`` untouched. A
+        tool timeout landing during the close therefore skipped the whole
+        stand-down decision, and the owner stayed wedged exactly as before the
+        fix -- recoverable only by killing it.
+
+        Measured with the decision outside the ``finally``: the call ended in
+        ``TimeoutError`` with ``stand_down_reason()`` still None and the lease
+        still held.
+        """
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = True
+
+        async def close_that_defers_its_cancel():
+            """What the production close does, in miniature."""
+            try:
+                await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                pass  # teardown runs to the end regardless
+            raise asyncio.CancelledError
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="gen-1",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                close_that_defers_its_cancel,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+        ):
+            with pytest.raises((TimeoutError, asyncio.CancelledError)):
+                await asyncio.wait_for(
+                    handle_auth_error(AuthenticationError("expired"), ctx=None),
+                    timeout=0.02,
+                )
+
+        assert stand_down_reason() is not None, (
+            "a timeout during the close left the owner wedged"
+        )
 
     async def test_a_single_server_is_not_asked_to_stand_down(self):
         """The same condition, and deliberately not the same answer.
