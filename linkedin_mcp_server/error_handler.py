@@ -38,6 +38,7 @@ from linkedin_mcp_server.exceptions import (
     OwnerCannotAuthenticateError,
     SessionExpiredError,
 )
+from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.error_diagnostics import (
     build_issue_diagnostics,
     format_tool_error_with_diagnostics,
@@ -147,6 +148,14 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     elif isinstance(exception, AuthenticationBootstrapFailedError):
         logger.warning("Authentication bootstrap failed%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    # Not a failure at all: another client signed in while this one was asking
+    # to. Diagnostics-free for the same reason as the branches above, and worth a
+    # branch of its own so it does not reach the catch-all, where an ordinary
+    # RuntimeError is masked into something the user cannot act on.
+    elif isinstance(exception, PeerSessionInPlaceError):
+        logger.info("Another client already signed in%s", ctx)
         raise ToolError(str(exception)) from exception
 
     # Its own branch rather than the LinkedInMCPError catch-all, which appends an

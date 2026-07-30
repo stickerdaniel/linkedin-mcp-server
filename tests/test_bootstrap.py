@@ -46,6 +46,7 @@ from linkedin_mcp_server.exceptions import (
     NoLinkedInSessionFoundError,
 )
 from linkedin_mcp_server.session_state import (
+    PeerSessionInPlaceError,
     portable_cookie_path,
     source_state_path,
 )
@@ -2216,14 +2217,14 @@ class TestTwoClientsMeetingOneDeadSession:
         fresh = bootstrap.current_login_generation()
         assert fresh != stale
 
-        # B arrives with the generation it was told about, which has moved on.
-        # It still starts a login, and that is right rather than weaker: B was
-        # asked to repair a session, so refusing outright would leave its caller
-        # with nothing. What must not happen is B retiring the session A just
-        # created, and the rotation decides that under the profile lock.
-        with pytest.raises(AuthenticationStartedError):
+        # B is told what actually happened, and no login is scheduled. An earlier
+        # version of this test accepted AuthenticationStartedError here, which
+        # blessed a false report: the caller was promised a login window, none
+        # opened, because the task stood down the moment it held the profile.
+        with pytest.raises(PeerSessionInPlaceError, match="already signed in"):
             await invalidate_auth_and_trigger_relogin(stale_generation=stale)
 
+        assert get_bootstrap_state().login_task is None
         surviving = load_source_state(isolate_profile_dir)
         assert surviving is not None
         assert surviving.login_generation == fresh

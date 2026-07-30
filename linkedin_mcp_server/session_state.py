@@ -702,6 +702,17 @@ def _exclusive_profile(profile_dir: Path, *, action: str) -> Iterator[None]:
 UNGUARDED = object()
 
 
+class PeerSessionInPlaceError(RuntimeError):
+    """A peer replaced the session this rotation was asked to retire.
+
+    Raised rather than returned as ``None``, which already means "there was
+    nothing to retire". The two look identical to a caller and are not: one is a
+    no-op, the other means somebody else has done the work and this caller should
+    stop rather than carry on as though it had. Measured with them conflated: the
+    caller went on to promise a login window that never opened.
+    """
+
+
 def a_peer_already_signed_in(
     user_data_dir: Path, superseded_by: str | None | object
 ) -> bool:
@@ -787,7 +798,10 @@ def rotate_source_profile(
             logger.info(
                 "Another client already signed in; leaving its session in place"
             )
-            return None
+            raise PeerSessionInPlaceError(
+                "Another LinkedIn MCP client has already signed in. Retry this "
+                "tool to use its session."
+            )
 
         # utcnow_iso() is second-resolution and rotation is now routine rather
         # than exceptional, so two rotations can land in the same second. The

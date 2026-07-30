@@ -37,6 +37,7 @@ from linkedin_mcp_server.exceptions import (
 )
 from linkedin_mcp_server.server_role import ServerRole, process_role
 from linkedin_mcp_server.session_state import (
+    PeerSessionInPlaceError,
     auth_root_dir,
     get_runtime_id,
     load_source_state,
@@ -1217,6 +1218,13 @@ def _move_auth_state_aside(
     # new session and this stale-state path produce identically shaped backups.
     try:
         rotate_source_profile(get_profile_dir(), superseded_by=superseded_by)
+    except PeerSessionInPlaceError:
+        # Ahead of RuntimeError, which it subclasses, and deliberately not turned
+        # into a bootstrap failure: nothing failed. Somebody else signed in, so
+        # the caller must stop rather than go on to promise a login window that
+        # will not open. Measured with it swallowed here: the caller was told
+        # "a login browser window has been opened" and none was.
+        raise
     except RuntimeError as exc:
         raise AuthenticationBootstrapFailedError(
             f"{exc} No login was started."

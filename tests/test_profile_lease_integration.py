@@ -1043,8 +1043,8 @@ class TestAMomentaryHolderDoesNotCancelTheRepair:
         import linkedin_mcp_server.bootstrap as bootstrap
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig
-        from linkedin_mcp_server.exceptions import AuthenticationStartedError
         from linkedin_mcp_server.session_state import (
+            PeerSessionInPlaceError,
             load_source_state,
             portable_cookie_path,
             write_source_state,
@@ -1063,7 +1063,9 @@ class TestAMomentaryHolderDoesNotCancelTheRepair:
         portable_cookie_path(isolate_profile_dir).write_text("[]")
         peer = write_source_state(isolate_profile_dir).login_generation
 
-        with pytest.raises(AuthenticationStartedError):
+        # Reported as the peer win it is, and no login is scheduled: the rotation
+        # decides that under the lock and says so.
+        with pytest.raises(PeerSessionInPlaceError):
             await bootstrap.invalidate_auth_and_trigger_relogin(stale_generation=None)
 
         surviving = load_source_state(isolate_profile_dir)
@@ -1140,6 +1142,7 @@ class TestTheComparisonHappensUnderTheLock:
     ):
         import linkedin_mcp_server.session_state as session_state
         from linkedin_mcp_server.session_state import (
+            PeerSessionInPlaceError,
             load_source_state,
             rotate_source_profile,
         )
@@ -1160,9 +1163,12 @@ class TestTheComparisonHappensUnderTheLock:
             session_state, "_exclusive_profile", peer_signs_in_then_we_lock
         )
 
-        retired = rotate_source_profile(isolate_profile_dir, superseded_by=stale)
+        # Raised rather than returning None, so a caller can tell "a peer won"
+        # from "there was nothing to retire" and stop instead of promising a
+        # login window it will not open.
+        with pytest.raises(PeerSessionInPlaceError):
+            rotate_source_profile(isolate_profile_dir, superseded_by=stale)
 
-        assert retired is None, "it rotated a session it should have left alone"
         surviving = load_source_state(isolate_profile_dir)
         assert surviving is not None
         assert surviving.login_generation == landed[0]
@@ -1249,3 +1255,57 @@ class TestTheComparisonHappensUnderTheLock:
         with pytest.raises(AuthenticationInProgressError):
             await bootstrap._start_login_if_needed(superseded_by="the-missing-one")
         assert seen == ["the-missing-one"], seen
+
+    async def test_a_peer_win_is_reported_as_one(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """Preserving a peer's session is not the same as retiring one.
+
+        The rotation returns None for "there was nothing to retire", so signalling
+        a peer win the same way made the two indistinguishable. The caller then
+        carried on and promised a login window, and the task stood down the moment
+        it held the profile, so none opened. The data was safe and the report was
+        a lie, which is the same user-visible failure as an earlier round's
+        blocker without the wedge.
+        """
+        from unittest.mock import AsyncMock
+
+        import linkedin_mcp_server.bootstrap as bootstrap
+        import linkedin_mcp_server.setup as setup
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.session_state import (
+            PeerSessionInPlaceError,
+            load_source_state,
+        )
+
+        config = AppConfig()
+        config.browser.user_data_dir = str(isolate_profile_dir)
+        config.browser.auto_import_from_browser = False
+        set_config(config)
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+
+        opened: list[bool] = []
+
+        async def browser_body(user_data_dir, *, config, state):
+            opened.append(True)
+            state.browser_opened = True
+            state.close_confirmed = True
+            return True
+
+        monkeypatch.setattr(setup, "_login_into_fresh_profile", browser_body)
+        monkeypatch.setattr(setup, "close_browser", AsyncMock())
+        monkeypatch.setattr(bootstrap, "close_browser", AsyncMock())
+
+        stale = self._write_session(isolate_profile_dir)
+        peer = self._write_session(isolate_profile_dir)
+
+        with pytest.raises(PeerSessionInPlaceError, match="already signed in"):
+            await bootstrap.invalidate_auth_and_trigger_relogin(stale_generation=stale)
+
+        # No task, so nothing to await and nothing that could have opened.
+        assert bootstrap.get_bootstrap_state().login_task is None
+        assert opened == []
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is not None
+        assert surviving.login_generation == peer
