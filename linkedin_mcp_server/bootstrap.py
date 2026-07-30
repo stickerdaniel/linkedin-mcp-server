@@ -46,7 +46,7 @@ from linkedin_mcp_server.session_state import (
     rotate_source_profile,
     source_state_path,
 )
-from linkedin_mcp_server.setup import interactive_login
+from linkedin_mcp_server.setup import UNGUARDED, interactive_login
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ class BootstrapState:
     #: signature: `_run_login_flow` is spawned as a bare task in several places
     #: and stubbed in as many tests, and threading an argument through all of
     #: them would change far more than the one thing that matters.
-    login_supersedes: str | None = None
+    login_supersedes: str | None | object = UNGUARDED
 
 
 _state = BootstrapState()
@@ -138,6 +138,7 @@ def reset_bootstrap_for_testing() -> None:
     _state = BootstrapState()
     _lock = asyncio.Lock()
     _AUTO_IMPORT_ANNOUNCED = False
+    _state.login_supersedes = UNGUARDED
     _auth_quiescent = False
     _auth_quiescent_generation = None
     os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
@@ -801,7 +802,15 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
         # reads are already bounded (security 10s / secret-tool 10s); this covers
         # the launch + navigation budget on top.
         result = await asyncio.wait_for(
-            import_session_from_browser(None, user_data_dir=user_data_dir),
+            import_session_from_browser(
+                None,
+                user_data_dir=user_data_dir,
+                # The import rotates the profile as soon as it holds the lease,
+                # exactly as the login does, so it needs the same guard. Without
+                # it a client whose keychain read ran long would retire a session
+                # a faster peer had already imported.
+                superseded_by=_state.login_supersedes,
+            ),
             timeout=60,
         )
         if not result:
@@ -835,7 +844,7 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
 
 
 async def _start_login_if_needed(
-    ctx: Context | None = None, *, superseded_by: str | None = None
+    ctx: Context | None = None, *, superseded_by: str | None | object = UNGUARDED
 ) -> None:
     if process_role() is ServerRole.OWNER:
         # Ahead of the lock, and ahead of every branch below, because all of them
@@ -880,6 +889,7 @@ async def _start_login_if_needed(
             # Claim the one-shot import under the lock so only one keychain read
             # / import browser ever runs per process episode.
             _state.import_attempted = True
+            _state.login_supersedes = superseded_by
             _state.import_task = asyncio.create_task(
                 _try_auto_import_session(ctx), name="linkedin-auto-import"
             )
@@ -968,7 +978,7 @@ async def _start_login_if_needed(
 
 
 async def start_login_if_needed(
-    ctx: Context | None = None, *, superseded_by: str | None = None
+    ctx: Context | None = None, *, superseded_by: str | None | object = UNGUARDED
 ) -> None:
     """Public wrapper for starting the shared login workflow."""
     await _start_login_if_needed(ctx, superseded_by=superseded_by)
@@ -1044,6 +1054,12 @@ def _raise_if_auth_quiescent() -> None:
         "window.",
         # Raised from the readiness gate, ahead of the tool body.
         nothing_ran_yet=True,
+        # The generation this owner latched on, not a fresh reading. Every call
+        # after the first arrives here rather than through `handle_auth_error`,
+        # so leaving it out would mean the *second* client to ask gets a marker
+        # with nothing to compare against, and repairs unguarded while the first
+        # is still signing in.
+        generation=_auth_quiescent_generation,
     )
 
 

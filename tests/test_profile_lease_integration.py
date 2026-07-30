@@ -760,3 +760,155 @@ class TestALateLoginDoesNotUndoAnEarlierOne:
         assert await interactive_login(isolate_profile_dir, superseded_by=stale) is True
 
         assert opened == [True]
+
+    async def test_an_observed_empty_profile_is_guarded_too(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """Two clients meeting an empty profile need the same protection.
+
+        A profile with no session reads as no generation at all, so the observed
+        value and "nothing asked for a guard" would be the same thing if both were
+        spelled None. Measured with them conflated: the second client rotated away
+        the session the first had just created, on a profile that started empty.
+        """
+        from linkedin_mcp_server.session_state import load_source_state
+        from linkedin_mcp_server.setup import interactive_login
+
+        opened = self._login_without_a_browser(monkeypatch)
+        assert load_source_state(isolate_profile_dir) is None
+
+        # The winner signs in where there was nothing.
+        fresh = self._write_session(isolate_profile_dir)
+
+        # The loser decided when the profile was empty, so it observed None.
+        assert await interactive_login(isolate_profile_dir, superseded_by=None) is True
+
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is not None
+        assert surviving.login_generation == fresh
+        assert opened == []
+
+    async def test_a_login_with_nothing_to_compare_is_left_alone(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        # `--login` typed at a terminal has no peer to defer to and must always
+        # sign in, however new the session on disk looks.
+        from linkedin_mcp_server.setup import interactive_login
+
+        self._write_session(isolate_profile_dir)
+        opened = self._login_without_a_browser(monkeypatch)
+        self._write_session(isolate_profile_dir)
+
+        assert await interactive_login(isolate_profile_dir) is True
+
+        assert opened == [True]
+
+    async def test_the_guard_releases_the_profile_when_it_fails(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        # The check runs with the profile held, so a failure inside it has to
+        # release. Left outside the try, an unreadable profile directory kept the
+        # lease until the process exited, locking out every other client.
+        import linkedin_mcp_server.setup as setup
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+        from linkedin_mcp_server.setup import interactive_login
+
+        self._login_without_a_browser(monkeypatch)
+        monkeypatch.setattr(
+            setup,
+            "a_peer_already_signed_in",
+            MagicMock(side_effect=PermissionError("cannot read the profile")),
+        )
+
+        with pytest.raises(PermissionError):
+            await interactive_login(isolate_profile_dir, superseded_by="g0")
+
+        assert get_profile_lease(isolate_profile_dir).held is False
+
+
+class TestALateImportDoesNotUndoALogin:
+    """The import rotates the profile too, so it needs the same guard.
+
+    `start_login_if_needed` tries an auto-import before it opens a login window,
+    and the import retires the current session as soon as it holds the profile.
+    A client whose keychain read or profile discovery ran long is exactly the late
+    arrival this protects against.
+    """
+
+    def _write_session(self, profile_dir) -> str:
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(profile_dir).write_text("[]")
+        return write_source_state(profile_dir).login_generation
+
+    def _import_without_a_browser(self, monkeypatch) -> list[bool]:
+        """Stub discovery and validation; the real rotation still runs."""
+        import linkedin_mcp_server.browser_import.orchestrate as orchestrate
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        set_config(AppConfig())
+        committed: list[bool] = []
+
+        async def imported(live, cookie_path, user_data_dir):
+            committed.append(True)
+            return True
+
+        monkeypatch.setattr(orchestrate, "_import_first_accepted", imported)
+        # Imported inside the function, so patched at the source module.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.drivers.browser.close_browser", AsyncMock()
+        )
+        monkeypatch.setattr(
+            orchestrate,
+            "_discover_and_rank",
+            MagicMock(return_value=([(MagicMock(), MagicMock())], [])),
+        )
+        return committed
+
+    async def test_a_late_import_stands_down(self, isolate_profile_dir, monkeypatch):
+        from linkedin_mcp_server.browser_import.orchestrate import (
+            import_session_from_browser,
+        )
+        from linkedin_mcp_server.session_state import load_source_state
+
+        stale = self._write_session(isolate_profile_dir)
+        committed = self._import_without_a_browser(monkeypatch)
+
+        # A peer signs in while this import is still reading the keychain.
+        fresh = self._write_session(isolate_profile_dir)
+
+        assert (
+            await import_session_from_browser(
+                None, user_data_dir=isolate_profile_dir, superseded_by=stale
+            )
+            is True
+        )
+
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is not None
+        assert surviving.login_generation == fresh
+        assert committed == []
+
+    async def test_an_import_with_nothing_to_compare_still_runs(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        # `--import-from-browser` typed at a terminal has no peer to defer to.
+        from linkedin_mcp_server.browser_import.orchestrate import (
+            import_session_from_browser,
+        )
+
+        self._write_session(isolate_profile_dir)
+        committed = self._import_without_a_browser(monkeypatch)
+
+        assert (
+            await import_session_from_browser(None, user_data_dir=isolate_profile_dir)
+            is True
+        )
+
+        assert committed == [True]

@@ -1401,7 +1401,7 @@ class TestAutoLogin:
         async def fake_run_login_flow() -> None:
             spawn_count["value"] += 1
 
-        async def fake_import(_browser, *, user_data_dir):
+        async def fake_import(_browser, *, user_data_dir, **_kwargs):
             _make_auth_ready(isolate_profile_dir)
             return True
 
@@ -1481,7 +1481,7 @@ class TestAutoLogin:
         never_done = asyncio.Event()
         spawn_count = {"value": 0}
 
-        async def fake_import(_browser, *, user_data_dir):
+        async def fake_import(_browser, *, user_data_dir, **_kwargs):
             await release_import.wait()
             return False
 
@@ -1715,7 +1715,7 @@ class TestAutoLogin:
         async def spy_close_browser() -> None:
             order.append("close")
 
-        async def fake_import(_browser, *, user_data_dir):
+        async def fake_import(_browser, *, user_data_dir, **_kwargs):
             order.append("import")
             _make_auth_ready(isolate_profile_dir)
             return True
@@ -1751,7 +1751,7 @@ class TestAutoLogin:
     ):
         """ctx.info notice fires at most once per process; a ctx.info failure never blocks the import."""
 
-        async def fake_import(_browser, *, user_data_dir):
+        async def fake_import(_browser, *, user_data_dir, **_kwargs):
             return False  # nothing to import; falls through to manual login
 
         async def fake_login_flow() -> None:
@@ -2127,6 +2127,29 @@ class TestTheOwnerStaysQuiescentUntilANewSessionLands:
         with pytest.raises(AuthStaleOnOwnerError):
             await ensure_tool_ready_or_raise("get_person_profile")
 
+    async def test_every_later_call_names_the_same_broken_session(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """The latch must put its generation on the failures it raises.
+
+        Only the first call reaches this through `handle_auth_error`, which knows
+        what it observed. Every call after that is answered by the latch, and a
+        failure raised there without the generation gives the *second* client a
+        marker with nothing to compare against. That client then repairs
+        unguarded, and rotates away the session the first one is signing in for.
+        """
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.exceptions import AuthStaleOnOwnerError
+
+        self._write_session(isolate_profile_dir)
+        broken = bootstrap.current_login_generation()
+        self._quiescent_on(broken)
+
+        with pytest.raises(AuthStaleOnOwnerError) as caught:
+            bootstrap._raise_if_auth_quiescent()
+
+        assert caught.value.generation == broken
+
 
 class TestTwoClientsMeetingOneDeadSession:
     """Only one of them may retire it, and `_lock` cannot arrange that.
@@ -2253,3 +2276,41 @@ class TestTwoClientsMeetingOneDeadSession:
             await invalidate_auth_and_trigger_relogin(stale_generation=stale)
 
         login.assert_called_once()
+
+
+class TestTheAutoImportInheritsTheGuard:
+    """`start_login_if_needed` tries an import first, and it rotates too.
+
+    The guard has to reach it, not only the login window behind it. A client whose
+    keychain read or profile discovery ran long is the realistic late arrival, and
+    the import retires the current session the moment it holds the profile.
+    """
+
+    async def test_the_generation_reaches_the_import(
+        self, isolate_profile_dir, monkeypatch, _stub_import_env
+    ):
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        # Installed rather than loaded: the import path calls get_config(), which
+        # parses sys.argv, and under pytest that is pytest's own command line.
+        config = AppConfig()
+        config.browser.auto_import_from_browser = True
+        set_config(config)
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+
+        seen: dict[str, object] = {}
+
+        async def fake_import(_browser, *, user_data_dir, **kwargs):
+            seen.update(kwargs)
+            return False
+
+        monkeypatch.setattr(_IMPORT_TARGET, fake_import)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_login_flow", AsyncMock()
+        )
+
+        with pytest.raises(AuthenticationInProgressError):
+            await _start_login_if_needed(superseded_by="the-broken-one")
+
+        assert seen.get("superseded_by") == "the-broken-one"

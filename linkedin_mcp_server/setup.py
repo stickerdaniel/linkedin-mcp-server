@@ -32,10 +32,18 @@ from linkedin_mcp_server.session_state import (
 from linkedin_mcp_server.drivers.browser import close_browser, get_profile_dir
 
 
+#: Distinguishes "no generation was observed" from "nothing asked for a guard".
+#: ``None`` cannot do both: a profile with no session reads as ``None``, and two
+#: clients meeting that state need protecting from each other exactly as much as
+#: two meeting a stale one. Measured with the two conflated: the second client
+#: rotated away the session the first had just created.
+UNGUARDED = object()
+
+
 async def interactive_login(
     user_data_dir: Path | None = None,
     *,
-    superseded_by: str | None = None,
+    superseded_by: str | None | object = UNGUARDED,
 ) -> bool:
     """
     Open browser for manual LinkedIn login with persistent profile.
@@ -46,10 +54,12 @@ async def interactive_login(
 
     Args:
         user_data_dir: Path to browser profile. Defaults to config's user_data_dir.
-        superseded_by: The login generation the caller believes is broken. When
-            given, the login stands down if a *different* usable session is on
-            disk by the time it holds the profile, because somebody else has
-            already done the work.
+        superseded_by: The login generation the caller believes is broken, or
+            ``None`` when it observed no session at all. Either way the login
+            stands down if a *different* usable session is on disk by the time it
+            holds the profile, because somebody else has already done the work.
+            Left at :data:`UNGUARDED` by callers with nothing to compare against,
+            such as ``--login`` typed at a terminal.
 
     Returns:
         True if login was successful, or a peer's session is already in place
@@ -87,26 +97,29 @@ async def interactive_login(
             "Another LinkedIn MCP client is using the browser, so a login "
             "cannot start. Close it and try again."
         )
-    # Checked here and nowhere earlier, because here is the first moment it can
-    # be trusted: the profile is held, so nothing can change underneath the
-    # answer. An earlier check, before the wait, is exactly what does not work.
-    # Two clients meeting one dead session both look, both see it dead, and both
-    # queue for the profile; the one that waited then holds a stale opinion. It
-    # would rotate the session the winner has just created, which was measured:
-    # the fresh generation ended up in quarantine and `load_source_state`
-    # returned None.
-    if superseded_by is not None and _a_peer_already_signed_in(
-        user_data_dir, superseded_by
-    ):
-        print("   Another client already signed in; using its session.")
-        lease.release()
-        return True
-
     # Every exit runs through one finally: a login can fail before the browser
     # opens (rotation errors, cancellation) or after it closed cleanly but with
     # an exception, and each of those must still settle the profile correctly.
     state = _LoginState()
     try:
+        # Checked here and nowhere earlier, because here is the first moment it
+        # can be trusted: the profile is held, so nothing can change underneath
+        # the answer. An earlier check, before the wait, is exactly what does not
+        # work. Two clients meeting one dead session both look, both see it dead,
+        # and both queue for the profile; the one that waited then holds a stale
+        # opinion. It would rotate the session the winner has just created, which
+        # was measured: the fresh generation ended up in quarantine and
+        # `load_source_state` returned None.
+        #
+        # Inside the try, so a failure while asking still releases the profile.
+        # Outside it, an unreadable profile directory left the lease held until
+        # the process exited, which locks out every other client.
+        if superseded_by is not UNGUARDED and a_peer_already_signed_in(
+            user_data_dir, superseded_by
+        ):
+            print("   Another client already signed in; using its session.")
+            return True
+
         return await _login_holding_the_profile(user_data_dir, lease, state)
     finally:
         if state.close_confirmed:
@@ -357,18 +370,25 @@ def run_interactive_setup() -> bool:
         return False
 
 
-def _a_peer_already_signed_in(user_data_dir: Path, superseded_by: str) -> bool:
+def a_peer_already_signed_in(
+    user_data_dir: Path, superseded_by: str | None | object
+) -> bool:
     """Whether a usable session other than *superseded_by* is on disk now.
 
+    Asked by every path that rotates the profile to make room for a new session,
+    which is the login here and the browser import next door, and asked only once
+    that path holds the profile lease. That is the first moment the answer cannot
+    change underneath it.
+
     Both halves are needed. A different generation alone is not enough: an
-    abandoned login leaves the profile rotated and no generation at all, which
-    also reads as different, and standing down there would mean nobody ever logs
+    abandoned attempt leaves the profile rotated and no generation at all, which
+    also reads as different, and standing down there would mean nobody ever signs
     in. A usable session alone is not enough either, because the dead one still
     looks usable from disk: readiness asks whether the files are there, not
     whether LinkedIn still accepts them.
 
     Together they mean what is wanted, because a generation is written only after
-    a login has validated its session and exported the cookies.
+    a login or import has validated its session and exported the cookies.
     """
     from linkedin_mcp_server.bootstrap import _auth_ready
     from linkedin_mcp_server.session_state import load_source_state
