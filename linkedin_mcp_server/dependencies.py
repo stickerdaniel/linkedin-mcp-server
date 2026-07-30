@@ -93,9 +93,11 @@ async def handle_auth_error(
     # on that: any future caller reaching here without the middleware, or any
     # change that releases the lease sooner, would otherwise latch onto a
     # generation written by the login it is about to ask for.
-    broken_generation = (
-        current_login_generation() if process_role() is ServerRole.OWNER else None
-    )
+    # Read for every role, not only the owner. A DIRECT server rotates through
+    # `invalidate_auth_and_trigger_relogin` exactly as a frontend does, so
+    # without this it reaches the rotation with nothing to compare against and
+    # the guard downstream reads the dead session as a peer's repair.
+    broken_generation = current_login_generation()
 
     logger.warning("Stale session detected; closing browser and triggering re-login")
     try:
@@ -127,7 +129,9 @@ async def handle_auth_error(
             generation=broken_generation,
         ) from error
 
-    await invalidate_auth_and_trigger_relogin(ctx)  # always raises
+    await invalidate_auth_and_trigger_relogin(
+        ctx, stale_generation=broken_generation
+    )  # always raises
 
 
 async def get_ready_extractor(

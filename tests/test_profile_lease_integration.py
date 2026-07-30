@@ -963,3 +963,113 @@ class TestAMomentaryHolderDoesNotCancelTheRepair:
             holder.wait(timeout=10)
 
         assert bootstrap.get_bootstrap_state().login_task is not None
+
+    async def test_a_direct_server_still_opens_a_window_after_the_delay(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """The end of the path, not just its start, and it caught a real defect.
+
+        The test above stubs the login task away, so it proves the repair is
+        *attempted* and nothing more. This one lets the real login run, and with
+        the earlier code it exposed the worst available failure: the server
+        reported that a login window had opened, opened none, kept the dead
+        session, and left readiness saying the session was fine.
+
+        The cause was a single-process server reaching the rotation with no
+        generation to compare against, so the guard read the dead session as
+        somebody else's repair and stood down.
+        """
+        import linkedin_mcp_server.bootstrap as bootstrap
+        import linkedin_mcp_server.setup as setup
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.exceptions import AuthenticationStartedError
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+        from linkedin_mcp_server.session_state import (
+            load_source_state,
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        config = AppConfig()
+        config.browser.user_data_dir = str(isolate_profile_dir)
+        set_config(config)
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+
+        (isolate_profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (isolate_profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(isolate_profile_dir).write_text("[]")
+        dead = write_source_state(isolate_profile_dir).login_generation
+
+        opened: list[bool] = []
+
+        async def signed_in(user_data_dir, *, config, state):
+            opened.append(True)
+            state.browser_opened = True
+            state.close_confirmed = True
+            return True
+
+        monkeypatch.setattr(setup, "_login_into_fresh_profile", signed_in)
+        monkeypatch.setattr(setup, "close_browser", AsyncMock())
+        monkeypatch.setattr(bootstrap, "close_browser", AsyncMock())
+
+        holder = _hold_profile(get_profile_lease(isolate_profile_dir).auth_root, 1.5)
+        try:
+            with pytest.raises(AuthenticationStartedError):
+                await bootstrap.invalidate_auth_and_trigger_relogin(
+                    stale_generation=dead
+                )
+            task = bootstrap.get_bootstrap_state().login_task
+            assert task is not None
+            await task
+        finally:
+            holder.wait(timeout=10)
+
+        # A window really opened, and the dead session is gone.
+        assert opened == [True]
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is None or surviving.login_generation != dead
+
+    async def test_an_observed_empty_profile_still_guards_the_rotation(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """Observing no session is an observation, not the absence of one.
+
+        A stale failure can arrive with the profile already empty, and then the
+        generation reads as None. If that were also how "nobody asked for a
+        guard" were spelled, this rotation would run unguarded and retire a
+        session a peer had established in the meantime.
+        """
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.exceptions import (
+            AuthenticationBootstrapFailedError,
+        )
+        from linkedin_mcp_server.session_state import (
+            load_source_state,
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        config = AppConfig()
+        config.browser.user_data_dir = str(isolate_profile_dir)
+        set_config(config)
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_run_login_flow", AsyncMock())
+
+        # Observed empty, then a peer signs in.
+        assert load_source_state(isolate_profile_dir) is None
+        (isolate_profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (isolate_profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(isolate_profile_dir).write_text("[]")
+        peer = write_source_state(isolate_profile_dir).login_generation
+
+        with pytest.raises(
+            AuthenticationBootstrapFailedError, match="already signed in"
+        ):
+            await bootstrap.invalidate_auth_and_trigger_relogin(stale_generation=None)
+
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is not None
+        assert surviving.login_generation == peer

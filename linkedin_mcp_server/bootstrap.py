@@ -1071,7 +1071,7 @@ def _raise_if_auth_quiescent() -> None:
 async def invalidate_auth_and_trigger_relogin(
     ctx: Context | None = None,
     *,
-    stale_generation: str | None = None,
+    stale_generation: str | None | object = UNGUARDED,
 ) -> NoReturn:
     """Force-invalidate stale auth state and trigger interactive login.
 
@@ -1080,12 +1080,16 @@ async def invalidate_auth_and_trigger_relogin(
     being present on disk.  The check-task → force-move → start-login sequence
     is atomic under ``_lock`` so an in-flight login is never corrupted.
 
-    *stale_generation* is the login generation the caller found broken, when it
-    knows. Passing it is what keeps two frontends from destroying each other's
-    work: ``_lock`` is process-local, so it says nothing about the other process,
-    and the rotation below is skipped when the generation on disk has moved on
-    from the one being complained about. Without it the second frontend rotates
-    away the session the first has just created.
+    *stale_generation* is the login generation the caller found broken, which may
+    be ``None`` when it found no session at all. Passing it is what keeps two
+    clients from destroying each other's work: ``_lock`` is process-local, so it
+    says nothing about the other process, and the rotation below is skipped when
+    the generation on disk has moved on from the one being complained about.
+
+    Left at :data:`UNGUARDED` only by a caller that has observed nothing, which
+    is why the two are distinct values. Conflating them was measured to produce
+    the worst available failure: a login that reports a window has opened, opens
+    none, keeps the dead session and leaves readiness saying it is fine.
 
     Raises:
         AuthenticationStartedError: Login browser opened.
@@ -1154,7 +1158,7 @@ async def invalidate_auth_and_trigger_relogin(
         # time it holds one its opinion may be stale. `interactive_login` checks
         # again there, where the answer can no longer change. Removing either is
         # visible in the tests, so neither is decoration.
-        if stale_generation is not None:
+        if stale_generation is not UNGUARDED:
             on_disk = current_login_generation()
             if on_disk != stale_generation and _auth_ready():
                 logger.info(
@@ -1183,8 +1187,12 @@ async def invalidate_auth_and_trigger_relogin(
         # better place for it anyway: this one runs without holding anything, so
         # its result was never guaranteed to survive to the login. What is lost by
         # skipping it is only that `_auth_ready()` keeps reporting the dead
-        # session until the login retires it, and the quiescence latch on an owner
-        # already covers that window.
+        # session until the login retires it. On a shared owner the quiescence
+        # latch closes that window. On a single-process server nothing does, and
+        # it does not need to: the same call is already committed to starting a
+        # login, and the login retires the state itself once it holds the
+        # profile. What must not happen is the login standing down there, which
+        # is why the generation it was told about travels with it.
         try:
             _force_move_auth_state_aside()
         except AuthenticationBootstrapFailedError as exc:
@@ -1231,10 +1239,13 @@ def _move_auth_state_aside(*, force: bool = False) -> None:
             knows the session is stale.
 
     Raises:
-        AuthenticationBootstrapFailedError: The state could not be retired. The
-            caller must not go on to open a login browser: that login rotates
-            the same artifacts and would fail at the same point, after telling
-            the user a browser had opened.
+        AuthenticationBootstrapFailedError: The state could not be retired.
+            Whether that stops the caller depends on the caller. It used to have
+            to: the login rotated the same artifacts and would have failed at the
+            same point, after telling the user a browser had opened. The login
+            waits for the profile now, so a caller that has one to start may
+            reasonably carry on and let it retire the state under the lease it
+            waited for.
     """
     if not force and _auth_ready():
         return

@@ -42,7 +42,11 @@ class TestHandleAuthError:
                 )
 
             mock_close.assert_awaited_once()
-            mock_relogin.assert_awaited_once_with(None)
+            # The generation it observed travels with it, so the rotation
+            # downstream can tell the dead session from a peer's repair.
+            mock_relogin.assert_awaited_once()
+            assert mock_relogin.await_args.args == (None,)
+            assert "stale_generation" in mock_relogin.await_args.kwargs
 
     async def test_docker_raises_host_error(self):
         """On Docker runtime, raise DockerHostLoginRequiredError."""
@@ -272,9 +276,20 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
 
         assert order == ["read", "close", "latch:gen-1"]
 
-    async def test_a_direct_server_neither_reads_nor_latches(self):
-        # The historical path has no owner state to keep, and touching it would
-        # make a single-process server refuse its own logins.
+    async def test_a_direct_server_reads_the_generation_but_does_not_latch(self):
+        """DIRECT reads it too, and that is a correction rather than a widening.
+
+        An earlier version asserted that DIRECT read nothing, on the reasoning
+        that the generation was owner state. It is not: a DIRECT server rotates
+        through the same function a frontend does, so without the generation it
+        reaches the rotation with nothing to compare against. Measured with the
+        old behaviour and a momentary profile holder: the login reported that a
+        window had opened, opened none, kept the dead session, and left readiness
+        saying the session was fine.
+
+        The latch stays owner-only. That is process state a single-process server
+        has no use for, and setting it would make it refuse its own logins.
+        """
         latched = MagicMock()
         read = MagicMock(return_value="gen-1")
 
@@ -295,10 +310,7 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
             with pytest.raises(AuthenticationStartedError):
                 await handle_auth_error(AuthenticationError("expired"), ctx=None)
 
-        # Both halves, as the name says. An earlier version asserted only the
-        # latch, so reading the generation unconditionally went unnoticed, and a
-        # DIRECT server would touch owner state it has no use for.
-        read.assert_not_called()
+        read.assert_called_once()
         latched.assert_not_called()
 
     async def test_an_unconfirmed_close_is_reported_instead_of_latching(self):

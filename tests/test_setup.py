@@ -526,3 +526,63 @@ async def test_interactive_login_without_proxy_omits_the_key(monkeypatch, tmp_pa
     await interactive_login(tmp_path / "profile")
 
     assert "proxy" not in captured_kwargs
+
+
+class TestTheExplicitCommandsStayUnguarded:
+    """`--login` and `--import-from-browser` are insistence, not a request.
+
+    Somebody typing them wants a new session whatever is on disk, so they must
+    not stand down for a peer. Asserted at the call sites rather than on the
+    helper's signature default: an earlier version checked only the default, and
+    a mutation passing `superseded_by=None` at the call site left it green while
+    the real command would have skipped the login it was asked for.
+    """
+
+    def test_login_passes_no_generation(self, monkeypatch):
+        import linkedin_mcp_server.setup as setup
+
+        seen: dict[str, object] = {}
+
+        async def capture(profile_dir=None, **kwargs):
+            seen.update(kwargs)
+            return True
+
+        monkeypatch.setattr(setup, "interactive_login", capture)
+
+        assert setup.run_profile_creation("/tmp/whatever") is True
+
+        assert "superseded_by" not in seen, seen
+
+    def test_import_passes_no_generation(self, monkeypatch):
+        import linkedin_mcp_server.browser_import.orchestrate as orchestrate
+
+        seen: dict[str, object] = {}
+
+        async def capture(_browser, *, user_data_dir, **kwargs):
+            seen.update(kwargs)
+            return True
+
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        # Installed rather than loaded: the handler calls get_config(), which
+        # parses sys.argv, and under pytest that is pytest's own command line.
+        config = AppConfig()
+        config.server.import_from_browser = "auto"
+        set_config(config)
+
+        monkeypatch.setattr(orchestrate, "import_session_from_browser", capture)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.configure_browser_environment", lambda: None
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.set_headless", lambda _v: None
+        )
+
+        from linkedin_mcp_server.cli_main import import_from_browser_and_exit
+
+        with pytest.raises(SystemExit) as caught:
+            import_from_browser_and_exit()
+
+        assert caught.value.code == 0
+        assert "superseded_by" not in seen, seen
