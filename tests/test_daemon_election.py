@@ -1657,6 +1657,56 @@ class TestNotHoldingTheLockForever:
 
         asyncio.run(exercise())
 
+    def test_an_owner_that_cannot_release_the_profile_gives_way(self):
+        """A wedged owner has to remove itself, because nothing else can.
+
+        When Chromium's shutdown cannot be confirmed the profile lease is kept
+        until the process exits, deliberately (``drivers/browser.py``). For a
+        single-process server the resulting message is actionable: its client
+        restarts it. For a detached owner it is not -- it outlives that client,
+        and the next frontend attaches straight back to it and meets the same
+        held profile. Measured before this: recovery needed killing the process
+        by hand.
+
+        Asserted through the real serve loop, because that is the only thing that
+        can end the process cleanly; the request itself is made in
+        ``dependencies`` and covered there.
+        """
+        import asyncio
+
+        from linkedin_mcp_server import daemon_owner, server_role
+
+        class Serving:
+            started = True
+            should_exit = False
+
+            async def serve(self, sockets: object = None) -> None:
+                while not self.should_exit:
+                    await asyncio.sleep(0.02)
+
+        async def exercise() -> bool:
+            server = Serving()
+            serving = asyncio.create_task(server.serve())
+            loop = asyncio.create_task(
+                daemon_owner._serve_until_stopped(server, serving, [])
+            )
+            try:
+                await asyncio.sleep(0.3)
+                assert not loop.done(), "a healthy owner stopped serving"
+
+                server_role.ask_this_process_to_stand_down("the profile is held")
+                await asyncio.wait_for(loop, timeout=5)
+                return True
+            except TimeoutError:
+                return False
+            finally:
+                serving.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await serving
+                server_role.reset_process_role_for_testing()
+
+        assert asyncio.run(exercise()), "the wedged owner kept the lock"
+
     def test_a_shutdown_that_never_completes_stops_waiting(
         self, monkeypatch: pytest.MonkeyPatch
     ):

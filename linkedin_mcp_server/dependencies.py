@@ -30,7 +30,11 @@ from linkedin_mcp_server.exceptions import (
 )
 from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.scraping import LinkedInExtractor
-from linkedin_mcp_server.server_role import ServerRole, process_role
+from linkedin_mcp_server.server_role import (
+    ServerRole,
+    ask_this_process_to_stand_down,
+    process_role,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +121,20 @@ async def handle_auth_error(
         # the reasoning that only a marker could mislead a client. Measured
         # otherwise: the single-process server reported "a login browser window
         # has been opened", opened none, and left a state only a restart clears.
+        if process_role() is ServerRole.OWNER:
+            # For a single-process server the message below is actionable: the
+            # client restarts its server and the lock goes with it. For a
+            # detached owner it is not. This process outlives the client that
+            # started it, so restarting the client elects nothing — the next
+            # frontend attaches to this same owner and meets the same held
+            # profile, and only killing it by hand recovers.
+            #
+            # So it removes itself instead. It holds no state a restart would
+            # lose: the session is on disk, the lock is released by the exit, and
+            # the next call elects a fresh owner that opens the profile cleanly.
+            ask_this_process_to_stand_down(
+                "the browser did not shut down cleanly, so the profile is held"
+            )
         raise BrowserShutdownUnconfirmedError() from error
 
     if process_role() is ServerRole.OWNER:

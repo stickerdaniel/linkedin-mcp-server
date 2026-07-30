@@ -403,3 +403,83 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
                 await handle_auth_error(AuthenticationError("expired"), ctx=None)
 
         relogin.assert_not_awaited()
+
+    async def test_a_wedged_owner_asks_to_be_replaced(self):
+        """Reporting the wedge is not enough for an owner: it has to go.
+
+        The two roles need different answers to the same condition. "Restart the
+        server" is actionable for a single-process server, whose client owns it.
+        A detached owner outlives the client that started it, so restarting the
+        client elects nothing: the next frontend attaches to this same owner and
+        meets the same held profile. Only exiting frees the lock.
+
+        Asserted against the request rather than against a real exit, because the
+        exit itself belongs to the serve loop; ``test_daemon_owner`` covers that
+        the loop acts on this.
+        """
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = True
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="gen-1",
+            ),
+            patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
+            patch(
+                "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+        ):
+            with pytest.raises(BrowserShutdownUnconfirmedError):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        assert stand_down_reason() is not None, "the wedged owner keeps serving"
+
+    async def test_a_single_server_is_not_asked_to_stand_down(self):
+        """The same condition, and deliberately not the same answer.
+
+        A DIRECT server has no successor to elect. Asking it to stand down would
+        end the only server the client has, over something a restart fixes.
+        """
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import stand_down_reason
+
+        lease = MagicMock()
+        lease.browser_open = True
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="gen-1",
+            ),
+            patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
+            patch(
+                "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                AsyncMock(),
+            ),
+        ):
+            with pytest.raises(BrowserShutdownUnconfirmedError):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        assert stand_down_reason() is None

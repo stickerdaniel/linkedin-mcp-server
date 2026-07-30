@@ -119,6 +119,36 @@ def process_role() -> ServerRole:
     return ServerRole.DIRECT if _role is None else _role
 
 
+#: Set when this process can no longer serve and has to be replaced.
+#:
+#: Only an owner uses it. A single-process server telling its own client to
+#: restart is an instruction someone can follow; a detached owner saying the same
+#: is not, because it outlives the client that started it and the next frontend
+#: attaches straight back to it. So the process that cannot recover has to remove
+#: itself, and the serve loop is the only place that can do it cleanly.
+_must_stand_down: list[str] = []
+
+
+def ask_this_process_to_stand_down(why: str) -> None:
+    """Record that this process must exit so a replacement can take over.
+
+    Recorded rather than acted on. This is called from inside a tool call, and an
+    owner that stopped serving mid-call would leave the client unable to tell a
+    completed handover from a refusal. The serve loop notices, finishes what is
+    in flight, and exits; the kernel frees the daemon lock, and the next call
+    elects a fresh owner.
+
+    Safe to call more than once, and cheap enough that no caller has to check
+    first.
+    """
+    _must_stand_down.append(why)
+
+
+def stand_down_reason() -> str | None:
+    """Why this process must exit, or ``None`` while it may keep serving."""
+    return _must_stand_down[0] if _must_stand_down else None
+
+
 def reset_process_role_for_testing() -> None:
     """Return to the unclaimed state, for test isolation.
 
@@ -127,3 +157,4 @@ def reset_process_role_for_testing() -> None:
     """
     global _role
     _role = None
+    _must_stand_down.clear()
