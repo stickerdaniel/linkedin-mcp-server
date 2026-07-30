@@ -34,7 +34,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
-from linkedin_mcp_server.server_role import ServerRole
+from linkedin_mcp_server.server_role import ServerRole, set_process_role
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
@@ -168,6 +168,18 @@ def create_mcp_server(
         # Only a proxy forwards. Accepting an owner here would mean a server that
         # was handed a bearer token for a shared browser and quietly ignored it.
         raise ValueError(f"Only a proxy forwards to an owner, not {role.value}")
+
+    # The role is also process state, because the auth gates live in `bootstrap`
+    # and are reached from a tool body with no server to ask (`server_role`).
+    # Claimed here rather than left to the entry points: anything may call this
+    # function directly, and a caller that built an OWNER while the process was
+    # still unclaimed would get an owner with every auth gate switched off, which
+    # is a detached process opening a login window nobody can see.
+    #
+    # The claim refuses a second, different role rather than applying it. That
+    # check lives in `set_process_role` so every entry point is covered by one
+    # rule, including the owner's, which claims OWNER before it ever gets here.
+    set_process_role(role)
 
     mcp = FastMCP(
         "mcp-server-linkedin",

@@ -61,7 +61,7 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
 from linkedin_mcp_server.drivers.browser import set_headless
 from linkedin_mcp_server.logging_config import configure_logging
-from linkedin_mcp_server.server_role import ServerRole
+from linkedin_mcp_server.server_role import ServerRole, set_process_role
 from linkedin_mcp_server.session_state import auth_root_dir, get_runtime_id
 
 logger = logging.getLogger(__name__)
@@ -691,6 +691,12 @@ def main(argv: list[str] | None = None) -> int:
     # and then opens headless anyway. A user who asked to watch the browser
     # would get no window and no error.
     set_headless(config.browser.headless)
+    # Before anything can reach an auth gate. `create_owner_server` records it
+    # too, but that runs several steps later, inside `_serve`: a failure between
+    # here and there would be handled by a process that still believed it had a
+    # terminal. This process has neither one nor a desktop session for its whole
+    # life, so it says so as early as it says anything.
+    set_process_role(ServerRole.OWNER)
     configure_logging(log_level=config.server.log_level, json_format=True)
 
     profile = Path(config.browser.user_data_dir).expanduser().resolve()

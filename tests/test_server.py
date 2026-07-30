@@ -15,6 +15,10 @@ from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
 from linkedin_mcp_server.server import ServerRole, create_mcp_server
+from linkedin_mcp_server.server_role import (
+    RoleAlreadyClaimedError,
+    process_role,
+)
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 
 
@@ -72,6 +76,22 @@ def _extras_for(role: ServerRole) -> dict[str, MagicMock]:
     return {}
 
 
+def _server_for(role: ServerRole) -> FastMCP:
+    """Build a server of *role*, as a fresh process would.
+
+    The role is process state as well as an argument, and ``create_mcp_server``
+    refuses a second, different one: in production that is a process trying to be
+    both a proxy and an owner, which cannot be right about whether it may open a
+    login window. A test comparing every role in one interpreter is the one
+    legitimate exception, so it starts each build from an unset role the way a
+    newly spawned process does.
+    """
+    from linkedin_mcp_server.server_role import reset_process_role_for_testing
+
+    reset_process_role_for_testing()
+    return create_mcp_server(role=role, **_extras_for(role))
+
+
 class TestServerRoles:
     """Which middleware each role gets, and why the split has to exist.
 
@@ -95,7 +115,7 @@ class TestServerRoles:
         # reach Chromium takes the lease first. A role added later that skips
         # this would corrupt the session rather than merely run slowly.
         for role in ServerRole:
-            mcp = create_mcp_server(role=role, **_extras_for(role))
+            mcp = _server_for(role)
             serializes = _has_middleware(mcp, SequentialToolExecutionMiddleware)
 
             # Stated as the conditional it is. Asserting that every role drives
@@ -111,7 +131,7 @@ class TestServerRoles:
         # many clients attach over its life. A proxy is the opposite case: it is
         # the process the client spawned, so the notice has to survive there.
         for role in ServerRole:
-            mcp = create_mcp_server(role=role, **_extras_for(role))
+            mcp = _server_for(role)
 
             assert (
                 _has_middleware(mcp, UpdateNoticeMiddleware) == role.faces_a_client
@@ -125,7 +145,7 @@ class TestServerRoles:
         # serves the owner's instead, which is a different claim and has its own
         # test below.
         async def tool_names(role: ServerRole) -> set[str]:
-            tools = await create_mcp_server(role=role).list_tools()
+            tools = await _server_for(role).list_tools()
             return {tool.name for tool in tools}
 
         served = {
@@ -162,6 +182,127 @@ class TestServerRoles:
         # Moving it must not break an embedder that already imports it from
         # where it used to live.
         assert server_module.ServerRole is ServerRole
+
+
+class TestTheRoleAsProcessState:
+    """The role has to be readable where no server can be passed in.
+
+    ``create_mcp_server`` is handed a role, and that settles everything it
+    assembles. The auth gates are elsewhere: whether a login window may open is
+    decided in ``bootstrap``, reached from a tool body with nothing to ask. A
+    detached owner has no terminal, so it has to be able to find out what it is.
+    """
+
+    def test_a_fresh_process_is_direct(self):
+        # The default carries every embedder and every test that never mentions a
+        # role, so it has to be the historical behaviour.
+        #
+        # Asserted in a subprocess rather than here. This suite resets the role per
+        # test, so an in-process assertion passes even against a module default
+        # mutated to OWNER: it would be testing the fixture, not the module.
+        probe = (
+            "from linkedin_mcp_server.server_role import process_role, ServerRole;"
+            "print(process_role() is ServerRole.DIRECT)"
+        )
+        answered = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        assert answered == "True"
+
+    def test_a_direct_server_followed_by_an_owner_is_refused(self):
+        # The gap a separate unclaimed state exists to close. With DIRECT doubling
+        # as "nothing said yet", this sequence was accepted, and the DIRECT
+        # server's own later tool calls would read OWNER and refuse the logins it
+        # is supposed to perform.
+        create_mcp_server()
+
+        with pytest.raises(RoleAlreadyClaimedError, match="already serves as direct"):
+            create_mcp_server(role=ServerRole.OWNER, auth_token="a-token")
+
+    def test_building_a_server_records_what_this_process_is(self):
+        # Recorded by the assembly rather than only by the entry points, because
+        # anything may call it directly. A caller that built an OWNER while the
+        # process still said DIRECT would get an owner with every auth gate off,
+        # which is a detached process opening a window nobody can see.
+        create_mcp_server(role=ServerRole.OWNER, auth_token="a-token")
+
+        assert process_role() is ServerRole.OWNER
+
+    def test_a_second_role_in_one_process_is_refused(self):
+        create_mcp_server(role=ServerRole.OWNER, auth_token="a-token")
+
+        # Not a resolvable disagreement: the two would have to disagree about
+        # whether this process may open a login window.
+        with pytest.raises(RoleAlreadyClaimedError, match="already serves as owner"):
+            create_mcp_server(role=ServerRole.PROXY, proxy_attachment=_an_attachment())
+
+    def test_restating_the_same_role_is_allowed(self):
+        # A process that builds two servers of one kind is doing nothing
+        # contradictory, and refusing it would break the owner, which records the
+        # role at its entry point and again when it assembles.
+        create_mcp_server(role=ServerRole.OWNER, auth_token="a-token")
+        create_mcp_server(role=ServerRole.OWNER, auth_token="another-token")
+
+        assert process_role() is ServerRole.OWNER
+
+    def test_the_owner_entry_point_says_so_before_it_can_fail(self, monkeypatch):
+        """`main` claims OWNER before anything downstream could need to know.
+
+        `create_owner_server` claims it too, but that runs several steps into
+        `_serve`. A failure between the two would be handled by a process that
+        still believed it had a terminal.
+
+        Driven rather than read: an earlier version of this asserted on the source
+        text of `main`, which stayed green when the call was made unreachable.
+        `configure_logging` is the first thing after the claim, so it serves as a
+        checkpoint to observe the role at and abort from.
+        """
+        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        class Checkpoint(Exception):
+            pass
+
+        seen: list[ServerRole] = []
+
+        def at_checkpoint(**_kwargs):
+            seen.append(process_role())
+            raise Checkpoint
+
+        monkeypatch.setattr(daemon_owner, "_read_config", lambda: AppConfig())
+        monkeypatch.setattr(daemon_owner, "set_headless", lambda _headless: None)
+        monkeypatch.setattr(daemon_owner, "configure_logging", at_checkpoint)
+        monkeypatch.setattr(
+            daemon_owner, "_claim_handshake_stream", lambda: MagicMock()
+        )
+
+        with pytest.raises(Checkpoint):
+            daemon_owner.main([])
+
+        assert seen == [ServerRole.OWNER]
+
+    def test_the_state_is_readable_without_importing_the_server(self):
+        # Same reason the enum lives here: `bootstrap` reads this, and `server`
+        # reaches `bootstrap` through the tool modules, so importing back would
+        # close the cycle.
+        probe = (
+            "from linkedin_mcp_server.server_role import process_role, ServerRole;"
+            "import sys;"
+            "print(process_role() is ServerRole.DIRECT"
+            " and 'linkedin_mcp_server.server' not in sys.modules)"
+        )
+        answered = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        assert answered == "True"
 
 
 class TestProxyRole:
@@ -337,8 +478,11 @@ class TestOwnerAuthentication:
     def test_a_server_without_a_token_stays_unauthenticated(self):
         # The stdio server has no port to protect, and adding an auth provider
         # there would advertise metadata for a flow nothing performs.
-        assert create_mcp_server().auth is None
-        assert create_mcp_server(role=ServerRole.OWNER).auth is None
+        #
+        # Two roles in one test, so each starts from an unclaimed process the way
+        # a freshly spawned one does.
+        assert _server_for(ServerRole.DIRECT).auth is None
+        assert _server_for(ServerRole.OWNER).auth is None
 
     def test_a_token_on_a_role_that_cannot_use_one_is_refused(self):
         # Passing a token to a stdio server is a caller that believes it built

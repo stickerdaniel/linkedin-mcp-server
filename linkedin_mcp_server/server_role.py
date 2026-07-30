@@ -6,6 +6,11 @@ open a login window, a proxy must not take the profile lease — so the modules
 that answer those questions need to read it. ``dependencies`` is one of them,
 and it cannot import from ``server``: ``server`` imports the tool modules, and
 those import ``dependencies``, so the edge would close the cycle.
+
+Which is why the role also lives here as process state, not only as an argument.
+``create_mcp_server`` is handed a role and that settles everything it decides,
+but the auth gates sit in ``bootstrap``, reached from a tool body that has no
+server to ask, and :func:`process_role` is what those ask instead.
 """
 
 import enum
@@ -46,3 +51,79 @@ class ServerRole(enum.Enum):
         are the ones a user reads, however little of the work happens here.
         """
         return self in (ServerRole.DIRECT, ServerRole.PROXY)
+
+
+#: What this process is, for the code that cannot be handed the role.
+#:
+#: Assembling a server takes the role as an argument, which is enough for
+#: everything ``server`` decides. Authentication is not like that: whether a
+#: login window may be opened is decided far down the stack, in ``bootstrap``,
+#: which is reached from a tool body with no server in sight. A detached owner
+#: has no terminal and no desktop session, so it must answer that question
+#: differently, and the only thing it can consult is the process it is.
+#:
+#: Deliberately not in ``AppConfig``. That is settings a user chose, and it
+#: travels to the owner over a pipe (``daemon_config``) carrying exactly the
+#: fields both ends must agree on. The role is not one of them: an owner knows
+#: what it is, and being told by the frontend would be the wrong direction.
+#:
+#: ``None`` means nothing has claimed this process yet, which is distinct from
+#: ``DIRECT``. Using ``DIRECT`` for both would make the claim below unable to
+#: tell "nobody said" from "somebody said single-process", and a real ``DIRECT``
+#: server followed by an ``OWNER`` would then be accepted: the ``DIRECT``
+#: server's own tool calls would afterwards read ``OWNER`` and refuse the logins
+#: it is supposed to perform.
+_role: ServerRole | None = None
+
+
+class RoleAlreadyClaimedError(RuntimeError):
+    """Two different roles were claimed in one process.
+
+    Not resolvable by picking one. The role decides whether this process may open
+    a login window, and a proxy and an owner cannot both be right about that, so
+    the second claim is refused rather than applied or ignored.
+    """
+
+
+def set_process_role(role: ServerRole) -> None:
+    """Claim this process for *role*, or refuse if another already has it.
+
+    The check lives here rather than at the call sites so every entry point is
+    covered by one rule. Re-stating the same role is allowed: the owner records
+    it at its entry point and again when it assembles its server, and a test
+    building several servers of one kind is doing nothing contradictory.
+
+    Not locked. Every production caller builds exactly one server synchronously
+    before anything else runs, so there is no window to protect. A threaded
+    embedder claiming two roles at once would need one, and would also need to
+    explain which of them was supposed to win.
+    """
+    global _role
+    if _role is not None and _role is not role:
+        raise RoleAlreadyClaimedError(
+            f"This process already serves as {_role.value}, so it cannot also "
+            f"serve as {role.value}"
+        )
+    _role = role
+
+
+def process_role() -> ServerRole:
+    """What this process is, defaulting to the historical single-process server.
+
+    ``DIRECT`` when nothing has claimed it, so an embedder that never calls
+    :func:`set_process_role`, and every test that does not care, get exactly the
+    behaviour they had. The unclaimed state is deliberately not visible here:
+    callers ask what this process *is*, and "not yet decided" is not an answer
+    any of them could act on.
+    """
+    return ServerRole.DIRECT if _role is None else _role
+
+
+def reset_process_role_for_testing() -> None:
+    """Return to the unclaimed state, for test isolation.
+
+    Without this an ``OWNER`` claimed by one test would refuse logins in every
+    test after it, in a suite where most never mention a role at all.
+    """
+    global _role
+    _role = None
