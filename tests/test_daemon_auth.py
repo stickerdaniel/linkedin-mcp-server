@@ -592,14 +592,11 @@ class TestTheRepairRunsForReal:
             AuthMissingOnOwnerError("no session", nothing_ran_yet=True)
         )
         asked_for: list[float] = []
-        spent_by_then: list[float] = []
 
         real_wait = daemon_auth._wait_for_the_sign_in
-        began = asyncio.get_running_loop().time()
 
         async def record(timeout: float) -> bool:
             asked_for.append(timeout)
-            spent_by_then.append(asyncio.get_running_loop().time() - began)
             return await real_wait(timeout)
 
         with (
@@ -612,15 +609,21 @@ class TestTheRepairRunsForReal:
 
         assert asked_for, "the sign-in was never waited for"
         share = budget * 5 / 6
-        # What was already spent is gone from the budget, so the wait has to be
-        # measurably shorter than the share itself.
-        assert asked_for[0] < share - spent_by_then[0] + 0.05, (
-            f"the wait asked for {asked_for[0]:.2f}s having already spent "
-            f"{spent_by_then[0]:.2f}s of a {budget}s call"
-        )
+        # Strictly under the share, because time had already gone before this was
+        # reached. Comparing against the share rather than against a second clock
+        # reading: an earlier version subtracted a duration measured from the
+        # start of the *test*, which includes client setup the middleware's own
+        # clock never saw, and it failed at 1.22s against 1.2s under full-suite
+        # load while passing alone. That measured the runner.
         assert asked_for[0] < share, "the spent time was not subtracted"
         assert result.is_error is True
         assert len(calls) == 1
+
+        # And exactly, away from the clock entirely, so the subtraction is pinned
+        # rather than merely implied by an inequality.
+        assert daemon_auth._how_long_to_wait_for_the_sign_in(1.2, 0.5) == pytest.approx(
+            0.5
+        )
 
     async def test_a_replay_that_runs_long_does_not_hang_the_client(self):
         """Waiting bounded and replaying unbounded still overruns the deadline.
