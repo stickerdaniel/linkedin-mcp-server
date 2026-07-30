@@ -22,8 +22,8 @@ from fastmcp.tools import ToolResult
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import Attachment
 from linkedin_mcp_server.daemon_descriptor import build, new_instance_id, new_token
+from linkedin_mcp_server import daemon_descriptor, daemon_proxy
 from linkedin_mcp_server.daemon_proxy import (
-    _COMPONENT_CACHE_SECONDS,
     _client_factory,
     create_proxy_provider,
 )
@@ -232,14 +232,19 @@ class TestServingTheOwnersTools:
 
         return owner
 
-    async def test_a_lookup_after_a_listing_costs_no_extra_round_trip(self):
+    async def test_a_lookup_after_a_listing_costs_no_extra_round_trip(
+        self, tmp_path: Path
+    ):
         # An owner's tool set never changes over its lifetime, so caching it is
-        # free correctness-wise and saves a list round trip per call — measured
-        # at 88ms against 122ms with the cache off.
+        # free correctness-wise and saves a list round trip per forwarded call —
+        # about 23ms against 42ms over a real loopback owner on this machine.
         #
-        # Asserted through the connection count rather than against the module's
-        # own constant: comparing to the constant moves with it, so setting the
-        # cache to zero passed that version of this test.
+        # Built through `create_proxy_provider` and then handed a counting
+        # factory, so the production `cache_ttl` wiring is what is under test.
+        # Two earlier versions of this were weaker: one compared against the
+        # module constant, which moves with the mutation, and one constructed its
+        # own provider, which left `create_proxy_provider(cache_ttl=0)`
+        # undetected.
         owner = self._owner()
         connections = 0
 
@@ -248,8 +253,8 @@ class TestServingTheOwnersTools:
             connections += 1
             return ProxyClient(owner)
 
-        provider = ProxyProvider(counting_factory, cache_ttl=_COMPONENT_CACHE_SECONDS)
-        assert _COMPONENT_CACHE_SECONDS > 0
+        provider = create_proxy_provider(_attachment(tmp_path), tool_timeout=1.0)
+        provider.client_factory = counting_factory
 
         await provider.list_tools()
         after_listing = connections
@@ -257,7 +262,9 @@ class TestServingTheOwnersTools:
 
         assert connections == after_listing
 
-    async def test_a_proxy_stays_pinned_to_the_owner_it_started_with(self):
+    async def test_a_proxy_stays_pinned_to_the_owner_it_started_with(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         """Pins the limitation rather than the behaviour anyone wants.
 
         The endpoint is resolved once, so an owner that goes away leaves this
@@ -266,28 +273,63 @@ class TestServingTheOwnersTools:
         asks the running owner to stand down, and every proxy already attached to
         it is stranded.
 
-        Written as an assertion so PR 5 has something that fails when the proxy
-        learns to re-resolve, instead of a comment nobody runs.
+        What this does assert, and it is narrower than it first looks: the
+        address the *production* factory puts in each client is the one it was
+        handed at construction, not a fresh reading. A replacement owner is
+        published before the second call, so the address is demonstrably stale by
+        then, and the call still goes to the old one.
+
+        What it deliberately does **not** claim is to be a tripwire that fails
+        once the liveness work lands. Three attempts at that were each defeated
+        by mutation: building a local provider missed the production wiring;
+        swapping a local URL missed a proxy reading the descriptor; and publishing
+        into an isolated root missed one reading the account's real root. A
+        re-resolution test needs the resolver to be an argument this can inject,
+        which is a design the liveness PR should introduce rather than something
+        to fake from outside. Until then this pins the pinning and nothing more.
         """
         owner = self._owner()
-        alive = True
+        auth_root = tmp_path / "state"
+        elected = _attachment(tmp_path)
 
-        def factory() -> ProxyClient:
-            if not alive:
-                # Stands in for an owner that has exited: the address the proxy
-                # holds no longer answers.
-                return ProxyClient("http://127.0.0.1:9/mcp")
+        # Only the socket is stood in for. A client reaches the owner when the
+        # address it carries is the one currently published, and fails otherwise,
+        # so what decides the outcome is the address production code chose rather
+        # than anything this test set.
+        def dial(url: str) -> ProxyClient:
+            published = daemon_descriptor.read(auth_root)
+            if published is None or url != published.url:
+                raise ConnectionError(f"nothing is listening on {url}")
             return ProxyClient(owner)
 
-        proxy = FastMCP("proxy", providers=[ProxyProvider(factory, cache_ttl=0)])
-        proxy.provider_error_strategy = "raise"
+        real_factory = daemon_proxy._client_factory
 
-        async with Client(proxy) as client:
-            assert {t.name for t in await client.list_tools()} == {"get_person_profile"}
+        def factory_over_a_socket(attachment, *, timeout):
+            build = real_factory(attachment, timeout=timeout)
 
-            alive = False
-            with pytest.raises(Exception, match="connect"):
-                await client.list_tools()
+            def open_client() -> ProxyClient:
+                built = build()
+                assert isinstance(built.transport, StreamableHttpTransport)
+                return dial(built.transport.url)
+
+            return open_client
+
+        monkeypatch.setattr(daemon_proxy, "_client_factory", factory_over_a_socket)
+
+        daemon_descriptor.publish(auth_root, elected.descriptor, elected.token)
+        provider = create_proxy_provider(elected, tool_timeout=1.0)
+        assert {t.name for t in await provider.list_tools()} == {"get_person_profile"}
+
+        # A replacement owner takes over on a new port and publishes itself, the
+        # way one does after a stand-down. A proxy that re-resolved would find it.
+        replacement = _attachment(tmp_path, port=elected.descriptor.port + 1)
+        daemon_descriptor.publish(auth_root, replacement.descriptor, replacement.token)
+        published = daemon_descriptor.read(auth_root)
+        assert published is not None
+        assert published.url == replacement.descriptor.url
+
+        with pytest.raises(ConnectionError, match="nothing is listening"):
+            await provider.list_tools()
 
     async def test_a_dead_owner_is_an_error_not_an_empty_tool_list(self):
         # FastMCP's default is to log a failing provider and carry on. For a

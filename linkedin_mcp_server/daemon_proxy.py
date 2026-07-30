@@ -9,9 +9,10 @@ server a role gets; the loopback address, the bearer token, the proxy-environmen
 refusal and the forwarding deadline are all daemon knowledge, and every one of
 them is a way to leak a credential or to hang a call.
 
-Nothing here caches an owner. A client is built per upstream operation because
-that is how ``ProxyProvider`` uses its factory, and a single shared session would
-outlive the owner it was opened against.
+No client *session* is cached: one is built per upstream operation, because that
+is how ``ProxyProvider`` uses its factory and because a single shared session
+would outlive the owner it was opened against. The owner's *address* is another
+matter, and it is pinned for this process's life — see below.
 
 **A proxy is pinned to the owner it started with, and an upgrade is enough to
 strand it.** The address and token are resolved once, at startup, so a proxy
