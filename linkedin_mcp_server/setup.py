@@ -32,7 +32,11 @@ from linkedin_mcp_server.session_state import (
 from linkedin_mcp_server.drivers.browser import close_browser, get_profile_dir
 
 
-async def interactive_login(user_data_dir: Path | None = None) -> bool:
+async def interactive_login(
+    user_data_dir: Path | None = None,
+    *,
+    superseded_by: str | None = None,
+) -> bool:
     """
     Open browser for manual LinkedIn login with persistent profile.
 
@@ -42,9 +46,13 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
 
     Args:
         user_data_dir: Path to browser profile. Defaults to config's user_data_dir.
+        superseded_by: The login generation the caller believes is broken. When
+            given, the login stands down if a *different* usable session is on
+            disk by the time it holds the profile, because somebody else has
+            already done the work.
 
     Returns:
-        True if login was successful
+        True if login was successful, or a peer's session is already in place
 
     Raises:
         Exception: If login fails or times out
@@ -69,16 +77,31 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
     # lease of its own to reuse, so a momentary holder anywhere else would leave
     # the user with a login that refuses to open and no way to make it.
     #
-    # The wait is bounded by how long a *handover* takes, not by how long a person
-    # takes at the window: the holder notices a waiter on a one-second poll and
-    # gives the profile up after at most `browser_min_hold_seconds`. Past that,
-    # the holder is a process that is not going to release, and failing is more
-    # use than hanging.
+    # Bounded by how long someone who just asked to sign in should be left
+    # waiting, rather than by any worst case: a holder part way through a tool
+    # call will not hand over until it finishes, and that can run to the tool
+    # timeout. Past this the user is told the browser is busy, which they can act
+    # on, and which beats a silent wait of several minutes.
     if not await lease.acquire(timeout=PROFILE_HANDOVER_WAIT_SECONDS):
         raise BrowserBusyError(
             "Another LinkedIn MCP client is using the browser, so a login "
             "cannot start. Close it and try again."
         )
+    # Checked here and nowhere earlier, because here is the first moment it can
+    # be trusted: the profile is held, so nothing can change underneath the
+    # answer. An earlier check, before the wait, is exactly what does not work.
+    # Two clients meeting one dead session both look, both see it dead, and both
+    # queue for the profile; the one that waited then holds a stale opinion. It
+    # would rotate the session the winner has just created, which was measured:
+    # the fresh generation ended up in quarantine and `load_source_state`
+    # returned None.
+    if superseded_by is not None and _a_peer_already_signed_in(
+        user_data_dir, superseded_by
+    ):
+        print("   Another client already signed in; using its session.")
+        lease.release()
+        return True
+
     # Every exit runs through one finally: a login can fail before the browser
     # opens (rotation errors, cancellation) or after it closed cleanly but with
     # an exception, and each of those must still settle the profile correctly.
@@ -332,3 +355,25 @@ def run_interactive_setup() -> bool:
     except Exception as e:
         print(f"Login failed: {e}")
         return False
+
+
+def _a_peer_already_signed_in(user_data_dir: Path, superseded_by: str) -> bool:
+    """Whether a usable session other than *superseded_by* is on disk now.
+
+    Both halves are needed. A different generation alone is not enough: an
+    abandoned login leaves the profile rotated and no generation at all, which
+    also reads as different, and standing down there would mean nobody ever logs
+    in. A usable session alone is not enough either, because the dead one still
+    looks usable from disk: readiness asks whether the files are there, not
+    whether LinkedIn still accepts them.
+
+    Together they mean what is wanted, because a generation is written only after
+    a login has validated its session and exported the cookies.
+    """
+    from linkedin_mcp_server.bootstrap import _auth_ready
+    from linkedin_mcp_server.session_state import load_source_state
+
+    state = load_source_state(user_data_dir)
+    if state is None or state.login_generation == superseded_by:
+        return False
+    return _auth_ready()

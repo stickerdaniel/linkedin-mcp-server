@@ -84,9 +84,22 @@ class OwnerCannotAuthenticateError(LinkedInMCPError):
     It defaults to False so a path that has not thought about it is not replayed.
     """
 
-    def __init__(self, message: str, *, nothing_ran_yet: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        nothing_ran_yet: bool = False,
+        generation: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.nothing_ran_yet = nothing_ran_yet
+        #: The login generation this owner found broken, as observed at the
+        #: moment it decided. Carried rather than re-read later: the profile
+        #: lease is released once the browser closes, so a second read can see a
+        #: generation somebody else has just written, and a frontend acting on
+        #: that would rotate away the very session it names. ``None`` is a value
+        #: (a rotated profile has no generation), not an absence.
+        self.generation = generation
 
 
 class AuthMissingOnOwnerError(OwnerCannotAuthenticateError):

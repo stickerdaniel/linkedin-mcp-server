@@ -38,11 +38,15 @@ DEFAULT_BROWSER_MIN_HOLD_SECONDS: float = 20.0
 # measured). Without it a waiter gives up moments before the handover lands.
 BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
 # How long a one-shot operation waits for another process to hand the profile
-# over. Not a tool-call budget and not a human's budget: the holder notices a
-# waiter on a one-second poll (`drivers/browser.py`) and releases after at most
-# browser_min_hold_seconds plus a Chromium teardown of roughly a second, so this
-# is comfortably past the worst cooperative case. Beyond it the holder is a
-# process that will not release, where failing beats hanging.
+# over. A user-experience limit rather than a derived worst case, and the
+# distinction is worth stating because the arithmetic invites the wrong one: an
+# idle holder does release quickly, after browser_min_hold_seconds plus about a
+# second of teardown, but a holder running a tool call refuses to hand over at
+# all until that call ends (`drivers/browser.py`), and a call may take up to
+# tool_timeout_seconds. So this does not bound every cooperative case. It bounds
+# how long someone who just asked to sign in is left staring at nothing, and past
+# it they are told the browser is busy, which they can act on. Waiting three
+# minutes in silence is the worse answer.
 #
 # Deliberately not configurable. Nothing measured suggests a user would need to
 # tune it, and an unused setting is a support burden.

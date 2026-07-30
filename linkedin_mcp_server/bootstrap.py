@@ -108,6 +108,12 @@ class BootstrapState:
     import_task: asyncio.Task[bool] | None = None
     import_attempted: bool = False
     initialized: bool = False
+    #: The login generation the in-flight login was told is broken, so it can
+    #: stand down if a peer signs in first. On the state rather than the task's
+    #: signature: `_run_login_flow` is spawned as a bare task in several places
+    #: and stubbed in as many tests, and threading an argument through all of
+    #: them would change far more than the one thing that matters.
+    login_supersedes: str | None = None
 
 
 _state = BootstrapState()
@@ -828,7 +834,9 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
         set_headless(prev_headless)
 
 
-async def _start_login_if_needed(ctx: Context | None = None) -> None:
+async def _start_login_if_needed(
+    ctx: Context | None = None, *, superseded_by: str | None = None
+) -> None:
     if process_role() is ServerRole.OWNER:
         # Ahead of the lock, and ahead of every branch below, because all of them
         # end somewhere this process cannot go: an auto-import that rotates the
@@ -907,7 +915,7 @@ async def _start_login_if_needed(ctx: Context | None = None) -> None:
         # Import resolved without a session -> manual-login path. Re-enter:
         # import_attempted is now True and import_task is done, so this call
         # takes the spawn/await-login branch (no recursion loop risk).
-        return await _start_login_if_needed(ctx)
+        return await _start_login_if_needed(ctx, superseded_by=superseded_by)
 
     # No import in flight and none claimed -> the #535 manual-login + inline-wait
     # fallback. Spawn the login task if one is not already shared.
@@ -927,6 +935,7 @@ async def _start_login_if_needed(ctx: Context | None = None) -> None:
                 _state.auth_started_at = utcnow_iso()
                 _state.last_error = None
                 _state.auth_completed_at = None
+                _state.login_supersedes = superseded_by
                 _state.login_task = asyncio.create_task(
                     _run_login_flow(), name="linkedin-login"
                 )
@@ -958,9 +967,11 @@ async def _start_login_if_needed(ctx: Context | None = None) -> None:
     raise AuthenticationInProgressError(_pending_login_message(prior_error))
 
 
-async def start_login_if_needed(ctx: Context | None = None) -> None:
+async def start_login_if_needed(
+    ctx: Context | None = None, *, superseded_by: str | None = None
+) -> None:
     """Public wrapper for starting the shared login workflow."""
-    await _start_login_if_needed(ctx)
+    await _start_login_if_needed(ctx, superseded_by=superseded_by)
 
 
 def current_login_generation() -> str | None:
@@ -1111,9 +1122,17 @@ async def invalidate_auth_and_trigger_relogin(
         # session was gone.
         #
         # Comparing generations closes it, because one is only written by a login
-        # or import that has already validated its session (`setup.py:269`). A
-        # generation different from the one being complained about therefore means
-        # somebody else's repair succeeded, and the right move is to stop.
+        # or import that has already validated its session. A generation different
+        # from the one being complained about therefore means somebody else's
+        # repair succeeded, and the right move is to stop.
+        #
+        # This is the early half of a pair, and it is not the important one. It
+        # runs before any waiting, so it only catches a peer that finished before
+        # this client even asked. The window that actually loses data opens after
+        # this returns: the login it starts queues for the profile, and by the
+        # time it holds one its opinion may be stale. `interactive_login` checks
+        # again there, where the answer can no longer change. Removing either is
+        # visible in the tests, so neither is decoration.
         if stale_generation is not None:
             on_disk = current_login_generation()
             if on_disk != stale_generation and _auth_ready():
@@ -1141,6 +1160,7 @@ async def invalidate_auth_and_trigger_relogin(
         _state.auth_started_at = utcnow_iso()
         _state.last_error = None
         _state.auth_completed_at = None
+        _state.login_supersedes = stale_generation
         _state.login_task = asyncio.create_task(
             _run_login_flow(), name="linkedin-login"
         )
@@ -1197,6 +1217,13 @@ def _move_invalid_auth_state_aside() -> None:
 
 
 async def _run_login_flow() -> None:
+    """Install what a headed login needs, then run one.
+
+    The generation this login supersedes is read from the shared state rather
+    than taken as an argument, and passed on rather than checked here: this runs
+    as a background task, and the gap between this line and the profile actually
+    being held is the whole window that matters.
+    """
     _state.auth_state = AuthState.IN_PROGRESS
     # The manual-login fallback launches headed, which needs full chromium.
     # In the default headless flow only the shell is installed eagerly, so
@@ -1205,7 +1232,9 @@ async def _run_login_flow() -> None:
     # binary-missing backstop remains as a recovery path.
     if not _uses_custom_chrome():
         await _ensure_full_chromium_installed()
-    success = await interactive_login(get_profile_dir())
+    success = await interactive_login(
+        get_profile_dir(), superseded_by=_state.login_supersedes
+    )
     if not success:
         raise AuthenticationBootstrapFailedError(
             "LinkedIn login was not completed. Retry the tool call to reopen the browser and continue setup."

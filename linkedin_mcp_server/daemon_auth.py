@@ -71,7 +71,14 @@ MARKER_KEY = "linkedin.dev/auth"
 #: does not know and has to ignore them. The reverse cannot arise: a newer
 #: frontend asks an older owner to stand down and elects a replacement, so it
 #: never talks to an owner that predates a version it understands.
-MARKER_VERSION = 1
+#:
+#: 2 adds ``generation``, and the bump is what makes it safe. A version-1 reader
+#: accepts a version-1 marker, ignores fields it does not know, and repairs
+#: without passing the generation on, which is the unguarded path that rotates a
+#: peer's fresh session away. Refusing the marker outright leaves that frontend
+#: reporting the owner's failure instead, which is the worse-informed but honest
+#: outcome, and it is the one this version number buys.
+MARKER_VERSION = 2
 
 
 def _auth_failure_in(exc: BaseException) -> OwnerCannotAuthenticateError | None:
@@ -120,8 +127,14 @@ class OwnerAuthSignalMiddleware(Middleware):
                 # "this is still the dead one" from "somebody else already fixed
                 # it". Two frontends meeting one dead session would otherwise both
                 # rotate, and the second would destroy the first's fresh login.
-                # None is a value: a rotated profile has no generation at all.
-                "generation": _broken_generation(),
+                #
+                # Taken from the failure rather than read again here. By this
+                # point the browser has closed and the profile lease is free, so a
+                # fresh read can return a generation another process has just
+                # written, and the frontend would then rotate away exactly the
+                # session it was told about. The owner's latch was armed from the
+                # same observation, so the two cannot disagree.
+                "generation": failure.generation,
             }
             logger.info(
                 "Asking the client to sign in (%s, replayable=%s)",
@@ -243,6 +256,14 @@ async def _repair_auth_locally(reason: str, generation: str | None) -> None:
         start_login_if_needed,
     )
 
+    if reason == "missing":
+        # The generation goes with it too. A missing session is diagnosed from
+        # disk, so two frontends can reach this at once, and the login itself
+        # rotates once it holds the profile: without the generation the second
+        # one retires the session the first has just created.
+        await start_login_if_needed(superseded_by=generation)
+        return
+
     if reason == "stale":
         # The old session is still on disk and still does not work, so readiness
         # would keep passing it. This is the path that retires it first, and it
@@ -251,22 +272,3 @@ async def _repair_auth_locally(reason: str, generation: str | None) -> None:
         # The generation goes with it so a frontend arriving late does not rotate
         # away a session another one has already established.
         await invalidate_auth_and_trigger_relogin(stale_generation=generation)
-    else:
-        await start_login_if_needed()
-
-
-def _broken_generation() -> str | None:
-    """Which login generation the owner is complaining about.
-
-    Read here rather than carried on the exception, because by this point the
-    browser has closed and the owner has latched onto exactly this value: reading
-    it in one place keeps the marker and the latch from ever disagreeing about
-    which session was the bad one.
-    """
-    from linkedin_mcp_server.bootstrap import current_login_generation
-
-    try:
-        return current_login_generation()
-    except Exception:  # noqa: BLE001 - a marker must not fail on a probe
-        logger.debug("Could not read the login generation", exc_info=True)
-        return None

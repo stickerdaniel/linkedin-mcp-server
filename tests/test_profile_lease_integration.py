@@ -602,3 +602,161 @@ class TestALoginWaitsForTheProfile:
             holder.wait(timeout=10)
 
         never.assert_not_called()
+
+
+class TestALateLoginDoesNotUndoAnEarlierOne:
+    """The window the generation check in `interactive_login` exists for.
+
+    Two clients told to sign in for one dead session both look, both see it dead,
+    and both queue for the profile. The one that waited then holds an opinion
+    formed before the winner finished. Its login rotates the profile as soon as it
+    has the lease, and rotation does not ask whose session it is retiring.
+
+    So the check cannot live where the decision to log in is made. It has to be
+    where the profile is actually held, which is the first moment the answer
+    cannot change underneath it.
+    """
+
+    def _write_session(self, profile_dir) -> str:
+        """Put a usable session on disk and return its generation."""
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(profile_dir).write_text("[]")
+        return write_source_state(profile_dir).login_generation
+
+    def _login_without_a_browser(self, monkeypatch) -> list[bool]:
+        """Stub only the browser half, so the real rotation still runs.
+
+        Returns a list that gains an entry each time a login would have opened,
+        which is how the tests below tell "stood down" from "signed in".
+        """
+        import linkedin_mcp_server.setup as setup
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        # Installed rather than loaded: `_login_holding_the_profile` calls
+        # get_config(), which parses sys.argv, and under pytest that is pytest's
+        # own command line.
+        set_config(AppConfig())
+
+        opened: list[bool] = []
+
+        async def signed_in(user_data_dir, config, state):
+            opened.append(True)
+            state.browser_opened = True
+            state.close_confirmed = True
+            return True
+
+        monkeypatch.setattr(setup, "_login_into_fresh_profile", signed_in)
+        monkeypatch.setattr(setup, "close_browser", AsyncMock())
+        return opened
+
+    async def test_without_the_generation_the_later_login_destroys_the_earlier(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        # The damage, reproduced, so the guarded case below is not asserting thin
+        # air. This is what the old call shape did.
+        from linkedin_mcp_server.session_state import load_source_state
+        from linkedin_mcp_server.setup import interactive_login
+
+        self._write_session(isolate_profile_dir)
+        self._login_without_a_browser(monkeypatch)
+
+        # The winner finishes and writes a fresh generation.
+        fresh = self._write_session(isolate_profile_dir)
+
+        # The loser's login proceeds anyway, knowing nothing.
+        assert await interactive_login(isolate_profile_dir) is True
+
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is None or surviving.login_generation != fresh
+
+    async def test_the_generation_makes_the_later_login_stand_down(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.session_state import load_source_state
+        from linkedin_mcp_server.setup import interactive_login
+
+        stale = self._write_session(isolate_profile_dir)
+        self._login_without_a_browser(monkeypatch)
+
+        fresh = self._write_session(isolate_profile_dir)
+        assert fresh != stale
+
+        # Reports success, because from the caller's point of view there is now a
+        # usable session, which is what it asked for.
+        assert await interactive_login(isolate_profile_dir, superseded_by=stale) is True
+
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is not None
+        assert surviving.login_generation == fresh
+
+    async def test_it_still_logs_in_when_the_session_really_is_the_dead_one(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        # The guard must not stop the client that is right, which is every
+        # ordinary case: same generation, so nobody has repaired anything.
+        from linkedin_mcp_server.setup import interactive_login
+
+        stale = self._write_session(isolate_profile_dir)
+
+        opened = self._login_without_a_browser(monkeypatch)
+
+        assert await interactive_login(isolate_profile_dir, superseded_by=stale) is True
+
+        assert opened == [True]
+
+    async def test_an_abandoned_peer_attempt_does_not_stop_the_next_login(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        # A rotated profile has no generation, which also differs from the stale
+        # one. Standing down there would mean nobody ever signs in.
+        from linkedin_mcp_server.session_state import (
+            load_source_state,
+            rotate_source_profile,
+        )
+        from linkedin_mcp_server.setup import interactive_login
+
+        stale = self._write_session(isolate_profile_dir)
+
+        opened = self._login_without_a_browser(monkeypatch)
+
+        rotate_source_profile(isolate_profile_dir)
+        assert load_source_state(isolate_profile_dir) is None
+
+        assert await interactive_login(isolate_profile_dir, superseded_by=stale) is True
+
+        assert opened == [True]
+
+    async def test_a_new_generation_without_a_usable_session_does_not_stop_it(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """A different generation is not on its own proof that anyone succeeded.
+
+        The abandoned case above never reaches this: rotation removes the state
+        file entirely, so the check stops at "there is no generation". This is the
+        other shape, where a generation *is* written and the session still is not
+        usable, and it is what the readiness half of the condition is for.
+        Measured: without it, the login stands down while nothing on disk works,
+        and the user is left with no session and no way to get one.
+        """
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+        )
+        from linkedin_mcp_server.setup import interactive_login
+
+        stale = self._write_session(isolate_profile_dir)
+        opened = self._login_without_a_browser(monkeypatch)
+
+        # A newer generation, but the cookies that make it usable are gone.
+        assert self._write_session(isolate_profile_dir) != stale
+        portable_cookie_path(isolate_profile_dir).unlink()
+
+        assert await interactive_login(isolate_profile_dir, superseded_by=stale) is True
+
+        assert opened == [True]

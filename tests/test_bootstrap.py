@@ -860,7 +860,7 @@ class TestLazyFullChromiumTrigger:
         async def fake_full() -> None:
             order.append("full")
 
-        async def fake_login(_profile_dir) -> bool:
+        async def fake_login(_profile_dir, *, superseded_by=None) -> bool:
             order.append("login")
             return True
 

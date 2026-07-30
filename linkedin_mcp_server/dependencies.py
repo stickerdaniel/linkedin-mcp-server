@@ -122,6 +122,9 @@ async def handle_auth_error(
             "cannot sign in by itself. Retry this tool: the client will open a "
             "login window.",
             nothing_ran_yet=nothing_ran_yet,
+            # The same observation the latch was armed with, so the two can never
+            # name different sessions.
+            generation=broken_generation,
         ) from error
 
     await invalidate_auth_and_trigger_relogin(ctx)  # always raises
