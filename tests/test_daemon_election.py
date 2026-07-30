@@ -1191,7 +1191,12 @@ class TestRealOwner:
                 async with Client(proxy) as client:
                     await client.list_tools()
 
-            with pytest.raises(Exception):
+            # Matched on the status rather than catching anything at all. A bare
+            # `Exception` passed on any failure whatsoever, including one raised
+            # before a request ever left this process — so the test would have
+            # gone green without the owner refusing anything. Measured: the real
+            # refusal is `McpError: Client error '401 Unauthorized'`.
+            with pytest.raises(Exception, match="401 Unauthorized"):
                 asyncio.run(served())
         finally:
             _stop(result.get("pid"))
