@@ -1158,6 +1158,92 @@ class TestRealOwner:
         finally:
             _stop(result.get("pid"))
 
+    def test_a_real_owner_asks_the_client_to_sign_in(self, real_state_root: Path):
+        """The auth marker, over a real socket, from a real detached owner.
+
+        Everything else about the marker runs in memory. This is the one that
+        proves the owner produces it with no LinkedIn session on disk and that it
+        survives the authenticated loopback hop as a *result* rather than being
+        flattened into a generic failure, which is what an exception would be.
+
+        Observed at a plain client with no repair middleware installed, and that
+        is what makes the test possible: a fully wired frontend *consumes* the
+        marker, opens a real login window and waits out the login timeout. So this
+        asserts what the owner sends; the consume-and-replay half is covered in
+        memory with a stubbed login.
+        """
+        import asyncio
+
+        from fastmcp import Client
+
+        from linkedin_mcp_server.daemon import look_up_owner
+        from linkedin_mcp_server.daemon_auth import (
+            MARKER_KEY,
+            MARKER_VERSION,
+            FrontendAuthRepairMiddleware,
+        )
+        from linkedin_mcp_server.server import ServerRole, create_mcp_server
+
+        profile = real_state_root
+        # The browser cache is keyed to the auth root, and the fixture's is empty,
+        # so without this the owner answers "still downloading Chromium" and never
+        # reaches the auth gate at all. Symlinked rather than copied: it is about a
+        # gigabyte, and nothing here launches a browser.
+        _borrow_the_browser_cache(profile)
+
+        result = _run_frontend(profile)
+        try:
+            lookup = look_up_owner(profile.parent, profile, _config(profile))
+            assert lookup.attachment is not None, lookup.reason
+
+            proxy = create_mcp_server(
+                tool_timeout=30.0,
+                role=ServerRole.PROXY,
+                proxy_attachment=lookup.attachment,
+            )
+            # The repair middleware is removed rather than never added, because
+            # `create_mcp_server` installs it for every proxy and that is correct:
+            # a real frontend consumes this marker, opens a login window and waits
+            # out the login timeout. Removing it is what lets the marker be
+            # observed at all, and it is the reason this test asserts what the
+            # owner *sends* rather than what a client finally sees.
+            proxy.middleware[:] = [
+                m
+                for m in proxy.middleware
+                if not isinstance(m, FrontendAuthRepairMiddleware)
+            ]
+
+            async def call_it():
+                async with Client(proxy) as client:
+                    return await client.call_tool(
+                        "get_person_profile",
+                        {"linkedin_username": "williamhgates"},
+                        raise_on_error=False,
+                    )
+
+            answered = asyncio.run(call_it())
+
+            assert answered.is_error is True
+            marker = (answered.meta or {}).get(MARKER_KEY)
+            assert marker is not None, answered.meta
+            assert marker["v"] == MARKER_VERSION
+            # `missing`, because the fixture's profile has never been logged in.
+            assert marker["reason"] == "missing"
+            # Nothing ran before the readiness gate refused, so a client may run
+            # the call again once it has signed in.
+            assert marker["replayable"] is True
+            # And the owner never opened a browser to find this out, so the
+            # profile is free for the login it is asking for.
+            assert marker["browser_open"] is False
+
+            # Worth recording what this does and does not pin. Removing the
+            # owner's middleware makes it fail, and so does removing *both* role
+            # claims. Removing only the one in `main` does not, because
+            # `create_mcp_server` claims it again before any call arrives: the two
+            # are deliberately redundant, and this test cannot tell them apart.
+        finally:
+            _stop(result.get("pid"))
+
     def test_a_proxy_refuses_an_owner_it_has_the_wrong_token_for(
         self, real_state_root: Path
     ):
@@ -1842,3 +1928,21 @@ class TestOutcome:
         absent = ElectionOutcome(OwnerLookup(state=OwnerState.ABSENT))
 
         assert not absent.worth_connecting
+
+
+def _borrow_the_browser_cache(profile: Path) -> None:
+    """Point an isolated auth root at the account's real browser cache.
+
+    The cache lives under the auth root (``bootstrap.browsers_path``), so an
+    isolated root looks like a fresh install and the readiness gate reports a
+    download in progress before anything about authentication is decided. A
+    symlink is enough: these tests read the gate's verdict and never launch
+    Chromium.
+
+    Skips the test rather than downloading one, because a test that pulls a
+    gigabyte on a cold machine is a test nobody runs.
+    """
+    real = Path.home() / ".linkedin-mcp" / "patchright-browsers"
+    if not real.is_dir():
+        pytest.skip("no patchright browser cache to borrow")
+    (profile.parent / "patchright-browsers").symlink_to(real)
