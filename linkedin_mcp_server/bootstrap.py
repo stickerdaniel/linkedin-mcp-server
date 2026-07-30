@@ -16,7 +16,6 @@ from typing import NoReturn
 
 from fastmcp import Context
 
-from linkedin_mcp_server.authentication import get_authentication_source
 from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.config.schema import is_loopback_host
@@ -663,20 +662,6 @@ def _auth_ready(profile_dir: Path | None = None) -> bool:
     )
 
 
-def _has_source_state() -> bool:
-    """Whether the configured profile has a readable source state.
-
-    Kept because other callers use it. Readiness no longer goes through it: it
-    resolves the profile itself, so it could not answer for a directory handed in
-    explicitly, and it re-checks the two things the caller has already tested.
-    """
-    try:
-        get_authentication_source()
-    except Exception:
-        return False
-    return True
-
-
 def _auto_import_allowed() -> bool:
     """Return whether a silent browser-session import is safe to attempt now.
 
@@ -960,7 +945,7 @@ async def _start_login_if_needed(
                 prior_error = None
             else:
                 prior_error = _state.last_error
-                _move_invalid_auth_state_aside()
+                _move_invalid_auth_state_aside(superseded_by)
                 _state.auth_state = AuthState.STARTING
                 _state.auth_started_at = utcnow_iso()
                 _state.last_error = None
@@ -1148,44 +1133,6 @@ async def invalidate_auth_and_trigger_relogin(
                 "then retry this tool."
             )
 
-        # Checked here, after the lock and immediately before the rotation, which
-        # is the only place it means anything. Two frontends can meet the same
-        # dead session, and `_lock` is process-local: it serializes this function
-        # against itself in *this* interpreter and knows nothing about the other
-        # process.
-        #
-        # Measured. Rotation itself is safe, because it takes the profile lease
-        # (`session_state.py:727`), so nobody can rotate while a login holds it.
-        # The exposed window is afterwards: A finishes a login and writes a
-        # generation, B arrives with the *old* one still in hand, finds the lease
-        # free, and rotates. `load_source_state` then returned None, and A's fresh
-        # session was gone.
-        #
-        # Comparing generations closes it, because one is only written by a login
-        # or import that has already validated its session. A generation different
-        # from the one being complained about therefore means somebody else's
-        # repair succeeded, and the right move is to stop.
-        #
-        # This is the early half of a pair, and it is not the important one. It
-        # runs before any waiting, so it only catches a peer that finished before
-        # this client even asked. The window that actually loses data opens after
-        # this returns: the login it starts queues for the profile, and by the
-        # time it holds one its opinion may be stale. `interactive_login` checks
-        # again there, where the answer can no longer change. Removing either is
-        # visible in the tests, so neither is decoration.
-        if stale_generation is not UNGUARDED:
-            on_disk = current_login_generation()
-            if on_disk != stale_generation and _auth_ready():
-                logger.info(
-                    "Another client already signed in (generation %s); leaving "
-                    "its session alone",
-                    on_disk,
-                )
-                raise AuthenticationBootstrapFailedError(
-                    "Another LinkedIn MCP client has already signed in. Retry "
-                    "this tool to use the new session."
-                )
-
         # Force-move stale profile files (skip _auth_ready() guard).
         #
         # A failure here used to stop the login, and that reasoning has expired.
@@ -1209,7 +1156,7 @@ async def invalidate_auth_and_trigger_relogin(
         # profile. What must not happen is the login standing down there, which
         # is why the generation it was told about travels with it.
         try:
-            _force_move_auth_state_aside()
+            _force_move_auth_state_aside(stale_generation)
         except AuthenticationBootstrapFailedError as exc:
             logger.info(
                 "Could not retire the stale session yet (%s); the login will "
@@ -1245,7 +1192,9 @@ async def invalidate_auth_and_trigger_relogin(
     )
 
 
-def _move_auth_state_aside(*, force: bool = False) -> None:
+def _move_auth_state_aside(
+    *, force: bool = False, superseded_by: str | None | object = UNGUARDED
+) -> None:
     """Move auth artifacts to a timestamped backup directory.
 
     Args:
@@ -1267,7 +1216,7 @@ def _move_auth_state_aside(*, force: bool = False) -> None:
     # Quarantine creation lives in session_state so the routine rotation on a
     # new session and this stale-state path produce identically shaped backups.
     try:
-        rotate_source_profile(get_profile_dir())
+        rotate_source_profile(get_profile_dir(), superseded_by=superseded_by)
     except RuntimeError as exc:
         raise AuthenticationBootstrapFailedError(
             f"{exc} No login was started."
@@ -1278,13 +1227,17 @@ def _move_auth_state_aside(*, force: bool = False) -> None:
         ) from exc
 
 
-def _force_move_auth_state_aside() -> None:
+def _force_move_auth_state_aside(
+    superseded_by: str | None | object = UNGUARDED,
+) -> None:
     """Move auth artifacts aside unconditionally (no ``_auth_ready()`` guard)."""
-    _move_auth_state_aside(force=True)
+    _move_auth_state_aside(force=True, superseded_by=superseded_by)
 
 
-def _move_invalid_auth_state_aside() -> None:
-    _move_auth_state_aside(force=False)
+def _move_invalid_auth_state_aside(
+    superseded_by: str | None | object = UNGUARDED,
+) -> None:
+    _move_auth_state_aside(force=False, superseded_by=superseded_by)
 
 
 async def _run_login_flow() -> None:

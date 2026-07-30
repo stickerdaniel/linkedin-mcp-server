@@ -1043,9 +1043,7 @@ class TestAMomentaryHolderDoesNotCancelTheRepair:
         import linkedin_mcp_server.bootstrap as bootstrap
         from linkedin_mcp_server.config import set_config
         from linkedin_mcp_server.config.schema import AppConfig
-        from linkedin_mcp_server.exceptions import (
-            AuthenticationBootstrapFailedError,
-        )
+        from linkedin_mcp_server.exceptions import AuthenticationStartedError
         from linkedin_mcp_server.session_state import (
             load_source_state,
             portable_cookie_path,
@@ -1065,9 +1063,7 @@ class TestAMomentaryHolderDoesNotCancelTheRepair:
         portable_cookie_path(isolate_profile_dir).write_text("[]")
         peer = write_source_state(isolate_profile_dir).login_generation
 
-        with pytest.raises(
-            AuthenticationBootstrapFailedError, match="already signed in"
-        ):
+        with pytest.raises(AuthenticationStartedError):
             await bootstrap.invalidate_auth_and_trigger_relogin(stale_generation=None)
 
         surviving = load_source_state(isolate_profile_dir)
@@ -1111,3 +1107,145 @@ class TestAMomentaryHolderDoesNotCancelTheRepair:
         assert a_peer_already_signed_in(other, "a-different-generation") is True
         # And the same call still says no when the generation is the one in hand.
         assert a_peer_already_signed_in(other, fresh) is False
+
+
+class TestTheComparisonHappensUnderTheLock:
+    """Deciding first and rotating afterwards leaves a gap wide enough to lose a
+    session in.
+
+    Every automatic path used to compare generations at the call site and then
+    call a rotation that takes the profile itself. A peer completing a login
+    between those two points had its fresh session quarantined by a process
+    acting on a view formed before that session existed. Five review rounds
+    missed it, because reproducing it needs the peer to land at the rotation
+    boundary rather than anywhere earlier.
+
+    Moving the comparison inside the lock is what closes it: there, the answer
+    cannot change between reading it and acting on it.
+    """
+
+    def _write_session(self, profile_dir) -> str:
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(profile_dir).write_text("[]")
+        return write_source_state(profile_dir).login_generation
+
+    def test_a_peer_landing_at_the_rotation_keeps_its_session(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.session_state as session_state
+        from linkedin_mcp_server.session_state import (
+            load_source_state,
+            rotate_source_profile,
+        )
+
+        stale = self._write_session(isolate_profile_dir)
+
+        real_lock = session_state._exclusive_profile
+        landed: list[str] = []
+
+        def peer_signs_in_then_we_lock(profile_dir, *, action):
+            # The peer finishes exactly at the boundary: after any caller-side
+            # decision, before this rotation holds anything.
+            if not landed:
+                landed.append(self._write_session(isolate_profile_dir))
+            return real_lock(profile_dir, action=action)
+
+        monkeypatch.setattr(
+            session_state, "_exclusive_profile", peer_signs_in_then_we_lock
+        )
+
+        retired = rotate_source_profile(isolate_profile_dir, superseded_by=stale)
+
+        assert retired is None, "it rotated a session it should have left alone"
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is not None
+        assert surviving.login_generation == landed[0]
+
+    def test_it_still_retires_the_session_it_was_told_about(self, isolate_profile_dir):
+        # The guard must not stop the ordinary case, which is every rotation
+        # where nobody else has done anything.
+        from linkedin_mcp_server.session_state import (
+            load_source_state,
+            rotate_source_profile,
+        )
+
+        stale = self._write_session(isolate_profile_dir)
+
+        retired = rotate_source_profile(isolate_profile_dir, superseded_by=stale)
+
+        assert retired is not None
+        assert load_source_state(isolate_profile_dir) is None
+
+    def test_an_unguarded_rotation_is_unchanged(self, isolate_profile_dir):
+        # `--login` and `--logout` rotate without a generation, and must keep
+        # retiring whatever is there.
+        from linkedin_mcp_server.session_state import (
+            load_source_state,
+            rotate_source_profile,
+        )
+
+        self._write_session(isolate_profile_dir)
+
+        assert rotate_source_profile(isolate_profile_dir) is not None
+        assert load_source_state(isolate_profile_dir) is None
+
+    async def test_both_automatic_paths_hand_their_generation_to_the_rotation(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """The comparison is only under the lock if the generation gets there.
+
+        Moving it inside `rotate_source_profile` is half the fix; the other half
+        is every automatic caller passing what it observed. A call site that
+        stopped forwarding would leave the rotation unguarded again, and nothing
+        else would notice.
+        """
+        from unittest.mock import AsyncMock
+
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.exceptions import (
+            AuthenticationInProgressError,
+            AuthenticationStartedError,
+        )
+
+        config = AppConfig()
+        config.browser.user_data_dir = str(isolate_profile_dir)
+        config.browser.auto_import_from_browser = False
+        set_config(config)
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_run_login_flow", AsyncMock())
+
+        seen: list[object] = []
+
+        def capture(profile_dir=None, *, superseded_by=None):
+            seen.append(superseded_by)
+            return None
+
+        monkeypatch.setattr(bootstrap, "rotate_source_profile", capture)
+
+        # The stale path.
+        self._write_session(isolate_profile_dir)
+        with pytest.raises(AuthenticationStartedError):
+            await bootstrap.invalidate_auth_and_trigger_relogin(
+                stale_generation="the-stale-one"
+            )
+        assert seen == ["the-stale-one"], seen
+
+        # The missing path, which rotates through the other helper.
+        seen.clear()
+        bootstrap.reset_bootstrap_for_testing()
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_run_login_flow", AsyncMock())
+        monkeypatch.setattr(bootstrap, "rotate_source_profile", capture)
+        monkeypatch.setattr(bootstrap, "_auth_ready", lambda *_a, **_k: False)
+
+        with pytest.raises(AuthenticationInProgressError):
+            await bootstrap._start_login_if_needed(superseded_by="the-missing-one")
+        assert seen == ["the-missing-one"], seen

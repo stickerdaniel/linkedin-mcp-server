@@ -22,6 +22,8 @@ from linkedin_mcp_server.core import (
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.session_state import (
+    UNGUARDED,
+    a_peer_already_signed_in,
     run_deferring_cancels,
     portable_cookie_path,
     restore_source_profile,
@@ -30,14 +32,6 @@ from linkedin_mcp_server.session_state import (
 )
 
 from linkedin_mcp_server.drivers.browser import close_browser, get_profile_dir
-
-
-#: Distinguishes "no generation was observed" from "nothing asked for a guard".
-#: ``None`` cannot do both: a profile with no session reads as ``None``, and two
-#: clients meeting that state need protecting from each other exactly as much as
-#: two meeting a stale one. Measured with the two conflated: the second client
-#: rotated away the session the first had just created.
-UNGUARDED = object()
 
 
 async def interactive_login(
@@ -368,36 +362,3 @@ def run_interactive_setup() -> bool:
     except Exception as e:
         print(f"Login failed: {e}")
         return False
-
-
-def a_peer_already_signed_in(
-    user_data_dir: Path, superseded_by: str | None | object
-) -> bool:
-    """Whether a usable session other than *superseded_by* is on disk now.
-
-    Asked by every path that rotates the profile to make room for a new session,
-    which is the login here and the browser import next door, and asked only once
-    that path holds the profile lease. That is the first moment the answer cannot
-    change underneath it.
-
-    Both halves are needed. A different generation alone is not enough: an
-    abandoned attempt leaves the profile rotated and no generation at all, which
-    also reads as different, and standing down there would mean nobody ever signs
-    in. A usable session alone is not enough either, because the dead one still
-    looks usable from disk: readiness asks whether the files are there, not
-    whether LinkedIn still accepts them.
-
-    Together they mean what is wanted, because a generation is written only after
-    a login or import has validated its session and exported the cookies.
-    """
-    from linkedin_mcp_server.bootstrap import _auth_ready
-    from linkedin_mcp_server.session_state import load_source_state
-
-    state = load_source_state(user_data_dir)
-    if state is None or state.login_generation == superseded_by:
-        return False
-    # The same directory the generation came from. Asking about the configured
-    # one instead would answer a different question than the one asked, and
-    # quietly: a caller handed an explicit profile would get the default
-    # profile's verdict while rotating theirs.
-    return _auth_ready(user_data_dir)

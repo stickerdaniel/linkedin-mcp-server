@@ -1858,7 +1858,6 @@ def test_move_auth_state_aside_reports_a_held_profile(monkeypatch):
     """Swallowing this would open a login browser whose own rotation fails at
     the same point, after telling the user the browser had opened."""
     from linkedin_mcp_server import bootstrap
-    from linkedin_mcp_server.exceptions import AuthenticationBootstrapFailedError
 
     monkeypatch.setattr(
         bootstrap,
@@ -2218,16 +2217,16 @@ class TestTwoClientsMeetingOneDeadSession:
         assert fresh != stale
 
         # B arrives with the generation it was told about, which has moved on.
-        with pytest.raises(
-            AuthenticationBootstrapFailedError, match="already signed in"
-        ):
+        # It still starts a login, and that is right rather than weaker: B was
+        # asked to repair a session, so refusing outright would leave its caller
+        # with nothing. What must not happen is B retiring the session A just
+        # created, and the rotation decides that under the profile lock.
+        with pytest.raises(AuthenticationStartedError):
             await invalidate_auth_and_trigger_relogin(stale_generation=stale)
 
-        # Intact, and no second login window opened on top of the first.
         surviving = load_source_state(isolate_profile_dir)
         assert surviving is not None
         assert surviving.login_generation == fresh
-        login.assert_not_called()
 
     async def test_the_first_client_still_retires_the_session_it_found(
         self, isolate_profile_dir, monkeypatch
