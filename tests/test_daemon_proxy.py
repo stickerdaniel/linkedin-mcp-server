@@ -257,6 +257,38 @@ class TestServingTheOwnersTools:
 
         assert connections == after_listing
 
+    async def test_a_proxy_stays_pinned_to_the_owner_it_started_with(self):
+        """Pins the limitation rather than the behaviour anyone wants.
+
+        The endpoint is resolved once, so an owner that goes away leaves this
+        process failing every operation for the rest of its life. An upgrade is
+        enough to cause it: ``@latest`` means the first client launched after one
+        asks the running owner to stand down, and every proxy already attached to
+        it is stranded.
+
+        Written as an assertion so PR 5 has something that fails when the proxy
+        learns to re-resolve, instead of a comment nobody runs.
+        """
+        owner = self._owner()
+        alive = True
+
+        def factory() -> ProxyClient:
+            if not alive:
+                # Stands in for an owner that has exited: the address the proxy
+                # holds no longer answers.
+                return ProxyClient("http://127.0.0.1:9/mcp")
+            return ProxyClient(owner)
+
+        proxy = FastMCP("proxy", providers=[ProxyProvider(factory, cache_ttl=0)])
+        proxy.provider_error_strategy = "raise"
+
+        async with Client(proxy) as client:
+            assert {t.name for t in await client.list_tools()} == {"get_person_profile"}
+
+            alive = False
+            with pytest.raises(Exception, match="connect"):
+                await client.list_tools()
+
     async def test_a_dead_owner_is_an_error_not_an_empty_tool_list(self):
         # FastMCP's default is to log a failing provider and carry on. For a
         # server whose only provider this is, that turns a dead owner into a

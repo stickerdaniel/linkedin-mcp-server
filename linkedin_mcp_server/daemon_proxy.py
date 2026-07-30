@@ -12,6 +12,25 @@ them is a way to leak a credential or to hang a call.
 Nothing here caches an owner. A client is built per upstream operation because
 that is how ``ProxyProvider`` uses its factory, and a single shared session would
 outlive the owner it was opened against.
+
+**A proxy is pinned to the owner it started with, and an upgrade is enough to
+strand it.** The address and token are resolved once, at startup, so a proxy
+whose owner goes away fails every operation afterwards rather than finding the
+replacement. Reproduced end to end: a proxy serving 19 tools was asked nothing,
+its owner was told to stand down the way a newer build does
+(``daemon_election._ask_to_stand_down``), and the next listing failed with
+``McpError: Client failed to connect``.
+
+That path is not hypothetical. ``@latest`` is the documented install, so the
+first client to launch after an upgrade stands the old owner down and every proxy
+already attached to it is dead until its own process restarts. Idle exit and a
+crashed owner end the same way.
+
+Resolving the backend per operation and re-electing on a pre-dispatch connection
+failure is what fixes this, and it belongs with the liveness work rather than
+here: a retry needs to know whether the call it is replacing may already have run
+against the browser. Until then the flag stays off by default and this is a
+documented limitation, not a solved problem.
 """
 
 from __future__ import annotations
