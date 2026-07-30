@@ -1073,3 +1073,41 @@ class TestAMomentaryHolderDoesNotCancelTheRepair:
         surviving = load_source_state(isolate_profile_dir)
         assert surviving is not None
         assert surviving.login_generation == peer
+
+    async def test_the_guard_asks_about_the_profile_it_was_given(
+        self, isolate_profile_dir, monkeypatch, tmp_path
+    ):
+        """Readiness has to be asked of the same directory the generation came from.
+
+        `interactive_login` and the browser import both accept an explicit profile
+        alongside the generation, and the check read the generation from that one
+        while asking the *configured* profile whether a session was usable.
+        Measured with the two apart: a peer's fresh session in the explicit
+        profile was rotated away, because the configured one happened to be empty.
+        """
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.session_state import (
+            load_source_state,
+            portable_cookie_path,
+            write_source_state,
+        )
+        from linkedin_mcp_server.setup import a_peer_already_signed_in
+
+        # The configured profile is empty, so its readiness is False.
+        config = AppConfig()
+        config.browser.user_data_dir = str(isolate_profile_dir)
+        set_config(config)
+
+        # A different profile, handed in explicitly, holds a complete session.
+        other = tmp_path / "other" / "profile"
+        (other / "Default").mkdir(parents=True)
+        (other / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(other).write_text("[]")
+        fresh = write_source_state(other).login_generation
+        assert load_source_state(isolate_profile_dir) is None
+
+        # Asked about `other`, the answer is yes: somebody has signed in there.
+        assert a_peer_already_signed_in(other, "a-different-generation") is True
+        # And the same call still says no when the generation is the one in hand.
+        assert a_peer_already_signed_in(other, fresh) is False

@@ -644,17 +644,32 @@ def _raise_if_docker_auth_missing() -> None:
     )
 
 
-def _auth_ready() -> bool:
-    profile_dir = get_profile_dir()
+def _auth_ready(profile_dir: Path | None = None) -> bool:
+    """Whether a session's files are all present under *profile_dir*.
+
+    Defaults to the configured profile, which is what every gate here means. The
+    argument exists for callers handed a directory explicitly, where asking about
+    the configured one would answer a different question than the one asked, and
+    silently: it would report the *default* profile ready while rotating another.
+    """
+    profile_dir = profile_dir or get_profile_dir()
     return (
         profile_exists(profile_dir)
         and portable_cookie_path(profile_dir).exists()
         and source_state_path(profile_dir).exists()
-        and _has_source_state()
+        # The file has to parse, not merely exist: a truncated write leaves one
+        # behind that every existence check above is happy with.
+        and load_source_state(profile_dir) is not None
     )
 
 
 def _has_source_state() -> bool:
+    """Whether the configured profile has a readable source state.
+
+    Kept because other callers use it. Readiness no longer goes through it: it
+    resolves the profile itself, so it could not answer for a directory handed in
+    explicitly, and it re-checks the two things the caller has already tested.
+    """
     try:
         get_authentication_source()
     except Exception:

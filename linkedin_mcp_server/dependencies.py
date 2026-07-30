@@ -105,16 +105,21 @@ async def handle_auth_error(
     except Exception as close_exc:
         logger.warning("Failed to close stale browser (ignored): %s", close_exc)
 
-    if process_role() is ServerRole.OWNER:
-        if get_profile_lease().browser_open:
-            # The teardown could not be confirmed, so Chromium may still be on the
-            # profile and the lease is deliberately kept until this process exits
-            # (`drivers/browser.py:786-798`). Asking a client to sign in now would
-            # send it after a lease it can never take, and latching would then
-            # answer every later call from a state only a restart clears. Reported
-            # as what it is instead.
-            raise BrowserShutdownUnconfirmedError() from error
+    if get_profile_lease().browser_open:
+        # The teardown could not be confirmed, so Chromium may still be on the
+        # profile, and the lease is deliberately kept until this process exits
+        # (`drivers/browser.py:786-798`). Nothing that follows can work: a shared
+        # owner would send a client after a lease it can never take, and a
+        # single-process server would start a login whose own rotation is refused
+        # for the same reason, after telling the user a window had opened.
+        #
+        # Checked for every role, ahead of the split. It was owner-only once, on
+        # the reasoning that only a marker could mislead a client. Measured
+        # otherwise: the single-process server reported "a login browser window
+        # has been opened", opened none, and left a state only a restart clears.
+        raise BrowserShutdownUnconfirmedError() from error
 
+    if process_role() is ServerRole.OWNER:
         # The browser is down and the lease is free, so the client can take over.
         # Recorded before raising so the next forwarded call is answered from the
         # latch rather than by opening Chromium again.

@@ -31,6 +31,10 @@ class TestHandleAuthError:
                 new_callable=AsyncMock,
             ) as mock_close,
             patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="the-dead-one",
+            ),
+            patch(
                 "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
                 new_callable=AsyncMock,
                 side_effect=AuthenticationStartedError("login opened"),
@@ -46,7 +50,10 @@ class TestHandleAuthError:
             # downstream can tell the dead session from a peer's repair.
             mock_relogin.assert_awaited_once()
             assert mock_relogin.await_args.args == (None,)
-            assert "stale_generation" in mock_relogin.await_args.kwargs
+            # The value, not merely the keyword. Asserting only that the argument
+            # exists left a mutation passing a hardcoded None green, which is the
+            # regression this whole path was fixed for.
+            assert mock_relogin.await_args.kwargs["stale_generation"] == "the-dead-one"
 
     async def test_docker_raises_host_error(self):
         """On Docker runtime, raise DockerHostLoginRequiredError."""
@@ -355,3 +362,44 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
 
         # Not latched: a latch here is the wedge, because nothing can clear it.
         latched.assert_not_called()
+
+    async def test_an_unconfirmed_close_stops_a_single_server_too(self):
+        """Not only the shared owner: nothing that follows can work for either.
+
+        An unconfirmed teardown keeps the profile lease until the process exits,
+        so a single-process server that carried on would start a login whose own
+        rotation is refused for exactly that reason, after having told the user a
+        window had opened. Measured with the check owner-only: the server reported
+        "a login browser window has been opened", opened none, kept the dead
+        session, and left a state only a restart clears.
+        """
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+
+        relogin = AsyncMock()
+        lease = MagicMock()
+        lease.browser_open = True
+
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.get_runtime_policy",
+                return_value="managed",
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.current_login_generation",
+                return_value="gen-1",
+            ),
+            patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
+            patch(
+                "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                relogin,
+            ),
+        ):
+            # A DIRECT server: the role is never set, so it is the default.
+            with pytest.raises(BrowserShutdownUnconfirmedError, match="Restart"):
+                await handle_auth_error(AuthenticationError("expired"), ctx=None)
+
+        relogin.assert_not_awaited()

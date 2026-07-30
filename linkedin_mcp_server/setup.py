@@ -396,4 +396,8 @@ def a_peer_already_signed_in(
     state = load_source_state(user_data_dir)
     if state is None or state.login_generation == superseded_by:
         return False
-    return _auth_ready()
+    # The same directory the generation came from. Asking about the configured
+    # one instead would answer a different question than the one asked, and
+    # quietly: a caller handed an explicit profile would get the default
+    # profile's verdict while rotating theirs.
+    return _auth_ready(user_data_dir)
