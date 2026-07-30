@@ -50,6 +50,7 @@ import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
+from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.exceptions import (
     AuthMissingOnOwnerError,
     OwnerCannotAuthenticateError,
@@ -199,6 +200,12 @@ class FrontendAuthRepairMiddleware(Middleware):
 
         try:
             await _repair_auth_locally(marker["reason"], marker["generation"])
+        except PeerSessionInPlaceError:
+            # Not a failure: another client signed in while this one was asking
+            # to, so the session the call needs already exists. Treating it as a
+            # failed repair would refuse the replay and send the user back for a
+            # retry that was not needed.
+            logger.info("Another client already signed in; using its session")
         except Exception:
             # The login path reports itself through its own exceptions, which the
             # tool layer turns into readable messages. Whatever happened, the

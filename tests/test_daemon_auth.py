@@ -375,6 +375,35 @@ class TestTheFrontendActsOnTheMarker:
         repair.assert_awaited_once()
         assert result.is_error is True
 
+    async def test_a_peer_win_still_replays_the_call(self):
+        """Somebody else signing in is a repair, not a failed one.
+
+        The session the call needs exists either way. Treating the peer win as a
+        failure refused the replay and sent the user back for a retry that was
+        not needed, while a usable session was already on disk.
+        """
+        from linkedin_mcp_server.session_state import PeerSessionInPlaceError
+
+        owner, calls = _owner_that_fails_with(
+            AuthMissingOnOwnerError("no session", nothing_ran_yet=True)
+        )
+
+        with (
+            self._profile_is_free(),
+            patch(
+                "linkedin_mcp_server.daemon_auth._repair_auth_locally",
+                new_callable=AsyncMock,
+                side_effect=PeerSessionInPlaceError("another client signed in"),
+            ),
+        ):
+            async with Client(_proxy_to(owner)) as client:
+                result = await client.call_tool("scrape", raise_on_error=False)
+
+        # Replayed, and the owner served it the second time.
+        assert len(calls) == 2
+        assert result.is_error is False
+        assert result.content[0].text == "scraped ok"
+
 
 class TestWhichRolesGetWhichHalf:
     """Each half belongs to exactly one role, and the wrong pairing is silent."""
