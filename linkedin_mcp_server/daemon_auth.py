@@ -66,9 +66,10 @@ from linkedin_mcp_server.exceptions import (
 
 logger = logging.getLogger(__name__)
 
-#: The least a replay is given, however little of the call is left. Short enough
-#: that it cannot be what overruns a client's deadline, long enough that the
-#: replay is a real attempt rather than a formality.
+#: The least a replay is given, so that a call which has spent nearly all of its
+#: budget still makes a real attempt rather than failing on a zero deadline for a
+#: session that now exists. Itself capped by the budget below: as a flat floor it
+#: overran, giving a 1-second call a 5-second replay.
 _MINIMUM_REPLAY_SECONDS = 5.0
 
 
@@ -92,15 +93,21 @@ def _how_long_to_wait_for_the_sign_in(budget: float, already_spent: float) -> fl
 
 
 def _what_is_left_of_this_call(budget: float, already_spent: float) -> float:
-    """How much of the client's deadline the replay may still use.
+    """How much of the client's deadline a read-only replay may still use.
 
     The whole budget rather than the fraction above: waiting deliberately leaves
     a share for this, and by here that share is whatever has not been spent. A
     floor keeps a call that has already overrun from being handed a zero or
     negative deadline, which would fail the replay before it started for a
     session that now exists.
+
+    The floor is itself capped by the budget, because a floor that outlives its
+    own call is the very overrun this function exists to prevent: measured at
+    ``tool_timeout_seconds=1.0`` with 0.9s spent, a flat floor allowed 5 seconds.
+    Only reached for read-only tools, where an abandoned replay costs a wasted
+    page load; anything that changes something is never timed out here.
     """
-    return max(_MINIMUM_REPLAY_SECONDS, budget - already_spent)
+    return min(budget, max(_MINIMUM_REPLAY_SECONDS, budget - already_spent))
 
 
 #: Namespaced so a future fastmcp key cannot shadow it. Measured: a custom key
@@ -300,16 +307,32 @@ class FrontendAuthRepairMiddleware(Middleware):
             return result
 
         logger.info("Signed in; running the call again")
-        # Bounded by what is left of this call, not given a fresh budget. Nothing
-        # below this middleware bounds the whole path: the forwarded call has its
-        # own deadline per hop (`daemon_proxy.create_proxy_provider`), so the
-        # first call, the wait and the replay each stay inside one, while their
-        # sum is not bounded by anything. Measured shape: a sign-in finishing
-        # near the end of the wait, followed by a replay taking a full budget of
-        # its own, put the client past its deadline with the answer already in
-        # hand. Timing out here instead spends the last of the budget on the
-        # answer and, when it does not arrive, returns the owner's readable
-        # failure rather than a bare transport error.
+
+        if await _the_tool_changes_something(context):
+            # Never timed out locally, and this is the one case where waiting
+            # longer is the safer answer. Giving up here does not stop the owner:
+            # cancellation is not forwarded across the hop
+            # (`daemon_proxy._TIMEOUT_MARGIN_SECONDS` records the same), so the
+            # frontend would report the old auth failure while the owner went on
+            # to send the message. Measured over a real loopback owner: the
+            # client was answered at 0.66s with an error, and the owner appended
+            # its effect 0.7s later. The user then retries something that already
+            # happened.
+            #
+            # An overrun client call is the lesser harm: the deadline belongs to
+            # the client, which can give up on its own, and doing so leaves the
+            # same one call outstanding rather than a second one queued behind it.
+            return await call_next(context)
+
+        # Read-only, so bounded by what is left of this call rather than given a
+        # fresh budget. Nothing below this middleware bounds the whole path: the
+        # forwarded call has its own deadline per hop
+        # (`daemon_proxy.create_proxy_provider`), so the first call, the wait and
+        # the replay each stay inside one while their sum stays inside nothing.
+        # Measured shape: a sign-in finishing near the end of the wait, followed
+        # by a replay taking a full budget of its own, put the client past its
+        # deadline with the answer already in hand. An abandoned scrape costs a
+        # wasted page load and nothing else.
         remaining = _what_is_left_of_this_call(
             self._tool_timeout, time.monotonic() - began
         )
@@ -318,6 +341,32 @@ class FrontendAuthRepairMiddleware(Middleware):
         except (TimeoutError, asyncio.TimeoutError):
             logger.info("The replayed call ran out of time; reporting the failure")
             return result
+
+
+async def _the_tool_changes_something(
+    context: MiddlewareContext[mt.CallToolRequestParams],
+) -> bool:
+    """Whether running this tool again could repeat an effect on LinkedIn.
+
+    Read from the tool's own annotations, which survive the hop
+    (``ProxyProvider`` copies them), rather than from a list of names kept here:
+    a list would go stale the first time a tool is added, and it would go stale
+    silently in the unsafe direction.
+
+    Unknown counts as changing something. Only ``readOnlyHint`` says otherwise,
+    and a tool that declares nothing has not promised anything.
+    """
+    name = getattr(context.message, "name", None)
+    fastmcp_context = context.fastmcp_context
+    if name is None or fastmcp_context is None:
+        return True
+    try:
+        tool = await fastmcp_context.fastmcp.get_tool(name)
+    except Exception:  # noqa: BLE001 - an unresolvable tool is not a safe one
+        logger.debug("Could not read the annotations of %s", name, exc_info=True)
+        return True
+    annotations = getattr(tool, "annotations", None)
+    return not bool(annotations and annotations.readOnlyHint)
 
 
 def _readable_marker(result: ToolResult) -> dict[str, Any] | None:
