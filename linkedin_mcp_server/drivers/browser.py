@@ -11,7 +11,8 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from collections.abc import Coroutine
+from typing import Any, TypeVar
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
@@ -93,6 +94,8 @@ _calls_in_flight: int = 0
 # arriving in that window would see no browser and launch a second Chromium on
 # the same profile, which is the very corruption this module prevents.
 _browser_lifecycle_lock = asyncio.Lock()
+
+T = TypeVar("T")
 
 
 def _debug_skip_checkpoint_restart() -> bool:
@@ -773,16 +776,27 @@ async def close_browser() -> None:
     exactly when a new launch must not start.
     """
     async with _browser_lifecycle_lock:
-        task = asyncio.create_task(_close_browser_locked())
-        cancelled = False
-        while True:
-            try:
-                await asyncio.shield(task)
-                break
-            except asyncio.CancelledError:
-                cancelled = True
-        if cancelled:
-            raise asyncio.CancelledError
+        await _run_deferring_cancels(_close_browser_locked())
+
+
+async def _run_deferring_cancels(coroutine: Coroutine[Any, Any, T]) -> T:
+    """Run *coroutine* to completion, holding cancellation back until it ends.
+
+    The caller holds the lifecycle lock. Splitting this out of ``close_browser``
+    lets the conditional close run its own coroutine under the same protection,
+    rather than duplicating the shield loop.
+    """
+    task = asyncio.create_task(coroutine)
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 def _settle_the_profile(*, confirmed: bool) -> None:
@@ -992,7 +1006,16 @@ async def release_profile_if_idle_or_requested() -> bool:
         return False
 
     config = get_config().browser
-    lease = get_profile_lease()
+    # The lease this browser holds, not one the registry resolves now. Both
+    # questions asked below are about *this* profile: `handoff_requested()`
+    # probes a file under the lease's own auth root, and `held_seconds` counts
+    # from the moment that lease was acquired. A freshly resolved object answers
+    # about whichever path the config points at now and reports a hold of zero,
+    # so a waiter would be either ignored or refused forever. `config` still
+    # comes from settings: the hold window and the idle timeout are not lease
+    # state. Bound to a local because the close below can clear the global, and
+    # the lines under it must keep describing the lease this decision was about.
+    lease = _browser_lease
     # None means no tool call has ever run, which is idle in the strongest sense.
     idle_for = time.monotonic() - _last_activity if _last_activity is not None else None
 
@@ -1011,8 +1034,7 @@ async def release_profile_if_idle_or_requested() -> bool:
                 "Another process is waiting for the browser; handing over (held %.1fs)",
                 held,
             )
-            await close_browser()
-            return True
+            return await _close_unless_a_call_arrived()
         logger.debug(
             "Handoff requested but held for only %.1fs of %.1fs; keeping the "
             "browser to avoid a reopen",
@@ -1026,10 +1048,65 @@ async def release_profile_if_idle_or_requested() -> bool:
         logger.info(
             "Closing idle browser after %.0fs and releasing the profile", idle_for
         )
-        await close_browser()
-        return True
+        return await _close_unless_a_call_arrived()
 
     return False
+
+
+async def _close_unless_a_call_arrived() -> bool:
+    """Close the browser, unless a tool call started while we were deciding.
+
+    The guard in the caller ran outside the lifecycle lock, and taking that lock
+    can wait: a close in progress holds it across the cookie export and the
+    Chromium teardown. A call that starts inside that wait is invisible to a
+    check that already happened. Measured, with the lock held to open the
+    window: the decision was taken with nothing in flight, and Chromium was
+    closed and the profile released with one call running. That call's Page is
+    gone, which is exactly the closed-target error the guard exists to prevent.
+
+    Here rather than in ``close_browser``: that is the general teardown entry
+    point, and ``close_session``, shutdown, login and import all mean "close it"
+    unconditionally. A counter check there would make a deliberate close
+    silently do nothing. This is the one caller whose close is conditional.
+
+    Returns whether the browser was closed.
+    """
+    async with _browser_lifecycle_lock:
+        return await _run_deferring_cancels(_close_browser_if_still_idle())
+
+
+async def _close_browser_if_still_idle() -> bool:
+    """Tear the browser down unless a call claimed it; the lock is held.
+
+    The check has to sit *here*, in the coroutine the teardown task runs, and
+    that placement is the whole point rather than a detail. Checking in the
+    caller and then starting this as a task leaves a scheduling point between
+    the two: ``asyncio.create_task`` does not begin the coroutine, so the loop
+    gets to run whatever else is ready before the first line below executes.
+    Measured with the counter read in the caller instead: the re-check saw zero,
+    a tool call ran next and took the live browser through the fast path in
+    ``get_or_create_browser``, and the teardown then closed that same browser
+    with one call in flight.
+
+    From here there is no such gap. This body runs to its first ``await``
+    without yielding, and ``_close_browser_locked`` clears ``_browser`` before
+    *its* first await, so a call arriving afterwards finds no browser and waits
+    on the lock for a fresh one rather than losing the one it holds.
+
+    Returns whether the browser was closed.
+    """
+    if _calls_in_flight > 0:
+        logger.debug(
+            "A tool call started while the browser was being handed over; "
+            "keeping it, and the caller's post-call check hands over next"
+        )
+        return False
+    # Another close may have run while we waited, and reporting a close we did
+    # not perform would tell the middleware a handover happened.
+    if _browser is None:
+        return False
+    await _close_browser_locked()
+    return True
 
 
 def reset_browser_for_testing() -> None:
