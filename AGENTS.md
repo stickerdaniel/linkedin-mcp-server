@@ -97,6 +97,11 @@ Always read [`CONTRIBUTING.md`](CONTRIBUTING.md) before filing an issue or worki
   5. Create a draft PR; only convert to regular PR when ready to merge
   6. Review with AI agents first, then manual review. PRs are squash-merged into `main` (one commit per PR), so keep the PR title as the conventional-commit subject; commits within a PR are for review only.
 
+### Submitting
+
+`gt submit` opens one PR per branch in the stack. To ship a multi-commit change
+as a single PR, keep it on one branch and use `gh pr create`.
+
 ### Merging a stack
 
 Use `gt merge`, which merges every PR from `main` up to the current branch in
