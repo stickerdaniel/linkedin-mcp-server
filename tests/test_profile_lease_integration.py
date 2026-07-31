@@ -295,14 +295,11 @@ class TestIdleOwnerHandsOver:
         fake_browser = MagicMock()
         fake_browser.close = AsyncMock(return_value=True)
 
-        with (
-            patch.multiple(
-                browser_module,
-                _browser=fake_browser,
-                _browser_cookie_export_path=None,
-                _browser_lease=lease,
-            ),
-            patch.object(browser_module, "get_profile_lease", return_value=lease),
+        with patch.multiple(
+            browser_module,
+            _browser=fake_browser,
+            _browser_cookie_export_path=None,
+            _browser_lease=lease,
         ):
             watcher = asyncio.create_task(browser_module.watch_for_handoff_requests())
             waiter = subprocess.Popen(
@@ -366,14 +363,11 @@ class TestPollerDoesNotInterruptWork:
         try:
             _await_line(waiter, "ANNOUNCED")
 
-            with (
-                patch.multiple(
-                    browser_module,
-                    _browser=fake_browser,
-                    _browser_cookie_export_path=None,
-                    _browser_lease=lease,
-                ),
-                patch.object(browser_module, "get_profile_lease", return_value=lease),
+            with patch.multiple(
+                browser_module,
+                _browser=fake_browser,
+                _browser_cookie_export_path=None,
+                _browser_lease=lease,
             ):
                 browser_module.note_call_started()
                 closed = await browser_module.release_profile_if_idle_or_requested()
@@ -428,14 +422,11 @@ class TestMinimumHoldWindow:
         try:
             _await_line(waiter, "ANNOUNCED")
 
-            with (
-                patch.multiple(
-                    browser_module,
-                    _browser=fake_browser,
-                    _browser_cookie_export_path=None,
-                    _browser_lease=lease,
-                ),
-                patch.object(browser_module, "get_profile_lease", return_value=lease),
+            with patch.multiple(
+                browser_module,
+                _browser=fake_browser,
+                _browser_cookie_export_path=None,
+                _browser_lease=lease,
             ):
                 browser_module.note_activity()  # a call just finished
                 closed = await browser_module.release_profile_if_idle_or_requested()
@@ -450,6 +441,110 @@ class TestMinimumHoldWindow:
             waiter.wait(timeout=10)
             lease.mark_browser_closed()
             lease.release()
+
+
+class TestTheHandoffAsksTheLeaseTheBrowserHolds:
+    """Both handoff questions are about the profile this browser is sitting on.
+
+    Every other test in this file gives the retained lease and the registry the
+    same object, so none of them can see which one the code consulted. These two
+    hand out different objects. `handoff_requested()` probes a file under the
+    lease's own auth root, so a resolved one answers about a profile nobody is
+    waiting for; `held_seconds` counts from acquisition, so a fresh one reports
+    zero and the hold window never elapses. The second is the failure that would
+    strand a waiter outright.
+    """
+
+    @staticmethod
+    def _leases(*, retained_wants_handoff: bool, retained_held: float):
+        retained = MagicMock()
+        retained.handoff_requested.return_value = retained_wants_handoff
+        retained.held_seconds = retained_held
+
+        # What the registry would hand back for whatever path the config points
+        # at now: nobody waiting on it, and taken a moment ago.
+        resolved = MagicMock()
+        resolved.handoff_requested.return_value = False
+        resolved.held_seconds = 0.0
+        return retained, resolved
+
+    async def test_the_waiter_is_the_retained_leases_waiter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from linkedin_mcp_server.config import reset_config
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        monkeypatch.setenv("BROWSER_MIN_HOLD", "0")
+        reset_config()
+
+        retained, resolved = self._leases(
+            retained_wants_handoff=True, retained_held=300.0
+        )
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        with (
+            patch.multiple(
+                browser_module,
+                _browser=fake_browser,
+                _browser_cookie_export_path=None,
+                _browser_lease=retained,
+            ),
+            patch.object(
+                browser_module, "get_profile_lease", return_value=resolved
+            ) as looked_up,
+        ):
+            browser_module.note_activity()  # a call just finished
+            closed = await browser_module.release_profile_if_idle_or_requested()
+
+        assert closed, (
+            "a process waiting on the profile this browser holds was ignored, "
+            "because the handoff probe went to a lease resolved from the path"
+        )
+        fake_browser.close.assert_awaited()
+        looked_up.assert_not_called()
+        resolved.handoff_requested.assert_not_called()
+
+    async def test_the_hold_window_runs_from_the_retained_acquisition(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from linkedin_mcp_server.config import reset_config
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        monkeypatch.setenv("BROWSER_MIN_HOLD", "60")
+        reset_config()
+
+        retained, resolved = self._leases(
+            retained_wants_handoff=True, retained_held=300.0
+        )
+        # Same answer on the waiter, so only the hold window can decide this one.
+        resolved.handoff_requested.return_value = True
+
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        with (
+            patch.multiple(
+                browser_module,
+                _browser=fake_browser,
+                _browser_cookie_export_path=None,
+                _browser_lease=retained,
+            ),
+            patch.object(
+                browser_module, "get_profile_lease", return_value=resolved
+            ) as looked_up,
+        ):
+            browser_module.note_activity()
+            closed = await browser_module.release_profile_if_idle_or_requested()
+
+        assert closed, (
+            "an owner well past its hold window refused to hand over, because "
+            "the window was measured from a lease acquired just now"
+        )
+        fake_browser.close.assert_awaited()
+        looked_up.assert_not_called()
 
 
 class TestFailedLoginStillRestores:
