@@ -771,7 +771,16 @@ def _hand_over_config(
     Written on a thread for the same reason the verdict is read on one: it is
     the one mechanism that bounds a blocking pipe operation on every platform.
     The thread is a daemon, so a write that never completes cannot keep the
-    frontend from exiting, and the descriptor it holds is closed by the caller.
+    frontend from exiting.
+
+    Nothing outside closes the descriptor it holds. The thread's own ``with``
+    below does, as it unwinds, and on a timeout that is a moment after this
+    function has already returned: the writer stays blocked inside ``write``
+    until the child dies and breaks the pipe. ``_release_handshake`` closes
+    ``stdout`` and only ``stdout``.
+
+    So a caller that wants the write side gone ends the child, rather than
+    closing the stream under a thread that is writing to it.
     """
     stream = child.stdin
     assert stream is not None

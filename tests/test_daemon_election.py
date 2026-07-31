@@ -626,6 +626,28 @@ class TestFailingFast:
             # change is the difference between an end of file and a wait on a
             # live reader, and CI is the only place that distinction is
             # observed at all.
+            #
+            # Joined first, because nothing in production closes that
+            # descriptor: the writer's own `with stream:` does, as it unwinds
+            # from the broken pipe, so asserting the instant `_start_owner`
+            # returns races that unwinding by construction. It has lost that
+            # race twice on CI, both times on these two assertions and both
+            # times green on a rerun. The rate is a property of the machine
+            # rather than of the code: on a saturated laptop it failed 4 runs in
+            # 10, and elsewhere it would not reproduce at all.
+            #
+            # So the property meant here is that the writer ends *promptly* once
+            # the child is gone, which is what the join states and the instant
+            # read only approximated. The bound stays well under the 3s margin
+            # above, which is the assertion that carries this test's weight on
+            # POSIX and must not be masked.
+            #
+            # It buys nothing beyond that. A writer blocked on a full pipe
+            # survives the handshake release and ends only when the child dies,
+            # in either order, so the ordering above stays a Windows claim.
+            for thread in threading.enumerate():
+                if "daemon-config" in thread.name:
+                    thread.join(timeout=1)
             assert all(
                 sleeper.stdin is None or sleeper.stdin.closed for sleeper in sleepers
             ), "the configuration pipe was left open"
