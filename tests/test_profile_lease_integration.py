@@ -387,6 +387,194 @@ class TestPollerDoesNotInterruptWork:
             waiter.kill()
             waiter.wait(timeout=10)
 
+    async def test_a_call_arriving_during_the_close_still_keeps_the_browser(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The guard runs before the lifecycle lock, so it can go stale.
+
+        Taking that lock waits on any close already in progress, across the
+        cookie export and the Chromium teardown. A call that starts inside that
+        wait was not there when the counter was read, and the sibling test above
+        cannot see it: there the call is already in flight when the decision is
+        taken.
+        """
+        import asyncio
+
+        from linkedin_mcp_server.config import reset_config
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        monkeypatch.setenv("BROWSER_MIN_HOLD", "0")
+        reset_config()
+
+        lease = get_profile_lease(tmp_path / "profile")
+        assert lease.try_acquire()
+        lease.mark_browser_open()
+
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        waiter = subprocess.Popen(
+            [sys.executable, str(_WORKER), "announce", str(tmp_path), "5"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            _await_line(waiter, "ANNOUNCED")
+
+            with patch.multiple(
+                browser_module,
+                _browser=fake_browser,
+                _browser_cookie_export_path=None,
+                _browser_lease=lease,
+                # `asyncio.Lock` binds to a loop the first time an acquire has
+                # to *wait*: the uncontended path returns before `_get_loop()`
+                # is ever called, which is why the rest of the suite never
+                # notices. Contending it is the whole point here, and the
+                # module-level lock outlives every test while each test gets a
+                # fresh loop, so this one brings its own.
+                _browser_lifecycle_lock=asyncio.Lock(),
+            ):
+                browser_module.note_activity()  # a call just finished
+
+                # Holding the lock is what a close in progress does, and it is
+                # the only way to open this window deterministically.
+                await browser_module._browser_lifecycle_lock.acquire()
+                handover = asyncio.create_task(
+                    browser_module.release_profile_if_idle_or_requested()
+                )
+                try:
+                    # Let the decision run until it blocks on the lock. It
+                    # cannot get past that while this test holds it.
+                    for _ in range(20):
+                        await asyncio.sleep(0)
+                    assert not handover.done(), (
+                        "the handover finished without waiting for the lock, so "
+                        "this test never opened the window it is about"
+                    )
+
+                    browser_module.note_call_started()
+                finally:
+                    browser_module._browser_lifecycle_lock.release()
+
+                closed = await handover
+
+            assert not closed, (
+                "a tool call that started while the close waited for the "
+                "lifecycle lock had its browser closed underneath it"
+            )
+            fake_browser.close.assert_not_awaited()
+            assert lease.held, "the profile was handed away from a running call"
+        finally:
+            waiter.kill()
+            waiter.wait(timeout=10)
+            browser_module.note_activity()
+            lease.mark_browser_closed()
+            lease.release()
+
+    async def test_a_call_arriving_after_the_recheck_still_keeps_the_browser(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The narrower window, one scheduling point later than the test above.
+
+        Checking the counter and then starting the teardown as a task leaves a
+        gap: `asyncio.create_task` does not begin the coroutine, so anything
+        already runnable goes first. A tool call in that gap takes the live
+        browser through the fast path in `get_or_create_browser` and then has it
+        closed underneath it. The sibling test cannot see this: it starts its
+        call before the lock is released, so the check has not run yet.
+        """
+        import asyncio
+
+        from linkedin_mcp_server.config import reset_config
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        monkeypatch.setenv("BROWSER_MIN_HOLD", "0")
+        reset_config()
+
+        lease = get_profile_lease(tmp_path / "profile")
+        assert lease.try_acquire()
+        lease.mark_browser_open()
+
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        # What the teardown saw, rather than only what it did: an assertion on
+        # the outcome alone would pass on a close that merely lost its own race.
+        seen: dict[str, int] = {}
+        real_teardown = browser_module._close_browser_locked
+
+        async def watched_teardown() -> None:
+            seen["calls_in_flight"] = browser_module._calls_in_flight
+            await real_teardown()
+
+        waiter = subprocess.Popen(
+            [sys.executable, str(_WORKER), "announce", str(tmp_path), "5"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            _await_line(waiter, "ANNOUNCED")
+
+            with patch.multiple(
+                browser_module,
+                _browser=fake_browser,
+                _browser_cookie_export_path=None,
+                _browser_lease=lease,
+                _close_browser_locked=watched_teardown,
+                # Its own, for the loop-binding reason given in the sibling
+                # test above.
+                _browser_lifecycle_lock=asyncio.Lock(),
+            ):
+                browser_module.note_activity()  # a call just finished
+                arrive = asyncio.Event()
+
+                async def a_tool_call_starts() -> None:
+                    await arrive.wait()
+                    browser_module.note_call_started()
+
+                await browser_module._browser_lifecycle_lock.acquire()
+                handover = asyncio.create_task(
+                    browser_module.release_profile_if_idle_or_requested()
+                )
+                call = asyncio.create_task(a_tool_call_starts())
+                # Both park: the handover on the lock, the call on the event.
+                for _ in range(10):
+                    await asyncio.sleep(0)
+                assert not handover.done() and not call.done(), (
+                    "neither task parked, so this test never built the ordering "
+                    "it is about"
+                )
+
+                # Releasing the lock schedules the handover; setting the event
+                # schedules the call immediately behind it. So the handover
+                # runs, decides, and yields, and the call runs next.
+                browser_module._browser_lifecycle_lock.release()
+                arrive.set()
+
+                closed = await handover
+                await call
+
+            assert not closed, (
+                "a tool call that started one scheduling point after the "
+                "re-check had its browser closed underneath it"
+            )
+            assert "calls_in_flight" not in seen, (
+                f"the teardown ran anyway, with {seen.get('calls_in_flight')} "
+                "calls in flight"
+            )
+            fake_browser.close.assert_not_awaited()
+            assert lease.held, "the profile was handed away from a running call"
+        finally:
+            waiter.kill()
+            waiter.wait(timeout=10)
+            browser_module.note_activity()
+            lease.mark_browser_closed()
+            lease.release()
+
 
 class TestMinimumHoldWindow:
     """The hold window bounds how often ownership can move.
