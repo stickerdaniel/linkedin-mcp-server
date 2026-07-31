@@ -154,11 +154,15 @@ class BrowserShutdownUnconfirmedError(LinkedInMCPError):
     the same wedged owner and got the same refusal.
 
     The request lives here rather than at the raise sites because that is what
-    makes it complete, and a count of them does not belong in this sentence: the
-    first draft said seven and there were nine. It sat at one site once, in
-    ``handle_auth_error``, and the path this was measured on never goes through
-    it -- the failure came from ``_authenticate_existing_profile``, deep in the
-    driver.
+    makes it complete. It sat at one site once, in ``handle_auth_error``, and the
+    path this was measured on never goes through it: the failure came from
+    ``_authenticate_existing_profile``, deep in the driver.
+
+    Not sufficient on its own, though, and the reason is an ordering. This runs
+    while the raise is still in flight, so a site that marks the profile held
+    *after* constructing the error is invisible here and has to ask for itself;
+    ``_create_browser`` is exactly that, and was measured wedged with this in
+    place.
     """
 
     def __init__(self, message: str | None = None):

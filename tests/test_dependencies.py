@@ -742,3 +742,87 @@ class TestAWedgeFromAnywhereFreesTheOwner:
         assert stand_down_reason() is not None, (
             "an owner stranded by a routine close keeps the profile forever"
         )
+
+    def test_a_free_profile_leaves_the_owner_serving(self):
+        """The guard is what keeps this from firing on every ordinary close.
+
+        Asserted against the helper directly rather than through a confirmed
+        close: that branch never reaches the helper at all, so a test driving it
+        stays green with the guard deleted. Measured -- the first version of this
+        did exactly that.
+
+        Without the guard every call here would end the owner, healthy or not,
+        and the daemon would churn a process per stale session.
+        """
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            a_held_profile_means_this_owner_must_go,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = False  # a confirmed teardown clears it
+
+        with patch(
+            "linkedin_mcp_server.profile_lease.get_profile_lease", return_value=lease
+        ):
+            a_held_profile_means_this_owner_must_go()
+
+        assert stand_down_reason() is None, "a healthy owner was told to exit"
+
+    async def test_a_confirmed_close_does_not_reach_the_request(self):
+        """And the ordinary close path stays silent end to end."""
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = False  # a confirmed teardown clears it
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        with (
+            patch.object(drv, "_browser", fake_browser),
+            patch.object(drv, "_browser_holds_lease", True),
+            patch.object(drv, "get_profile_lease", return_value=lease),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+        ):
+            await drv._close_browser_locked()
+
+        assert stand_down_reason() is None, "a healthy owner was told to exit"
+
+    def test_a_lease_it_cannot_read_counts_as_held(self):
+        """Not being able to tell is not the same as being told it is free.
+
+        The two outcomes are not symmetric: an unnecessary stand-down costs one
+        election, a stranded owner costs every later call. Measured with the read
+        raising ``PermissionError``: the owner kept serving.
+        """
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            a_held_profile_means_this_owner_must_go,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+
+        def unreadable():
+            raise PermissionError("the profile path cannot be resolved")
+
+        with patch(
+            "linkedin_mcp_server.profile_lease.get_profile_lease",
+            side_effect=unreadable,
+        ):
+            a_held_profile_means_this_owner_must_go()
+
+        assert stand_down_reason() is not None

@@ -168,15 +168,25 @@ def a_held_profile_means_this_owner_must_go() -> None:
 
     Reads the lease itself. It runs from a ``finally`` a cancellation passes
     through, and from a teardown with no caller left to have worked it out.
+
+    A read that fails asks anyway. Not being able to tell is not the same as
+    being told the profile is free, and the two outcomes are not symmetric: an
+    unnecessary stand-down costs one election, while a stranded owner costs every
+    later call until somebody kills it by hand. Measured with the read raising
+    ``PermissionError``: the owner kept serving with the question unanswered.
+
+    Never raises. The caller is mid-teardown or mid-failure and has its own
+    exception to deliver.
     """
     if process_role() is not ServerRole.OWNER:
         return
     from linkedin_mcp_server.profile_lease import get_profile_lease
 
     try:
-        if not get_profile_lease().browser_open:
-            return
-    except Exception:  # noqa: BLE001 - a probe must not replace the real failure
+        held = get_profile_lease().browser_open
+    except Exception:  # noqa: BLE001 - unreadable is not the same as free
+        held = True
+    if not held:
         return
     ask_this_process_to_stand_down(
         "the browser did not shut down cleanly, so the profile is held"
