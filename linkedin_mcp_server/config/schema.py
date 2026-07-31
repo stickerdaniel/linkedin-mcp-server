@@ -37,6 +37,37 @@ DEFAULT_BROWSER_MIN_HOLD_SECONDS: float = 20.0
 # notices on a one-second poll and then has to tear Chromium down (~0.7s
 # measured). Without it a waiter gives up moments before the handover lands.
 BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
+# How long a one-shot operation waits for another process to hand the profile
+# over. A user-experience limit rather than a derived worst case, and the
+# distinction is worth stating because the arithmetic invites the wrong one: an
+# idle holder does release quickly, after browser_min_hold_seconds plus about a
+# second of teardown, but a holder running a tool call refuses to hand over at
+# all until that call ends (`drivers/browser.py`), and a call may take up to
+# tool_timeout_seconds. So this does not bound every cooperative case. It bounds
+# how long someone who just asked to sign in is left staring at nothing, and past
+# it they are told the browser is busy, which they can act on. Waiting three
+# minutes in silence is the worse answer.
+#
+# Deliberately not configurable. Nothing measured suggests a user would need to
+# tune it, and an unused setting is a support burden.
+PROFILE_HANDOVER_WAIT_SECONDS: float = 60.0
+
+# What fraction of a tool call a frontend may spend waiting for the sign-in it
+# started, before answering without it.
+#
+# A fraction rather than a number of seconds, because the bound that matters is
+# the call this wait is spent inside, and ``tool_timeout_seconds`` is something
+# the user sets. A fixed value was measured against ``TOOL_TIMEOUT=60``: the
+# client's call was cut short while the middleware was still waiting, so instead
+# of the readable "sign-in still in progress" the user got a bare timeout. The
+# login survived it and the next call succeeded, so nothing was lost but the
+# explanation -- which is the part a person acts on.
+#
+# Five sixths leaves the remaining sixth for the replayed call, which is the
+# whole point of having waited. Somebody still typing when it runs out loses only
+# this attempt: the login keeps running and the next call finds what it wrote.
+AUTH_REPAIR_LOGIN_WAIT_FRACTION: float = 5 / 6
+
 # Close an idle browser and release the profile after this long with no calls.
 # A backstop only — the handoff signal does the real work — so it is deliberately
 # long: a reopen costs one more LinkedIn request. 0 disables it.

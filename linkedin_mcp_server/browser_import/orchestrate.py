@@ -47,6 +47,7 @@ from linkedin_mcp_server.exceptions import (
     NoLinkedInSessionFoundError,
 )
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
+from linkedin_mcp_server.setup import UNGUARDED, a_peer_already_signed_in
 from linkedin_mcp_server.session_state import (
     run_deferring_cancels,
     portable_cookie_path,
@@ -193,6 +194,7 @@ async def import_session_from_browser(
     browser: str | None,
     *,
     user_data_dir: Path,
+    superseded_by: str | None | object = UNGUARDED,
 ) -> bool:
     """Discover, rank, decrypt, validate and persist a browser LinkedIn session.
 
@@ -242,6 +244,17 @@ async def import_session_from_browser(
         )
     release_profile = True
     try:
+        # Checked with the profile in hand, for the same reason the login checks
+        # there: two clients meeting one bad session both decide to repair it,
+        # both queue, and the one that waited is acting on an answer formed before
+        # the winner finished. The rotation below does not ask whose session it is
+        # retiring. Measured with two real processes: the loser rotated away the
+        # session the winner had just imported.
+        if superseded_by is not UNGUARDED and a_peer_already_signed_in(
+            user_data_dir, superseded_by
+        ):
+            logger.info("Another client already signed in; keeping its session")
+            return True
         return await _import_holding_the_profile(
             live, cookie_path, user_data_dir, lease
         )

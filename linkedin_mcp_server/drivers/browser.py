@@ -38,6 +38,7 @@ from linkedin_mcp_server.exceptions import (
     BrowserShutdownUnconfirmedError,
 )
 from linkedin_mcp_server.profile_lease import get_profile_lease
+from linkedin_mcp_server.server_role import a_held_profile_means_this_owner_must_go
 from linkedin_mcp_server.session_state import (
     SourceState,
     clear_runtime_profile,
@@ -593,6 +594,16 @@ async def _create_browser() -> BrowserManager:
         # process exits.
         lease.mark_browser_open()
         lease.try_acquire()
+        # After the marker, not before, and that ordering is the whole reason
+        # this call is here rather than only in the exception's constructor. The
+        # constructor runs while `_create_browser_locked` is still raising, when
+        # `browser_open` is false, so the helper reads "nothing is held" and
+        # returns; the two lines above then hold the profile with nobody having
+        # asked for a replacement. Measured through `_create_browser` in
+        # production order: `browser_open=True`, `stand_down=None`, and live, a
+        # real owner that three consecutive fresh clients each attached to and
+        # got the same refusal from.
+        a_held_profile_means_this_owner_must_go()
         raise
     except BaseException:
         # BaseException, not Exception: a cancelled startup would otherwise
@@ -778,7 +789,31 @@ async def _close_browser_locked() -> None:
             logger.debug("Cookie export on close skipped", exc_info=True)
     confirmed = await browser.close()
 
-    lease = get_profile_lease()
+    try:
+        lease = get_profile_lease()
+    except Exception:
+        # The lookup is path-based, so it can fail on a profile directory that
+        # became unreadable while the browser was running, even though this
+        # process still holds the open descriptor. By here the singleton is
+        # already cleared, so every line that would have kept the profile safe
+        # is below this point and none of them runs. Measured in production
+        # order: browser cleared, the hold flag still set, and no stand-down.
+        #
+        # Asked before re-raising, because the helper now treats a lease it
+        # cannot read as held, which is exactly this situation. The original
+        # failure still reaches the caller.
+        #
+        # Whether Chromium closed cleanly makes no difference here, and an
+        # earlier version of this exempted the confirmed case on the reasoning
+        # that a proven-closed browser leaves the profile free. It does not: both
+        # `mark_browser_closed()` and `release()` need the object this lookup
+        # failed to produce, so a confirmed close strands the lease just as
+        # thoroughly. Measured with a real acquired lease: Chromium gone, the
+        # lease still held with its marker set, and this owner's own next launch
+        # refused with `BrowserBusyError` while nobody had asked for a
+        # replacement.
+        a_held_profile_means_this_owner_must_go()
+        raise
     if confirmed:
         # Only now is Chromium provably gone, so only now may auth state move.
         lease.mark_browser_closed()
@@ -796,6 +831,15 @@ async def _close_browser_locked() -> None:
                 "Browser shutdown could not be confirmed; keeping the profile "
                 "lease until this process exits."
             )
+            # And for a shared owner, that sentence is the whole problem: it
+            # outlives the client that started it, so nobody is coming to restart
+            # it and every later call meets `BrowserBusyError`. Asked here rather
+            # than only where the failure is *reported*, because this path
+            # reports nothing at all: a handoff, the idle timeout and
+            # `close_session` all return normally from here, so no exception is
+            # ever constructed. Reproduced: close returned, lease kept,
+            # `stand_down_reason()` None, next launch refused.
+            a_held_profile_means_this_owner_must_go()
     logger.info("Browser closed")
 
 

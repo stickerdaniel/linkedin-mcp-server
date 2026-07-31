@@ -694,7 +694,63 @@ def _exclusive_profile(profile_dir: Path, *, action: str) -> Iterator[None]:
         lease.release()
 
 
-def rotate_source_profile(source_profile_dir: Path | None = None) -> Path | None:
+#: Distinguishes "no generation was observed" from "nothing asked for a guard".
+#: ``None`` cannot do both: a profile with no session reads as ``None``, and two
+#: clients meeting that state need protecting from each other exactly as much as
+#: two meeting a stale one. Measured with the two conflated: the second client
+#: rotated away the session the first had just created.
+UNGUARDED = object()
+
+
+class PeerSessionInPlaceError(RuntimeError):
+    """A peer replaced the session this rotation was asked to retire.
+
+    Raised rather than returned as ``None``, which already means "there was
+    nothing to retire". The two look identical to a caller and are not: one is a
+    no-op, the other means somebody else has done the work and this caller should
+    stop rather than carry on as though it had. Measured with them conflated: the
+    caller went on to promise a login window that never opened.
+    """
+
+
+def a_peer_already_signed_in(
+    user_data_dir: Path, superseded_by: str | None | object
+) -> bool:
+    """Whether a usable session other than *superseded_by* is on disk now.
+
+    Asked by every path that rotates the profile to make room for a new session,
+    which is the login here and the browser import next door, and asked only once
+    that path holds the profile lease. That is the first moment the answer cannot
+    change underneath it.
+
+    Both halves are needed. A different generation alone is not enough: an
+    abandoned attempt leaves the profile rotated and no generation at all, which
+    also reads as different, and standing down there would mean nobody ever signs
+    in. A usable session alone is not enough either, because the dead one still
+    looks usable from disk: readiness asks whether the files are there, not
+    whether LinkedIn still accepts them.
+
+    Together they mean what is wanted, because a generation is written only after
+    a login or import has validated its session and exported the cookies.
+    """
+    from linkedin_mcp_server.bootstrap import _auth_ready
+    from linkedin_mcp_server.session_state import load_source_state
+
+    state = load_source_state(user_data_dir)
+    if state is None or state.login_generation == superseded_by:
+        return False
+    # The same directory the generation came from. Asking about the configured
+    # one instead would answer a different question than the one asked, and
+    # quietly: a caller handed an explicit profile would get the default
+    # profile's verdict while rotating theirs.
+    return _auth_ready(user_data_dir)
+
+
+def rotate_source_profile(
+    source_profile_dir: Path | None = None,
+    *,
+    superseded_by: str | None | object = UNGUARDED,
+) -> Path | None:
     """Retire the current source session so the next one starts clean.
 
     Chromium mints ``machine_id``, ``session_id_generator_last_value`` and
@@ -707,10 +763,26 @@ def rotate_source_profile(source_profile_dir: Path | None = None) -> Path | None
     The retired artifacts are moved, not deleted, so a session that turns out to
     have been fine is still recoverable. ``--logout`` clears the quarantines.
 
+    *superseded_by* is the generation the caller found broken. Given one, this
+    retires nothing if a *different* usable session is on disk by the time the
+    profile is held, because somebody else has replaced it in the meantime.
+
+    The comparison belongs here rather than at the call site, and that is the
+    whole point of the argument. A caller deciding first and rotating afterwards
+    leaves a gap: measured, a peer completing a login inside it had its fresh
+    session quarantined by a process acting on a view formed before it existed.
+    Under the lease below, the answer cannot change between reading it and acting
+    on it.
+
     Returns the quarantine directory, or ``None`` when there was nothing to
     retire.
 
     Raises:
+        PeerSessionInPlaceError: Another client signed in first, so its session
+            is on disk and this rotation must not touch it. Distinct from the
+            ``None`` above, and the distinction is load-bearing: both mean "did
+            not rotate", but only one of them means a usable session now exists.
+            Conflated, the caller promised a login window it never opened.
         RuntimeError: Another process holds the profile. Rotating underneath a
             live Chromium corrupts both the old and the new session.
         OSError: A move failed. Whatever had already moved is put back first, so
@@ -725,6 +797,17 @@ def rotate_source_profile(source_profile_dir: Path | None = None) -> Path | None
         return None
 
     with _exclusive_profile(profile_dir, action="creating a new session"):
+        if superseded_by is not UNGUARDED and a_peer_already_signed_in(
+            profile_dir, superseded_by
+        ):
+            logger.info(
+                "Another client already signed in; leaving its session in place"
+            )
+            raise PeerSessionInPlaceError(
+                "Another LinkedIn MCP client has already signed in. Retry this "
+                "tool to use its session."
+            )
+
         # utcnow_iso() is second-resolution and rotation is now routine rather
         # than exceptional, so two rotations can land in the same second. The
         # suffix keeps them from merging into one directory.

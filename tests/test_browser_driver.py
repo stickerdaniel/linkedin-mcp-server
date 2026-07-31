@@ -1,5 +1,6 @@
 """Tests for linkedin_mcp_server.drivers.browser runtime-aware auth startup."""
 
+import asyncio
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1206,3 +1207,39 @@ class TestFeedFailureDoesNotLeakCredentials:
         assert not any("s3cr3t" in trace for trace in traces)
         assert "s3cr3t" not in caplog.text
         assert "acctzone9" not in caplog.text
+
+
+class TestTheCookieExportCannotStrandTheProfile:
+    """Closing runs the export first, and it used to be able to hang there.
+
+    ``export_cookies`` awaits a protocol call that has no deadline of its own,
+    and on close it runs before the bounded teardown, with the singleton already
+    cleared and the profile lease still held, inside a section that defers
+    cancellation. A call that never answered therefore stranded the profile
+    before anything bounded was reached and raised nothing for anyone to act on:
+    no close result, no exception, no stand-down.
+    """
+
+    async def test_an_export_that_never_answers_gives_up(self):
+        from unittest.mock import MagicMock, patch
+
+        from linkedin_mcp_server.core import browser as core
+
+        manager = core.BrowserManager.__new__(core.BrowserManager)
+        context = MagicMock()
+
+        async def never_answers():
+            await asyncio.sleep(3600)
+
+        context.cookies = never_answers
+        manager._context = context
+
+        with patch.object(core, "_CLEANUP_TIMEOUT_SECONDS", 0.2):
+            began = asyncio.get_running_loop().time()
+            exported = await manager.export_cookies("/tmp/never-written.json")
+            took = asyncio.get_running_loop().time() - began
+
+        # Reported as a failed export, not raised: the caller logs it and carries
+        # on to the teardown, which is the part that must not be skipped.
+        assert exported is False
+        assert took < 2, f"the export was still unbounded ({took:.1f}s)"

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.schema import PROFILE_HANDOVER_WAIT_SECONDS
 from linkedin_mcp_server.core import (
     BrowserManager,
     goto_reporting_proxy_errors,
@@ -21,6 +22,8 @@ from linkedin_mcp_server.core import (
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.session_state import (
+    UNGUARDED,
+    a_peer_already_signed_in,
     run_deferring_cancels,
     portable_cookie_path,
     restore_source_profile,
@@ -31,7 +34,11 @@ from linkedin_mcp_server.session_state import (
 from linkedin_mcp_server.drivers.browser import close_browser, get_profile_dir
 
 
-async def interactive_login(user_data_dir: Path | None = None) -> bool:
+async def interactive_login(
+    user_data_dir: Path | None = None,
+    *,
+    superseded_by: str | None | object = UNGUARDED,
+) -> bool:
     """
     Open browser for manual LinkedIn login with persistent profile.
 
@@ -41,9 +48,15 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
 
     Args:
         user_data_dir: Path to browser profile. Defaults to config's user_data_dir.
+        superseded_by: The login generation the caller believes is broken, or
+            ``None`` when it observed no session at all. Either way the login
+            stands down if a *different* usable session is on disk by the time it
+            holds the profile, because somebody else has already done the work.
+            Left at :data:`UNGUARDED` by callers with nothing to compare against,
+            such as ``--login`` typed at a terminal.
 
     Returns:
-        True if login was successful
+        True if login was successful, or a peer's session is already in place
 
     Raises:
         Exception: If login fails or times out
@@ -63,7 +76,17 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
     # moment cookies are written, and another process could launch against it
     # while this browser is still open.
     lease = get_profile_lease(user_data_dir)
-    if not lease.try_acquire():
+    # Waited for rather than demanded outright, because this is also the path a
+    # frontend takes when the shared browser asks it to sign in. A proxy holds no
+    # lease of its own to reuse, so a momentary holder anywhere else would leave
+    # the user with a login that refuses to open and no way to make it.
+    #
+    # Bounded by how long someone who just asked to sign in should be left
+    # waiting, rather than by any worst case: a holder part way through a tool
+    # call will not hand over until it finishes, and that can run to the tool
+    # timeout. Past this the user is told the browser is busy, which they can act
+    # on, and which beats a silent wait of several minutes.
+    if not await lease.acquire(timeout=PROFILE_HANDOVER_WAIT_SECONDS):
         raise BrowserBusyError(
             "Another LinkedIn MCP client is using the browser, so a login "
             "cannot start. Close it and try again."
@@ -73,6 +96,24 @@ async def interactive_login(user_data_dir: Path | None = None) -> bool:
     # an exception, and each of those must still settle the profile correctly.
     state = _LoginState()
     try:
+        # Checked here and nowhere earlier, because here is the first moment it
+        # can be trusted: the profile is held, so nothing can change underneath
+        # the answer. An earlier check, before the wait, is exactly what does not
+        # work. Two clients meeting one dead session both look, both see it dead,
+        # and both queue for the profile; the one that waited then holds a stale
+        # opinion. It would rotate the session the winner has just created, which
+        # was measured: the fresh generation ended up in quarantine and
+        # `load_source_state` returned None.
+        #
+        # Inside the try, so a failure while asking still releases the profile.
+        # Outside it, an unreadable profile directory left the lease held until
+        # the process exited, which locks out every other client.
+        if superseded_by is not UNGUARDED and a_peer_already_signed_in(
+            user_data_dir, superseded_by
+        ):
+            print("   Another client already signed in; using its session.")
+            return True
+
         return await _login_holding_the_profile(user_data_dir, lease, state)
     finally:
         if state.close_confirmed:

@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from fastmcp.exceptions import ToolError
 
@@ -11,6 +13,8 @@ from linkedin_mcp_server.core.exceptions import (
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import (
     AuthenticationInProgressError,
+    AuthMissingOnOwnerError,
+    AuthStaleOnOwnerError,
     BrowserBinaryMissingError,
     CredentialsNotFoundError,
     LinkedInMCPError,
@@ -135,6 +139,30 @@ def test_authentication_in_progress_surfaces_poll_friendly_message_verbatim():
     assert "issue" not in surfaced.lower()
 
 
+def test_owner_auth_refusal_skips_issue_diagnostics():
+    """A shared browser that cannot sign in is designed behaviour, not a bug.
+
+    The LinkedInMCPError catch-all appends an issue-report template, which would
+    send users to the tracker for something working as intended. Its own branch
+    exists for that.
+
+    Asserted on the surfaced text rather than by patching build_issue_diagnostics:
+    a patched-out builder makes the catch-all fall back to a message with no
+    template, so the mutation of removing the branch survived. Measured, the
+    unbranched path really appends "Diagnostics:" and an issue-template path.
+    """
+    for error in (
+        AuthMissingOnOwnerError("the shared browser has no session"),
+        AuthStaleOnOwnerError("the shared browser's session stopped working"),
+    ):
+        with pytest.raises(ToolError) as caught:
+            raise_tool_error(error, "get_person_profile")
+
+        surfaced = str(caught.value)
+        assert surfaced == str(error)
+        assert "issue" not in surfaced.lower()
+
+
 def test_reraises_unknown_exception():
     """Unknown exceptions are re-raised as-is, not wrapped in ToolError."""
     with pytest.raises(ValueError, match="oops"):
@@ -245,3 +273,134 @@ async def test_fastmcp_boundary_logging_stays_clean(monkeypatch):
     output = rendered.getvalue()
     assert secret not in output
     assert user not in output
+
+
+class TestAnAlreadyShapedToolErrorPassesThrough:
+    """One failure reaches ``raise_tool_error`` twice, and the second pass must
+    not re-derive it.
+
+    A tool wraps its body in ``except Exception`` while the helpers it call shape
+    their own failures, so one failure arrives once as the domain exception and
+    again as the ``ToolError`` that produced. A ``ToolError`` matched none of the
+    type branches, so it fell through to the catch-all's ``raise safe from None``.
+
+    What that cost, checked rather than assumed. The client-visible *message*
+    survived: ``redacted_copy`` returns the same object when the text needs no
+    rewriting, so nothing was reworded. What was lost was ``__cause__``, and with
+    it the ability of anything downstream to tell one failure from another, plus a
+    second log line calling an already-classified failure unexpected.
+
+    Redaction is the exception, and it is why the pass-through is conditional: a
+    message that *does* need rewriting cannot keep its cause, because the original
+    still carries the credential.
+    """
+
+    def test_the_original_cause_survives_the_second_pass(self):
+        original = SessionExpiredError("the session on disk is stale")
+
+        with pytest.raises(ToolError) as caught:
+            try:
+                raise_tool_error(original, "get_person_profile")
+            except ToolError as shaped:
+                # What a tool's own `except Exception` does with it.
+                raise_tool_error(shaped, "get_person_profile")
+
+        # The chain is what a middleware classifies a failure by. Before the fix
+        # this was [ToolError] alone.
+        chain = []
+        current: BaseException | None = caught.value
+        while current is not None:
+            chain.append(type(current))
+            current = current.__cause__
+        assert chain == [ToolError, SessionExpiredError]
+
+    def test_the_second_pass_is_not_logged_as_an_unexpected_error(self, caplog):
+        # The catch-all logs at ERROR as "Unexpected error". A failure a branch
+        # already classified and logged at WARNING must not be reported a second
+        # time as something nothing recognised, which is what a support log then
+        # shows for an ordinary expired session.
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(ToolError):
+                try:
+                    raise_tool_error(SessionExpiredError(), "get_person_profile")
+                except ToolError as shaped:
+                    raise_tool_error(shaped, "get_person_profile")
+
+        assert "Unexpected error" not in caplog.text
+
+    def test_the_cause_reaches_a_middleware_at_a_real_tool_catch_site(self):
+        # The property the daemon work depends on, asserted through a real tool
+        # rather than by calling raise_tool_error directly: the double pass is
+        # produced by the tool's own `except Exception`, so a synthetic
+        # reproduction proves nothing about the shape the code actually takes.
+        import asyncio
+
+        from fastmcp import FastMCP
+        from fastmcp.server.middleware import Middleware
+
+        seen: dict[str, list[type]] = {}
+
+        class Sniff(Middleware):
+            async def on_call_tool(self, context, call_next):
+                try:
+                    return await call_next(context)
+                except Exception as exc:
+                    chain: list[type] = []
+                    current: BaseException | None = exc
+                    while current is not None:
+                        chain.append(type(current))
+                        current = current.__cause__
+                    seen["chain"] = chain
+                    raise
+
+        mcp = FastMCP("test", mask_error_details=True)
+        mcp.add_middleware(Sniff())
+
+        @mcp.tool
+        async def failing_tool() -> str:
+            try:
+                raise_tool_error(SessionExpiredError(), "failing_tool")
+            except Exception as exc:  # exactly what every tool body does
+                raise_tool_error(exc, "failing_tool")
+
+        async def drive() -> None:
+            with pytest.raises(Exception):
+                await mcp.call_tool("failing_tool", {})
+
+        asyncio.run(drive())
+
+        assert seen["chain"] == [ToolError, SessionExpiredError]
+
+    def test_a_shaped_error_carrying_a_credential_is_still_redacted(self, monkeypatch):
+        # The pass-through must not become a way around redaction. Before this
+        # was guarded, a proxy password inside an already-shaped ToolError reached
+        # the client and the log in clear text, where the catch-all had been
+        # rewriting it. mask_error_details does not help: FastMCP logs the
+        # exception and its traceback before masking the reply.
+        #
+        # Built rather than written literally so the assertion cannot match this
+        # source line if it is ever echoed back in a traceback.
+        user = "acct" + "zone9"
+        secret = "s3" + "cr3t"
+
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_username = user
+        config.browser.proxy_password = secret
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        shaped = ToolError(f"failed via http://{user}:{secret}@gate.example:7000")
+
+        with pytest.raises(ToolError) as caught:
+            raise_tool_error(shaped, "get_person_profile")
+
+        assert secret not in str(caught.value)
+        assert user not in str(caught.value)
+        # The one case where the cause cannot be kept: a rewritten message means
+        # a new object, and the original still carries the credential.
+        assert caught.value.__cause__ is None
+
+        # That the pass-through is for ToolError only, and an unknown exception
+        # still reaches the catch-all, is `test_reraises_unknown_exception` above.

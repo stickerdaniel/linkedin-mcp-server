@@ -36,6 +36,7 @@ from linkedin_mcp_server.bootstrap import (
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import NetworkError
 from linkedin_mcp_server.exceptions import (
+    AuthenticationBootstrapFailedError,
     AuthenticationInProgressError,
     AuthenticationStartedError,
     BrowserSetupInProgressError,
@@ -45,6 +46,7 @@ from linkedin_mcp_server.exceptions import (
     NoLinkedInSessionFoundError,
 )
 from linkedin_mcp_server.session_state import (
+    PeerSessionInPlaceError,
     portable_cookie_path,
     source_state_path,
 )
@@ -108,7 +110,7 @@ class TestBootstrap:
             await ensure_tool_ready_or_raise("search_jobs")
 
     async def test_missing_auth_starts_login(self, monkeypatch):
-        async def fake_start_login(ctx=None) -> None:
+        async def fake_start_login(ctx=None, **_kwargs) -> None:
             raise AuthenticationStartedError(
                 "No valid LinkedIn session was found. A login browser window has been opened. Sign in with your LinkedIn credentials there, then retry this tool."
             )
@@ -859,7 +861,7 @@ class TestLazyFullChromiumTrigger:
         async def fake_full() -> None:
             order.append("full")
 
-        async def fake_login(_profile_dir) -> bool:
+        async def fake_login(_profile_dir, *, superseded_by=None) -> bool:
             order.append("login")
             return True
 
@@ -1400,7 +1402,7 @@ class TestAutoLogin:
         async def fake_run_login_flow() -> None:
             spawn_count["value"] += 1
 
-        async def fake_import(_browser, *, user_data_dir):
+        async def fake_import(_browser, *, user_data_dir, **_kwargs):
             _make_auth_ready(isolate_profile_dir)
             return True
 
@@ -1480,7 +1482,7 @@ class TestAutoLogin:
         never_done = asyncio.Event()
         spawn_count = {"value": 0}
 
-        async def fake_import(_browser, *, user_data_dir):
+        async def fake_import(_browser, *, user_data_dir, **_kwargs):
             await release_import.wait()
             return False
 
@@ -1714,7 +1716,7 @@ class TestAutoLogin:
         async def spy_close_browser() -> None:
             order.append("close")
 
-        async def fake_import(_browser, *, user_data_dir):
+        async def fake_import(_browser, *, user_data_dir, **_kwargs):
             order.append("import")
             _make_auth_ready(isolate_profile_dir)
             return True
@@ -1750,7 +1752,7 @@ class TestAutoLogin:
     ):
         """ctx.info notice fires at most once per process; a ctx.info failure never blocks the import."""
 
-        async def fake_import(_browser, *, user_data_dir):
+        async def fake_import(_browser, *, user_data_dir, **_kwargs):
             return False  # nothing to import; falls through to manual login
 
         async def fake_login_flow() -> None:
@@ -1857,7 +1859,6 @@ def test_move_auth_state_aside_reports_a_held_profile(monkeypatch):
     """Swallowing this would open a login browser whose own rotation fails at
     the same point, after telling the user the browser had opened."""
     from linkedin_mcp_server import bootstrap
-    from linkedin_mcp_server.exceptions import AuthenticationBootstrapFailedError
 
     monkeypatch.setattr(
         bootstrap,
@@ -1921,3 +1922,464 @@ class TestProxyErrorSurvivesTheImportTask:
 
         # No login task started: the proxy has to be fixed first.
         assert get_bootstrap_state().login_task is None
+
+
+class TestAnOwnerNeverSignsInItself:
+    """A detached owner reports bad auth instead of acting on it.
+
+    It has no terminal and no desktop session, so a login window has nowhere to
+    appear. It must also leave the profile alone: the frontend that will log in
+    needs to find the session state as the owner saw it, and rotating from here
+    would race that login for the same files.
+    """
+
+    def _as_owner(self, monkeypatch):
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        set_process_role(ServerRole.OWNER)
+
+    async def test_a_missing_session_is_reported_not_repaired(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.exceptions import AuthMissingOnOwnerError
+
+        self._as_owner(monkeypatch)
+        # Both of the things the owner must not do, watched rather than assumed.
+        # Patched on `bootstrap`, not on `setup`: bootstrap imported the name
+        # directly (`bootstrap.py:49`), so patching the source module would watch
+        # a reference nothing calls and pass however the gate behaved.
+        started_login = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.interactive_login", started_login
+        )
+        imported = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.browser_import.orchestrate.import_session_from_browser",
+            imported,
+        )
+
+        with pytest.raises(AuthMissingOnOwnerError, match="cannot sign in by itself"):
+            await _start_login_if_needed()
+
+        started_login.assert_not_called()
+        imported.assert_not_called()
+        # No login task either: one would open a window on the next poll.
+        assert get_bootstrap_state().login_task is None
+
+    async def test_a_stale_session_is_reported_without_rotating_the_profile(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.exceptions import AuthStaleOnOwnerError
+
+        self._as_owner(monkeypatch)
+        rotated = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.rotate_source_profile", rotated
+        )
+        started_login = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.interactive_login", started_login
+        )
+
+        with pytest.raises(AuthStaleOnOwnerError, match="cannot sign in by itself"):
+            await invalidate_auth_and_trigger_relogin()
+
+        # The rotation is the destructive half: it retires the session the
+        # frontend is about to replace, and it cannot be undone from there.
+        rotated.assert_not_called()
+        started_login.assert_not_called()
+
+    async def test_auto_import_is_refused(self, isolate_profile_dir, monkeypatch):
+        # As a predicate test beside the Docker and proxy ones, because gating
+        # only the call site would leave the next caller free to reopen the hole.
+        config = _auto_import_config(flag=True, is_interactive=True)
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+
+        assert _auto_import_allowed() is True  # the same config, as a DIRECT server
+        self._as_owner(monkeypatch)
+        assert _auto_import_allowed() is False
+
+    async def test_a_direct_server_still_signs_in(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        # The gates key off the role, so the historical single-process behaviour
+        # has to be untouched. Without this, a gate written against the wrong
+        # predicate would look correct in every owner test and break every user.
+
+        config = _auto_import_config(flag=False, is_interactive=True)
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._move_invalid_auth_state_aside",
+            MagicMock(),
+        )
+        login_flow = AsyncMock()
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._run_login_flow", login_flow)
+
+        # Reaches the login path rather than the owner refusal, and actually
+        # starts one: asserting only that an AuthenticationInProgressError came
+        # back proves a task-shaped path, not a login. Verified by mutation, that
+        # weaker form passed with _run_login_flow replaced by a bare sleep.
+        with pytest.raises(AuthenticationInProgressError):
+            await _start_login_if_needed()
+
+        login_flow.assert_called_once()
+
+
+class TestTheOwnerStaysQuiescentUntilANewSessionLands:
+    """Closing the browser is not enough to stop the next call reopening it.
+
+    ``get_or_create_browser`` opens one whenever the singleton is None, and
+    readiness tests whether the auth files exist rather than whether they work.
+    Measured before the latch existed: the call after a confirmed close created a
+    second browser, which is one opened into the middle of the frontend's login.
+    """
+
+    def _quiescent_on(self, generation):
+        import linkedin_mcp_server.bootstrap as bootstrap
+
+        bootstrap.go_auth_quiescent(generation)
+
+    def _still_latched(self) -> bool:
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.exceptions import AuthStaleOnOwnerError
+
+        try:
+            bootstrap._raise_if_auth_quiescent()
+        except AuthStaleOnOwnerError:
+            return True
+        return False
+
+    def _write_session(self, profile_dir):
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(profile_dir).write_text("[]")
+        write_source_state(profile_dir)
+
+    async def test_the_broken_session_alone_never_lifts_it(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.bootstrap as bootstrap
+
+        self._write_session(isolate_profile_dir)
+        self._quiescent_on(bootstrap.current_login_generation())
+
+        # `_auth_ready()` is already true of these very files, so a latch that
+        # only asked whether a session exists would lift immediately.
+        assert bootstrap._auth_ready() is True
+        assert self._still_latched() is True
+
+    async def test_an_abandoned_login_leaves_it_latched(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import rotate_source_profile
+
+        self._write_session(isolate_profile_dir)
+        self._quiescent_on(bootstrap.current_login_generation())
+
+        # What the frontend does first, and all it does if the user closes the
+        # window: the session is retired and nothing replaces it.
+        rotate_source_profile(isolate_profile_dir)
+
+        # The generation now reads as None, which *differs* from the observed
+        # one, so a latch keyed on inequality alone would lift here and open
+        # Chromium on a profile with no session at all.
+        assert bootstrap.current_login_generation() is None
+        assert self._still_latched() is True
+
+    async def test_a_real_new_session_lifts_it(self, isolate_profile_dir, monkeypatch):
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import rotate_source_profile
+
+        self._write_session(isolate_profile_dir)
+        self._quiescent_on(bootstrap.current_login_generation())
+
+        rotate_source_profile(isolate_profile_dir)
+        self._write_session(isolate_profile_dir)  # the login succeeds
+
+        assert self._still_latched() is False
+
+        # Then take the session away again. This is what proves the latch was
+        # *cleared* rather than merely reporting itself lifted because the
+        # predicate happened to be true: an implementation that answers from the
+        # predicate every time would arm again here, while a cleared latch stays
+        # silent whatever the files say. Verified by mutation, an earlier version
+        # of this test passed against exactly that.
+        rotate_source_profile(isolate_profile_dir)
+
+        assert self._still_latched() is False
+
+    async def test_the_gate_refuses_before_it_can_reach_a_browser(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.exceptions import AuthStaleOnOwnerError
+
+        self._write_session(isolate_profile_dir)
+        self._quiescent_on(bootstrap.current_login_generation())
+
+        # Through the real pre-tool gate, which is what a forwarded call hits.
+        with pytest.raises(AuthStaleOnOwnerError):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+    async def test_every_later_call_names_the_same_broken_session(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """The latch must put its generation on the failures it raises.
+
+        Only the first call reaches this through `handle_auth_error`, which knows
+        what it observed. Every call after that is answered by the latch, and a
+        failure raised there without the generation gives the *second* client a
+        marker with nothing to compare against. That client then repairs
+        unguarded, and rotates away the session the first one is signing in for.
+        """
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.exceptions import AuthStaleOnOwnerError
+
+        self._write_session(isolate_profile_dir)
+        broken = bootstrap.current_login_generation()
+        self._quiescent_on(broken)
+
+        with pytest.raises(AuthStaleOnOwnerError) as caught:
+            bootstrap._raise_if_auth_quiescent()
+
+        assert caught.value.generation == broken
+
+
+class TestTwoClientsMeetingOneDeadSession:
+    """Only one of them may retire it, and `_lock` cannot arrange that.
+
+    Two frontends can be told to sign in for the same dead session. The lock
+    around this function is process-local, so it serializes each process against
+    itself and knows nothing about the other one.
+    """
+
+    def _write_session(self, profile_dir):
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(profile_dir).write_text("[]")
+        write_source_state(profile_dir)
+
+    async def test_without_the_generation_the_second_client_destroys_the_first(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """The damage, reproduced first, so the fix below is not asserting thin air.
+
+        This is the shipped behaviour of the unguarded path: rotation is safe
+        against a *concurrent* login, because it takes the profile lease, but
+        nothing stops a client that arrives after one has finished.
+        """
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import load_source_state
+
+        self._write_session(isolate_profile_dir)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_login_flow", AsyncMock()
+        )
+
+        # A finishes a login: a fresh session, and a generation to go with it.
+        self._write_session(isolate_profile_dir)
+        fresh = bootstrap.current_login_generation()
+
+        # B arrives holding no generation at all, which is the old call shape.
+        with pytest.raises(AuthenticationStartedError):
+            await invalidate_auth_and_trigger_relogin()
+
+        # A's session is gone, rotated into quarantine by a client that was
+        # complaining about a session already replaced.
+        assert load_source_state(isolate_profile_dir) is None
+        assert fresh is not None
+
+    async def test_the_generation_stops_the_second_client(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import load_source_state
+
+        self._write_session(isolate_profile_dir)
+        stale = bootstrap.current_login_generation()
+
+        login = AsyncMock()
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._run_login_flow", login)
+
+        # A finishes its login, writing a different generation.
+        self._write_session(isolate_profile_dir)
+        fresh = bootstrap.current_login_generation()
+        assert fresh != stale
+
+        # B is told what actually happened, and no login is scheduled. An earlier
+        # version of this test accepted AuthenticationStartedError here, which
+        # blessed a false report: the caller was promised a login window, none
+        # opened, because the task stood down the moment it held the profile.
+        with pytest.raises(PeerSessionInPlaceError, match="already signed in"):
+            await invalidate_auth_and_trigger_relogin(stale_generation=stale)
+
+        assert get_bootstrap_state().login_task is None
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is not None
+        assert surviving.login_generation == fresh
+
+    async def test_the_first_client_still_retires_the_session_it_found(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        # The guard must not stop the client that is actually right about the
+        # session being dead, which is every ordinary case.
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import load_source_state
+
+        self._write_session(isolate_profile_dir)
+        stale = bootstrap.current_login_generation()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_login_flow", AsyncMock()
+        )
+
+        with pytest.raises(AuthenticationStartedError):
+            await invalidate_auth_and_trigger_relogin(stale_generation=stale)
+
+        assert load_source_state(isolate_profile_dir) is None
+
+    async def test_an_abandoned_first_attempt_does_not_block_the_second_client(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """A different generation is not on its own proof that anyone succeeded.
+
+        An abandoned login leaves the profile rotated and nothing written, so the
+        generation reads as None: different from the stale one, and yet no session
+        exists. A guard that asked only whether the generation had moved would tell
+        the next client "another client already signed in" and never start the login
+        it is asking for. Measured, that is exactly what the half-guard does.
+        """
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import rotate_source_profile
+
+        self._write_session(isolate_profile_dir)
+        stale = bootstrap.current_login_generation()
+        login = AsyncMock()
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap._run_login_flow", login)
+
+        # A starts a login and the user closes the window: rotated, nothing new.
+        rotate_source_profile(isolate_profile_dir)
+        assert bootstrap.current_login_generation() is None
+
+        # B has to be allowed through, and has to open a login.
+        with pytest.raises(AuthenticationStartedError):
+            await invalidate_auth_and_trigger_relogin(stale_generation=stale)
+
+        login.assert_called_once()
+
+
+class TestTheAutoImportInheritsTheGuard:
+    """`start_login_if_needed` tries an import first, and it rotates too.
+
+    The guard has to reach it, not only the login window behind it. A client whose
+    keychain read or profile discovery ran long is the realistic late arrival, and
+    the import retires the current session the moment it holds the profile.
+    """
+
+    async def test_the_generation_reaches_the_import(
+        self, isolate_profile_dir, monkeypatch, _stub_import_env
+    ):
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        # Installed rather than loaded: the import path calls get_config(), which
+        # parses sys.argv, and under pytest that is pytest's own command line.
+        config = AppConfig()
+        config.browser.auto_import_from_browser = True
+        set_config(config)
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+
+        seen: dict[str, object] = {}
+
+        async def fake_import(_browser, *, user_data_dir, **kwargs):
+            seen.update(kwargs)
+            return False
+
+        monkeypatch.setattr(_IMPORT_TARGET, fake_import)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_login_flow", AsyncMock()
+        )
+
+        with pytest.raises(AuthenticationInProgressError):
+            await _start_login_if_needed(superseded_by="the-broken-one")
+
+        assert seen.get("superseded_by") == "the-broken-one"
+
+
+class TestTheAutomaticPathCarriesWhatItObserved:
+    """A login a tool call started is not somebody insisting at a terminal.
+
+    The readiness gate has just looked at the profile, so it knows which session
+    it found wanting. Passing that on lets the login stand down if a peer signs in
+    while this one is still getting there. `--login` deliberately keeps the
+    unguarded default, which is what makes it an override rather than a request.
+    """
+
+    async def test_the_gate_hands_on_the_generation_it_just_read(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_state import (
+            portable_cookie_path,
+            write_source_state,
+        )
+
+        # A session that exists on disk but is about to be found unusable: the
+        # gate reads this generation and must pass exactly it on.
+        (isolate_profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (isolate_profile_dir / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(isolate_profile_dir).write_text("[]")
+        observed = write_source_state(isolate_profile_dir).login_generation
+
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        # Installed rather than loaded: the gate calls get_config(), which parses
+        # sys.argv, and under pytest that is pytest's own command line.
+        config = AppConfig()
+        config.browser.user_data_dir = str(isolate_profile_dir)
+        set_config(config)
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+
+        seen: dict[str, object] = {}
+
+        async def capture(ctx=None, **kwargs):
+            seen.update(kwargs)
+
+        monkeypatch.setattr(bootstrap, "_start_login_if_needed", capture)
+        monkeypatch.setattr(bootstrap, "_auth_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: True)
+
+        # Both branches of the gate, because they are separate call sites: a
+        # configured Chrome executable skips the managed-binary path entirely and
+        # reaches its own. Mutating one and not the other went unnoticed until
+        # this covered both.
+        for custom_chrome in (False, True):
+            seen.clear()
+            monkeypatch.setattr(bootstrap, "_uses_custom_chrome", lambda: custom_chrome)
+
+            await bootstrap.ensure_tool_ready_or_raise("get_person_profile")
+
+            assert seen.get("superseded_by") == observed, custom_chrome
+
+    async def test_an_explicit_login_stays_unguarded(self):
+        # `--login` reaches interactive_login directly, with no generation, so it
+        # always signs in. Asserted on the signature default rather than by
+        # driving a browser: the default is the contract.
+        import inspect
+
+        from linkedin_mcp_server.setup import UNGUARDED, interactive_login
+
+        default = inspect.signature(interactive_login).parameters["superseded_by"]
+
+        assert default.default is UNGUARDED

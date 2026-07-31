@@ -61,7 +61,11 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
 from linkedin_mcp_server.drivers.browser import set_headless
 from linkedin_mcp_server.logging_config import configure_logging
-from linkedin_mcp_server.server_role import ServerRole
+from linkedin_mcp_server.server_role import (
+    ServerRole,
+    set_process_role,
+    stand_down_reason,
+)
 from linkedin_mcp_server.session_state import auth_root_dir, get_runtime_id
 
 logger = logging.getLogger(__name__)
@@ -420,14 +424,29 @@ _FAILED_STARTUP_SHUTDOWN_SECONDS = 10.0
 async def _serve_until_stopped(
     server: Any, serving: asyncio.Task[None], turnover: list[str]
 ) -> None:
-    """Hold the endpoint open until it stops, or until a newer build asks.
+    """Hold the endpoint open until it stops, or until asked to give way.
 
-    The stand-down request is noticed here rather than acted on inside the
-    route, so the asking frontend gets its reply before this process goes away.
-    Stopping mid-request would leave it unable to tell a completed turnover from
-    a refusal, and it would then wait for a lock this process had not yet freed.
+    Two things ask, for unrelated reasons, and they are noticed in the same place
+    because the answer is the same: a newer build wants the browser, or this
+    process can no longer drive it. Both are noticed here rather than acted on
+    where they arise, so the request in flight gets its reply before this process
+    goes away. Stopping mid-request would leave the caller unable to tell a
+    completed handover from a refusal, and it would then wait for a lock this
+    process had not yet freed.
     """
     while not serving.done():
+        wedged = stand_down_reason()
+        if wedged is not None:
+            # Not recoverable in place, which is what separates this from every
+            # other error an owner reports and keeps serving after. The profile
+            # is held until this process exits, so exiting *is* the recovery: the
+            # kernel frees the daemon lock and the next call elects an owner that
+            # can open the profile. Nothing is lost, because the session lives on
+            # disk rather than in this process.
+            logger.warning("Standing down: %s", wedged)
+            server.should_exit = True
+            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
+            return
         if turnover:
             logger.info("A newer build asked for the browser; standing down")
             server.should_exit = True
@@ -691,6 +710,12 @@ def main(argv: list[str] | None = None) -> int:
     # and then opens headless anyway. A user who asked to watch the browser
     # would get no window and no error.
     set_headless(config.browser.headless)
+    # Before anything can reach an auth gate. `create_owner_server` records it
+    # too, but that runs several steps later, inside `_serve`: a failure between
+    # here and there would be handled by a process that still believed it had a
+    # terminal. This process has neither one nor a desktop session for its whole
+    # life, so it says so as early as it says anything.
+    set_process_role(ServerRole.OWNER)
     configure_logging(log_level=config.server.log_level, json_format=True)
 
     profile = Path(config.browser.user_data_dir).expanduser().resolve()

@@ -30,11 +30,15 @@ from linkedin_mcp_server.drivers.browser import (
     close_browser,
     watch_for_handoff_requests,
 )
+from linkedin_mcp_server.daemon_auth import (
+    FrontendAuthRepairMiddleware,
+    OwnerAuthSignalMiddleware,
+)
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
-from linkedin_mcp_server.server_role import ServerRole
+from linkedin_mcp_server.server_role import ServerRole, set_process_role
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
@@ -169,6 +173,18 @@ def create_mcp_server(
         # was handed a bearer token for a shared browser and quietly ignored it.
         raise ValueError(f"Only a proxy forwards to an owner, not {role.value}")
 
+    # The role is also process state, because the auth gates live in `bootstrap`
+    # and are reached from a tool body with no server to ask (`server_role`).
+    # Claimed here rather than left to the entry points: anything may call this
+    # function directly, and a caller that built an OWNER while the process was
+    # still unclaimed would get an owner with every auth gate switched off, which
+    # is a detached process opening a login window nobody can see.
+    #
+    # The claim refuses a second, different role rather than applying it. That
+    # check lives in `set_process_role` so every entry point is covered by one
+    # rule, including the owner's, which claims OWNER before it ever gets here.
+    set_process_role(role)
+
     mcp = FastMCP(
         "mcp-server-linkedin",
         version=__version__,
@@ -179,6 +195,24 @@ def create_mcp_server(
         mask_error_details=True,
         auth=_StaticTokenAuth(auth_token) if auth_token is not None else None,
     )
+    # Added before the serializing middleware below, which makes it the outer one.
+    # An inner position would work: `close_browser` does not consult the in-flight
+    # count, so quiescence succeeds from there, and the lease reference the inner
+    # layer holds is released in its own `finally`. Outside is preferred because
+    # the marker reports whether the profile is still held, and from inside that
+    # answer would describe the layer below rather than the process.
+    if role is ServerRole.OWNER:
+        mcp.add_middleware(OwnerAuthSignalMiddleware())
+    # The other half, and only ever on the process that has a user in front of it.
+    if role is ServerRole.PROXY:
+        # Handed the same budget every tool here is given, rather than reading it
+        # from the configuration singleton. The two agree for a server `cli_main`
+        # built, which loaded that configuration first, and need not for one
+        # constructed directly: measured at `tool_timeout=1.2` with no
+        # configuration loaded, the repair budgeted itself 149.8 seconds of a
+        # 1.2-second call, and the first read of an unloaded singleton parses
+        # whatever `sys.argv` happens to hold.
+        mcp.add_middleware(FrontendAuthRepairMiddleware(tool_timeout=tool_timeout))
     # Profile ownership belongs to whoever launches Chromium. A process that
     # only forwards calls must not take the lease: it would either block itself
     # until its own timeout, or take the lease and leave the process that

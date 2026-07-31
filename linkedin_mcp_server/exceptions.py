@@ -51,6 +51,65 @@ class AuthenticationBootstrapFailedError(LinkedInMCPError):
     """Interactive LinkedIn login could not be completed."""
 
 
+class OwnerCannotAuthenticateError(LinkedInMCPError):
+    """The shared browser owner found bad auth and cannot fix it itself.
+
+    A detached owner has nobody in front of it. It can open a browser, and does
+    when configured to run headed, but an interactive login is different in kind:
+    it waits for someone to type credentials and answer a challenge, and no client
+    is attached to this process to do that. The same goes for a keychain prompt.
+    It also must not move the shared profile aside: the process that will log in
+    needs to find the session state as the owner saw it, and rotating from here
+    would race that login for the same files.
+
+    So the owner reports instead of acting, and the frontend, which is the process
+    an MCP client actually spawned, does the work. These two carry which of the
+    two situations it is, because the frontend's response differs:
+
+    * missing means no usable session on disk, so a plain login is enough;
+    * stale means a session that exists and no longer works, which has to be
+      retired before a new one can replace it.
+
+    Subclasses rather than one class with a field: they are raised from different
+    places and the distinction has to survive being caught by type.
+
+    ``nothing_ran_yet`` is carried separately from which subclass this is, because
+    the two are independent and conflating them costs correctness. Whether the
+    session is missing or stale says what has to be repaired; whether any work has
+    happened says whether the call may be run again afterwards. Both combinations
+    occur: a stale session is usually found by the readiness check before a tool
+    has done anything, and only the owner can tell, because by the time a failure
+    reaches a client every origin looks the same.
+
+    It defaults to False so a path that has not thought about it is not replayed.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        nothing_ran_yet: bool = False,
+        generation: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.nothing_ran_yet = nothing_ran_yet
+        #: The login generation this owner found broken, as observed at the
+        #: moment it decided. Carried rather than re-read later: the profile
+        #: lease is released once the browser closes, so a second read can see a
+        #: generation somebody else has just written, and a frontend acting on
+        #: that would rotate away the very session it names. ``None`` is a value
+        #: (a rotated profile has no generation), not an absence.
+        self.generation = generation
+
+
+class AuthMissingOnOwnerError(OwnerCannotAuthenticateError):
+    """No usable LinkedIn session exists, and the owner cannot create one."""
+
+
+class AuthStaleOnOwnerError(OwnerCannotAuthenticateError):
+    """The LinkedIn session stopped working, and the owner cannot replace it."""
+
+
 class DockerHostLoginRequiredError(LinkedInMCPError):
     """Docker runtime requires host-side login creation."""
 
@@ -86,6 +145,24 @@ class BrowserShutdownUnconfirmedError(LinkedInMCPError):
     must be left exactly as it is. Resetting it, restoring over it, or trying
     the next candidate would all write underneath a Chromium that may still be
     running.
+
+    Raising it also asks a shared owner to stand down, because for that process
+    the message below is not something anyone can act on: it outlives the client
+    that started it, so restarting the client re-attaches to the same held
+    profile. Measured live against a real detached owner, over a teardown that
+    timed out after 10 seconds: three consecutive fresh clients each attached to
+    the same wedged owner and got the same refusal.
+
+    The request lives here rather than at the raise sites because that is what
+    makes it complete. It sat at one site once, in ``handle_auth_error``, and the
+    path this was measured on never goes through it: the failure came from
+    ``_authenticate_existing_profile``, deep in the driver.
+
+    Not sufficient on its own, though, and the reason is an ordering. This runs
+    while the raise is still in flight, so a site that marks the profile held
+    *after* constructing the error is invisible here and has to ask for itself;
+    ``_create_browser`` is exactly that, and was measured wedged with this in
+    place.
     """
 
     def __init__(self, message: str | None = None):
@@ -96,6 +173,13 @@ class BrowserShutdownUnconfirmedError(LinkedInMCPError):
                 "still be running. Restart the server to recover."
             )
         )
+        # Imported here rather than at module scope: this module is imported by
+        # nearly everything, and `server_role` must stay free of cycles.
+        from linkedin_mcp_server.server_role import (
+            a_held_profile_means_this_owner_must_go,
+        )
+
+        a_held_profile_means_this_owner_must_go()
 
 
 class BrowserBusyError(LinkedInMCPError):

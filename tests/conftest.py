@@ -8,11 +8,16 @@ def reset_singletons():
     from linkedin_mcp_server.config import reset_config
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
     from linkedin_mcp_server.profile_lease import reset_leases_for_testing
+    from linkedin_mcp_server.server_role import reset_process_role_for_testing
 
     reset_bootstrap_for_testing()
     reset_browser_for_testing()
     reset_leases_for_testing()
     reset_config()
+    # Every test that builds a server records a role, and the auth gates read it
+    # from process state. Left standing, one OWNER would refuse logins in every
+    # test after it, in a suite where most never mention a role.
+    reset_process_role_for_testing()
     yield
     reset_bootstrap_for_testing()
     reset_browser_for_testing()
@@ -20,6 +25,7 @@ def reset_singletons():
     # own bookkeeping first rather than yanked out from under it.
     reset_leases_for_testing()
     reset_config()
+    reset_process_role_for_testing()
 
 
 @pytest.fixture(autouse=True)
