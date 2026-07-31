@@ -38,6 +38,7 @@ from linkedin_mcp_server.exceptions import (
     BrowserShutdownUnconfirmedError,
 )
 from linkedin_mcp_server.profile_lease import get_profile_lease
+from linkedin_mcp_server.server_role import a_held_profile_means_this_owner_must_go
 from linkedin_mcp_server.session_state import (
     SourceState,
     clear_runtime_profile,
@@ -796,6 +797,15 @@ async def _close_browser_locked() -> None:
                 "Browser shutdown could not be confirmed; keeping the profile "
                 "lease until this process exits."
             )
+            # And for a shared owner, that sentence is the whole problem: it
+            # outlives the client that started it, so nobody is coming to restart
+            # it and every later call meets `BrowserBusyError`. Asked here rather
+            # than only where the failure is *reported*, because this path
+            # reports nothing at all: a handoff, the idle timeout and
+            # `close_session` all return normally from here, so no exception is
+            # ever constructed. Reproduced: close returned, lease kept,
+            # `stand_down_reason()` None, next launch refused.
+            a_held_profile_means_this_owner_must_go()
     logger.info("Browser closed")
 
 

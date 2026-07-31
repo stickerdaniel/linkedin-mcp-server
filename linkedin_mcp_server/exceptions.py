@@ -145,6 +145,20 @@ class BrowserShutdownUnconfirmedError(LinkedInMCPError):
     must be left exactly as it is. Resetting it, restoring over it, or trying
     the next candidate would all write underneath a Chromium that may still be
     running.
+
+    Raising it also asks a shared owner to stand down, because for that process
+    the message below is not something anyone can act on: it outlives the client
+    that started it, so restarting the client re-attaches to the same held
+    profile. Measured live against a real detached owner, over a teardown that
+    timed out after 10 seconds: three consecutive fresh clients each attached to
+    the same wedged owner and got the same refusal.
+
+    The request lives here rather than at the raise sites because that is what
+    makes it complete, and a count of them does not belong in this sentence: the
+    first draft said seven and there were nine. It sat at one site once, in
+    ``handle_auth_error``, and the path this was measured on never goes through
+    it -- the failure came from ``_authenticate_existing_profile``, deep in the
+    driver.
     """
 
     def __init__(self, message: str | None = None):
@@ -155,6 +169,13 @@ class BrowserShutdownUnconfirmedError(LinkedInMCPError):
                 "still be running. Restart the server to recover."
             )
         )
+        # Imported here rather than at module scope: this module is imported by
+        # nearly everything, and `server_role` must stay free of cycles.
+        from linkedin_mcp_server.server_role import (
+            a_held_profile_means_this_owner_must_go,
+        )
+
+        a_held_profile_means_this_owner_must_go()
 
 
 class BrowserBusyError(LinkedInMCPError):

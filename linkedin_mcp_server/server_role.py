@@ -149,6 +149,40 @@ def stand_down_reason() -> str | None:
     return _must_stand_down[0] if _must_stand_down else None
 
 
+def a_held_profile_means_this_owner_must_go() -> None:
+    """Give way if this is an owner an unconfirmed teardown has stranded.
+
+    One function rather than the same three lines at each site, because the sites
+    kept being found one at a time. A browser whose shutdown could not be
+    confirmed keeps the profile lease until its process exits, deliberately. For
+    a single-process server the resulting "restart the server" is actionable: its
+    client owns it. A detached owner outlives that client, so restarting elects
+    nothing, every later call meets ``BrowserBusyError``, and only a manual kill
+    recovers. Measured live: three consecutive fresh clients attached to the same
+    stranded owner.
+
+    Called from wherever the lease is *kept*, not from wherever the failure is
+    reported, and the difference is what the third site turned on: the routine
+    close path returns normally, so a handoff, the idle timeout and
+    ``close_session`` strand an owner without raising anything at all.
+
+    Reads the lease itself. It runs from a ``finally`` a cancellation passes
+    through, and from a teardown with no caller left to have worked it out.
+    """
+    if process_role() is not ServerRole.OWNER:
+        return
+    from linkedin_mcp_server.profile_lease import get_profile_lease
+
+    try:
+        if not get_profile_lease().browser_open:
+            return
+    except Exception:  # noqa: BLE001 - a probe must not replace the real failure
+        return
+    ask_this_process_to_stand_down(
+        "the browser did not shut down cleanly, so the profile is held"
+    )
+
+
 def reset_process_role_for_testing() -> None:
     """Return to the unclaimed state, for test isolation.
 

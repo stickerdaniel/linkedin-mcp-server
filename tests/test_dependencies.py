@@ -357,6 +357,13 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
                 "linkedin_mcp_server.dependencies.get_profile_lease",
                 return_value=lease,
             ),
+            # Also at the source: the stand-down helper lives in `server_role`
+            # and reads the lease through `profile_lease`, not through the
+            # module under test.
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
             patch("linkedin_mcp_server.dependencies.go_auth_quiescent", latched),
         ):
             with pytest.raises(BrowserShutdownUnconfirmedError, match="Restart"):
@@ -393,6 +400,13 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
             patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
             patch(
                 "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+            # Also at the source: the stand-down helper lives in `server_role`
+            # and reads the lease through `profile_lease`, not through the
+            # module under test.
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
                 return_value=lease,
             ),
             patch(
@@ -442,6 +456,13 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
             patch("linkedin_mcp_server.dependencies.close_browser", AsyncMock()),
             patch(
                 "linkedin_mcp_server.dependencies.get_profile_lease",
+                return_value=lease,
+            ),
+            # Also at the source: the stand-down helper lives in `server_role`
+            # and reads the lease through `profile_lease`, not through the
+            # module under test.
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
                 return_value=lease,
             ),
         ):
@@ -499,6 +520,13 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
                 "linkedin_mcp_server.dependencies.get_profile_lease",
                 return_value=lease,
             ),
+            # Also at the source: the stand-down helper lives in `server_role`
+            # and reads the lease through `profile_lease`, not through the
+            # module under test.
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
         ):
             with pytest.raises((TimeoutError, asyncio.CancelledError)):
                 await asyncio.wait_for(
@@ -536,6 +564,13 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
                 "linkedin_mcp_server.dependencies.get_profile_lease",
                 return_value=lease,
             ),
+            # Also at the source: the stand-down helper lives in `server_role`
+            # and reads the lease through `profile_lease`, not through the
+            # module under test.
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
             patch(
                 "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
                 AsyncMock(),
@@ -545,3 +580,100 @@ class TestAnOwnerGoesQuiescentInsteadOfLoggingIn:
                 await handle_auth_error(AuthenticationError("expired"), ctx=None)
 
         assert stand_down_reason() is None
+
+
+class TestAWedgeFromAnywhereFreesTheOwner:
+    """The request belongs to the error, not to one of its raise sites.
+
+    Found live rather than by review. A real detached owner failed to close
+    Chromium inside 10 seconds during `_authenticate_existing_profile`, deep in
+    the driver, which never reaches `handle_auth_error`. The owner kept the
+    profile and three consecutive fresh clients each attached to it and got the
+    same refusal, recoverable only by killing it.
+    """
+
+    def teardown_method(self):
+        from linkedin_mcp_server.server_role import reset_process_role_for_testing
+
+        reset_process_role_for_testing()
+
+    def test_raising_it_asks_an_owner_to_give_way(self):
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        # Production marks the browser open before the startup that fails, so by
+        # the time this is raised the lease says the profile is held. Without
+        # that the request is correctly skipped, and asserting on the bare
+        # construction would test a state the code never reaches.
+        lease = MagicMock()
+        lease.browser_open = True
+        with patch(
+            "linkedin_mcp_server.profile_lease.get_profile_lease", return_value=lease
+        ):
+            BrowserShutdownUnconfirmedError("the startup teardown timed out")
+
+        assert stand_down_reason() is not None, (
+            "an owner wedged outside handle_auth_error keeps the profile forever"
+        )
+
+    def test_a_single_server_is_left_alone(self):
+        """Its client owns it, so "restart the server" is something to act on."""
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import stand_down_reason
+
+        lease = MagicMock()
+        lease.browser_open = True
+        with patch(
+            "linkedin_mcp_server.profile_lease.get_profile_lease", return_value=lease
+        ):
+            BrowserShutdownUnconfirmedError("the startup teardown timed out")
+
+        assert stand_down_reason() is None
+
+    async def test_a_quiet_close_that_keeps_the_profile_also_frees_the_owner(self):
+        """The path that reports nothing at all, which is why it was missed twice.
+
+        A handoff, the idle timeout and ``close_session`` all reach
+        ``_close_browser_locked``, which returns *normally* when the teardown
+        cannot be confirmed: it logs, keeps the lease, and raises nothing. So
+        neither the exception constructor nor ``handle_auth_error`` runs, and the
+        owner sits on the profile while every later launch is refused with
+        ``BrowserBusyError``.
+
+        Reproduced before this: close returned, the lease was kept, and
+        ``stand_down_reason()`` was still None.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = True
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=False)  # unconfirmed teardown
+
+        with (
+            patch.object(drv, "_browser", fake_browser),
+            patch.object(drv, "_browser_holds_lease", True),
+            patch.object(drv, "get_profile_lease", return_value=lease),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+        ):
+            await drv._close_browser_locked()
+
+        # The lease is kept deliberately; what must not also happen is silence.
+        lease.release.assert_not_called()
+        assert stand_down_reason() is not None, (
+            "an owner stranded by a routine close keeps the profile forever"
+        )

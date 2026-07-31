@@ -291,7 +291,17 @@ class BrowserManager:
 
         path = Path(cookie_path) if cookie_path else self._default_cookie_path()
         try:
-            all_cookies = await self._context.cookies()
+            # Bounded like the teardown steps below it, and for a stronger
+            # reason. On close this runs *before* them, with the singleton
+            # already cleared and the profile lease still held, inside a section
+            # that defers cancellation until it finishes. A protocol call that
+            # never answers therefore strands the profile before anything
+            # bounded is reached, and raises nothing for anyone to act on: no
+            # close result, no exception, no stand-down. Losing an export costs
+            # the Docker cookie file this run, which the next close rewrites.
+            all_cookies = await asyncio.wait_for(
+                self._context.cookies(), timeout=_CLEANUP_TIMEOUT_SECONDS
+            )
             cookies = [
                 self._normalize_cookie_domain(c)
                 for c in all_cookies

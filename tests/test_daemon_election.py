@@ -535,6 +535,12 @@ attachment = outcome.attachment_lookup.attachment
 # handed over.
 print(json.dumps({
     "state": outcome.attachment_lookup.state.value,
+    # Which refusal, not merely that there was one. There are five paths to
+    # INCOMPATIBLE across `daemon.py` and `daemon_election.py`, and a failure
+    # recorded without this cannot say which fired: one such failure in a full
+    # suite run left nothing to distinguish a runtime mismatch from a profile
+    # mismatch, and the state alone made it look like flake either way.
+    "reason": outcome.attachment_lookup.reason,
     "started": outcome.started_owner,
     "pid": attachment.descriptor.pid if attachment else None,
     "url": attachment.descriptor.url if attachment else None,

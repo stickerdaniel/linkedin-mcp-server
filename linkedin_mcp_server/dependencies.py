@@ -32,7 +32,7 @@ from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.scraping import LinkedInExtractor
 from linkedin_mcp_server.server_role import (
     ServerRole,
-    ask_this_process_to_stand_down,
+    a_held_profile_means_this_owner_must_go,
     process_role,
 )
 
@@ -58,36 +58,6 @@ def _is_browser_binary_missing_error(error: Exception) -> bool:
         "looks like playwright was just installed or updated",
     )
     return any(marker in message for marker in markers)
-
-
-def _ask_a_wedged_owner_to_give_way() -> None:
-    """Ask this process to exit, if it is an owner the profile is stuck on.
-
-    For a single-process server the "restart the server" message is actionable:
-    the client owns it, and restarting frees the lock. For a detached owner it is
-    not. It outlives the client that started it, so restarting the client elects
-    nothing — the next frontend attaches to this same owner and meets the same
-    held profile, and only killing it by hand recovers.
-
-    So it removes itself instead. It holds no state a restart would lose: the
-    session is on disk, the lock is released by the exit, and the next call
-    elects a fresh owner that opens the profile cleanly.
-
-    Reads the lease itself rather than taking the answer as an argument, because
-    it runs from a ``finally`` that a cancellation passes through, where there is
-    no caller left to have worked it out.
-    """
-    if process_role() is not ServerRole.OWNER:
-        return
-    try:
-        if not get_profile_lease().browser_open:
-            return
-    except Exception:  # noqa: BLE001 - a probe must not replace the real failure
-        logger.debug("Could not read the profile lease state", exc_info=True)
-        return
-    ask_this_process_to_stand_down(
-        "the browser did not shut down cleanly, so the profile is held"
-    )
 
 
 async def handle_auth_error(
@@ -153,7 +123,7 @@ async def handle_auth_error(
         # Only the request is made here. The exception below still has to be
         # raised on the normal path, and a cancelled call has nobody left to
         # raise it to, so what has to survive the cancellation is exactly this.
-        _ask_a_wedged_owner_to_give_way()
+        a_held_profile_means_this_owner_must_go()
 
     if get_profile_lease().browser_open:
         # The teardown could not be confirmed, so Chromium may still be on the
