@@ -992,7 +992,16 @@ async def release_profile_if_idle_or_requested() -> bool:
         return False
 
     config = get_config().browser
-    lease = get_profile_lease()
+    # The lease this browser holds, not one the registry resolves now. Both
+    # questions asked below are about *this* profile: `handoff_requested()`
+    # probes a file under the lease's own auth root, and `held_seconds` counts
+    # from the moment that lease was acquired. A freshly resolved object answers
+    # about whichever path the config points at now and reports a hold of zero,
+    # so a waiter would be either ignored or refused forever. `config` still
+    # comes from settings: the hold window and the idle timeout are not lease
+    # state. Bound to a local so this stays true if an `await` ever appears
+    # above it and lets a concurrent close clear the global.
+    lease = _browser_lease
     # None means no tool call has ever run, which is idle in the strongest sense.
     idle_for = time.monotonic() - _last_activity if _last_activity is not None else None
 
