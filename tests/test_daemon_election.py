@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -35,6 +36,7 @@ from linkedin_mcp_server.daemon import Attachment, OwnerState
 from linkedin_mcp_server.daemon_election import (
     _Attempt,
     ElectionOutcome,
+    Reach,
     obtain_owner,
 )
 from linkedin_mcp_server.daemon_descriptor import (
@@ -116,6 +118,28 @@ def _publish_stale_owner(
     return descriptor.instance_id
 
 
+def _attachment_for(profile: Path, config: AppConfig, port: int) -> Attachment:
+    """An attachment pointing at *port*, for probing a socket directly.
+
+    Not published: this is for handing to the probe by itself, without an
+    election around it.
+    """
+    token = new_token()
+    descriptor = build(
+        instance_id=new_instance_id(),
+        package_version=__version__,
+        runtime_id=_RUNTIME,
+        profile=profile,
+        host="127.0.0.1",
+        port=port,
+        path="/mcp",
+        token=token,
+        config=config,
+        log_path=profile.parent / "daemon.log",
+    )
+    return Attachment(descriptor=descriptor, token=token)
+
+
 class TestLiveness:
     """A descriptor is a file. Only a request that is answered is a process."""
 
@@ -134,7 +158,7 @@ class TestLiveness:
             profile,
             config,
             deadline_seconds=0,
-            connect=lambda attachment: False,
+            connect=lambda attachment: Reach.REFUSED,
         )
 
         assert not outcome.worth_connecting
@@ -158,7 +182,7 @@ class TestLiveness:
             profile,
             config,
             deadline_seconds=0,
-            connect=lambda attachment: False,
+            connect=lambda attachment: Reach.REFUSED,
         )
 
         assert descriptor_file.exists()
@@ -176,7 +200,7 @@ class TestLiveness:
             profile,
             config,
             deadline_seconds=0,
-            connect=lambda attachment: True,
+            connect=lambda attachment: Reach.ANSWERED,
         )
 
         assert outcome.worth_connecting
@@ -194,9 +218,14 @@ class TestLiveness:
 
         probes: list[Attachment] = []
 
-        def never_answers(attachment: Attachment) -> bool:
+        def never_answers(attachment: Attachment) -> Reach:
             probes.append(attachment)
-            return False
+            # REFUSED, which is what a corpse really produces: its port is
+            # closed, so the kernel turns the connection away rather than
+            # leaving the probe to time out. A SILENT stub here would be
+            # testing a different animal, and the count below would rightly
+            # fail.
+            return Reach.REFUSED
 
         obtain_owner(
             auth_root, profile, config, deadline_seconds=1.0, connect=never_answers
@@ -208,6 +237,213 @@ class TestLiveness:
         # implementation that skipped reachability entirely would have looked
         # correct here.
         assert len(probes) == 1, [p.descriptor.instance_id for p in probes]
+
+
+class TestSilenceIsNotDeath:
+    """A probe that ran out of time proves nothing, and used to prove death.
+
+    A frontend started an owner, watched it report ready, and then refused to
+    attach to it: one ping landed in a scheduler stall, the instance was written
+    off, and every later read in that election short-circuited on the record of
+    that single observation. The owner kept running and kept the lock, so the
+    frontend spent the rest of its budget contending with the healthy process it
+    had started itself.
+    """
+
+    def test_a_dead_endpoint_and_a_frozen_one_are_told_apart(self, tmp_path: Path):
+        """The distinction the whole fix rests on, against the real probe.
+
+        Not against a stub. Everything else here keys off ``REFUSED`` versus
+        ``SILENT``, so a test that manufactured the two would pass just as
+        happily if the production probe collapsed them again.
+
+        The two sockets differ in exactly one way, and it is the way that
+        matters: a corpse's port is closed, so the kernel refuses the connection
+        outright, while a paused process still holds its listening socket and
+        the kernel completes the handshake into a backlog nobody reads. That is
+        what makes a listening-but-unaccepting socket a faithful stand-in for a
+        stopped process, without the cost of stopping one.
+        """
+        profile = _profile(tmp_path)
+        config = _config(profile)
+
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        dead_port = closed.getsockname()[1]
+        closed.close()
+
+        began = time.monotonic()
+        refused = election_module._reachable(
+            _attachment_for(profile, config, dead_port)
+        )
+        refusal_took = time.monotonic() - began
+
+        frozen = socket.socket()
+        frozen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        frozen.bind(("127.0.0.1", 0))
+        # Listening, and deliberately never accepted from.
+        frozen.listen(64)
+        try:
+            began = time.monotonic()
+            silent = election_module._reachable(
+                _attachment_for(profile, config, frozen.getsockname()[1])
+            )
+            silence_took = time.monotonic() - began
+        finally:
+            frozen.close()
+
+        assert refused is Reach.REFUSED, f"a closed port read as {refused}"
+        assert silent is Reach.SILENT, f"an unaccepting socket read as {silent}"
+
+        # And the refusal is genuinely cheap rather than merely different.
+        # Measured at about ten milliseconds; asserted well above that so a
+        # loaded runner cannot fail it, and well below the probe's own budget so
+        # a refusal that started timing out would.
+        assert refusal_took < election_module._REACHABLE_SECONDS / 2, (
+            f"the refusal took {refusal_took:.2f}s"
+        )
+        assert silence_took >= election_module._REACHABLE_SECONDS - 0.5, (
+            f"the silence took only {silence_took:.2f}s"
+        )
+
+    def test_an_owner_that_is_slow_twice_is_still_attached_to(self, tmp_path: Path):
+        """Two silences, not one, and the count is the point.
+
+        A single retry would satisfy a one-shot version of this test while still
+        failing every stall longer than about ten seconds, because each probe
+        costs the full budget. Measured against the real loop: one grace rescues
+        a six second freeze and gives up on a fifteen second one, which is the
+        bug as reported.
+        """
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        _publish_stale_owner(auth_root, profile, config)
+
+        answers = [Reach.SILENT, Reach.SILENT, Reach.ANSWERED]
+        probes: list[Attachment] = []
+
+        def slow_to_answer(attachment: Attachment) -> Reach:
+            probes.append(attachment)
+            return answers[min(len(probes) - 1, len(answers) - 1)]
+
+        # The stalled owner holds the daemon lock, which is what makes the loop
+        # keep going rather than start a replacement. That is not a convenience
+        # of the test: a process too busy to answer a ping is still a process,
+        # and it is holding the lock precisely because it is alive. Without this
+        # the frontend finds the position free, tries to start a child, and the
+        # spawn's own failure ends the election before any retry happens.
+        held = DaemonLock(auth_root)
+        assert held.try_acquire(), "could not simulate the stalled owner's lock"
+        try:
+            outcome = obtain_owner(
+                auth_root,
+                profile,
+                config,
+                deadline_seconds=20.0,
+                connect=slow_to_answer,
+            )
+        finally:
+            held.release()
+
+        assert outcome.worth_connecting, outcome.attachment_lookup.reason
+        assert len(probes) >= 3, "the owner was written off before it answered"
+
+    def test_a_silence_is_reported_as_its_own_state(self, tmp_path: Path):
+        """Which refusal it was, not merely that there was one.
+
+        The original failure was diagnosed from this string, and reusing the
+        burial's wording would have made a stalled owner indistinguishable from
+        a corpse in exactly the report a user pastes into an issue.
+        """
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        _publish_stale_owner(auth_root, profile, config)
+
+        silent = obtain_owner(
+            auth_root,
+            profile,
+            config,
+            deadline_seconds=0,
+            connect=lambda attachment: Reach.SILENT,
+        )
+        refused = obtain_owner(
+            auth_root,
+            profile,
+            config,
+            deadline_seconds=0,
+            connect=lambda attachment: Reach.REFUSED,
+        )
+
+        assert silent.attachment_lookup.reason != refused.attachment_lookup.reason
+        assert not silent.worth_connecting
+
+    def test_a_refusal_still_buries_on_the_first_probe(self, tmp_path: Path):
+        """The corpse path keeps its fail-fast, and the grace does not leak into it.
+
+        Written as "would have answered next time" rather than "never answers":
+        a stub that refuses forever passes even if refusals were retried, since
+        the outcome is the same either way. This one fails if the retry is
+        granted, because the second probe would succeed and the election would
+        attach.
+        """
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        _publish_stale_owner(auth_root, profile, config)
+
+        probes: list[Attachment] = []
+
+        def refuses_then_would_answer(attachment: Attachment) -> Reach:
+            probes.append(attachment)
+            return Reach.REFUSED if len(probes) == 1 else Reach.ANSWERED
+
+        outcome = obtain_owner(
+            auth_root,
+            profile,
+            config,
+            deadline_seconds=1.0,
+            connect=refuses_then_would_answer,
+        )
+
+        assert len(probes) == 1, "a refused instance was probed again"
+        assert not outcome.worth_connecting
+
+    def test_an_owner_that_never_answers_does_not_outlast_the_deadline(
+        self, tmp_path: Path
+    ):
+        """Nothing is buried now, so the deadline is the only thing bounding this.
+
+        The worst case for the change: an owner frozen for good that also still
+        holds the daemon lock, so no replacement can be elected either. It has to
+        end on time rather than probe forever.
+        """
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        _publish_stale_owner(auth_root, profile, config)
+
+        held = DaemonLock(auth_root)
+        assert held.try_acquire(), "could not simulate the frozen owner's lock"
+        try:
+            began = time.monotonic()
+            outcome = obtain_owner(
+                auth_root,
+                profile,
+                config,
+                deadline_seconds=1.0,
+                connect=lambda attachment: Reach.SILENT,
+            )
+            elapsed = time.monotonic() - began
+        finally:
+            held.release()
+
+        assert not outcome.worth_connecting
+        # Generous, because the budget is spent inside probes and lock attempts
+        # that are not interrupted mid-flight. What it catches is an unbounded
+        # loop, which is the only real risk of never burying anything.
+        assert elapsed < 15, f"the election ran {elapsed:.1f}s past a 1.0s budget"
 
 
 class TestFailingFast:
@@ -234,7 +470,7 @@ class TestFailingFast:
             profile,
             config,
             deadline_seconds=30,
-            connect=lambda attachment: False,
+            connect=lambda attachment: Reach.REFUSED,
         )
         elapsed = time.monotonic() - started
 
@@ -289,7 +525,7 @@ class TestFailingFast:
                 profile,
                 config,
                 deadline_seconds=20,
-                connect=lambda attachment: True,
+                connect=lambda attachment: Reach.ANSWERED,
             )
         finally:
             releasing.cancel()
@@ -498,7 +734,7 @@ class TestFailingFast:
             profile,
             config,
             deadline_seconds=1.0,
-            connect=lambda attachment: False,
+            connect=lambda attachment: Reach.REFUSED,
         )
         elapsed = time.monotonic() - started
 
@@ -644,6 +880,19 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _resume(pid: object) -> None:
+    """Let a stopped process run again, tolerating one that is already gone.
+
+    Separate from :func:`_stop` because a paused process that is never resumed
+    cannot be killed cleanly either: ``SIGKILL`` is delivered, but the test's own
+    cleanup has no way to observe the exit while the process is not scheduled.
+    """
+    if not isinstance(pid, int):
+        return
+    with contextlib.suppress(OSError):
+        os.kill(pid, signal.SIGCONT)
+
+
 def _stop(pid: object) -> None:
     """Kill an owner, taking the pid as it comes out of the child's JSON.
 
@@ -676,6 +925,46 @@ class TestRealOwner:
             assert result["pid"] and result["pid"] != os.getpid()
         finally:
             _stop(result.get("pid"))
+
+    @_POSIX_ONLY
+    def test_a_paused_owner_is_waited_for_rather_than_written_off(
+        self, real_state_root: Path
+    ):
+        """The reported bug, against a real owner over real loopback.
+
+        The in-process tests above drive this through an injected probe, which
+        proves the loop's logic and nothing about the transport. Here the socket,
+        the token and the process are all real: the owner is genuinely stopped,
+        so its port stays open with nobody reading it, and the frontend's probe
+        genuinely times out rather than being told to.
+
+        Deterministic rather than timed. The owner is stopped *before* the second
+        frontend starts and released on a timer, so the frontend cannot miss the
+        window: every probe it makes until the resume lands in a stalled process.
+        The issue reproduced this by timing a stop against the post-start ping,
+        which is the same condition arrived at by luck.
+        """
+        profile = real_state_root
+
+        first = _run_frontend(profile)
+        owner = first["pid"]
+        assert isinstance(owner, int), first
+        assert first["state"] == OwnerState.ATTACHABLE.value, first
+
+        resume = threading.Timer(8.0, lambda: _resume(owner))
+        try:
+            os.kill(owner, signal.SIGSTOP)
+            resume.start()
+
+            second = _run_frontend(profile)
+
+            assert second["state"] == OwnerState.ATTACHABLE.value, second
+            assert second["pid"] == owner, "the paused owner was replaced"
+            assert second["started"] is False, "a second owner was started"
+        finally:
+            resume.cancel()
+            _resume(owner)
+            _stop(owner)
 
     def test_the_frontend_lets_go_of_the_lock_it_handed_over(
         self, real_state_root: Path
@@ -1321,7 +1610,7 @@ class TestVersionSkew:
             deadline_seconds=0,
             # Would attach if version were not consulted, which is what makes
             # this test about the version rather than about reachability.
-            connect=lambda attachment: True,
+            connect=lambda attachment: Reach.ANSWERED,
         )
 
         assert asked, "the stale owner was never asked to stand down"
@@ -1349,7 +1638,7 @@ class TestVersionSkew:
             profile,
             config,
             deadline_seconds=0,
-            connect=lambda attachment: True,
+            connect=lambda attachment: Reach.ANSWERED,
         )
 
         assert not asked
@@ -1378,7 +1667,7 @@ class TestVersionSkew:
             profile,
             config,
             deadline_seconds=0,
-            connect=lambda attachment: True,
+            connect=lambda attachment: Reach.ANSWERED,
         )
 
         assert not asked
