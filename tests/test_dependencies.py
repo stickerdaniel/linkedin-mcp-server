@@ -826,3 +826,80 @@ class TestAWedgeFromAnywhereFreesTheOwner:
             a_held_profile_means_this_owner_must_go()
 
         assert stand_down_reason() is not None
+
+    async def test_a_close_whose_own_lease_lookup_fails_still_frees_the_owner(self):
+        """The lookup sits between the teardown and every line that protects it.
+
+        `get_profile_lease` resolves a path, so it can fail on a profile
+        directory that became unreadable while the browser was running, even
+        though this process still holds the open descriptor. By then the
+        singleton is cleared, so nothing below it runs: not the hold flag, not
+        the warning, not the request.
+
+        Measured in production order: browser cleared, hold flag still set,
+        `stand_down_reason()` None.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=False)  # unconfirmed
+
+        def unreadable():
+            raise PermissionError("the profile path cannot be resolved")
+
+        with (
+            patch.object(drv, "_browser", fake_browser),
+            patch.object(drv, "_browser_holds_lease", True),
+            patch.object(drv, "get_profile_lease", side_effect=unreadable),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                side_effect=unreadable,
+            ),
+        ):
+            # The original failure still reaches the caller.
+            with pytest.raises(PermissionError):
+                await drv._close_browser_locked()
+
+        assert stand_down_reason() is not None, (
+            "an owner whose close could not read the lease keeps the profile"
+        )
+
+    async def test_a_confirmed_close_with_an_unreadable_lease_is_left_alone(self):
+        """Only an *unconfirmed* teardown means the profile may still be held.
+
+        Chromium is provably gone here, so the failed lookup is a problem for the
+        caller rather than a reason to end the owner.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)  # confirmed
+
+        def unreadable():
+            raise PermissionError("the profile path cannot be resolved")
+
+        with (
+            patch.object(drv, "_browser", fake_browser),
+            patch.object(drv, "_browser_holds_lease", True),
+            patch.object(drv, "get_profile_lease", side_effect=unreadable),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                side_effect=unreadable,
+            ),
+        ):
+            with pytest.raises(PermissionError):
+                await drv._close_browser_locked()
+
+        assert stand_down_reason() is None, "a proven-closed owner was told to exit"

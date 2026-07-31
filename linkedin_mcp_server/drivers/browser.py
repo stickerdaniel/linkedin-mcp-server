@@ -789,7 +789,22 @@ async def _close_browser_locked() -> None:
             logger.debug("Cookie export on close skipped", exc_info=True)
     confirmed = await browser.close()
 
-    lease = get_profile_lease()
+    try:
+        lease = get_profile_lease()
+    except Exception:
+        # The lookup is path-based, so it can fail on a profile directory that
+        # became unreadable while the browser was running, even though this
+        # process still holds the open descriptor. By here the singleton is
+        # already cleared, so every line that would have kept the profile safe
+        # is below this point and none of them runs. Measured in production
+        # order: browser cleared, the hold flag still set, and no stand-down.
+        #
+        # Asked before re-raising, because the helper now treats a lease it
+        # cannot read as held, which is exactly this situation. The original
+        # failure still reaches the caller.
+        if not confirmed:
+            a_held_profile_means_this_owner_must_go()
+        raise
     if confirmed:
         # Only now is Chromium provably gone, so only now may auth state move.
         lease.mark_browser_closed()
