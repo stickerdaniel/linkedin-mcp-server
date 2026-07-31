@@ -594,6 +594,16 @@ async def _create_browser() -> BrowserManager:
         # process exits.
         lease.mark_browser_open()
         lease.try_acquire()
+        # After the marker, not before, and that ordering is the whole reason
+        # this call is here rather than only in the exception's constructor. The
+        # constructor runs while `_create_browser_locked` is still raising, when
+        # `browser_open` is false, so the helper reads "nothing is held" and
+        # returns; the two lines above then hold the profile with nobody having
+        # asked for a replacement. Measured through `_create_browser` in
+        # production order: `browser_open=True`, `stand_down=None`, and live, a
+        # real owner that three consecutive fresh clients each attached to and
+        # got the same refusal from.
+        a_held_profile_means_this_owner_must_go()
         raise
     except BaseException:
         # BaseException, not Exception: a cancelled startup would otherwise

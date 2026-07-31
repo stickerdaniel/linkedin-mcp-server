@@ -606,10 +606,11 @@ class TestAWedgeFromAnywhereFreesTheOwner:
         )
 
         set_process_role(ServerRole.OWNER)
-        # Production marks the browser open before the startup that fails, so by
-        # the time this is raised the lease says the profile is held. Without
-        # that the request is correctly skipped, and asserting on the bare
-        # construction would test a state the code never reaches.
+        # Constructed with the profile already held, which is the state the
+        # request is about. This asserts the constructor's own contribution; the
+        # startup path that produces that state in the real order is asserted
+        # through `_create_browser` below, because a mocked flag there hid a live
+        # wedge for a whole review round.
         lease = MagicMock()
         lease.browser_open = True
         with patch(
@@ -619,6 +620,70 @@ class TestAWedgeFromAnywhereFreesTheOwner:
 
         assert stand_down_reason() is not None, (
             "an owner wedged outside handle_auth_error keeps the profile forever"
+        )
+
+    async def test_the_startup_path_frees_the_owner_in_the_real_order(self):
+        """The live wedge, driven through the function that produces it.
+
+        `_create_browser_locked` raises while `browser_open` is still false, so
+        the helper inside the exception's constructor reads "nothing is held" and
+        returns. Only the catch afterwards marks the browser open and takes the
+        extra reference -- holding the profile with nobody having asked for a
+        replacement.
+
+        Measured in production order: `browser_open=True`, `stand_down=None`.
+        The previous test for this handed the constructor a lease that already
+        said True, which is exactly the state production has not reached yet, and
+        that mock is what hid it.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        class Lease:
+            """Real enough: the marker starts false, as production's does."""
+
+            def __init__(self):
+                self.browser_open = False
+                self.refs = 1
+
+            def try_acquire(self):
+                self.refs += 1
+                return True
+
+            def mark_browser_open(self):
+                self.browser_open = True
+
+            def release(self):
+                self.refs -= 1
+
+        set_process_role(ServerRole.OWNER)
+        lease = Lease()
+
+        async def teardown_that_could_not_be_confirmed():
+            raise BrowserShutdownUnconfirmedError("the startup teardown timed out")
+
+        with (
+            patch.object(drv, "_browser", None),
+            patch.object(drv, "get_profile_lease", return_value=lease),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+            patch.object(
+                drv, "_create_browser_locked", teardown_that_could_not_be_confirmed
+            ),
+        ):
+            with pytest.raises(BrowserShutdownUnconfirmedError):
+                await drv._create_browser()
+
+        assert lease.browser_open is True, "the profile was not actually held"
+        assert stand_down_reason() is not None, (
+            "the owner holds the profile and nobody asked for a replacement"
         )
 
     def test_a_single_server_is_left_alone(self):
