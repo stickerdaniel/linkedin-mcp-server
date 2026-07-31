@@ -870,11 +870,15 @@ class TestAWedgeFromAnywhereFreesTheOwner:
             "an owner whose close could not read the lease keeps the profile"
         )
 
-    async def test_a_confirmed_close_with_an_unreadable_lease_is_left_alone(self):
-        """Only an *unconfirmed* teardown means the profile may still be held.
+    async def test_a_confirmed_close_with_an_unreadable_lease_also_asks(self):
+        """A proven-closed Chromium does not mean a released lease.
 
-        Chromium is provably gone here, so the failed lookup is a problem for the
-        caller rather than a reason to end the owner.
+        This asserted the opposite once, on the reasoning that a confirmed close
+        leaves the profile free. It does not: ``mark_browser_closed()`` and
+        ``release()`` both need the object the lookup failed to produce, so the
+        lease stays held with its marker set. Measured with a real acquired
+        lease: Chromium gone, and this owner's own next launch refused with
+        ``BrowserBusyError`` while nobody had asked for a replacement.
         """
         from linkedin_mcp_server.drivers import browser as drv
         from linkedin_mcp_server.server_role import (
@@ -902,4 +906,6 @@ class TestAWedgeFromAnywhereFreesTheOwner:
             with pytest.raises(PermissionError):
                 await drv._close_browser_locked()
 
-        assert stand_down_reason() is None, "a proven-closed owner was told to exit"
+        assert stand_down_reason() is not None, (
+            "a confirmed close that could not release the lease left it held"
+        )

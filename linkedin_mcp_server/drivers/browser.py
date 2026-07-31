@@ -802,8 +802,17 @@ async def _close_browser_locked() -> None:
         # Asked before re-raising, because the helper now treats a lease it
         # cannot read as held, which is exactly this situation. The original
         # failure still reaches the caller.
-        if not confirmed:
-            a_held_profile_means_this_owner_must_go()
+        #
+        # Whether Chromium closed cleanly makes no difference here, and an
+        # earlier version of this exempted the confirmed case on the reasoning
+        # that a proven-closed browser leaves the profile free. It does not: both
+        # `mark_browser_closed()` and `release()` need the object this lookup
+        # failed to produce, so a confirmed close strands the lease just as
+        # thoroughly. Measured with a real acquired lease: Chromium gone, the
+        # lease still held with its marker set, and this owner's own next launch
+        # refused with `BrowserBusyError` while nobody had asked for a
+        # replacement.
+        a_held_profile_means_this_owner_must_go()
         raise
     if confirmed:
         # Only now is Chromium provably gone, so only now may auth state move.
