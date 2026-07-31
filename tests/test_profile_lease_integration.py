@@ -300,7 +300,7 @@ class TestIdleOwnerHandsOver:
                 browser_module,
                 _browser=fake_browser,
                 _browser_cookie_export_path=None,
-                _browser_holds_lease=True,
+                _browser_lease=lease,
             ),
             patch.object(browser_module, "get_profile_lease", return_value=lease),
         ):
@@ -371,7 +371,7 @@ class TestPollerDoesNotInterruptWork:
                     browser_module,
                     _browser=fake_browser,
                     _browser_cookie_export_path=None,
-                    _browser_holds_lease=True,
+                    _browser_lease=lease,
                 ),
                 patch.object(browser_module, "get_profile_lease", return_value=lease),
             ):
@@ -433,7 +433,7 @@ class TestMinimumHoldWindow:
                     browser_module,
                     _browser=fake_browser,
                     _browser_cookie_export_path=None,
-                    _browser_holds_lease=True,
+                    _browser_lease=lease,
                 ),
                 patch.object(browser_module, "get_profile_lease", return_value=lease),
             ):
@@ -506,7 +506,7 @@ class TestConfirmedClose:
             browser_module,
             _browser=fake_browser,
             _browser_cookie_export_path=None,
-            _browser_holds_lease=True,
+            _browser_lease=lease,
         )
         with monkey:
             with patch.object(browser_module, "get_profile_lease", return_value=lease):
@@ -528,7 +528,7 @@ class TestConfirmedClose:
             browser_module,
             _browser=fake_browser,
             _browser_cookie_export_path=None,
-            _browser_holds_lease=True,
+            _browser_lease=lease,
         ):
             with patch.object(browser_module, "get_profile_lease", return_value=lease):
                 await browser_module.close_browser()

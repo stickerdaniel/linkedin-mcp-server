@@ -728,7 +728,7 @@ class TestAWedgeFromAnywhereFreesTheOwner:
 
         with (
             patch.object(drv, "_browser", fake_browser),
-            patch.object(drv, "_browser_holds_lease", True),
+            patch.object(drv, "_browser_lease", lease),
             patch.object(drv, "get_profile_lease", return_value=lease),
             patch(
                 "linkedin_mcp_server.profile_lease.get_profile_lease",
@@ -789,7 +789,7 @@ class TestAWedgeFromAnywhereFreesTheOwner:
 
         with (
             patch.object(drv, "_browser", fake_browser),
-            patch.object(drv, "_browser_holds_lease", True),
+            patch.object(drv, "_browser_lease", lease),
             patch.object(drv, "get_profile_lease", return_value=lease),
             patch(
                 "linkedin_mcp_server.profile_lease.get_profile_lease",
@@ -827,17 +827,26 @@ class TestAWedgeFromAnywhereFreesTheOwner:
 
         assert stand_down_reason() is not None
 
-    async def test_a_close_whose_own_lease_lookup_fails_still_frees_the_owner(self):
-        """The lookup sits between the teardown and every line that protects it.
+    async def test_a_close_settles_the_profile_without_any_lookup(self):
+        """The close no longer asks where its lease is, so it cannot be told wrong.
 
-        `get_profile_lease` resolves a path, so it can fail on a profile
-        directory that became unreadable while the browser was running, even
-        though this process still holds the open descriptor. By then the
-        singleton is cleared, so nothing below it runs: not the hold flag, not
-        the warning, not the request.
+        This replaces a pair of tests that injected ``get_profile_lease`` raising
+        ``PermissionError`` inside the close and asserted the workaround fired.
+        Kept as a scenario and inverted as an assertion: with the lookup raising
+        for the whole call, an unconfirmed teardown still keeps the lease and
+        still asks for a replacement. If a lookup ever returns to this path the
+        ``PermissionError`` surfaces and this fails.
 
-        Measured in production order: browser cleared, hold flag still set,
-        `stand_down_reason()` None.
+        Worth saying why the old pair had to go rather than be adjusted. Left as
+        they were they would have passed *vacuously* — green while the injected
+        failure had nothing to land on — which is the one outcome worse than a
+        red test. And the failure they injected is hard to provoke for real:
+        measured against the actual function, a removed auth root, a parent
+        directory at mode 000 and a symlink loop all return normally, because
+        ``Path.resolve()`` is non-strict and the registry is a dict. What they
+        were really pinning is structural, and that is what is asserted here:
+        whatever goes wrong between clearing ``_browser`` and settling the lease,
+        the profile must not be left held in silence.
         """
         from linkedin_mcp_server.drivers import browser as drv
         from linkedin_mcp_server.server_role import (
@@ -847,6 +856,8 @@ class TestAWedgeFromAnywhereFreesTheOwner:
         )
 
         set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = True
         fake_browser = MagicMock()
         fake_browser.close = AsyncMock(return_value=False)  # unconfirmed
 
@@ -855,30 +866,30 @@ class TestAWedgeFromAnywhereFreesTheOwner:
 
         with (
             patch.object(drv, "_browser", fake_browser),
-            patch.object(drv, "_browser_holds_lease", True),
+            patch.object(drv, "_browser_lease", lease),
             patch.object(drv, "get_profile_lease", side_effect=unreadable),
             patch(
                 "linkedin_mcp_server.profile_lease.get_profile_lease",
                 side_effect=unreadable,
             ),
         ):
-            # The original failure still reaches the caller.
-            with pytest.raises(PermissionError):
-                await drv._close_browser_locked()
+            # No PermissionError: nothing on this path resolves a path any more.
+            await drv._close_browser_locked()
 
+        lease.release.assert_not_called()
         assert stand_down_reason() is not None, (
-            "an owner whose close could not read the lease keeps the profile"
+            "an owner stranded by an unconfirmed close keeps the profile"
         )
 
-    async def test_a_confirmed_close_with_an_unreadable_lease_also_asks(self):
-        """A proven-closed Chromium does not mean a released lease.
+    async def test_a_confirmed_close_releases_without_any_lookup_either(self):
+        """The same for the ordinary ending, which used to strand a lease too.
 
-        This asserted the opposite once, on the reasoning that a confirmed close
-        leaves the profile free. It does not: ``mark_browser_closed()`` and
-        ``release()`` both need the object the lookup failed to produce, so the
-        lease stays held with its marker set. Measured with a real acquired
-        lease: Chromium gone, and this owner's own next launch refused with
-        ``BrowserBusyError`` while nobody had asked for a replacement.
+        A proven-closed Chromium does not by itself free the profile: both
+        ``mark_browser_closed()`` and ``release()`` need the lease object, and
+        when that had to be looked up a failing lookup left it held with its
+        marker set. Measured then with a real acquired lease: Chromium gone, and
+        this owner's own next launch refused with ``BrowserBusyError`` while
+        nobody had asked for a replacement.
         """
         from linkedin_mcp_server.drivers import browser as drv
         from linkedin_mcp_server.server_role import (
@@ -888,6 +899,8 @@ class TestAWedgeFromAnywhereFreesTheOwner:
         )
 
         set_process_role(ServerRole.OWNER)
+        lease = MagicMock()
+        lease.browser_open = False  # a confirmed teardown clears it
         fake_browser = MagicMock()
         fake_browser.close = AsyncMock(return_value=True)  # confirmed
 
@@ -896,16 +909,211 @@ class TestAWedgeFromAnywhereFreesTheOwner:
 
         with (
             patch.object(drv, "_browser", fake_browser),
-            patch.object(drv, "_browser_holds_lease", True),
+            patch.object(drv, "_browser_lease", lease),
             patch.object(drv, "get_profile_lease", side_effect=unreadable),
             patch(
                 "linkedin_mcp_server.profile_lease.get_profile_lease",
                 side_effect=unreadable,
             ),
         ):
-            with pytest.raises(PermissionError):
-                await drv._close_browser_locked()
+            await drv._close_browser_locked()
 
+        lease.mark_browser_closed.assert_called_once()
+        lease.release.assert_called_once()
+        assert stand_down_reason() is None, "a healthy owner was told to exit"
+
+
+class TestTheBrowserKeepsItsOwnLease:
+    """Ownership as an object it holds, rather than a fact it remembers.
+
+    Six review rounds each found one more way for an owner to end up sitting on
+    the profile with nobody asked to replace it, and every one of them lived in
+    the same gap: the close had cleared ``_browser``, still had work to do, and
+    had to go and find its lease again before it could do any of it.
+    """
+
+    def teardown_method(self):
+        from linkedin_mcp_server.server_role import reset_process_role_for_testing
+
+        reset_process_role_for_testing()
+
+    async def test_it_keeps_the_object_the_registry_handed_out(self, tmp_path):
+        """By identity, because a fresh equivalent instance is the failure mode.
+
+        ``profile_lease`` clears inherited leases after a fork by walking its
+        registry, so a ``ProfileLease`` constructed outside it is invisible to
+        that handler: a forked child would keep its parent's kernel lock alive
+        with nothing in its own state to explain why. The two objects would
+        behave identically everywhere else, which is exactly why this asserts
+        identity rather than behaviour.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        lease = get_profile_lease(tmp_path / "profile")
+
+        async def built() -> object:
+            return MagicMock()
+
+        with (
+            patch.object(drv, "_browser", None),
+            patch.object(drv, "_browser_lease", None),
+            patch.object(drv, "get_profile_lease", return_value=lease),
+            patch.object(drv, "_create_browser_locked", built),
+        ):
+            await drv._create_browser()
+            retained = drv._browser_lease
+
+        try:
+            assert retained is lease, "the browser kept a lease of its own making"
+        finally:
+            lease.release()
+
+    def test_the_test_reset_drops_the_lease_without_releasing_it(self, tmp_path):
+        """``conftest`` resets this module first, on purpose.
+
+        A lease the browser still holds is settled by its own bookkeeping before
+        ``reset_leases_for_testing`` runs. Releasing a reference here as well
+        would drop one this module never took, and the next test would meet a
+        lease reporting itself free while the kernel lock is still open.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        lease = get_profile_lease(tmp_path / "profile")
+        assert lease.try_acquire()
+
+        with patch.object(drv, "_browser_lease", lease):
+            drv.reset_browser_for_testing()
+
+        try:
+            assert lease.held, "the reset released a reference it never took"
+        finally:
+            lease.release()
+
+    async def test_it_settles_the_lease_it_took_after_a_rotation(self, tmp_path):
+        """The profile can move under a live browser, and the lease does not.
+
+        ``rotate_source_profile`` takes the lease itself, and afterwards the
+        registry's entry for the new auth root is a *different* object. A close
+        that re-derived its lease from the current path would then mark and
+        release the wrong one, leaving the browser's own profile held. Holding
+        the object is what makes that unrepresentable.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+
+        took = MagicMock()
+        took.browser_open = True
+        somewhere_else = MagicMock()
+        somewhere_else.browser_open = True
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        with (
+            patch.object(drv, "_browser", fake_browser),
+            patch.object(drv, "_browser_lease", took),
+            # What the path resolves to now, which is not what was acquired.
+            patch.object(drv, "get_profile_lease", return_value=somewhere_else),
+        ):
+            await drv._close_browser_locked()
+
+        took.release.assert_called_once()
+        somewhere_else.release.assert_not_called()
+        somewhere_else.mark_browser_closed.assert_not_called()
+
+    def test_the_stand_down_helper_uses_the_lease_it_is_given(self):
+        """And never reaches for the registry when it was handed one.
+
+        The lookup is the thing being removed from these paths, so a helper that
+        quietly consulted it anyway would leave the reconstruction alive in the
+        one decision the six rounds converged on.
+
+        Asserted against the *call*, not by making the lookup raise. That was the
+        first version of this test and it passed against a helper that ignored
+        its argument entirely: the helper catches broadly on purpose, so an
+        injected failure is swallowed and read as "cannot tell, assume held",
+        which is the same verdict the correct code reaches. The mutation was
+        invisible until the assertion moved here.
+        """
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            a_held_profile_means_this_owner_must_go,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        set_process_role(ServerRole.OWNER)
+        held = MagicMock()
+        held.browser_open = True
+
+        with patch("linkedin_mcp_server.profile_lease.get_profile_lease") as looked_up:
+            a_held_profile_means_this_owner_must_go(held)
+
+        looked_up.assert_not_called()
+        assert stand_down_reason() is not None
+
+    async def test_a_startup_that_could_not_tear_down_keeps_its_extra_reference(
+        self, tmp_path
+    ):
+        """The one path that retains a lease with no browser behind it.
+
+        ``_create_browser_locked`` can raise after Chromium is up, and then the
+        teardown may not be confirmable: something may still be on the profile
+        with nothing left to close it. So the lease is kept *and* an extra
+        reference taken, so the caller's own release cannot drop the last one and
+        let a second launch start on top of a live Chromium. The kernel frees it
+        when the process exits, which is the whole recovery.
+        """
+        from linkedin_mcp_server.drivers import browser as drv
+        from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+        from linkedin_mcp_server.server_role import (
+            ServerRole,
+            set_process_role,
+            stand_down_reason,
+        )
+
+        class Lease:
+            """Real enough, and the marker starts false as production's does."""
+
+            def __init__(self):
+                self.browser_open = False
+                self.refs = 0
+
+            def try_acquire(self):
+                self.refs += 1
+                return True
+
+            def mark_browser_open(self):
+                self.browser_open = True
+
+            def release(self):
+                self.refs -= 1
+
+        set_process_role(ServerRole.OWNER)
+        lease = Lease()
+
+        async def teardown_that_could_not_be_confirmed():
+            raise BrowserShutdownUnconfirmedError("the startup teardown timed out")
+
+        with (
+            patch.object(drv, "_browser", None),
+            patch.object(drv, "_browser_lease", None),
+            patch.object(drv, "get_profile_lease", return_value=lease),
+            patch(
+                "linkedin_mcp_server.profile_lease.get_profile_lease",
+                return_value=lease,
+            ),
+            patch.object(
+                drv, "_create_browser_locked", teardown_that_could_not_be_confirmed
+            ),
+        ):
+            with pytest.raises(BrowserShutdownUnconfirmedError):
+                await drv._create_browser()
+            retained = drv._browser_lease
+
+        assert retained is lease, "nothing records who holds the profile"
+        assert lease.refs >= 2, "the extra reference was not taken"
+        assert lease.browser_open is True
         assert stand_down_reason() is not None, (
-            "a confirmed close that could not release the lease left it held"
+            "the owner holds the profile and nobody asked for a replacement"
         )
