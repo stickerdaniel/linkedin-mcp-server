@@ -72,9 +72,13 @@ logger = logging.getLogger(__name__)
 #: starts: handing the configuration over, and the lock attempts before that.
 DEFAULT_ELECTION_SECONDS = 90.0
 
-#: How long a published owner has to answer before it is treated as leftovers.
+#: How long a published owner has to answer before it is treated as *silent*.
 #: This is a loopback request to a process that is either serving or gone, so
-#: the only thing a longer budget buys is a longer stall on a dead descriptor.
+#: the only thing a longer budget buys is a longer stall on a dead descriptor —
+#: and a dead one does not stall at all, it refuses. Measured against a real
+#: descriptor and token: a closed port comes back in about ten milliseconds,
+#: while a process holding a listening socket that nobody reads spends the whole
+#: budget. That is the distinction :class:`Reach` exists to carry.
 _REACHABLE_SECONDS = 5.0
 
 #: How long a superseded owner has to acknowledge a stand-down request. Short:
@@ -87,9 +91,38 @@ _STAND_DOWN_SECONDS = 5.0
 #: is an owner finishing its shutdown, and long enough not to spin.
 _RETRY_SECONDS = 0.2
 
+
+class Reach(enum.Enum):
+    """What a probe of a published endpoint established.
+
+    Three answers rather than two, because "it did not answer" covers two
+    situations that call for opposite reactions, and collapsing them is what
+    made a healthy owner unreachable for a whole election.
+
+    A process that is *gone* leaves a closed port, and the kernel refuses the
+    connection at once. A process that is *stalled* still holds its listening
+    socket, so the handshake completes into the backlog and the probe waits out
+    its whole budget. Measured against the real probe with a real descriptor and
+    token: about ten milliseconds for the first, a full five seconds for the
+    second. Three orders of magnitude apart, and the old ``bool`` threw the
+    difference away.
+    """
+
+    #: The endpoint answered an authenticated request. Attach to it.
+    ANSWERED = "answered"
+
+    #: Nothing is serving at that address, or something is and it is not this
+    #: owner. Either way the descriptor is leftovers.
+    REFUSED = "refused"
+
+    #: Something holds the port and did not answer in time. No proof it is
+    #: alive, and no proof it is dead.
+    SILENT = "silent"
+
+
 #: Proves a published endpoint is live. Injectable so the election can be tested
 #: without a real server; production passes nothing and gets a real round trip.
-Reachable = Callable[[Attachment], bool]
+Reachable = Callable[[Attachment], Reach]
 
 
 @dataclass(frozen=True)
@@ -139,9 +172,15 @@ def obtain_owner(
     deadline = time.monotonic() + max(deadline_seconds, 0.0)
     started = False
     reach = connect or _reachable
-    # Instances proved dead, so a corpse is not handed back a second time. The
-    # descriptor stays on disk until a live owner overwrites it, and without
-    # this the loop would re-read it, probe it again, and spin.
+    # Instances that answered *wrongly* — a refused connection, a rejected
+    # token, a stranger on the port — so a corpse is not handed back a second
+    # time. The descriptor stays on disk until a live owner overwrites it, and
+    # without this the loop would re-read it, probe it again, and spin.
+    #
+    # Deliberately narrower than "did not answer". An instance that merely ran
+    # out of time is never put here, because the next probe may well reach it:
+    # a paused or overloaded owner holds its port and says nothing, and burying
+    # it made a frontend refuse the healthy owner it had just started itself.
     buried: set[str] = set()
     # A turnover is asked for at most once per election, and the bound is not
     # decoration. A newer frontend replaces a stale owner and then reads the
@@ -240,6 +279,11 @@ def _live_lookup(
     it. The file is left alone and the *lock* decides what happens next, which
     is the rule the whole module is built on.
 
+    Failing the probe is itself two things, and only one of them is final. A
+    refusal says nothing usable is at that address, so the instance is buried and
+    not asked again. A silence says only that the answer did not arrive in time,
+    so nothing is recorded and the next pass asks afresh.
+
     Every path here answers on the first readable descriptor, and the waiting
     happens inside :func:`look_up_owner` alone. That split is measured rather
     than tidy: an earlier version looped, and because nothing rewrites a
@@ -297,8 +341,32 @@ def _live_lookup(
             True,
         )
 
-    if reach(attachment):
+    verdict = reach(attachment)
+    if verdict is Reach.ANSWERED:
         return lookup, False
+
+    if verdict is Reach.SILENT:
+        # Not buried, and that is the whole of the fix. Something holds the port
+        # and did not get to us inside the budget, which is what a paused or
+        # overloaded owner looks like — including one this very election started
+        # and watched report ready. Burying it made every later pass short
+        # circuit, so the owner never got a second chance inside the election it
+        # belonged to, and the frontend spent its whole budget contending for a
+        # lock the healthy owner was still holding.
+        #
+        # Left to the caller's own deadline rather than bounded by a retry
+        # count. Each probe already costs the full budget, so a fixed number of
+        # retries covers a fixed and rather short stall — measured, one retry
+        # rescues a six second freeze and still gives up on a fifteen second
+        # one. The election deadline is what bounds this, as it always was.
+        logger.info("The published daemon has not answered yet; will ask again")
+        return (
+            OwnerLookup(
+                state=OwnerState.INCOMPATIBLE,
+                reason="the published daemon has not answered yet",
+            ),
+            False,
+        )
 
     buried.add(instance)
     logger.info("The published daemon is not answering; electing a new one")
@@ -350,17 +418,23 @@ def _ask_to_stand_down(attachment: Attachment) -> None:
     logger.debug("Stand-down request answered with %s", response.status_code)
 
 
-def _reachable(attachment: Attachment) -> bool:
-    """Whether the published endpoint answers this token.
+def _reachable(attachment: Attachment) -> Reach:
+    """What the published endpoint says when asked with this token.
 
     An authenticated round trip rather than a TCP connect. A connect succeeds
     against any listener that happens to hold the port, including one the
     operating system handed to something else after the owner died, and against
     an owner whose token no longer matches the file this client just read.
+
+    The timeout is caught apart from every other failure, and that separation is
+    the whole point of this function's return type. An owner that is gone refuses
+    the connection; an owner that is merely stalled holds the port and says
+    nothing. Both used to arrive here as ``False``, so a frontend buried a live
+    owner it had just started because one ping landed in a scheduler stall.
     """
     import asyncio
 
-    async def ask() -> bool:
+    async def ask() -> Reach:
         from fastmcp import Client
         from fastmcp.client.transports import StreamableHttpTransport
 
@@ -376,17 +450,30 @@ def _reachable(attachment: Attachment) -> bool:
             ) as client:
                 await client.ping()
         except Exception:
+            # Answered, and wrongly: a refused connection, a rejected token, a
+            # stranger on the port. All of them say this descriptor is not an
+            # owner to attach to, and saying so again would not change it.
             logger.debug("The published daemon did not answer", exc_info=True)
-            return False
-        return True
+            return Reach.REFUSED
+        return Reach.ANSWERED
 
     try:
         return asyncio.run(asyncio.wait_for(ask(), _REACHABLE_SECONDS))
+    except TimeoutError:
+        # Something holds the port and did not get to us in time. Deliberately
+        # not treated as leftovers: a loaded machine, a paused process or a busy
+        # owner all look like this, and every one of them may answer a moment
+        # later.
+        logger.debug("The published daemon did not answer in time", exc_info=True)
+        return Reach.SILENT
     except Exception:
-        # Includes the timeout, and a caller that is already inside a running
-        # loop. Both mean the same thing here: no proof the owner is alive.
-        logger.debug("The daemon reachability check failed", exc_info=True)
-        return False
+        # A caller already inside a running loop, which is no observation at all.
+        # Classified with the refusals rather than the silences because asking
+        # again would fail for the same reason, so a retry would only spend the
+        # budget. Production never reaches it: the election runs synchronously
+        # from ``cli_main`` before any server exists.
+        logger.debug("The daemon reachability check could not run", exc_info=True)
+        return Reach.REFUSED
 
 
 def _log_hint(auth_root: Path) -> Path:
