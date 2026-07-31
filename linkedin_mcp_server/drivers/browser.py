@@ -37,7 +37,7 @@ from linkedin_mcp_server.exceptions import (
     BrowserBusyError,
     BrowserShutdownUnconfirmedError,
 )
-from linkedin_mcp_server.profile_lease import get_profile_lease
+from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.server_role import a_held_profile_means_this_owner_must_go
 from linkedin_mcp_server.session_state import (
     SourceState,
@@ -67,9 +67,22 @@ _headless: bool = True
 # this path and race the first tool call, and an unguarded check-then-create
 # would launch two browsers against the same profile.
 _browser_create_lock = asyncio.Lock()
-# Set while the singleton holds a profile-lease reference, so close_browser()
-# releases exactly the reference the browser took and never someone else's.
-_browser_holds_lease: bool = False
+# The lease the singleton took, held onto rather than merely noted, so the close
+# settles the object it acquired instead of looking one up again.
+#
+# It used to be a bool, and the difference cost six review rounds. Recording only
+# *that* a lease existed left the close to reconstruct it through
+# ``get_profile_lease()``, which resolves a path and can fail — while ``_browser``
+# is already cleared and every line that keeps the profile safe sits below that
+# call. Ownership was therefore inferred from two globals that could disagree,
+# settled at the one moment one of them was already gone. Each round closed one
+# more way in; keeping the object closes the shape.
+#
+# Always the object the registry handed out (``get_profile_lease``), never one
+# constructed here: ``profile_lease`` clears inherited leases after a fork by
+# walking that registry, and an instance built outside it would silently keep a
+# parent's kernel lock alive in a child.
+_browser_lease: ProfileLease | None = None
 # Monotonic timestamp of the last completed tool call, for the idle timer.
 _last_activity: float | None = None
 # Tool calls currently driving the browser. The background handoff poll must not
@@ -562,7 +575,7 @@ async def get_or_create_browser(
 
 async def _create_browser() -> BrowserManager:
     """Create and initialize the singleton (caller holds _browser_create_lock)."""
-    global _browser, _browser_cookie_export_path, _browser_holds_lease
+    global _browser, _browser_cookie_export_path, _browser_lease
 
     lease = get_profile_lease()
 
@@ -579,7 +592,7 @@ async def _create_browser() -> BrowserManager:
     # reference already, so this is usually a cheap second reference; taking it
     # here as well keeps every launch path covered, including the CLI ones.
     took_lease = False
-    if not _browser_holds_lease:
+    if _browser_lease is None:
         if not lease.try_acquire():
             raise BrowserBusyError()
         took_lease = True
@@ -594,6 +607,10 @@ async def _create_browser() -> BrowserManager:
         # process exits.
         lease.mark_browser_open()
         lease.try_acquire()
+        # Recorded even though no browser survives, because the profile is held
+        # and something has to say by whom. There is no ``_browser`` to close, so
+        # nothing will ever settle this lease: that is the point of keeping it.
+        _browser_lease = lease
         # After the marker, not before, and that ordering is the whole reason
         # this call is here rather than only in the exception's constructor. The
         # constructor runs while `_create_browser_locked` is still raising, when
@@ -603,7 +620,7 @@ async def _create_browser() -> BrowserManager:
         # production order: `browser_open=True`, `stand_down=None`, and live, a
         # real owner that three consecutive fresh clients each attached to and
         # got the same refusal from.
-        a_held_profile_means_this_owner_must_go()
+        a_held_profile_means_this_owner_must_go(lease)
         raise
     except BaseException:
         # BaseException, not Exception: a cancelled startup would otherwise
@@ -614,7 +631,7 @@ async def _create_browser() -> BrowserManager:
         raise
 
     if took_lease:
-        _browser_holds_lease = True
+        _browser_lease = lease
     # Records that Chromium is live on the profile, which the reference count
     # cannot express: destructive helpers ask for a reference and would simply
     # get one from our own lease.
@@ -768,9 +785,61 @@ async def close_browser() -> None:
             raise asyncio.CancelledError
 
 
+def _settle_the_profile(*, confirmed: bool) -> None:
+    """Hand the profile back, or keep it and ask for a replacement.
+
+    Every way a browser stops arrives here, and there is nothing to look up: the
+    lease is the object this module took, kept for exactly this moment. That is
+    the whole of the refactor. The close used to re-derive it from a path while
+    ``_browser`` was already cleared, so a lookup that failed skipped every line
+    below it — the marker, the release, the warning and the request for a
+    successor, all at once.
+
+    *confirmed* says whether Chromium is provably gone, which is the only thing
+    that decides between the two outcomes:
+
+    * proven gone, so the profile is free: clear the marker, release the
+      reference, and forget the lease.
+    * not proven, so Chromium may still be on the profile: keep both, and say so.
+      Handing it over now is the corruption the lease exists to prevent, and the
+      kernel frees the lock when this process exits.
+
+    Never raises. Callers reach it mid-teardown, sometimes with an exception of
+    their own already on the way out.
+    """
+    global _browser_lease
+
+    lease, _browser_lease = _browser_lease, None
+    if lease is None:
+        # Nothing was ever taken, so nothing is owed. A browser created while the
+        # middleware already held a reference is the ordinary case.
+        return
+
+    if confirmed:
+        # Only now is Chromium provably gone, so only now may auth state move.
+        lease.mark_browser_closed()
+        lease.release()
+        return
+
+    # close() bounds its cleanup steps and reports failure rather than hanging,
+    # so it can return while Chromium is still running.
+    _browser_lease = lease
+    logger.warning(
+        "Browser shutdown could not be confirmed; keeping the profile "
+        "lease until this process exits."
+    )
+    # And for a shared owner that sentence is the whole problem: it outlives the
+    # client that started it, so nobody is coming to restart it and every later
+    # call meets `BrowserBusyError`. Asked from wherever the lease is *kept*
+    # rather than wherever a failure is reported, because this path reports
+    # nothing at all — a handoff, the idle timeout and `close_session` all return
+    # normally from here, and no exception is ever constructed.
+    a_held_profile_means_this_owner_must_go(lease)
+
+
 async def _close_browser_locked() -> None:
     """Tear the browser down; the caller holds the lifecycle lock."""
-    global _browser, _browser_cookie_export_path, _browser_holds_lease, _last_activity
+    global _browser, _browser_cookie_export_path, _last_activity
 
     browser = _browser
     cookie_export_path = _browser_cookie_export_path
@@ -787,59 +856,17 @@ async def _close_browser_locked() -> None:
             await browser.export_cookies(cookie_export_path)
         except Exception:
             logger.debug("Cookie export on close skipped", exc_info=True)
-    confirmed = await browser.close()
 
+    # In a `finally`, so the profile is settled however `close()` ends. It is
+    # bounded and swallows its own failures today, but the ordering here is what
+    # the whole class of wedge turned on: anything raised between clearing
+    # `_browser` and settling the lease used to leave the profile held by a
+    # process nobody had asked to give way.
+    confirmed = False
     try:
-        lease = get_profile_lease()
-    except Exception:
-        # The lookup is path-based, so it can fail on a profile directory that
-        # became unreadable while the browser was running, even though this
-        # process still holds the open descriptor. By here the singleton is
-        # already cleared, so every line that would have kept the profile safe
-        # is below this point and none of them runs. Measured in production
-        # order: browser cleared, the hold flag still set, and no stand-down.
-        #
-        # Asked before re-raising, because the helper now treats a lease it
-        # cannot read as held, which is exactly this situation. The original
-        # failure still reaches the caller.
-        #
-        # Whether Chromium closed cleanly makes no difference here, and an
-        # earlier version of this exempted the confirmed case on the reasoning
-        # that a proven-closed browser leaves the profile free. It does not: both
-        # `mark_browser_closed()` and `release()` need the object this lookup
-        # failed to produce, so a confirmed close strands the lease just as
-        # thoroughly. Measured with a real acquired lease: Chromium gone, the
-        # lease still held with its marker set, and this owner's own next launch
-        # refused with `BrowserBusyError` while nobody had asked for a
-        # replacement.
-        a_held_profile_means_this_owner_must_go()
-        raise
-    if confirmed:
-        # Only now is Chromium provably gone, so only now may auth state move.
-        lease.mark_browser_closed()
-
-    if _browser_holds_lease:
-        if confirmed:
-            _browser_holds_lease = False
-            lease.release()
-        else:
-            # Chromium may still be running: close() bounds its cleanup steps and
-            # reports failure rather than hanging. Handing the profile to another
-            # process now is exactly the corruption the lease prevents, so keep
-            # it until this process exits and the kernel frees it.
-            logger.warning(
-                "Browser shutdown could not be confirmed; keeping the profile "
-                "lease until this process exits."
-            )
-            # And for a shared owner, that sentence is the whole problem: it
-            # outlives the client that started it, so nobody is coming to restart
-            # it and every later call meets `BrowserBusyError`. Asked here rather
-            # than only where the failure is *reported*, because this path
-            # reports nothing at all: a handoff, the idle timeout and
-            # `close_session` all return normally from here, so no exception is
-            # ever constructed. Reproduced: close returned, lease kept,
-            # `stand_down_reason()` None, next launch refused.
-            a_held_profile_means_this_owner_must_go()
+        confirmed = await browser.close()
+    finally:
+        _settle_the_profile(confirmed=confirmed)
     logger.info("Browser closed")
 
 
@@ -954,7 +981,7 @@ async def release_profile_if_idle_or_requested() -> bool:
 
     Returns whether the browser was closed.
     """
-    if _browser is None or not _browser_holds_lease:
+    if _browser is None or _browser_lease is None:
         return False
 
     # A tool call is using this browser's Page right now. Closing it here would
@@ -1006,12 +1033,19 @@ async def release_profile_if_idle_or_requested() -> bool:
 
 
 def reset_browser_for_testing() -> None:
-    """Reset global browser state for test isolation."""
+    """Reset global browser state for test isolation.
+
+    The lease is dropped rather than released, deliberately. ``conftest`` resets
+    this module before ``profile_lease`` precisely so a lease the browser still
+    held is settled by its own bookkeeping first; releasing a reference here as
+    well would drop one the test never took, and the next test would find a lease
+    that reports itself free while the kernel lock is still open.
+    """
     global _browser, _browser_cookie_export_path, _headless
-    global _browser_holds_lease, _last_activity, _calls_in_flight
+    global _browser_lease, _last_activity, _calls_in_flight
     _browser = None
     _browser_cookie_export_path = None
     _headless = True
-    _browser_holds_lease = False
+    _browser_lease = None
     _last_activity = None
     _calls_in_flight = 0

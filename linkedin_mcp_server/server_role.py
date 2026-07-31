@@ -14,6 +14,7 @@ server to ask, and :func:`process_role` is what those ask instead.
 """
 
 import enum
+from typing import Any
 
 
 class ServerRole(enum.Enum):
@@ -149,7 +150,7 @@ def stand_down_reason() -> str | None:
     return _must_stand_down[0] if _must_stand_down else None
 
 
-def a_held_profile_means_this_owner_must_go() -> None:
+def a_held_profile_means_this_owner_must_go(lease: Any | None = None) -> None:
     """Give way if this is an owner an unconfirmed teardown has stranded.
 
     One function rather than the same three lines at each site, because the sites
@@ -166,8 +167,12 @@ def a_held_profile_means_this_owner_must_go() -> None:
     close path returns normally, so a handoff, the idle timeout and
     ``close_session`` strand an owner without raising anything at all.
 
-    Reads the lease itself. It runs from a ``finally`` a cancellation passes
-    through, and from a teardown with no caller left to have worked it out.
+    *lease* is the object the caller already holds, and passing it is what keeps
+    this function off the path-based lookup. That lookup resolves a directory and
+    consults a registry, neither of which the caller needs: it is holding the
+    very lease being asked about. Callers with nothing in hand may still omit it
+    and get the lookup, which is right for the ones reasoning about the profile
+    rather than about an object they own.
 
     A read that fails asks anyway. Not being able to tell is not the same as
     being told the profile is free, and the two outcomes are not symmetric: an
@@ -175,15 +180,22 @@ def a_held_profile_means_this_owner_must_go() -> None:
     later call until somebody kills it by hand. Measured with the read raising
     ``PermissionError``: the owner kept serving with the question unanswered.
 
+    Typed loosely on purpose. ``ProfileLease`` lives in a module this one must not
+    import — the whole point of ``server_role`` is that it depends on nothing —
+    and the only thing wanted here is ``browser_open``.
+
     Never raises. The caller is mid-teardown or mid-failure and has its own
     exception to deliver.
     """
     if process_role() is not ServerRole.OWNER:
         return
-    from linkedin_mcp_server.profile_lease import get_profile_lease
 
     try:
-        held = get_profile_lease().browser_open
+        if lease is None:
+            from linkedin_mcp_server.profile_lease import get_profile_lease
+
+            lease = get_profile_lease()
+        held = lease.browser_open
     except Exception:  # noqa: BLE001 - unreadable is not the same as free
         held = True
     if not held:
