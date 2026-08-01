@@ -59,6 +59,12 @@ from linkedin_mcp_server import __version__, daemon_config, daemon_descriptor
 from linkedin_mcp_server.config import set_config
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
+from linkedin_mcp_server.daemon_liveness import (
+    CALL_HEADER,
+    HEARTBEAT_PATH,
+    call_id_in,
+    get_liveness,
+)
 from linkedin_mcp_server.drivers.browser import set_headless
 from linkedin_mcp_server.logging_config import configure_logging
 from linkedin_mcp_server.server_role import (
@@ -227,7 +233,13 @@ async def _probe(url: str, token: str) -> None:
 
 
 #: The route a newer frontend uses to ask a stale owner to stand down. Part of
-#: the daemon's own protocol, so a change here is a ``PROTOCOL_VERSION`` bump.
+#: the daemon's own protocol, so a change to *this* route is a
+#: ``PROTOCOL_VERSION`` bump: every turnover depends on it, and a frontend that
+#: guessed wrong about it would wait out its whole budget against a held lock.
+#:
+#: Adding a route beside it is a different question, answered where the version
+#: is defined. The heartbeat route was added without a bump because both sides
+#: work without it; this one they do not.
 STAND_DOWN_PATH = "/control/stand-down"
 
 
@@ -302,6 +314,29 @@ def create_owner_server(
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             stand_down()
             return JSONResponse({"standing_down": True})
+
+    @mcp.custom_route(HEARTBEAT_PATH, methods=["POST"])
+    async def heartbeat_route(request: Request) -> JSONResponse:
+        """Note that somebody is still waiting for a call this owner is running.
+
+        The same explicit token check as the route above, for the same measured
+        reason: a custom route is mounted outside the authentication middleware,
+        so without this any process on the machine could keep a call alive that
+        its own frontend had already abandoned.
+
+        A call this owner does not know gets ``watched: false`` rather than an
+        error. It is the ordinary race, not a fault: a beat sent while the call
+        was returning arrives after it was released, and the frontend has
+        nothing useful to do about that.
+        """
+        header = request.headers.get("authorization", "")
+        scheme, _, presented = header.partition(" ")
+        if scheme.lower() != "bearer" or not _matches_token(presented, token):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        call_id = call_id_in(request.headers.get(CALL_HEADER))
+        if call_id is None:
+            return JSONResponse({"error": "no call named"}, status_code=400)
+        return JSONResponse({"watched": get_liveness().heard(call_id)})
 
     app = mcp.http_app(
         path=MCP_PATH,
@@ -464,6 +499,10 @@ async def _serve_until_stopped(
             # freed by the exit either way.
             await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
             return
+        # Cheap enough to do on the same tick as the two questions above: one
+        # dictionary scan over the calls in flight, on a process that is already
+        # polling. A timer of its own would be a second thing to shut down.
+        get_liveness().cancel_the_abandoned()
         await asyncio.sleep(_STAND_DOWN_POLL_SECONDS)
     await serving
 

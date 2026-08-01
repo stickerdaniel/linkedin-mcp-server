@@ -69,12 +69,24 @@ from linkedin_mcp_server.private_state import harden_directory, harden_file
 #: recognise the value refuses rather than guessing at fields it cannot read.
 SCHEMA_VERSION = 2
 
-#: Bumped when the daemon's own protocol changes: the control routes, the call
-#: metadata, or the ping contract. Compatibility keys on this rather than on the
-#: package version, because the documented install is ``@latest`` and this
-#: project releases often. Matching exact versions would mean a manual shutdown
-#: after almost every release, which is precisely the friction the daemon exists
-#: to remove.
+#: Bumped when the daemon's own protocol changes incompatibly: the control
+#: routes, the call metadata, or the ping contract. Compatibility keys on this
+#: rather than on the package version, because the documented install is
+#: ``@latest`` and this project releases often. Matching exact versions would
+#: mean a manual shutdown after almost every release, which is precisely the
+#: friction the daemon exists to remove.
+#:
+#: **Incompatibly is doing the work in that sentence, and it was added rather
+#: than assumed.** The heartbeat route and the call marker
+#: (:mod:`linkedin_mcp_server.daemon_liveness`) are a control route and call
+#: metadata both, and they did not bump this. A bump makes an old owner
+#: unreadable — :func:`read` refuses the file before an attachment exists — and
+#: an owner nobody can read is an owner nobody can ask to stand down, so the
+#: turnover that an upgrade depends on would break for every owner already
+#: installed. An addition that both sides can do without is therefore not a
+#: reason to bump; one that either side would misread is. The test for it is
+#: whether the two mixed pairings still work, and for the heartbeat they are
+#: tested rather than asserted.
 PROTOCOL_VERSION = 1
 
 _DESCRIPTOR_FILE = "daemon.json"

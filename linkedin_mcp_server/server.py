@@ -205,6 +205,15 @@ def create_mcp_server(
     # answer would describe the layer below rather than the process.
     if role is ServerRole.OWNER:
         mcp.add_middleware(OwnerAuthSignalMiddleware())
+        # Before the serializing middleware below, which puts it outside. That
+        # is the whole point rather than a detail: a call spends most of its
+        # life queued, and a frontend that gives up while its call is still
+        # waiting its turn is the commonest way to end up with work nobody
+        # wants. Inside, a call would only become cancellable once it already
+        # had the browser.
+        from linkedin_mcp_server.daemon_liveness import OwnerCallLivenessMiddleware
+
+        mcp.add_middleware(OwnerCallLivenessMiddleware())
     # The other half, and only ever on the process that has a user in front of it.
     if role is ServerRole.PROXY:
         # Handed the same budget every tool here is given, rather than reading it
@@ -220,10 +229,18 @@ def create_mcp_server(
         # their own liveness wrapper, rather than one wrapper around the pair.
         # The other way round, an owner that departed between the two would leave
         # the replay unrecoverable.
-        from linkedin_mcp_server.daemon_proxy import FrontendOwnerRecoveryMiddleware
+        from linkedin_mcp_server.daemon_proxy import (
+            FrontendCallHeartbeatMiddleware,
+            FrontendOwnerRecoveryMiddleware,
+        )
 
         assert proxy_backend is not None  # the role check above established it
         mcp.add_middleware(FrontendOwnerRecoveryMiddleware(proxy_backend))
+        # Innermost of the three, which is what makes a replay behave: a call the
+        # recovery middleware runs again enters here a second time and gets its
+        # own identifier and its own heartbeats, against whichever owner it is
+        # talking to now.
+        mcp.add_middleware(FrontendCallHeartbeatMiddleware(proxy_backend))
     # Profile ownership belongs to whoever launches Chromium. A process that
     # only forwards calls must not take the lease: it would either block itself
     # until its own timeout, or take the lease and leave the process that
