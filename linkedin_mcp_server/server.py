@@ -48,7 +48,7 @@ from linkedin_mcp_server.tools.person import register_person_tools
 from linkedin_mcp_server.tools.post import register_post_tools
 
 if TYPE_CHECKING:
-    from linkedin_mcp_server.daemon import Attachment
+    from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,7 @@ def create_mcp_server(
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     role: ServerRole = ServerRole.DIRECT,
     auth_token: str | None = None,
-    proxy_attachment: "Attachment | None" = None,
+    proxy_backend: "DaemonProxyBackend | None" = None,
 ) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools.
 
@@ -149,10 +149,12 @@ def create_mcp_server(
     one: it listens on a loopback port that every process on the machine can
     reach, and a browser the user merely points at a page can reach it too.
 
-    *proxy_attachment* is the owner a proxy forwards to. The two credentials are
-    kept apart on purpose and must not be conflated: *auth_token* is what an
-    owner *demands* of callers, while the attachment's token is what a proxy
-    *presents* to one.
+    *proxy_backend* is the owner a proxy forwards to, held as an object rather
+    than as a bare attachment because which owner that is can change: an upgrade
+    replaces one, and a proxy that captured the address at startup would keep
+    using it. The two credentials are kept apart on purpose and must not be
+    conflated: *auth_token* is what an owner *demands* of callers, while the
+    backend's token is what a proxy *presents* to one.
     """
     if auth_token is not None and role is not ServerRole.OWNER:
         # A token on a stdio server protects nothing — there is no port to
@@ -162,13 +164,13 @@ def create_mcp_server(
         raise ValueError(
             f"Only a daemon owner authenticates requests, not {role.value}"
         )
-    if role is ServerRole.PROXY and proxy_attachment is None:
+    if role is ServerRole.PROXY and proxy_backend is None:
         # A proxy registers no tools of its own, so without an owner it would
         # serve an empty tool list and look like a server whose tools vanished.
         raise ValueError(
             "A proxy has no tools of its own and needs an owner to forward to"
         )
-    if proxy_attachment is not None and role is not ServerRole.PROXY:
+    if proxy_backend is not None and role is not ServerRole.PROXY:
         # Only a proxy forwards. Accepting an owner here would mean a server that
         # was handed a bearer token for a shared browser and quietly ignored it.
         raise ValueError(f"Only a proxy forwards to an owner, not {role.value}")
@@ -226,11 +228,11 @@ def create_mcp_server(
     if role.faces_a_client:
         mcp.add_middleware(UpdateNoticeMiddleware())
 
-    if proxy_attachment is not None:
+    if proxy_backend is not None:
         from linkedin_mcp_server.daemon_proxy import create_proxy_provider
 
         mcp.add_provider(
-            create_proxy_provider(proxy_attachment, tool_timeout=tool_timeout)
+            create_proxy_provider(proxy_backend, tool_timeout=tool_timeout)
         )
         # Not the default, which is "warn": a failing provider is logged and
         # skipped, and for a server whose *only* provider this is, that turns a

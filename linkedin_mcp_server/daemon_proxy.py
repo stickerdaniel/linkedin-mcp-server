@@ -11,14 +11,16 @@ them is a way to leak a credential or to hang a call.
 
 No client *session* is cached: one is built per upstream operation, because that
 is how ``ProxyProvider`` uses its factory and because a single shared session
-would outlive the owner it was opened against. The owner's *address* is another
-matter, and it is pinned for this process's life — see below.
+would outlive the owner it was opened against. The address and token are read
+per operation too, from :class:`DaemonProxyBackend`, so following a replacement
+takes no further machinery — see below for what it still takes.
 
-**A proxy is pinned to the owner it started with, and an upgrade is enough to
-strand it.** The address and token are resolved once, at startup, so a proxy
-whose owner goes away fails every operation afterwards rather than finding the
-replacement. Reproduced end to end: a proxy serving 19 tools was asked nothing,
-its owner was told to stand down the way a newer build does
+**A proxy is still pinned to the owner it started with, and an upgrade is enough
+to strand it.** Not because the address is captured any more, but because
+nothing replaces the attachment the backend holds. A proxy whose owner goes away
+therefore fails every operation afterwards rather than finding the replacement.
+Reproduced end to end: a proxy serving 19 tools was asked nothing, its owner was
+told to stand down the way a newer build does
 (``daemon_election._ask_to_stand_down``), and the next listing failed with
 ``McpError: Client failed to connect``.
 
@@ -27,23 +29,27 @@ first client to launch after an upgrade stands the old owner down and every prox
 already attached to it is dead until its own process restarts. Idle exit and a
 crashed owner end the same way.
 
-Resolving the backend per operation and re-electing on a pre-dispatch connection
-failure is what fixes this, and it belongs with the liveness work rather than
-here: a retry needs to know whether the call it is replacing may already have run
-against the browser. Until then the flag stays off by default and this is a
-documented limitation, not a solved problem.
+What is left is noticing that the owner is gone and electing another. That
+belongs with the liveness work rather than here, because a retry needs to know
+whether the call it is replacing may already have run against the browser. Until
+then the flag stays off by default and this is a documented limitation, not a
+solved problem.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Callable
+from functools import partial
+from typing import TYPE_CHECKING
 
 from linkedin_mcp_server import daemon_owner
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from fastmcp.server.providers.proxy import ProxyClient, ProxyProvider
 
+    from linkedin_mcp_server.config.schema import AppConfig
     from linkedin_mcp_server.daemon import Attachment
 
 logger = logging.getLogger(__name__)
@@ -81,25 +87,74 @@ _TIMEOUT_MARGIN_SECONDS = 30.0
 _COMPONENT_CACHE_SECONDS = 300.0
 
 
-def _client_factory(
-    attachment: Attachment, *, timeout: float
-) -> Callable[[], ProxyClient]:
-    """Build the callable ``ProxyProvider`` uses to reach the owner.
+class DaemonProxyBackend:
+    """The owner this proxy forwards to, and what it would take to find another.
 
-    A fresh client per call rather than one shared session, because that is what
-    the provider expects: it opens and closes a client around every upstream
-    operation.
+    One object rather than two loose values, and the reason is the second half:
+    an owner is replaced by every upgrade, so the address a proxy uses has to be
+    a thing that can change rather than a value captured at startup. Nothing
+    changes it yet — that is the next change — but the shape has to exist before
+    anything can.
+
+    It carries the election's inputs alongside the answer because nothing
+    downstream has them otherwise. ``create_proxy_provider`` used to receive an
+    ``Attachment`` and a timeout, and ``create_mcp_server`` has no configuration
+    parameter at all, so the proxy layer could not have elected a replacement
+    even if it had wanted to. Reaching for ``get_config()`` there instead would
+    walk into the argv sensitivity ``daemon_auth`` already documents: an unloaded
+    singleton parses whatever ``sys.argv`` happens to hold, which for a directly
+    constructed server is pytest's command line.
+
+    Not frozen, unlike the ``Attachment`` it holds. The attachment is a proved
+    fact about one owner and must not be edited; which attachment is current is
+    exactly the thing that moves.
     """
-    from fastmcp.client.transports import StreamableHttpTransport
-    from fastmcp.server.providers.proxy import ProxyClient
 
-    # Verbatim, never rebuilt from host and port: the descriptor's own URL
-    # already carries the MCP path and brackets an IPv6 literal, and FastMCP
-    # deliberately does not rewrite the path it is given.
-    url = attachment.descriptor.url
-    token = attachment.token
+    def __init__(
+        self,
+        *,
+        attachment: Attachment,
+        auth_root: Path,
+        profile: Path,
+        config: AppConfig,
+    ) -> None:
+        self._attachment = attachment
+        #: What an election needs, kept rather than looked up again.
+        self.auth_root = auth_root
+        self.profile = profile
+        self.config = config
 
-    def open_client() -> ProxyClient:
+    @property
+    def attachment(self) -> Attachment:
+        """The owner to talk to right now."""
+        return self._attachment
+
+    def open_client(self, *, timeout: float) -> ProxyClient:
+        """Build a client for whoever the owner is at this moment.
+
+        Read here rather than closed over, and that is the whole point of this
+        object. ``ProxyProvider`` calls its factory for every upstream operation
+        and never caches the client, so a factory that reads current state
+        follows a replacement without any further machinery. A factory that
+        captured the address instead keeps using it for the process's life.
+
+        A fresh client per call rather than one shared session, because that is
+        what the provider expects: it opens and closes a client around every
+        upstream operation.
+        """
+        from fastmcp.client.transports import StreamableHttpTransport
+        from fastmcp.server.providers.proxy import ProxyClient
+
+        attachment = self._attachment
+        # Verbatim, never rebuilt from host and port: the descriptor's own URL
+        # already carries the MCP path and brackets an IPv6 literal, and FastMCP
+        # deliberately does not rewrite the path it is given.
+        url = attachment.descriptor.url
+        # Read together with the URL, never separately. They are one credential
+        # pair for one owner, and a token kept across an address change would
+        # authenticate against a process it was never issued for.
+        token = attachment.token
+
         return ProxyClient(
             StreamableHttpTransport(
                 url,
@@ -123,14 +178,9 @@ def _client_factory(
             timeout=timeout,
         )
 
-    # ProxyClient rather than a plain Client, and that is not a preference:
-    # a plain client installs no progress handler, so the progress every
-    # browser-backed tool reports is silently dropped. Measured both ways.
-    return open_client
-
 
 def create_proxy_provider(
-    attachment: Attachment, *, tool_timeout: float
+    backend: DaemonProxyBackend, *, tool_timeout: float
 ) -> ProxyProvider:
     """Serve the owner's tools as if they were this server's own."""
     from fastmcp.server.providers.proxy import ProxyProvider
@@ -138,10 +188,19 @@ def create_proxy_provider(
     timeout = tool_timeout + _TIMEOUT_MARGIN_SECONDS
     logger.debug(
         "Forwarding tool calls to the shared browser owner at %s (deadline %.0fs)",
-        attachment.descriptor.url,
+        backend.attachment.descriptor.url,
         timeout,
     )
+    # One callable, built once and never replaced. That is a requirement rather
+    # than a style: `ProxyProvider` hands this object to every `ProxyTool` it
+    # builds while listing, and keeps those tools for `_COMPONENT_CACHE_SECONDS`.
+    # Reassigning the provider's factory later would not reach them, so the
+    # object has to stay the same one and resolve inside.
+    #
+    # ProxyClient rather than a plain Client, and that is not a preference
+    # either: a plain client installs no progress handler, so the progress every
+    # browser-backed tool reports is silently dropped. Measured both ways.
     return ProxyProvider(
-        _client_factory(attachment, timeout=timeout),
+        partial(backend.open_client, timeout=timeout),
         cache_ttl=_COMPONENT_CACHE_SECONDS,
     )

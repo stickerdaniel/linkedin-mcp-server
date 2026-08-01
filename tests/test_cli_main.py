@@ -644,7 +644,10 @@ class TestForwardingToASharedOwner:
 
         found = cli_main._obtain_shared_owner(self._config(daemon_enabled=True))
 
-        assert found is attachment
+        # Through the backend the proxy layer is built from, which is what now
+        # carries it. The claim is unchanged: the election's answer survives.
+        assert found is not None
+        assert found.attachment is attachment
 
     def test_a_failed_election_leaves_this_process_driving_its_own_browser(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path, caplog
@@ -708,7 +711,7 @@ class TestForwardingToASharedOwner:
         cli_main.main()
 
         assert built["role"] is ServerRole.PROXY
-        assert built["proxy_attachment"] is attachment
+        assert built["proxy_backend"].attachment is attachment
         # The owner's inbound credential must not be reused for the outbound hop.
         assert "auth_token" not in built
 

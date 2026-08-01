@@ -38,7 +38,7 @@ from linkedin_mcp_server.server import ServerRole, create_mcp_server
 from linkedin_mcp_server.setup import run_profile_creation
 
 if TYPE_CHECKING:
-    from linkedin_mcp_server.daemon import Attachment
+    from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
 
 logger = logging.getLogger(__name__)
 
@@ -286,7 +286,7 @@ def profile_info_and_exit() -> None:
     sys.exit(1)
 
 
-def _obtain_shared_owner(config: AppConfig) -> "Attachment | None":
+def _obtain_shared_owner(config: AppConfig) -> "DaemonProxyBackend | None":
     """Return the shared owner to forward to, starting one if nobody has.
 
     Off by default, and inert when off. ``None`` means this process serves its
@@ -328,20 +328,33 @@ def _obtain_shared_owner(config: AppConfig) -> "Attachment | None":
 
     try:
         from linkedin_mcp_server.daemon_election import obtain_owner
+        from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
         from linkedin_mcp_server.session_state import auth_root_dir
 
         profile = get_profile_dir()
-        outcome = obtain_owner(auth_root_dir(profile), profile, config)
+        auth_root = auth_root_dir(profile)
+        outcome = obtain_owner(auth_root, profile, config)
     except Exception:
         logger.warning("The shared browser owner is unavailable", exc_info=True)
         return None
 
-    if outcome.worth_connecting:
+    attachment = outcome.attachment_lookup.attachment
+    if outcome.worth_connecting and attachment is not None:
         logger.info("Forwarding to the shared browser owner")
         # Handed on as the election verified it. Re-reading the descriptor or the
         # token from disk would be a second, unproven read of a pair this one
         # already matched and reached.
-        return outcome.attachment_lookup.attachment
+        #
+        # The election's own inputs travel with it, because they are what finding
+        # a *replacement* would take and nothing downstream has them: the proxy
+        # layer receives no configuration, and reading the singleton there would
+        # parse whatever `sys.argv` holds.
+        return DaemonProxyBackend(
+            attachment=attachment,
+            auth_root=auth_root,
+            profile=profile,
+            config=config,
+        )
 
     logger.warning(
         "No shared browser owner could be started (%s); this server will "
@@ -463,16 +476,16 @@ def main() -> None:
             # before this runs: `daemon_would_be_used` asks whether this is a
             # stdio process, and an interactively chosen HTTP server must not
             # elect a daemon.
-            attachment = _obtain_shared_owner(config)
+            proxy_backend = _obtain_shared_owner(config)
 
             # Create and run the MCP server
-            if attachment is None:
+            if proxy_backend is None:
                 mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
             else:
                 mcp = create_mcp_server(
                     tool_timeout=config.server.tool_timeout_seconds,
                     role=ServerRole.PROXY,
-                    proxy_attachment=attachment,
+                    proxy_backend=proxy_backend,
                 )
 
             if transport == "streamable-http":

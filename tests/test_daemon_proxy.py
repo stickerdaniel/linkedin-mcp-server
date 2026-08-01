@@ -9,6 +9,7 @@ arriving, or a dead owner that looks like a server with no tools.
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -22,11 +23,27 @@ from fastmcp.tools import ToolResult
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import Attachment
 from linkedin_mcp_server.daemon_descriptor import build, new_instance_id, new_token
-from linkedin_mcp_server import daemon_descriptor, daemon_proxy
+from linkedin_mcp_server import daemon_descriptor
 from linkedin_mcp_server.daemon_proxy import (
-    _client_factory,
+    DaemonProxyBackend,
     create_proxy_provider,
 )
+
+
+def _backend(attachment: Attachment, tmp_path: Path) -> DaemonProxyBackend:
+    """The state object the proxy layer is built from.
+
+    The election's inputs travel with the answer, so a later change can find a
+    replacement without reading a configuration singleton whose first read parses
+    `sys.argv`.
+    """
+    profile = tmp_path / "profile"
+    return DaemonProxyBackend(
+        attachment=attachment,
+        auth_root=profile.parent,
+        profile=profile,
+        config=AppConfig(),
+    )
 
 
 def _attachment(
@@ -63,7 +80,7 @@ class TestReachingTheOwner:
         # Rebuilding it from host and port loses the MCP path, and FastMCP does
         # not add one back: it deliberately serves whatever path it is given.
         attachment = _attachment(tmp_path)
-        client = _client_factory(attachment, timeout=1.0)()
+        client = _backend(attachment, tmp_path).open_client(timeout=1.0)
 
         assert isinstance(client.transport, StreamableHttpTransport)
         assert client.transport.url == attachment.descriptor.url
@@ -73,7 +90,7 @@ class TestReachingTheOwner:
         # Unbracketed, the colons in the address run into the one before the
         # port and the whole URL parses as a bad port.
         attachment = _attachment(tmp_path, host="::1")
-        client = _client_factory(attachment, timeout=1.0)()
+        client = _backend(attachment, tmp_path).open_client(timeout=1.0)
 
         assert isinstance(client.transport, StreamableHttpTransport)
         assert "[::1]" in client.transport.url
@@ -82,7 +99,7 @@ class TestReachingTheOwner:
         # The owner compares the token after the `Bearer ` scheme, so a raw
         # header value would be rejected by the endpoint it was minted for.
         attachment = _attachment(tmp_path)
-        client = _client_factory(attachment, timeout=1.0)()
+        client = _backend(attachment, tmp_path).open_client(timeout=1.0)
 
         request = httpx.Request("POST", attachment.descriptor.url)
         assert client.transport.auth is not None
@@ -94,14 +111,16 @@ class TestReachingTheOwner:
         # The provider opens and closes a client around each upstream call, so a
         # single shared session would be reused after its context had exited —
         # and would outlive the owner it was opened against.
-        factory = _client_factory(_attachment(tmp_path), timeout=1.0)
+        factory = partial(
+            _backend(_attachment(tmp_path), tmp_path).open_client, timeout=1.0
+        )
 
         assert factory() is not factory()
 
     def test_it_forwards_with_a_proxy_client(self, tmp_path: Path):
         # Not a plain Client. That one installs no progress handler, so every
         # progress update the tools report would be dropped on the way through.
-        client = _client_factory(_attachment(tmp_path), timeout=1.0)()
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
 
         assert isinstance(client, ProxyClient)
 
@@ -120,7 +139,7 @@ class TestKeepingTheTokenOffTheNetwork:
         monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
         monkeypatch.delenv("NO_PROXY", raising=False)
 
-        client = _client_factory(_attachment(tmp_path), timeout=1.0)()
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
         http_client = client.transport.httpx_client_factory(
             headers=None, auth=None, follow_redirects=True
         )
@@ -133,7 +152,7 @@ class TestKeepingTheTokenOffTheNetwork:
         # FastMCP's transport passes `follow_redirects` on top of the documented
         # client-factory protocol. A factory accepting only the three declared
         # parameters failed at connect time with an unexpected keyword.
-        client = _client_factory(_attachment(tmp_path), timeout=1.0)()
+        client = _backend(_attachment(tmp_path), tmp_path).open_client(timeout=1.0)
 
         http_client = client.transport.httpx_client_factory(
             headers={"x": "y"},
@@ -166,7 +185,9 @@ class TestTheForwardingDeadline:
         # Equal would race the owner's error response, turning a diagnosable
         # "tool timed out" into an unexplained transport failure. Shorter would
         # abort calls the owner would have finished.
-        provider = create_proxy_provider(_attachment(tmp_path), tool_timeout=42.0)
+        provider = create_proxy_provider(
+            _backend(_attachment(tmp_path), tmp_path), tool_timeout=42.0
+        )
 
         assert self._request_deadline(self._client_of(provider)) > 42.0
 
@@ -177,7 +198,9 @@ class TestTheForwardingDeadline:
         # outlives the read timeout never returns at all. What produces an error
         # is the MCP-level timeout, and setting that also raises the HTTP read
         # timeout, so one value covers both layers.
-        provider = create_proxy_provider(_attachment(tmp_path), tool_timeout=42.0)
+        provider = create_proxy_provider(
+            _backend(_attachment(tmp_path), tmp_path), tool_timeout=42.0
+        )
         client = self._client_of(provider)
 
         assert self._request_deadline(client) == 72.0
@@ -253,7 +276,9 @@ class TestServingTheOwnersTools:
             connections += 1
             return ProxyClient(owner)
 
-        provider = create_proxy_provider(_attachment(tmp_path), tool_timeout=1.0)
+        provider = create_proxy_provider(
+            _backend(_attachment(tmp_path), tmp_path), tool_timeout=1.0
+        )
         provider.client_factory = counting_factory
 
         await provider.list_tools()
@@ -267,17 +292,17 @@ class TestServingTheOwnersTools:
     ):
         """Pins the limitation rather than the behaviour anyone wants.
 
-        The endpoint is resolved once, so an owner that goes away leaves this
-        process failing every operation for the rest of its life. An upgrade is
-        enough to cause it: ``@latest`` means the first client launched after one
-        asks the running owner to stand down, and every proxy already attached to
-        it is stranded.
+        Nothing replaces the attachment the backend holds, so an owner that goes
+        away leaves this process failing every operation for the rest of its
+        life. An upgrade is enough to cause it: ``@latest`` means the first
+        client launched after one asks the running owner to stand down, and every
+        proxy already attached to it is stranded.
 
         What this does assert, and it is narrower than it first looks: the
-        address the *production* factory puts in each client is the one it was
-        handed at construction, not a fresh reading. A replacement owner is
-        published before the second call, so the address is demonstrably stale by
-        then, and the call still goes to the old one.
+        address the *production* factory puts in each client is the one the
+        backend was built with, not a fresh reading from disk. A replacement
+        owner is published before the second call, so the published address is
+        demonstrably different by then, and the call still goes to the old one.
 
         What it deliberately does **not** claim is to be a tripwire that fails
         once the liveness work lands. Three attempts at that were each defeated
@@ -309,22 +334,17 @@ class TestServingTheOwnersTools:
                 raise ConnectionError(f"nothing is listening on {url}")
             return ProxyClient(owner)
 
-        real_factory = daemon_proxy._client_factory
+        real_open = DaemonProxyBackend.open_client
 
-        def factory_over_a_socket(attachment, *, timeout):
-            build = real_factory(attachment, timeout=timeout)
+        def open_over_a_socket(self, *, timeout: float) -> ProxyClient:
+            built = real_open(self, timeout=timeout)
+            assert isinstance(built.transport, StreamableHttpTransport)
+            return dial(built.transport.url)
 
-            def open_client() -> ProxyClient:
-                built = build()
-                assert isinstance(built.transport, StreamableHttpTransport)
-                return dial(built.transport.url)
-
-            return open_client
-
-        monkeypatch.setattr(daemon_proxy, "_client_factory", factory_over_a_socket)
+        monkeypatch.setattr(DaemonProxyBackend, "open_client", open_over_a_socket)
 
         daemon_descriptor.publish(auth_root, elected.descriptor, elected.token)
-        provider = create_proxy_provider(elected, tool_timeout=1.0)
+        provider = create_proxy_provider(_backend(elected, tmp_path), tool_timeout=1.0)
         assert {t.name for t in await provider.list_tools()} == {"get_person_profile"}
 
         # A replacement owner takes over on a new port and publishes itself, the
