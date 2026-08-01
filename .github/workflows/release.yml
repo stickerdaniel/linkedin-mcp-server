@@ -6,9 +6,18 @@ on:
     branches: [main]
     paths: ['pyproject.toml']  # Only trigger when pyproject.toml changes
 
+# Every job then declares what it needs on top of this. Nothing here may run
+# third-party code and hold a credential it does not need: a job with
+# id-token: write can mint an OIDC token for PyPI, so anything executing a
+# build backend, an npm package or a Dockerfile stays in a job without it.
+permissions:
+  contents: read
+
 jobs:
   check-version-bump:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
       new-version: ${{ steps.check.outputs.new-version }}
@@ -16,6 +25,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 2  # Need to compare with previous commit
+          persist-credentials: false
 
       - name: Set up uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
@@ -45,36 +55,71 @@ jobs:
             echo "should-release=false" >> $GITHUB_OUTPUT
           fi
 
-  release:
+  # Builds the distributions without any publishing or administration
+  # credentials: the build backend is third-party code and must not run where
+  # it could reach the OIDC identity. Its output travels to the publishing job
+  # as an artifact.
+  build:
     needs: check-version-bump
     if: needs.check-version-bump.outputs.should-release == 'true'
     runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ needs.check-version-bump.outputs.new-version }}
     permissions:
-      contents: write
-      packages: write
-      id-token: write  # Required for PyPI Trusted Publishing
-
+      contents: read
     steps:
-      - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
 
-      # PyPI is the cutover-critical artifact: publish first so a failure in
-      # any later step (Docker build, MCPB pack) cannot leave the README
-      # pointing at a package version that does not exist yet.
+      # build-constraints.txt pins the build backend to a hashed version, so a
+      # tampered setuptools release cannot slip into the distributions. The
+      # requirement in pyproject.toml stays a lower bound, because an exact pin
+      # there would be baked into every published sdist.
       - name: Build package distributions
         run: |
-          uv build
+          uv build --no-sources --build-constraint build-constraints.txt --require-hashes
           echo "Built package distributions:"
           ls -lh dist/
+
+      - name: Optimize uv cache for CI
+        run: uv cache prune --ci
+
+      # The upload is not the last thing the job does: a post step such as the
+      # uv cache save can still fail it. Artifacts are immutable, so overwrite
+      # keeps a retry from tripping over the one the failed attempt wrote.
+      - name: Upload distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # PyPI is the cutover-critical artifact: publish first so a failure in any
+  # later job (Docker build, MCPB pack) cannot leave the README pointing at a
+  # package version that does not exist yet.
+  #
+  # This job holds the OIDC identity of the project, so it runs no repository
+  # code: no checkout, no build, only the artifact download and the upload.
+  publish-pypi:
+    needs: [check-version-bump, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mcp-server-linkedin/${{ needs.check-version-bump.outputs.new-version }}/
+    permissions:
+      id-token: write  # Required for PyPI Trusted Publishing
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package-distributions
+          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
@@ -83,8 +128,26 @@ jobs:
           verbose: true
           skip-existing: true
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+  # Writes the released version into the repository and tags it. Runs nothing
+  # but checkout and the tools the runner ships with, so the admin token never
+  # shares a job with a package manager.
+  prepare-release:
+    needs: [check-version-bump, publish-pypi]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+    permissions:
+      contents: write
+    outputs:
+      release-sha: ${{ steps.release-sha.outputs.release-sha }}
+    steps:
+      # The only checkout that keeps its credentials: this job pushes the
+      # version commit and the tag. fetch-depth: 0 brings the existing tags in
+      # for the duplicate check below.
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6 # zizmor: ignore[artipacked]
+        with:
+          fetch-depth: 0
 
       - name: Update manifest.json and docker-compose.yml version
         run: |
@@ -154,6 +217,27 @@ jobs:
             echo "✅ Created and pushed tag v$VERSION"
           fi
 
+      # The Docker image and the MCP bundle are built from the commit that
+      # carries the updated manifest.json and docker-compose.yml, so the jobs
+      # below check out this SHA instead of the one that triggered the run.
+      - name: Publish the released commit
+        id: release-sha
+        run: echo "release-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  docker:
+    needs: [check-version-bump, prepare-release]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout released commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare-release.outputs.release-sha }}
+          persist-credentials: false
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
@@ -183,19 +267,62 @@ jobs:
           repository: stickerdaniel/linkedin-mcp-server
           readme-filepath: docs/docker-hub.md
 
-      - name: Optimize uv cache for CI
-        run: uv cache prune --ci
+  build-mcpb:
+    needs: [check-version-bump, prepare-release]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+      MCPB_VERSION: 2.1.2
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout released commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare-release.outputs.release-sha }}
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
       - name: Validate and build MCP bundle
         run: |
-          bunx @anthropic-ai/mcpb validate manifest.json
-          bunx @anthropic-ai/mcpb pack .
+          bunx "@anthropic-ai/mcpb@$MCPB_VERSION" validate manifest.json
+          bunx "@anthropic-ai/mcpb@$MCPB_VERSION" pack .
           mv linkedin-mcp-server.mcpb linkedin-mcp-server-v$VERSION.mcpb
 
       - name: Generate release notes
         run: |
           envsubst < RELEASE_NOTES_TEMPLATE.md > RELEASE_NOTES.md
           echo "✅ Generated release notes from template"
+
+      # Overwrites for the same reason as the distributions upload: the bun
+      # cache save runs after this and can fail the job around it.
+      - name: Upload release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-release-assets
+          path: |
+            linkedin-mcp-server-v${{ env.VERSION }}.mcpb
+            RELEASE_NOTES.md
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # Waits for Docker so the release never announces an image that failed to
+  # push. Runs no repository code, only the artifact download and the release.
+  create-github-release:
+    needs: [check-version-bump, docker, build-mcpb]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-version-bump.outputs.new-version }}
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: github-release-assets
 
       - name: Create GitHub Release
         env:

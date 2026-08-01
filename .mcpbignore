@@ -27,6 +27,8 @@ docker-compose.yml
 Dockerfile
 RELEASE_NOTES_TEMPLATE.md
 btca.config.jsonc
+build-constraints.in
+build-constraints.txt
 pytest.ini
 renovate.json
 *.mcpb
