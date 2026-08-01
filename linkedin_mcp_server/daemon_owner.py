@@ -417,6 +417,11 @@ async def _serve(
         )
 
         daemon_descriptor.publish(auth_root, descriptor, token)
+        # The idle clock starts here rather than at startup: before the
+        # descriptor is published nobody can reach this owner, and counting the
+        # import and the browser launch as quiet time would let a short timeout
+        # expire before the frontend that asked for it could call.
+        get_liveness().the_endpoint_is_live()
         # Only now, and only while the lock is held: a token file that is not
         # this generation's belongs to an owner that is gone, because a live one
         # would be holding the lock this process has.
@@ -435,7 +440,9 @@ async def _serve(
         raise
 
     del lock  # held for the process lifetime; named to say so
-    await _serve_until_stopped(server, serving, turnover)
+    await _serve_until_stopped(
+        server, serving, turnover, config.browser.browser_idle_timeout_seconds
+    )
     return 0
 
 
@@ -457,7 +464,10 @@ _FAILED_STARTUP_SHUTDOWN_SECONDS = 10.0
 
 
 async def _serve_until_stopped(
-    server: Any, serving: asyncio.Task[None], turnover: list[str]
+    server: Any,
+    serving: asyncio.Task[None],
+    turnover: list[str],
+    idle_timeout: float = 0.0,
 ) -> None:
     """Hold the endpoint open until it stops, or until asked to give way.
 
@@ -502,7 +512,24 @@ async def _serve_until_stopped(
         # Cheap enough to do on the same tick as the two questions above: one
         # dictionary scan over the calls in flight, on a process that is already
         # polling. A timer of its own would be a second thing to shut down.
-        get_liveness().cancel_the_abandoned()
+        liveness = get_liveness()
+        liveness.cancel_the_abandoned()
+        # And the third reason to go, after wedge and turnover. An owner holds
+        # the daemon lock for the machine's uptime otherwise, having closed the
+        # browser hours ago: the process is what the next election has to wait
+        # for, not the Chromium it is no longer running.
+        #
+        # `quiet_for` answers None while any call is in flight, marked or not,
+        # so this cannot cut one off. The stale descriptor is left behind
+        # deliberately: the next election probes it, is refused, and elects a
+        # replacement, whereas deleting it here would race whoever publishes
+        # next.
+        quiet = liveness.quiet_for()
+        if idle_timeout > 0 and quiet is not None and quiet >= idle_timeout:
+            logger.info("Nothing has needed the browser in %.0fs; exiting", quiet)
+            server.should_exit = True
+            await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS)
+            return
         await asyncio.sleep(_STAND_DOWN_POLL_SECONDS)
     await serving
 

@@ -629,6 +629,203 @@ class TestTheOwnersOwnLoop:
         assert marker not in liveness._waiting
 
 
+class TestGoingAwayWhenNobodyNeedsIt:
+    """The owner's third reason to exit, after wedge and turnover.
+
+    Without it the process holds the daemon lock for the machine's uptime,
+    having closed the browser hours earlier. What the next election waits for is
+    the process, not the Chromium it stopped running.
+    """
+
+    @staticmethod
+    async def _run_loop(idle_timeout: float, *, ticks: float = 0.4) -> bool:
+        """Run the owner's loop briefly. True if it decided to exit."""
+        from linkedin_mcp_server.daemon_owner import _serve_until_stopped
+
+        server = MagicMock()
+        server.should_exit = False
+
+        async def serves() -> None:
+            await asyncio.sleep(ticks)
+
+        serving = asyncio.create_task(serves())
+        await _serve_until_stopped(server, serving, [], idle_timeout)
+        return bool(server.should_exit)
+
+    async def test_an_owner_nobody_ever_called_still_exits(self):
+        # Idleness counted from the first *call* rather than from the endpoint
+        # going live would leave an owner that was started and then never used
+        # running forever, which is the commonest way to reach this state: an
+        # election starts one, and the frontend that asked dies before calling.
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+
+        assert await self._run_loop(idle_timeout=5.0) is True
+
+    async def test_it_does_not_exit_before_the_endpoint_is_published(self):
+        # The clock has not started. An owner spends its first seconds importing
+        # and launching Chromium, and a short timeout would otherwise fire
+        # during startup, before the frontend that asked for it could call.
+        from linkedin_mcp_server import daemon_liveness
+
+        assert daemon_liveness.get_liveness().quiet_for() is None
+        assert await self._run_loop(idle_timeout=0.05) is False
+
+    @pytest.mark.parametrize("marked", [True, False], ids=["marked", "unmarked"])
+    async def test_a_call_in_flight_holds_the_door(
+        self, marked: bool, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Both cases matter and only one is obvious. An unmarked call cannot be
+        # cancelled, and calling it idleness would exit in the middle of one,
+        # cutting off exactly the older frontends this build promises to serve.
+        #
+        # Driven through the middleware rather than by calling the tracker here.
+        # An earlier version of this test registered the call itself and stayed
+        # green when the middleware stopped counting unmarked calls at all,
+        # which is the whole thing it exists to catch.
+        from linkedin_mcp_server import daemon_liveness
+
+        headers = {CALL_HEADER: new_call_id()} if marked else {}
+        monkeypatch.setattr(
+            "fastmcp.server.dependencies.get_http_headers", lambda **_kw: headers
+        )
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 3600  # ty: ignore
+
+        running = asyncio.Event()
+
+        async def call_next(_context: Any) -> str:
+            running.set()
+            await asyncio.sleep(3600)
+            return "never reached"  # pragma: no cover
+
+        context = MagicMock()
+        context.message.name = "get_person_profile"
+        call = asyncio.create_task(
+            OwnerCallLivenessMiddleware().on_call_tool(
+                context,
+                call_next,  # ty: ignore
+            )
+        )
+        await asyncio.wait_for(running.wait(), timeout=5)
+
+        try:
+            assert liveness.quiet_for() is None, "a running call read as idleness"
+            assert await self._run_loop(idle_timeout=0.05) is False
+        finally:
+            call.cancel()
+
+    async def test_the_clock_restarts_when_a_call_ends(self):
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+
+        liveness.call_started()
+        liveness.call_finished()
+
+        # Quiet again, but only just: the wait starts from the call rather than
+        # from whenever the endpoint went live.
+        quiet = liveness.quiet_for()
+        assert quiet is not None and quiet < 1
+        assert await self._run_loop(idle_timeout=5.0) is False
+
+    async def test_a_zero_timeout_keeps_the_owner_forever(self):
+        # The documented way to switch it off, and the same value that already
+        # disables the browser's own idle close.
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 86400  # ty: ignore
+
+        assert await self._run_loop(idle_timeout=0.0) is False
+
+
+#: A frontend that elects an owner with a short idle timeout and then leaves.
+#: Its own script rather than the election suite's, because that one builds an
+#: `AppConfig()` directly and ignores the environment: an idle timeout set as a
+#: variable never reached the owner, and the first version of the test below
+#: watched an owner running on the 600 second default and called the feature
+#: broken.
+_ELECT_WITH_IDLE_TIMEOUT = """
+import json
+import sys
+from pathlib import Path
+
+from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.daemon_election import obtain_owner
+
+profile = Path(sys.argv[1])
+config = AppConfig()
+config.browser.user_data_dir = str(profile)
+config.browser.browser_idle_timeout_seconds = float(sys.argv[2])
+
+outcome = obtain_owner(profile.parent, profile, config, deadline_seconds=90)
+attachment = outcome.attachment_lookup.attachment
+print(json.dumps({
+    "started": outcome.started_owner,
+    "pid": attachment.descriptor.pid if attachment else None,
+}))
+"""
+
+
+@pytest.mark.slow
+class TestARealOwnerGoingAway:
+    """The idle exit with a real detached process on the other end.
+
+    Nothing in one interpreter can see this. The rules above are all driven by
+    calling the tracker or the loop directly, so every one of them stays green
+    with the clock never started at the publish site, and the owner would then
+    hold the daemon lock for the machine's uptime having closed the browser
+    hours before. That line is the whole feature, and this is the only test that
+    touches it.
+    """
+
+    def test_an_idle_owner_exits(self, tmp_path):
+        import json
+        import os
+        import subprocess
+        import sys
+        import time as clock
+
+        from test_daemon_election import _REPO_ROOT, _alive, _stop
+
+        profile = tmp_path / "state"
+        profile.mkdir()
+
+        # Short enough to watch, and comfortably longer than the startup it must
+        # not count as quiet.
+        idle = 4.0
+        started = subprocess.run(
+            [sys.executable, "-c", _ELECT_WITH_IDLE_TIMEOUT, str(profile), str(idle)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+            cwd=_REPO_ROOT,
+            timeout=180,
+        )
+        assert started.returncode == 0, started.stderr
+        result = json.loads(started.stdout.strip().splitlines()[-1])
+        owner = result["pid"]
+        assert isinstance(owner, int) and _alive(owner), result
+
+        try:
+            deadline = clock.monotonic() + idle * 8
+            while clock.monotonic() < deadline and _alive(owner):
+                clock.sleep(0.25)
+            assert not _alive(owner), (
+                "an owner nobody called kept running past its idle timeout"
+            )
+        finally:
+            _stop(owner)
+
+
 class TestTheMarkerSurvivesTheRealClient:
     """That the header the middleware sets is still there when it goes out.
 

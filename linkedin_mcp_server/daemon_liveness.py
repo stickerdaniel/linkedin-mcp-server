@@ -134,6 +134,18 @@ class CallLiveness:
 
     _waiting: dict[str, _Waiting] = field(default_factory=dict)
 
+    #: How many calls are running, marked or not. Separate from ``_waiting`` on
+    #: purpose: an unmarked call cannot be cancelled, but it is emphatically not
+    #: idleness, and an owner that exited during one would cut off the very
+    #: frontends this build promises to keep serving.
+    _in_flight: int = 0
+
+    #: When this owner last did anything for anybody, or ``None`` while it is
+    #: still starting. Idleness is only meaningful once the endpoint is
+    #: published: before that nobody could have called, and an owner that
+    #: counted its own startup as idle time would exit during it.
+    _quiet_since: float | None = None
+
     #: When the owner last got round to asking who was still waiting. Compared
     #: against the next scan so a stall in this process is not charged to the
     #: frontends.
@@ -147,6 +159,45 @@ class CallLiveness:
         deadline it has to catch up with.
         """
         self._waiting[call_id] = _Waiting(task=task, last_heard=time.monotonic())
+
+    def call_started(self) -> None:
+        """Note a call arriving, whether or not this build can identify it."""
+        self._in_flight += 1
+        self._quiet_since = None
+
+    def call_finished(self) -> None:
+        """Note a call ending, however it ended."""
+        self._in_flight = max(0, self._in_flight - 1)
+        if self._in_flight == 0:
+            self._quiet_since = time.monotonic()
+
+    def the_endpoint_is_live(self) -> None:
+        """Start the idle clock, once there is something to be idle *at*.
+
+        Called where the descriptor is published rather than at startup. An
+        owner spends its first seconds importing and launching Chromium, and
+        counting that as quiet would let a short timeout expire before the
+        frontend that asked for this owner had any way to reach it.
+        """
+        if self._quiet_since is None and self._in_flight == 0:
+            self._quiet_since = time.monotonic()
+
+    def quiet_for(self) -> float | None:
+        """Seconds since this owner last had anything to do, if it is free now.
+
+        ``None`` while a call is running, and while the endpoint has not been
+        published, which are the two states where the question does not apply.
+
+        The ``_in_flight`` half of that test is redundant today and is kept
+        anyway, which is worth saying rather than leaving to be discovered: what
+        actually protects a running call is :meth:`call_started` clearing the
+        clock, and removing this check breaks no test. It is here so the answer
+        stays right if the two ever drift, and it should not be counted as a
+        rule anything verifies.
+        """
+        if self._in_flight > 0 or self._quiet_since is None:
+            return None
+        return time.monotonic() - self._quiet_since
 
     def heard(self, call_id: str) -> bool:
         """Note that somebody is still waiting. False if this call is unknown.
@@ -222,6 +273,8 @@ def get_liveness() -> CallLiveness:
 def reset_liveness_for_testing() -> None:
     """Forget every watched call, so one test cannot leak into the next."""
     _liveness._waiting.clear()
+    _liveness._in_flight = 0
+    _liveness._quiet_since = None
     _liveness._last_scan = None
 
 
@@ -249,33 +302,46 @@ class OwnerCallLivenessMiddleware(Middleware):
         from fastmcp.server.dependencies import get_http_headers
 
         call_id = call_id_in(get_http_headers().get(CALL_HEADER))
-        if call_id is None:
-            return await call_next(context)
 
-        # A task rather than a plain await, because cancelling is the whole
-        # point and there is nothing to cancel until the work has a handle.
-        # `create_task` copies the current context, so everything the call reads
-        # from it downstream is the same as it would have been.
-        running: asyncio.Task[ToolResult] = asyncio.ensure_future(call_next(context))
-        _liveness.watch(call_id, running)
+        # Counted before anything else, and counted even when the marker is
+        # missing. Cancelling an unidentified call is not safe, but calling it
+        # idleness is worse: the owner would exit in the middle of one, and the
+        # frontends that send no marker are exactly the older ones this build
+        # promises to keep serving.
+        _liveness.call_started()
         try:
-            return await running
-        except asyncio.CancelledError:
-            outer = asyncio.current_task()
-            if outer is not None and outer.cancelling():
-                # Somebody cancelled *this* middleware, which is shutdown rather
-                # than an abandoned call. Reporting it as one would tell whoever
-                # asked us to stop that the call merely lost its client. The
-                # same counter tells the two apart in `browser_lifespan`, for
-                # the same reason.
+            if call_id is None:
+                return await call_next(context)
+
+            # A task rather than a plain await, because cancelling is the whole
+            # point and there is nothing to cancel until the work has a handle.
+            # `create_task` copies the current context, so everything the call
+            # reads from it downstream is the same as it would have been.
+            running: asyncio.Task[ToolResult] = asyncio.ensure_future(
+                call_next(context)
+            )
+            _liveness.watch(call_id, running)
+            try:
+                return await running
+            except asyncio.CancelledError:
+                outer = asyncio.current_task()
+                if outer is not None and outer.cancelling():
+                    # Somebody cancelled *this* middleware, which is shutdown
+                    # rather than an abandoned call. Reporting it as one would
+                    # tell whoever asked us to stop that the call merely lost
+                    # its client. The same counter tells the two apart in
+                    # `browser_lifespan`, for the same reason.
+                    raise
+                if running.cancelled() and call_id not in _liveness._waiting:
+                    # Ours: this call was expired above. Reported as an error
+                    # rather than re-raised, so the cancellation stops here
+                    # instead of travelling on into a server nobody asked to
+                    # shut down.
+                    raise ToolError(
+                        "Stopped because the client that asked for it stopped waiting"
+                    ) from None
                 raise
-            if running.cancelled() and call_id not in _liveness._waiting:
-                # Ours: this call was expired above. Reported as an error rather
-                # than re-raised, so the cancellation stops here instead of
-                # travelling on into a server nobody asked to shut down.
-                raise ToolError(
-                    "Stopped because the client that asked for it stopped waiting"
-                ) from None
-            raise
+            finally:
+                _liveness.release(call_id)
         finally:
-            _liveness.release(call_id)
+            _liveness.call_finished()
