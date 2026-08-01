@@ -118,6 +118,24 @@ def _publish_stale_owner(
     return descriptor.instance_id
 
 
+def _proxy_backend_for(attachment: Attachment):
+    """The state object a proxy is built from, around a proved attachment.
+
+    The election's inputs travel with the answer so that a later change can find
+    a replacement. These tests only need the answer, and the profile they pass is
+    the one the attachment already describes.
+    """
+    from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
+
+    profile = Path(attachment.descriptor.profile_path)
+    return DaemonProxyBackend(
+        attachment=attachment,
+        auth_root=profile.parent,
+        profile=profile,
+        config=_config(profile),
+    )
+
+
 def _attachment_for(profile: Path, config: AppConfig, port: int) -> Attachment:
     """An attachment pointing at *port*, for probing a socket directly.
 
@@ -1457,7 +1475,7 @@ class TestRealOwner:
             proxy = create_mcp_server(
                 tool_timeout=30.0,
                 role=ServerRole.PROXY,
-                proxy_attachment=lookup.attachment,
+                proxy_backend=_proxy_backend_for(lookup.attachment),
             )
 
             async def served() -> set[str]:
@@ -1516,7 +1534,7 @@ class TestRealOwner:
             proxy = create_mcp_server(
                 tool_timeout=30.0,
                 role=ServerRole.PROXY,
-                proxy_attachment=lookup.attachment,
+                proxy_backend=_proxy_backend_for(lookup.attachment),
             )
             # The repair middleware is removed rather than never added, because
             # `create_mcp_server` installs it for every proxy and that is correct:
@@ -1587,7 +1605,9 @@ class TestRealOwner:
 
             wrong = dataclasses.replace(lookup.attachment, token="not-the-token")
             proxy = create_mcp_server(
-                tool_timeout=30.0, role=ServerRole.PROXY, proxy_attachment=wrong
+                tool_timeout=30.0,
+                role=ServerRole.PROXY,
+                proxy_backend=_proxy_backend_for(wrong),
             )
 
             async def served() -> None:

@@ -1,6 +1,8 @@
 import asyncio
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
 import mcp.types as mt
@@ -14,6 +16,8 @@ from linkedin_mcp_server import __version__
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
+from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.daemon_proxy import DaemonProxyBackend
 from linkedin_mcp_server.server import ServerRole, create_mcp_server
 from linkedin_mcp_server.server_role import (
     RoleAlreadyClaimedError,
@@ -39,40 +43,61 @@ def _owner_serving(*tool_names: str) -> FastMCP:
     return owner
 
 
-def _an_attachment() -> MagicMock:
-    """Stands in for an elected owner.
+def _a_backend() -> DaemonProxyBackend:
+    """A real backend around a stood-in owner.
 
-    The real one carries a loopback address and a bearer token and needs a
-    published descriptor to build. These tests are about which parts of a server
-    a role gets, so the endpoint is stood in for; the real URL, token, timeout
-    and proxy-environment wiring are covered in ``tests/test_daemon_proxy.py``.
+    The backend itself is production's, so the client it builds is production's
+    too: pointed at a port nothing listens on, it fails to connect exactly as a
+    proxy whose owner is gone does. Only the *attachment* is stood in, because a
+    real one needs a published descriptor; the real URL, token, timeout and
+    proxy-environment wiring are covered in ``tests/test_daemon_proxy.py``.
     """
     attachment = MagicMock(name="attachment")
     attachment.descriptor.url = "http://127.0.0.1:1/mcp"
     attachment.token = "a-token"
-    return attachment
+    return DaemonProxyBackend(
+        attachment=attachment,
+        auth_root=Path("/nonexistent"),
+        profile=Path("/nonexistent/profile"),
+        config=AppConfig(),
+    )
+
+
+class _BackendReaching(DaemonProxyBackend):
+    """A backend whose client reaches an in-process owner instead of a socket.
+
+    A subclass rather than a patched attribute, because the provider is handed
+    *this object's* bound method: production reads the override exactly where it
+    would read the real one, and none of the wiring around it is stood in.
+    """
+
+    def __init__(self, owner: FastMCP) -> None:
+        base = _a_backend()
+        super().__init__(
+            attachment=base.attachment,
+            auth_root=base.auth_root,
+            profile=base.profile,
+            config=base.config,
+        )
+        self._owner = owner
+
+    def open_client(self, *, timeout: float) -> ProxyClient:
+        # ProxyClient, matching production: a plain Client would drop the
+        # progress every browser-backed tool reports.
+        return ProxyClient(self._owner)
 
 
 def _proxy_to(monkeypatch: pytest.MonkeyPatch, owner: FastMCP, **kwargs) -> FastMCP:
     """Build a PROXY whose provider reaches *owner* in memory rather than over HTTP."""
-    import linkedin_mcp_server.daemon_proxy as daemon_proxy
-
-    # ProxyClient, matching production: a plain Client would drop the progress
-    # every browser-backed tool reports.
-    monkeypatch.setattr(
-        daemon_proxy,
-        "_client_factory",
-        lambda _a, *, timeout: lambda: ProxyClient(owner),
-    )
     return create_mcp_server(
-        role=ServerRole.PROXY, proxy_attachment=_an_attachment(), **kwargs
+        role=ServerRole.PROXY, proxy_backend=_BackendReaching(owner), **kwargs
     )
 
 
-def _extras_for(role: ServerRole) -> dict[str, MagicMock]:
+def _extras_for(role: ServerRole) -> dict[str, Any]:
     """The arguments a role cannot be built without."""
     if role is ServerRole.PROXY:
-        return {"proxy_attachment": _an_attachment()}
+        return {"proxy_backend": _a_backend()}
     return {}
 
 
@@ -238,7 +263,7 @@ class TestTheRoleAsProcessState:
         # Not a resolvable disagreement: the two would have to disagree about
         # whether this process may open a login window.
         with pytest.raises(RoleAlreadyClaimedError, match="already serves as owner"):
-            create_mcp_server(role=ServerRole.PROXY, proxy_attachment=_an_attachment())
+            create_mcp_server(role=ServerRole.PROXY, proxy_backend=_a_backend())
 
     def test_restating_the_same_role_is_allowed(self):
         # A process that builds two servers of one kind is doing nothing
@@ -409,9 +434,7 @@ class TestProxyRole:
         # the provider *is* the server, so that default turns an unreachable
         # owner into a client that sees no tools and no reason why. Measured on
         # 3.4.4: `tools/list` returned `[]`.
-        proxy = create_mcp_server(
-            role=ServerRole.PROXY, proxy_attachment=_an_attachment()
-        )
+        proxy = create_mcp_server(role=ServerRole.PROXY, proxy_backend=_a_backend())
 
         async with Client(proxy) as client:
             with pytest.raises(Exception, match="connect"):
@@ -452,7 +475,7 @@ class TestProxyRole:
         # shared browser and quietly ignore it.
         for role in (ServerRole.DIRECT, ServerRole.OWNER):
             with pytest.raises(ValueError, match="Only a proxy forwards"):
-                create_mcp_server(role=role, proxy_attachment=_an_attachment())
+                create_mcp_server(role=role, proxy_backend=_a_backend())
 
     def test_the_owners_inbound_token_is_not_the_proxys_outbound_one(self):
         # Two credentials pointing opposite ways. Conflating them would either
