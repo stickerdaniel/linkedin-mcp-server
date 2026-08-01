@@ -2,6 +2,19 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:best-practices", "group:allNonMajor"],
   "schedule": ["before 6am on Monday"],
+  "pip-compile": {
+    "managerFilePatterns": ["/^build-constraints\\.txt$/"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "MCPB CLI pinned in the release workflow",
+      "managerFilePatterns": ["/^\\.github/workflows/release\\.yml$/"],
+      "matchStrings": ["MCPB_VERSION:\\s*(?<currentValue>\\S+)"],
+      "depNameTemplate": "@anthropic-ai/mcpb",
+      "datasourceTemplate": "npm"
+    }
+  ],
   "vulnerabilityAlerts": {
     "enabled": true,
     "labels": ["security"],

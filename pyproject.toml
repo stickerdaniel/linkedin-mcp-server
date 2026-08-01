@@ -49,7 +49,7 @@ Changelog = "https://github.com/stickerdaniel/linkedin-mcp-server/releases"
 mcp-server-linkedin = "linkedin_mcp_server.cli_main:main"
 
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
