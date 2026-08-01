@@ -36,17 +36,26 @@ it twice would send a connection request twice.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from linkedin_mcp_server import daemon_owner
 from linkedin_mcp_server.daemon_auth import a_repeat_could_change_something
+from linkedin_mcp_server.daemon_liveness import (
+    CALL_HEADER,
+    HEARTBEAT_PATH,
+    HEARTBEAT_SECONDS,
+    new_call_id,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -57,6 +66,32 @@ if TYPE_CHECKING:
     from linkedin_mcp_server.daemon import Attachment
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _CallBinding:
+    """One call, and the owner it belongs to for as long as it runs.
+
+    The two travel together and must not be read separately. The heartbeats and
+    the request itself both name an owner, and if they name *different* ones the
+    mechanism inverts: the owner running the call never hears a beat and cancels
+    it after the expiry, while a call that is very much alive is reported to the
+    user as abandoned. That is reachable, because with no component cache every
+    call re-lists first, and a replacement adopted between the two would move
+    the backend underneath this call.
+    """
+
+    call_id: str
+    attachment: Attachment
+
+
+#: The call the current task is making, for the factory to address and stamp.
+#: A context variable rather than an argument because `ProxyProvider` builds the
+#: client itself: the middleware that knows the call never sees the code that
+#: builds the transport.
+_call_being_made: contextvars.ContextVar[_CallBinding | None] = contextvars.ContextVar(
+    "linkedin_mcp_call", default=None
+)
 
 #: Added to the owner's tool timeout to get the frontend's deadline. The owner is
 #: the one that should report a timed-out tool, so the frontend has to outlast it;
@@ -482,7 +517,12 @@ class DaemonProxyBackend:
         """
         from fastmcp.client.transports import StreamableHttpTransport
 
-        attachment = self._attachment
+        # Which call this request belongs to, if it belongs to one, and the owner
+        # that call was bound to. Read together and never separately: a call that
+        # dialled a replacement while its heartbeats stayed with the departing
+        # owner would be cancelled by the owner actually running it.
+        bound = _call_being_made.get()
+        attachment = bound.attachment if bound is not None else self._attachment
         # Verbatim, never rebuilt from host and port: the descriptor's own URL
         # already carries the MCP path and brackets an IPv6 literal, and FastMCP
         # deliberately does not rewrite the path it is given.
@@ -495,6 +535,7 @@ class DaemonProxyBackend:
         return _tells_which_owner_failed()(
             StreamableHttpTransport(
                 url,
+                headers={CALL_HEADER: bound.call_id} if bound is not None else None,
                 # A plain string becomes `Authorization: Bearer <token>`, which
                 # is the form the owner's verifier compares against.
                 auth=token,
@@ -647,3 +688,121 @@ class FrontendOwnerRecoveryMiddleware(Middleware):
 
             logger.info("Attached to a replacement owner; running the call again")
             return await call_next(context)
+
+
+class FrontendCallHeartbeatMiddleware(Middleware):
+    """Say, for as long as this frontend is waiting, that it still is.
+
+    The other half of `daemon_liveness`. Cancellation does not cross the hop, so
+    an owner cannot tell a call somebody wants from one whose client has gone;
+    this is the frontend answering that question over and over until it stops
+    caring, at which point the answer stops arriving and the owner draws the
+    obvious conclusion.
+
+    Innermost of the three a proxy installs, and that is what makes a replay
+    behave: the recovery middleware sits outside, so a call it runs again enters
+    here a second time and gets its own identifier and its own heartbeats
+    against whichever owner it is now talking to.
+    """
+
+    def __init__(self, backend: DaemonProxyBackend) -> None:
+        self._backend = backend
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        call_id = new_call_id()
+        # Captured once, and every beat for this call goes here even if another
+        # call adopts a replacement owner meanwhile. Beating at the new owner
+        # would name a call it has never heard of, while the owner actually
+        # running this one stopped being told about it.
+        attachment = self._backend.attachment
+
+        if not await self._route_exists(attachment, call_id):
+            return await call_next(context)
+
+        beating = asyncio.create_task(self._keep_saying(attachment, call_id))
+        marked = _call_being_made.set(_CallBinding(call_id, attachment))
+        try:
+            return await call_next(context)
+        finally:
+            _call_being_made.reset(marked)
+            # In a finally, and unconditionally: a task left running would go on
+            # keeping a finished call alive in the owner's tracker, which is the
+            # exact state this exists to prevent.
+            beating.cancel()
+
+    async def _route_exists(self, attachment: Attachment, call_id: str) -> bool:
+        """Beat once, to learn whether this owner understands heartbeats at all.
+
+        A 404 is an owner from before this existed. It is served rather than
+        refused: the additions are optional in both directions, so the call goes
+        ahead unheard, exactly as every call did before this change.
+
+        Anything else that goes wrong here is reported and then ignored, and
+        that is deliberate. A 401 or a dead socket will stop the call itself a
+        moment later, with a classification this middleware has no business
+        second-guessing. Beating on regardless would only add a failing request
+        every two seconds to a call that is already failing.
+        """
+        try:
+            answered = await self._beat(attachment, call_id)
+        except Exception:
+            logger.debug(
+                "Could not reach the shared browser owner to say we are waiting",
+                exc_info=True,
+            )
+            return False
+        if answered == 404:
+            logger.debug("This shared browser owner predates heartbeats")
+            return False
+        if answered != 200:
+            logger.warning(
+                "The shared browser owner refused a heartbeat (HTTP %s)", answered
+            )
+            return False
+        return True
+
+    async def _keep_saying(self, attachment: Attachment, call_id: str) -> None:
+        """Beat until cancelled, and never let a failed beat end the run.
+
+        A beat that fails is not evidence the call is over: the owner may be
+        momentarily busy, and giving up here would expire a call that is running
+        perfectly well. The frontend stops saying it is waiting only when it
+        stops waiting, which is what the cancellation in the caller's `finally`
+        expresses.
+        """
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            try:
+                await self._beat(attachment, call_id)
+            except Exception:
+                logger.debug("A heartbeat did not arrive", exc_info=True)
+
+    @staticmethod
+    async def _beat(attachment: Attachment, call_id: str) -> int:
+        """One heartbeat, returning the owner's status code.
+
+        The address is the published one with its path replaced, rather than
+        rebuilt from host and port: the descriptor's URL already brackets an
+        IPv6 literal, and rebuilding is how that bracket gets lost.
+
+        The owner's own client factory, for the reason it exists: httpx honours
+        ``HTTP_PROXY`` even for loopback unless ``NO_PROXY`` happens to say
+        otherwise, and this request carries the bearer token.
+        """
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(attachment.descriptor.url)
+        url = urlunsplit((parts.scheme, parts.netloc, HEARTBEAT_PATH, "", ""))
+        async with daemon_owner.direct_async_http_client(
+            headers={
+                "Authorization": f"Bearer {attachment.token}",
+                CALL_HEADER: call_id,
+            },
+            timeout=httpx.Timeout(HEARTBEAT_SECONDS),
+        ) as client:
+            response = await client.post(url)
+            return response.status_code
