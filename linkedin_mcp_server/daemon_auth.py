@@ -306,7 +306,7 @@ class FrontendAuthRepairMiddleware(Middleware):
             logger.info("Signed in; not repeating a call that had already started")
             return result
 
-        if await _the_tool_changes_something(context):
+        if await a_repeat_could_change_something(context):
             # Repaired, but not run again. The auth is fixed and the next call
             # will work; what this one gets is the owner's own message, which
             # already says to retry.
@@ -350,10 +350,15 @@ class FrontendAuthRepairMiddleware(Middleware):
             return result
 
 
-async def _the_tool_changes_something(
+async def a_repeat_could_change_something(
     context: MiddlewareContext[mt.CallToolRequestParams],
 ) -> bool:
     """Whether running this tool again could repeat an effect on LinkedIn.
+
+    Public because two middlewares need the same answer: this module replays a
+    call after signing in, and ``daemon_proxy`` replays one after electing a
+    replacement owner. One rule, in one place, so the two cannot drift apart in
+    the unsafe direction.
 
     Read from the tool's own annotations, which survive the hop
     (``ProxyProvider`` copies them), rather than from a list of names kept here:
