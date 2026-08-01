@@ -215,6 +215,15 @@ def create_mcp_server(
         # 1.2-second call, and the first read of an unloaded singleton parses
         # whatever `sys.argv` happens to hold.
         mcp.add_middleware(FrontendAuthRepairMiddleware(tool_timeout=tool_timeout))
+        # After the repair, which keeps that one outermost. The order decides how
+        # the two compose: a call and the replay a sign-in triggers each get
+        # their own liveness wrapper, rather than one wrapper around the pair.
+        # The other way round, an owner that departed between the two would leave
+        # the replay unrecoverable.
+        from linkedin_mcp_server.daemon_proxy import FrontendOwnerRecoveryMiddleware
+
+        assert proxy_backend is not None  # the role check above established it
+        mcp.add_middleware(FrontendOwnerRecoveryMiddleware(proxy_backend))
     # Profile ownership belongs to whoever launches Chromium. A process that
     # only forwards calls must not take the lease: it would either block itself
     # until its own timeout, or take the lease and leave the process that
