@@ -29,8 +29,63 @@ def reset_singletons():
 
 
 @pytest.fixture(autouse=True)
-def isolate_profile_dir(tmp_path, monkeypatch):
-    """Redirect profile directory to tmp_path via config and DEFAULT_PROFILE_DIR."""
+def ignore_the_developers_environment(monkeypatch):
+    """Run against an empty environment rather than whatever the shell holds.
+
+    The configuration loader calls ``load_dotenv()`` at import, so a local
+    ``.env`` is part of the environment too. A developer running a real proxy
+    then fails a test that sets only ``PROXY_SERVER``, because the loader sees
+    that server *and* the ambient credentials and refuses the pair. That failure
+    says nothing about the code, reproduces on no other machine, and is
+    invisible in CI, which is the worst combination a test can have.
+
+    Two sources rather than a list kept here, because a hand-written list is the
+    same bug one setting along: it has to be remembered whenever a setting is
+    added, and forgetting it produces a test that passes or fails only on the
+    machine that happens to define it.
+
+    * every key the loader reads, from the loader's own table;
+    * every variable this project names after itself. Those are read directly
+      through ``os.environ`` all over the package — debug switches, the trace
+      mode, the container hint, the update check — and none of them go through
+      the table above. Measured: with ``LINKEDIN_DEBUG_BRIDGE_COOKIE_SET`` set,
+      a cookie-import test fails, and a run with every one of them set failed 22
+      tests.
+
+    What is deliberately left alone is everything this project did not name:
+    ``CI``, which pytest and the workflow both mean something by,
+    ``PYTEST_CURRENT_TEST``, which pytest owns, ``PLAYWRIGHT_BROWSERS_PATH``,
+    which points at an installed browser, and the platform's own
+    ``LOCALAPPDATA``, ``APPDATA`` and ``XDG_CONFIG_HOME``. Clearing those would
+    not be isolation, it would be pretending to run somewhere else.
+    """
+    import os
+
+    from linkedin_mcp_server.config.loaders import EnvironmentKeys
+
+    from_the_table = [
+        value
+        for name, value in vars(EnvironmentKeys).items()
+        if not name.startswith("_") and isinstance(value, str)
+    ]
+    ours = [key for key in os.environ if key.startswith("LINKEDIN")]
+    for key in (*from_the_table, *ours):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolate_profile_dir(ignore_the_developers_environment, tmp_path, monkeypatch):
+    """Redirect profile directory to tmp_path via config and DEFAULT_PROFILE_DIR.
+
+    Takes the clearing fixture as an argument rather than trusting the order two
+    autouse fixtures happen to run in. Pytest orders by scope, dependency and
+    autouse, and explicitly not by where or in what order a fixture was defined;
+    the order these two run in today comes from ``dir()`` being alphabetical,
+    which is a coincidence a rename would end. Reversed, the clearing would
+    delete the ``USER_DATA_DIR`` this sets, and tests would fall back to the
+    real profile at ``~/.linkedin-mcp/profile`` — including anything that spawns
+    a subprocess, which the in-process patches below do not reach.
+    """
     fake_profile = tmp_path / "profile"
     monkeypatch.setenv("USER_DATA_DIR", str(fake_profile))
 
