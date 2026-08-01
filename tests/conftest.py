@@ -12,10 +12,11 @@ def reset_singletons():
     from linkedin_mcp_server.server_role import reset_process_role_for_testing
 
     reset_bootstrap_for_testing()
-    # The owner's call tracker is process state like the rest. Left standing,
-    # the moment of one test's last expiry scan is the baseline for the next,
-    # and a gap of seconds between them reads as an owner that was not
-    # running, so nothing expires.
+    # The owner's call tracker is process state like the rest. Left standing, a
+    # call one test watched is still in flight for the next, which reads as an
+    # owner that is never idle, and the moment of one test's last expiry scan
+    # becomes the baseline for the next, where a gap of seconds reads as an
+    # owner that was not running.
     reset_liveness_for_testing()
     reset_browser_for_testing()
     reset_leases_for_testing()
