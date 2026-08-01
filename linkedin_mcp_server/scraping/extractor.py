@@ -58,6 +58,22 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 # Returned as section text when LinkedIn rate-limits the page
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
+
+def rate_limited_section_error() -> dict[str, str]:
+    """The ``section_errors`` entry for a section LinkedIn rate-limited.
+
+    One shape for every caller, because the alternative is what this codebase
+    did until now: most call sites dropped the sentinel and returned the
+    section as simply absent. An agent reading an empty section with no error
+    concludes there was nothing to find and calls again, which is the opposite
+    of what a rate limit asks for. Being told is what lets a client back off.
+    """
+    return {
+        "error_type": "rate_limit",
+        "error_message": _RATE_LIMITED_MSG,
+    }
+
+
 # LinkedIn shows 25 results per page
 _PAGE_SIZE = 25
 
@@ -1720,6 +1736,7 @@ class LinkedInExtractor:
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
         profile_urn: str | None = None
+        rate_limited = False
 
         requested_ordered = [
             (name, suffix, is_overlay)
@@ -1775,6 +1792,13 @@ class LinkedInExtractor:
                         sections[section_name] = extracted.text
                         if extracted.references:
                             references[section_name] = extracted.references
+                    elif extracted.text == _RATE_LIMITED_MSG:
+                        section_errors[section_name] = rate_limited_section_error()
+                        # Stop rather than walk the remaining sections. Each one
+                        # is another navigation, and LinkedIn has just said it
+                        # wants fewer of them. Whatever was gathered before this
+                        # point is kept and returned.
+                        rate_limited = True
                     elif extracted.error:
                         section_errors[section_name] = extracted.error
 
@@ -1798,6 +1822,9 @@ class LinkedInExtractor:
                     await callbacks.on_progress(
                         f"Scraped {section_name} ({i + 1}/{total})", percent
                     )
+
+                if rate_limited:
+                    break
         except LinkedInScraperException as e:
             if callbacks:
                 await callbacks.on_error(e)
@@ -2852,6 +2879,7 @@ class LinkedInExtractor:
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
+        rate_limited = False
 
         requested_ordered = [
             (name, suffix, is_overlay)
@@ -2883,6 +2911,9 @@ class LinkedInExtractor:
                         sections[section_name] = extracted.text
                         if extracted.references:
                             references[section_name] = extracted.references
+                    elif extracted.text == _RATE_LIMITED_MSG:
+                        section_errors[section_name] = rate_limited_section_error()
+                        rate_limited = True
                     elif extracted.error:
                         section_errors[section_name] = extracted.error
                 except LinkedInScraperException:
@@ -2903,6 +2934,9 @@ class LinkedInExtractor:
                     await callbacks.on_progress(
                         f"Scraped {section_name} ({i + 1}/{total})", percent
                     )
+
+                if rate_limited:
+                    break
         except LinkedInScraperException as e:
             if callbacks:
                 await callbacks.on_error(e)
@@ -2944,6 +2978,8 @@ class LinkedInExtractor:
             sections["employees"] = extracted.text
             if extracted.references:
                 references["employees"] = extracted.references
+        elif extracted.text == _RATE_LIMITED_MSG:
+            section_errors["employees"] = rate_limited_section_error()
         elif extracted.error:
             section_errors["employees"] = extracted.error
 
@@ -2973,6 +3009,8 @@ class LinkedInExtractor:
             sections["job_posting"] = extracted.text
             if extracted.references:
                 references["job_posting"] = extracted.references
+        elif extracted.text == _RATE_LIMITED_MSG:
+            section_errors["job_posting"] = rate_limited_section_error()
         elif extracted.error:
             section_errors["job_posting"] = extracted.error
 
@@ -3228,9 +3266,14 @@ class LinkedInExtractor:
                 )
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
-                    if extracted.error:
+                    # Rate limit first: it is the more specific diagnosis, and a
+                    # page that was throttled may carry a generic error too.
+                    if extracted.text == _RATE_LIMITED_MSG:
+                        section_errors["search_results"] = rate_limited_section_error()
+                    elif extracted.error:
                         section_errors["search_results"] = extracted.error
-                    # Navigation failed or rate-limited; skip ID extraction
+                    # Navigation failed or rate-limited; skip ID extraction.
+                    # Pages gathered so far are kept and returned.
                     break
 
                 # Read total pages from pagination state (once only, best-effort)
@@ -3454,7 +3497,9 @@ class LinkedInExtractor:
                 )
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
-                    if extracted.error:
+                    if extracted.text == _RATE_LIMITED_MSG:
+                        section_errors["saved_jobs"] = rate_limited_section_error()
+                    elif extracted.error:
                         section_errors["saved_jobs"] = extracted.error
                     break
 
@@ -3589,6 +3634,8 @@ class LinkedInExtractor:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references
+        elif extracted.text == _RATE_LIMITED_MSG:
+            section_errors["search_results"] = rate_limited_section_error()
         elif extracted.error:
             section_errors["search_results"] = extracted.error
 
@@ -3621,6 +3668,8 @@ class LinkedInExtractor:
             sections["search_results"] = extracted.text
             if extracted.references:
                 references["search_results"] = extracted.references
+        elif extracted.text == _RATE_LIMITED_MSG:
+            section_errors["search_results"] = rate_limited_section_error()
         elif extracted.error:
             section_errors["search_results"] = extracted.error
 

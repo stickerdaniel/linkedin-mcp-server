@@ -16,7 +16,10 @@ from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import parse_company_sections
-from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG
+from linkedin_mcp_server.scraping.extractor import (
+    _RATE_LIMITED_MSG,
+    rate_limited_section_error,
+)
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
@@ -138,6 +141,8 @@ def register_company_tools(
                 sections["posts"] = extracted.text
                 if extracted.references:
                     references["posts"] = extracted.references
+            elif extracted.text == _RATE_LIMITED_MSG:
+                section_errors["posts"] = rate_limited_section_error()
             elif extracted.error:
                 section_errors["posts"] = extracted.error
 
