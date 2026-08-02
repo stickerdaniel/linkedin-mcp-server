@@ -168,6 +168,61 @@ def test_returns_nothing_when_no_candidate_stands_out() -> None:
     assert build_image_references(page, "search_results") == []
 
 
+def test_a_tie_for_largest_yields_no_subject() -> None:
+    """Two distinct images the same size: neither is identifiable as subject.
+
+    Emitting both would be worse than emitting none — a caller asking for
+    "the subject" would get a stranger half the time — and it breaks the
+    payload contract of at most one subject per kind.
+    """
+    tied: list[RawImage] = [
+        {"src": cdn(PHOTO, 800, 1)},
+        {"src": cdn(PHOTO, 800, 2)},
+        {"src": cdn(PHOTO, 100, 3)},
+    ]
+    assert build_image_references(tied, "main_profile") == []
+
+
+def test_the_same_photo_signed_twice_is_one_candidate() -> None:
+    """The top-card photo reappears in the sticky header, signed afresh.
+
+    Keyed on the whole URL those are two candidates, they tie for largest,
+    and the tie rule above then drops the subject from precisely the pages
+    that render it most prominently. The media id is what identifies an
+    image; the signature and the size variant are not part of it.
+    """
+    page: list[RawImage] = [
+        {"src": f"{SUBJECT}?e=1&v=beta&t=first-signature"},
+        {"src": f"{SUBJECT}?e=2&v=beta&t=second-signature"},
+        {"src": OTHER_MEMBER},
+    ]
+    [ref] = build_image_references(page, "main_profile")
+    assert ref["url"].startswith(SUBJECT)
+
+
+def test_a_photo_and_its_own_thumbnail_are_one_candidate() -> None:
+    """Same image, two sizes — represented by the largest it offers."""
+    page: list[RawImage] = [
+        {"src": cdn(PHOTO, 100, 1)},
+        {"src": cdn(PHOTO, 800, 1)},
+    ]
+    assert [r["url"] for r in build_image_references(page, "main_profile")] == [
+        cdn(PHOTO, 800, 1)
+    ]
+
+
+def test_one_subject_per_kind_at_most() -> None:
+    """A profile page carries both a member photo and an employer logo."""
+    page: list[RawImage] = [
+        {"src": SUBJECT},
+        {"src": OTHER_MEMBER},
+        {"src": COMPANY_SUBJECT_LOGO},
+        {"src": COMPANY_LOGO},
+    ]
+    refs = build_image_references(page, "main_profile")
+    assert [r["context"] for r in refs] == ["profile photo", "company logo"]
+
+
 def test_a_lone_thumbnail_is_not_a_subject() -> None:
     """With nothing to compare against, size is the only evidence left.
 
@@ -236,10 +291,15 @@ def test_the_same_image_rendered_twice_is_one_reference() -> None:
     ]
 
 
-def test_caps_the_number_returned() -> None:
+def test_a_crowd_at_one_size_is_not_a_pile_of_subjects() -> None:
+    """The result is bounded by the rule, not by a cap.
+
+    Ten members rendered alike are ten strangers, not ten subjects — and a
+    caller cannot be handed several things all called "the subject".
+    """
     page: list[RawImage] = [{"src": cdn(PHOTO, 800, i)} for i in range(10)]
     page.append({"src": cdn(PHOTO, 100, 99)})
-    assert len(build_image_references(page, "main_profile", cap=4)) == 4
+    assert build_image_references(page, "main_profile") == []
 
 
 def test_context_names_the_kind_not_the_section() -> None:

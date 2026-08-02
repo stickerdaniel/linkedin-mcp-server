@@ -548,7 +548,6 @@ def _image_kind(match: re.Match[str]) -> str:
 def build_image_references(
     raw_images: list[RawImage],
     section_name: str,
-    cap: int = 4,
 ) -> list[Reference]:
     """Normalize raw ``<img>`` data into ``image`` references.
 
@@ -561,6 +560,10 @@ def build_image_references(
     than against a fixed size: the subject is the largest variant of its kind
     present, and it must be strictly larger than the next one down.
 
+    At most one image per kind is returned, so a page yields the member's
+    photo and — where the page renders one larger than the rest — a company
+    logo, never a list of strangers.
+
     That comparison is what makes the rule safe. A page carries dozens of other
     members' and companies' thumbnails, so when every candidate of a kind is the
     same size there is nothing distinguishing a subject and none is returned —
@@ -569,54 +572,62 @@ def build_image_references(
     express that, and would emit a stranger the moment LinkedIn rendered one
     card larger.
     """
-    candidates: list[tuple[str, int, RawImage]] = []
-    # Deduped here, before anything is judged: LinkedIn renders the same image
-    # more than once (the top-card photo reappears in the sticky header), and
-    # counting those copies as separate candidates of equal size would make the
-    # subject look ambiguous and return nothing.
-    seen: set[str] = set()
+    # One entry per distinct image, keyed by the path up to the size segment.
+    # That prefix is the media id, which is stable across both signings and
+    # size variants; the whole URL is not. LinkedIn renders the same photo more
+    # than once — the top-card image reappears in the sticky header — and signs
+    # each rendering separately, so identical pictures arrive as different
+    # strings. Counted apart they tie for largest, and a tie is read below as
+    # "no subject": the photo would be dropped on exactly the pages that show
+    # it most prominently.
+    best: dict[str, tuple[str, int, RawImage]] = {}
 
     for raw in raw_images:
         src = (raw.get("src") or "").strip()
-        if not src or not _MEDIA_CDN.match(src) or src in seen:
+        if not src or not _MEDIA_CDN.match(src):
             continue
         match = _SUBJECT_IMAGE.search(src)
         if match is None:
             continue
-        seen.add(src)
         variant = max(int(match.group(2)), int(match.group(3)))
-        candidates.append((_image_kind(match), variant, raw))
+        identity = src[: match.start()]
+        previous = best.get(identity)
+        # The same image offered at several sizes is still one image, and is
+        # represented by the largest size it offers.
+        if previous is None or variant > previous[1]:
+            best[identity] = (_image_kind(match), variant, raw)
+
+    candidates = list(best.values())
 
     out: list[Reference] = []
 
     for kind in dict.fromkeys(k for k, _, _ in candidates):
         of_kind = [(v, raw) for k, v, raw in candidates if k == kind]
-        variants = {v for v, _ in of_kind}
-        largest = max(variants)
+        largest = max(v for v, _ in of_kind)
+        tied = [raw for v, raw in of_kind if v == largest]
 
         # Nothing of this kind to compare against, so size is the only
         # evidence: a lone thumbnail is an employer logo on a member page or a
         # visitor avatar on a company page, and neither is the subject.
-        if len(variants) == 1 and largest <= _THUMBNAIL_VARIANT:
+        if len(of_kind) == 1 and largest <= _THUMBNAIL_VARIANT:
             continue
-        # Several candidates, all the same size: none stands out, so none is
-        # the subject. This is the right answer on a search-results page.
-        if len(of_kind) > 1 and len(variants) == 1:
+        # Distinct images sharing the largest size: none stands out, so none is
+        # the subject. Returning them all would be worse than returning none —
+        # a caller reading "the subject" would get a stranger half the time.
+        # This is also the right answer on a search-results page, where every
+        # card is an equal-sized thumbnail.
+        if len(tied) > 1:
             continue
 
-        for variant, raw in of_kind:
-            if variant != largest:
-                continue
-            reference: Reference = {
-                "kind": "image",
-                "url": (raw.get("src") or "").strip(),
-            }
-            alt = (raw.get("alt") or "").strip()
-            if alt:
-                reference["text"] = alt
-            reference["context"] = _IMAGE_CONTEXT.get(kind, "profile photo")
-            out.append(reference)
-            if len(out) >= cap:
-                return out
+        raw = tied[0]
+        reference: Reference = {
+            "kind": "image",
+            "url": (raw.get("src") or "").strip(),
+        }
+        alt = (raw.get("alt") or "").strip()
+        if alt:
+            reference["text"] = alt
+        reference["context"] = _IMAGE_CONTEXT.get(kind, "profile photo")
+        out.append(reference)
 
     return out
