@@ -36,6 +36,7 @@ from linkedin_mcp_server.core.utils import (
 from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
+    build_image_references,
     build_references,
     dedupe_references,
 )
@@ -1646,7 +1647,8 @@ class LinkedInExtractor:
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
-            references=build_references(raw_result["references"], section_name),
+            references=build_references(raw_result["references"], section_name)
+            + build_image_references(raw_result.get("images", []), section_name),
         )
 
     async def _extract_overlay(
@@ -1726,7 +1728,8 @@ class LinkedInExtractor:
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
-            references=build_references(raw_result["references"], section_name),
+            references=build_references(raw_result["references"], section_name)
+            + build_image_references(raw_result.get("images", []), section_name),
         )
 
     async def scrape_person(
@@ -3159,7 +3162,8 @@ class LinkedInExtractor:
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
-            references=build_references(raw_result["references"], section_name),
+            references=build_references(raw_result["references"], section_name)
+            + build_image_references(raw_result.get("images", []), section_name),
         )
 
     async def _get_total_search_pages(self) -> int | None:
@@ -3453,7 +3457,8 @@ class LinkedInExtractor:
         cleaned = _filter_linkedin_noise_lines(truncated)
         return ExtractedSection(
             text=cleaned,
-            references=build_references(raw_result["references"], section_name),
+            references=build_references(raw_result["references"], section_name)
+            + build_image_references(raw_result.get("images", []), section_name),
         )
 
     async def _get_total_list_pages(self) -> int | None:
@@ -4393,7 +4398,26 @@ class LinkedInExtractor:
                     })
                     .filter(Boolean);
 
-                return { source, text, references };
+                // Every <img>, not `img[src]`: LinkedIn defers loading, so an
+                // image below the fold has no src attribute yet at extraction
+                // time and the narrower selector silently matches nothing.
+                // The deferred URL is carried on a data- attribute until then.
+                const images = Array.from(container.querySelectorAll('img'))
+                    .slice(0, MAX_REFERENCE_ANCHORS)
+                    .map(img => ({
+                        src: (
+                            img.currentSrc ||
+                            img.getAttribute('src') ||
+                            img.getAttribute('data-delayed-url') ||
+                            img.getAttribute('data-ghost-url') ||
+                            img.getAttribute('data-src') ||
+                            ''
+                        ).trim(),
+                        alt: normalize(img.getAttribute('alt')),
+                    }))
+                    .filter(image => image.src);
+
+                return { source, text, references, images };
             }""",
             {"selectors": selectors},
         )

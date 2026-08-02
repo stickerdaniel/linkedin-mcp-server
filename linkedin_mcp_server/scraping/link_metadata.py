@@ -17,6 +17,7 @@ ReferenceKind = Literal[
     "school",
     "conversation",
     "external",
+    "image",
 ]
 
 
@@ -28,6 +29,15 @@ class Reference(TypedDict):
     text: NotRequired[str]
     context: NotRequired[str]
     value: NotRequired[str]
+
+
+class RawImage(TypedDict, total=False):
+    """Raw ``<img>`` data collected from the browser DOM."""
+
+    src: str
+    alt: str
+    width: int
+    height: int
 
 
 class RawReference(TypedDict, total=False):
@@ -498,3 +508,103 @@ def _is_linkedin_chrome(path: str) -> bool:
 
 def _is_linkedin_host(host: str) -> bool:
     return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
+# --- images -----------------------------------------------------------------
+
+# LinkedIn serves media from its CDN under a path naming both the kind of image
+# and its size variant, and a page renders its own subject from a larger variant
+# than anyone else:
+#
+#   /dms/image/v2/<id>/profile-displayphoto-shrink_800_800/...  the member
+#   /dms/image/v2/<id>/profile-displayphoto-shrink_100_100/...  someone else
+#   /dms/image/v2/<id>/profile-displaybackgroundimage-shrink...  the banner
+#   /dms/image/v2/<id>/feedshare-shrink_480/...                  a post
+#
+# The grammar is the whole signal. Rendered size is not usable: extraction runs
+# before LinkedIn lays the image out, so the subject's own image reports 0x0 as
+# often as not, and class names are hashed and change between deploys.
+_MEDIA_CDN = re.compile(r"^https://media\.licdn\.com/dms/image/", re.IGNORECASE)
+
+_SUBJECT_IMAGE = re.compile(
+    r"/profile-displayphoto-(?:shrink|scale)_(\d+)_(\d+)/",
+    re.IGNORECASE,
+)
+
+# LinkedIn renders every non-subject from its 100px thumbnail — post authors,
+# mutual connections, suggested profiles. Used only to judge a candidate that
+# has nothing to be compared against.
+_THUMBNAIL_VARIANT = 100
+
+
+def build_image_references(
+    raw_images: list[RawImage],
+    section_name: str,
+    cap: int = 4,
+) -> list[Reference]:
+    """Normalize raw ``<img>`` data into ``image`` references.
+
+    Kept separate from :func:`build_references` because an image is not an
+    anchor: there is no href to classify, and the signal is the CDN path rather
+    than a link target.
+
+    Only the profile subject's own photo is returned. It is identified *relative to the page* rather
+    than against a fixed size: the subject is the largest variant of its kind
+    present, and it must be strictly larger than the next one down.
+
+    That comparison is what makes the rule safe. A page carries dozens of other
+    members' thumbnails, so when every candidate is the same size there is
+    nothing distinguishing a subject and none is returned — the correct answer
+    on a search-results page. A fixed threshold cannot express that, and would
+    emit a stranger the moment LinkedIn rendered one card larger.
+    """
+    candidates: list[tuple[str, int, RawImage]] = []
+    # Deduped here, before anything is judged: LinkedIn renders the same image
+    # more than once (the top-card photo reappears in the sticky header), and
+    # counting those copies as separate candidates of equal size would make the
+    # subject look ambiguous and return nothing.
+    seen: set[str] = set()
+
+    for raw in raw_images:
+        src = (raw.get("src") or "").strip()
+        if not src or not _MEDIA_CDN.match(src) or src in seen:
+            continue
+        match = _SUBJECT_IMAGE.search(src)
+        if match is None:
+            continue
+        seen.add(src)
+        variant = max(int(match.group(1)), int(match.group(2)))
+        candidates.append(("photo", variant, raw))
+
+    out: list[Reference] = []
+
+    for kind in dict.fromkeys(k for k, _, _ in candidates):
+        of_kind = [(v, raw) for k, v, raw in candidates if k == kind]
+        variants = {v for v, _ in of_kind}
+        largest = max(variants)
+
+        # Nothing to compare against, so size is the only evidence left, and a
+        # lone thumbnail is somebody else's avatar rather than the subject.
+        if len(variants) == 1 and largest <= _THUMBNAIL_VARIANT:
+            continue
+        # Several candidates, all the same size: none stands out, so none is
+        # the subject. This is the right answer on a search-results page.
+        if len(of_kind) > 1 and len(variants) == 1:
+            continue
+
+        for variant, raw in of_kind:
+            if variant != largest:
+                continue
+            reference: Reference = {
+                "kind": "image",
+                "url": (raw.get("src") or "").strip(),
+            }
+            alt = (raw.get("alt") or "").strip()
+            if alt:
+                reference["text"] = alt
+            reference["context"] = "profile photo"
+            out.append(reference)
+            if len(out) >= cap:
+                return out
+
+    return out

@@ -55,6 +55,7 @@ Optional additional keys:
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
+- `references[section]` entries with `kind: "image"` — the profile subject's own photo. Identified relative to the page rather than against a fixed size: the largest `profile-displayphoto-*` variant present, and only when it is strictly larger than the next one down, so a page of equal-sized thumbnails (search results) yields nothing and a lone `_100_100` avatar is never mistaken for a subject. `context` is `profile photo`. At most one entry per section. Rendered size is deliberately not used as a signal — extraction runs before layout, so the subject's photo often measures 0x0.
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 
 ## Verifying Bug Reports
