@@ -16,6 +16,7 @@ hashed and change between deploys.
 from __future__ import annotations
 
 import pytest
+from patchright.async_api import async_playwright
 
 from linkedin_mcp_server.scraping.extractor import _LARGEST_IMAGE_VARIANT_FN_JS
 from linkedin_mcp_server.scraping.link_metadata import (
@@ -316,6 +317,29 @@ def test_context_names_the_kind_not_the_section() -> None:
     assert logo["context"] == "company logo"
 
 
+@pytest.fixture
+async def dom_page():
+    """Real chromium page, or skip when no browser is installed.
+
+    Same shape as tests/test_action_signals_dom.py: only launch and setup sit
+    inside the guard, with the ``yield`` outside it, so an assertion failure or
+    a JS error in a test body surfaces as a failure rather than being swallowed
+    into a skip. CI installs no browser, which is exactly what the
+    ``browser_dom`` marker undertakes to tolerate; run these locally after
+    ``uv run patchright install chromium``.
+    """
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+        except Exception as exc:  # browser binary missing
+            pytest.skip(f"chromium unavailable: {exc}")
+        try:
+            yield page
+        finally:
+            await browser.close()
+
+
 class TestAgainstARealDom:
     """The collection JS, run against synthetic HTML in headless chromium.
 
@@ -341,24 +365,19 @@ class TestAgainstARealDom:
     </main>
     """
 
-    @pytest.mark.asyncio
-    async def test_collects_the_subject_photo_from_a_rendered_page(self) -> None:
-        from patchright.async_api import async_playwright
-
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch()
-            page = await browser.new_page()
-            await page.set_content(self.PAGE)
-            images = await page.evaluate(
-                """() => {
-                    const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
-                    return Array.from(document.querySelectorAll('img[src]')).map(img => ({
-                        src: (img.currentSrc || img.src || '').trim(),
-                        alt: normalize(img.getAttribute('alt')),
-                    })).filter(i => i.src);
-                }"""
-            )
-            await browser.close()
+    async def test_collects_the_subject_photo_from_a_rendered_page(
+        self, dom_page
+    ) -> None:
+        await dom_page.set_content(self.PAGE)
+        images = await dom_page.evaluate(
+            r"""() => {
+                const normalize = v => (v || '').replace(/\s+/g, ' ').trim();
+                return Array.from(document.querySelectorAll('img[src]')).map(img => ({
+                    src: (img.currentSrc || img.src || '').trim(),
+                    alt: normalize(img.getAttribute('alt')),
+                })).filter(i => i.src);
+            }"""
+        )
 
         assert [r["url"] for r in build_image_references(images, "main_profile")] == [
             SUBJECT
@@ -381,43 +400,33 @@ class TestLargestVariantJS:
     pytestmark = pytest.mark.browser_dom
 
     @staticmethod
-    async def _pick(html: str) -> str:
-        from patchright.async_api import async_playwright
+    async def _pick(page, html: str) -> str:
+        await page.set_content(html)
+        # Same shape as _ACTION_SIGNALS_JS: an arrow wrapping the shared
+        # declaration, because evaluate() treats a bare "function …" string
+        # as the function to invoke rather than as a declaration.
+        return await page.evaluate(
+            "(() => {"
+            + _LARGEST_IMAGE_VARIANT_FN_JS
+            + "return largestImageVariant(document.querySelector('img'));"
+            + "})"
+        )
 
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch()
-            page = await browser.new_page()
-            await page.set_content(html)
-            # Same shape as _ACTION_SIGNALS_JS: an arrow wrapping the shared
-            # declaration, because evaluate() treats a bare "function …" string
-            # as the function to invoke rather than as a declaration.
-            picked = await page.evaluate(
-                "(() => {"
-                + _LARGEST_IMAGE_VARIANT_FN_JS
-                + "return largestImageVariant(document.querySelector('img'));"
-                + "})"
-            )
-            await browser.close()
-        return picked
-
-    @pytest.mark.asyncio
-    async def test_prefers_the_biggest_candidate_in_srcset(self) -> None:
+    async def test_prefers_the_biggest_candidate_in_srcset(self, dom_page) -> None:
         html = (
             f'<main><img src="{cdn(PHOTO, 200)}" alt="Subject" '
             f'srcset="{cdn(PHOTO, 100)} 100w, {cdn(PHOTO, 200)} 200w, '
             f'{cdn(PHOTO, 800)} 800w"></main>'
         )
-        assert await self._pick(html) == cdn(PHOTO, 800), (
+        assert await self._pick(dom_page, html) == cdn(PHOTO, 800), (
             "srcset offered 800 but a smaller variant was taken"
         )
 
-    @pytest.mark.asyncio
-    async def test_falls_back_to_src_when_there_is_no_srcset(self) -> None:
+    async def test_falls_back_to_src_when_there_is_no_srcset(self, dom_page) -> None:
         html = f'<main><img src="{cdn(PHOTO, 400)}" alt="Subject"></main>'
-        assert await self._pick(html) == cdn(PHOTO, 400)
+        assert await self._pick(dom_page, html) == cdn(PHOTO, 400)
 
-    @pytest.mark.asyncio
-    async def test_reads_a_deferred_image_that_has_no_src_yet(self) -> None:
+    async def test_reads_a_deferred_image_that_has_no_src_yet(self, dom_page) -> None:
         """Below-the-fold images carry the URL on a data- attribute."""
         html = f'<main><img data-delayed-url="{cdn(PHOTO, 800)}" alt="Subject"></main>'
-        assert await self._pick(html) == cdn(PHOTO, 800)
+        assert await self._pick(dom_page, html) == cdn(PHOTO, 800)
