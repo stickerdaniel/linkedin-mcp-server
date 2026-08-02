@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 
+from linkedin_mcp_server.scraping.extractor import _LARGEST_IMAGE_VARIANT_FN_JS
 from linkedin_mcp_server.scraping.link_metadata import (
     RawImage,
     build_image_references,
@@ -302,3 +303,61 @@ class TestAgainstARealDom:
         assert [r["url"] for r in build_image_references(images, "main_profile")] == [
             SUBJECT
         ]
+
+
+class TestLargestVariantJS:
+    """The extractor's own variant chooser, run against a real chromium DOM.
+
+    ``currentSrc`` is whatever the layout engine resolved for its viewport and
+    pixel ratio — a property of the headless window, not of the profile. A live
+    fetch returned a 200x200 photo while the same element's srcset listed 800,
+    and the CDN URLs are signed, so a larger one cannot be constructed
+    afterwards: the size has to be taken at scrape time or not at all.
+
+    Evaluates ``_LARGEST_IMAGE_VARIANT_FN_JS`` itself rather than a copy, so
+    the extractor and this test cannot drift apart.
+    """
+
+    pytestmark = pytest.mark.browser_dom
+
+    @staticmethod
+    async def _pick(html: str) -> str:
+        from patchright.async_api import async_playwright
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            await page.set_content(html)
+            # Same shape as _ACTION_SIGNALS_JS: an arrow wrapping the shared
+            # declaration, because evaluate() treats a bare "function …" string
+            # as the function to invoke rather than as a declaration.
+            picked = await page.evaluate(
+                "(() => {"
+                + _LARGEST_IMAGE_VARIANT_FN_JS
+                + "return largestImageVariant(document.querySelector('img'));"
+                + "})"
+            )
+            await browser.close()
+        return picked
+
+    @pytest.mark.asyncio
+    async def test_prefers_the_biggest_candidate_in_srcset(self) -> None:
+        html = (
+            f'<main><img src="{cdn(PHOTO, 200)}" alt="Subject" '
+            f'srcset="{cdn(PHOTO, 100)} 100w, {cdn(PHOTO, 200)} 200w, '
+            f'{cdn(PHOTO, 800)} 800w"></main>'
+        )
+        assert await self._pick(html) == cdn(PHOTO, 800), (
+            "srcset offered 800 but a smaller variant was taken"
+        )
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_src_when_there_is_no_srcset(self) -> None:
+        html = f'<main><img src="{cdn(PHOTO, 400)}" alt="Subject"></main>'
+        assert await self._pick(html) == cdn(PHOTO, 400)
+
+    @pytest.mark.asyncio
+    async def test_reads_a_deferred_image_that_has_no_src_yet(self) -> None:
+        """Below-the-fold images carry the URL on a data- attribute."""
+        html = f'<main><img data-delayed-url="{cdn(PHOTO, 800)}" alt="Subject"></main>'
+        assert await self._pick(html) == cdn(PHOTO, 800)

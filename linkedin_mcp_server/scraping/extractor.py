@@ -319,6 +319,45 @@ function findIncomingActionRow(main) {
 #   cards.
 #
 # The username is CSS-escaped before interpolation into attribute
+# Shared JS function returning the largest image variant an <img> offers.
+#
+# `currentSrc` alone is not enough: it is whatever the layout engine resolved
+# for the current viewport and device pixel ratio, so the same profile yields a
+# 200px photo in one window and 800px in another, while the element's srcset
+# lists every size LinkedIn will serve. The CDN URLs are signed, so a larger
+# variant cannot be constructed after the fact — it has to be read here.
+#
+# Kept out of the extraction block so tests/test_image_references.py can
+# evaluate this exact source against a real DOM instead of a copy of it.
+_LARGEST_IMAGE_VARIANT_FN_JS = r"""
+function largestImageVariant(img) {
+  const candidates = [];
+  for (const attr of ['src', 'data-delayed-url', 'data-ghost-url', 'data-src']) {
+    const value = (img.getAttribute(attr) || '').trim();
+    if (value) candidates.push(value);
+  }
+  if (img.currentSrc) candidates.push(img.currentSrc.trim());
+  // srcset is "<url> <descriptor>, <url> <descriptor>, …"
+  for (const part of (img.getAttribute('srcset') || '').split(',')) {
+    const url = part.trim().split(/\s+/)[0];
+    if (url) candidates.push(url);
+  }
+
+  let best = '';
+  let bestSize = -1;
+  for (const url of candidates) {
+    const match = url.match(/_(\d+)_(\d+)\//);
+    const size = match ? Math.max(+match[1], +match[2]) : 0;
+    if (size > bestSize) {
+      bestSize = size;
+      best = url;
+    }
+  }
+  return best;
+}
+"""
+
+
 # selectors to defend against malformed inputs containing characters
 # that would otherwise break the selector syntax (quotes, brackets).
 _ACTION_SIGNALS_JS = (
@@ -4301,7 +4340,10 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Extract innerText and raw anchor metadata from the first matching root."""
         result = await self._page.evaluate(
-            """({ selectors }) => {
+            r"""({ selectors }) => {
+"""
+            + _LARGEST_IMAGE_VARIANT_FN_JS
+            + r"""
                 const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
                 const containerSelector = 'section, article, li, div';
                 const headingSelector = 'h1, h2, h3';
@@ -4398,21 +4440,14 @@ class LinkedInExtractor:
                     })
                     .filter(Boolean);
 
+
                 // Every <img>, not `img[src]`: LinkedIn defers loading, so an
                 // image below the fold has no src attribute yet at extraction
                 // time and the narrower selector silently matches nothing.
-                // The deferred URL is carried on a data- attribute until then.
                 const images = Array.from(container.querySelectorAll('img'))
                     .slice(0, MAX_REFERENCE_ANCHORS)
                     .map(img => ({
-                        src: (
-                            img.currentSrc ||
-                            img.getAttribute('src') ||
-                            img.getAttribute('data-delayed-url') ||
-                            img.getAttribute('data-ghost-url') ||
-                            img.getAttribute('data-src') ||
-                            ''
-                        ).trim(),
+                        src: largestImageVariant(img),
                         alt: normalize(img.getAttribute('alt')),
                     }))
                     .filter(image => image.src);
