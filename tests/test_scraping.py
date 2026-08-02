@@ -3758,6 +3758,81 @@ class TestActivityFeedExtraction:
 
         show_more.click.assert_not_awaited()
 
+    async def test_skills_page_bypasses_show_more_and_wheel_scrolls(self, mock_page):
+        """Skills page skips the Show-more loop and wheel-scrolls to load the list."""
+        skills_text = (
+            "Skills\nAll\n\nIPTV\n99+ endorsements\n\nDVB\n8 endorsements\n\nDRM"
+        )
+        aria = ["Edit IPTV skill", "Edit DVB skill", "Edit DRM skill", "Dismiss"]
+
+        def evaluate_side_effect(js, *args, **kwargs):
+            if "innerText.length" in js:
+                return 500  # constant -> wheel loop goes stale and stops
+            if "querySelectorAll('[aria-label]')" in js:
+                return aria
+            return {"source": "root", "text": skills_text, "references": []}
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+        mock_page.wait_for_function = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse = MagicMock()
+        mock_page.mouse.move = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
+
+        show_more = MagicMock()
+        show_more.count = AsyncMock(return_value=1)
+        show_more.is_visible = AsyncMock(return_value=True)
+        show_more.click = AsyncMock()
+        show_more.first = show_more
+        show_more.filter = MagicMock(return_value=show_more)
+
+        def locator_side_effect(selector):
+            if selector == "main button":
+                return show_more
+            return MagicMock(count=AsyncMock(return_value=0))
+
+        mock_page.locator = MagicMock(side_effect=locator_side_effect)
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_window_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/details/skills/",
+                section_name="skills",
+            )
+
+        # never clicks the (per-skill "Show all N details") button, never uses
+        # the window-scroll helper, and does wheel-scroll instead
+        show_more.click.assert_not_awaited()
+        mock_window_scroll.assert_not_awaited()
+        assert mock_page.mouse.wheel.await_count > 0
+
+        # structured skills parsed and keyed on aria names
+        assert result.structured is not None
+        by_name = {s["name"]: s for s in result.structured}
+        assert set(by_name) == {"IPTV", "DVB", "DRM"}
+        assert by_name["IPTV"]["endorsements"] == 99
+        assert by_name["IPTV"]["endorsements_display"] == "99+"
+        assert by_name["DVB"]["endorsements"] == 8
+        assert by_name["DRM"]["endorsements"] == 0
+
     async def test_activity_page_timeout_proceeds_gracefully(self, mock_page):
         """When activity feed content never loads, extraction proceeds with available text."""
         from patchright.async_api import TimeoutError as PlaywrightTimeoutError

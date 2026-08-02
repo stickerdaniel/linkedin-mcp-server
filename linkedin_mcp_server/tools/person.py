@@ -54,16 +54,21 @@ def register_person_tools(
                 Examples: "experience,education", "contact_info", "skills,projects", "honors,languages", "posts"
                 Default (None) scrapes only the main profile page.
             max_scrolls: Maximum pagination attempts per section to load more content.
-                On detail sections (experience, certifications, skills, etc.) this
-                is the max number of "Show more" button clicks. On activity/posts
-                it is the max scroll-to-bottom iterations. Applies to all sections
-                in this call. Default (None) uses 5 for detail sections and 10 for
-                posts. Increase when a profile has many items in a section
-                (e.g., 30+ certifications, max_scrolls=20). To avoid slowing down
-                other sections, request heavy sections in a separate call.
+                On most detail sections (experience, certifications, etc.) this is
+                the max number of "Show more" button clicks. The skills section
+                instead wheel-scrolls to load its full list (default budget 25);
+                activity/posts scroll to the bottom. Applies to all sections in
+                this call. Default (None) uses 5 for detail sections, 25 for
+                skills, and 10 for posts. Increase when a profile has many items
+                in a section (e.g., 30+ certifications, max_scrolls=20). To avoid
+                slowing down other sections, request heavy sections separately.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
+            When "skills" is requested the full list is returned (not just the
+            top ~10 LinkedIn shows by default), and result["structured"]["skills"]
+            carries parsed records: {name, endorsements (int), endorsements_display
+            (str, e.g. "99+"), endorsers (list[str])}, in page order.
             Sections may be absent if extraction yielded no content for that page.
             Includes unknown_sections list when unrecognised names are passed.
             The LLM should parse the raw text in each section.
@@ -337,6 +342,9 @@ def register_person_tools(
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
+            When "skills" is requested the full list is returned (not just the
+            top ~10), plus result["structured"]["skills"] with parsed records
+            {name, endorsements, endorsements_display, endorsers}.
             The url field reflects the resolved profile URL, revealing the real username.
         """
         try:

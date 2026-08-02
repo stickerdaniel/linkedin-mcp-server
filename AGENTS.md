@@ -28,6 +28,7 @@ All scraping tools return: `{url, sections: {name: raw_text}}`.
 Optional additional keys:
 
 - `references: {section_name: [{kind, url, text?, context?, value?}]}` — LinkedIn URLs are relative paths; `value` carries non-URL identifiers (e.g. company URN id for `kind: "company_urn"`)
+- `structured: {section_name: [...]}` — parsed records for sections that support it. Currently only `skills`: `[{name, endorsements (int), endorsements_display (str, e.g. "99+"), endorsers (list[str])}]`, in page order. The raw `sections["skills"]` text is still returned alongside.
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
