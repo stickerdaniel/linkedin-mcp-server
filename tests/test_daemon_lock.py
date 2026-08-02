@@ -546,11 +546,24 @@ _ADOPT_THEN_LAUNCH_AN_UNRELATED_CHILD = """
 
     # Launched the way a browser is, inheriting whatever is still inheritable.
     child = subprocess.Popen(
-        [sys.executable, "-c", "import sys; sys.stdin.readline()"],
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('up', flush=True); sys.stdin.readline()",
+        ],
         stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
         close_fds=False,
     )
     try:
+        # Wait for the child to reach its own code before asking anything about
+        # the lock. Between fork and exec it is a copy of this process and holds
+        # a copy of every descriptor, inheritable or not -- CLOEXEC only takes
+        # effect at exec. Asking inside that window reports the lock as held no
+        # matter what adopt() did, which is a race in the test rather than a
+        # finding about the code.
+        assert child.stdout.readline().strip() == b"up", "the child never started"
+
         adopter.release()
         # Through the production API rather than a raw flock, so a `try_acquire`
         # that refused for its own reasons would be caught here too.
