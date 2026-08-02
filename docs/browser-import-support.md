@@ -77,26 +77,24 @@ browser or against yt-dlp / HackBrowserData, never a guess.
 
 ## User agent of an imported session
 
-LinkedIn ties a session token to the browser fingerprint it was minted under, so
-an imported cookie is replayed under the source browser's user agent rather than
-the runtime browser's default. Since Chromium's user-agent reduction (Chromium
-101+) the desktop UA is frozen: it varies only in the platform token and the
-engine major (minor/build/patch are always `0.0.0`). `browser_import/user_agent.py`
-reconstructs it from two on-disk inputs, no network call:
+There is none. An imported cookie is replayed under the runtime browser's own
+user agent, and nothing about the source browser's is carried forward.
 
-- the OS platform token (frozen per platform), and
-- the Chromium major, read from `<user-data-root>/Last Version` with the
-  `Local State` `stats_version` as fallback.
+The import used to synthesize the source browser's UA, on the reasoning that
+LinkedIn ties a session token to the fingerprint it was minted under. That was
+never measured, and the mechanism did not do what it claimed. Patchright
+overrides only the UA string, so the client hints kept reporting the real
+browser and any page could see the two disagree; the override never reached
+service workers at all
+([playwright#5237](https://github.com/microsoft/playwright/issues/5237), closed
+as an upstream Chromium bug); and the value was frozen at import time while the
+browser it described kept updating.
 
-Only browsers whose version string leads with the Chromium engine major qualify,
-marked `chromium_versioned` in the registry: Chrome, Chromium, Edge, Arc, Brave
-(prefixes the engine major, e.g. `138.1.80.113`), and Helium. Edge appends its
-own brand token via `ua_brand_suffix` (`Edg/<major>.0.0.0`). Opera, Opera GX,
-Vivaldi, Yandex, Whale and Cốc Cốc version independently of the engine, so no UA
-is synthesized and they keep the runtime default. The UA is recorded in
-`source-state.json` (`user_agent`, absent for manual logins where the cookie is
-minted in the runtime browser itself) and every runtime replay adopts it. An
-explicit `USER_AGENT` env var or `--user-agent` flag always overrides it.
+A browser reporting its own identity consistently beats one caught contradicting
+itself, so the synthesis, the `user_agent` key in `source-state.json`, and the
+`USER_AGENT` / `--user-agent` settings are all gone. The settings are refused at
+startup rather than ignored. See `docs/browser-fingerprint.md` for the
+measurements.
 
 ## Flat layout (Opera)
 

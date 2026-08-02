@@ -241,7 +241,6 @@ async def _login_into_fresh_profile(
         user_data_dir=user_data_dir,
         headless=False,
         slow_mo=config.browser.slow_mo,
-        user_agent=config.browser.user_agent,
         viewport=viewport,
         **launch_options,
     )
@@ -295,14 +294,7 @@ async def _run_login(
         # first successful /feed/ recovery instead of relying on browser teardown.
         if await browser.export_cookies(portable_cookie_path(user_data_dir)):
             print("   Cookies exported for Docker portability")
-            # Record the override UA the cookie was minted under (the login
-            # browser ran with config.browser.user_agent). Without this a later
-            # replay from a runtime that lacks the override would fall back to
-            # its default UA, a fingerprint mismatch. None when no override is
-            # set (the runtime default is stable across replays on that runtime).
-            source_state = write_source_state(
-                user_data_dir, user_agent=config.browser.user_agent
-            )
+            source_state = write_source_state(user_data_dir)
             print(f"   Source session generation: {source_state.login_generation}")
         else:
             print(

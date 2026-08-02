@@ -127,7 +127,13 @@ class BrowserConfig:
 
     headless: bool = True
     slow_mo: int = 0  # Milliseconds between browser actions (debugging)
-    user_agent: str | None = None  # Custom browser user agent
+    # Always None: the override was removed and both settings that used to fill
+    # this are now refused at startup. The field stays because
+    # ``SHARED_CONFIG_FIELDS`` hashes it into the daemon's configuration
+    # fingerprint, and dropping a field there makes a running owner unreadable
+    # to a client of the other version instead of merely mismatched. Remove it
+    # once owner turnover survives a fingerprint change.
+    user_agent: str | None = None
     viewport_width: int = 1280
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
