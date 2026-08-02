@@ -1923,6 +1923,38 @@ class TestConnectWithPerson:
         assert mock_extract.await_count == 1
         assert "posts" not in result["sections"]
 
+    async def test_a_failing_urn_read_cannot_bury_the_rate_limit(self, mock_page):
+        """The URN read is skipped once throttled, so it cannot overwrite it.
+
+        It runs after the section handling but inside the same try, so a
+        failure there lands in the generic handler and replaces the entry with
+        a diagnostic — losing the one thing this section had to report. There
+        is nothing to read a URN from on a page with no content anyway.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(_RATE_LIMITED_MSG),
+            ),
+            patch.object(
+                extractor,
+                "_extract_profile_urn",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("execution context destroyed"),
+            ) as mock_urn,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", set())
+
+        mock_urn.assert_not_awaited()
+        assert result["section_errors"]["main_profile"]["error_type"] == "rate_limit"
+
     async def test_earlier_sections_survive_a_later_rate_limit(self, mock_page):
         """Stopping early keeps what was already gathered."""
         extractor = LinkedInExtractor(mock_page)
@@ -2141,6 +2173,7 @@ class TestScrapeJob:
             result = await extractor.scrape_job("12345")
 
         assert result["sections"] == {}
+        assert result["section_errors"]["job_posting"]["error_type"] == "rate_limit"
 
     async def test_scrape_job_omits_orphaned_references_when_text_empty(
         self, mock_page
@@ -2645,6 +2678,7 @@ class TestSearchJobs:
 
         assert result["job_ids"] == []
         assert result["sections"] == {}
+        assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
         mock_ids.assert_not_awaited()
 
 
@@ -2943,6 +2977,36 @@ class TestGetSavedJobs:
         mock_ids.assert_not_awaited()
         assert result["job_ids"] == []
         assert result["sections"]["saved_jobs"] == "Login page content"
+
+
+class TestSingleSectionRateLimits:
+    """The single-page tools report the reason too, not just an empty result.
+
+    Without these, three of the nine repaired call sites would be unbound: the
+    branch could be deleted and the suite would stay green, because the older
+    tests only assert the sentinel does not reach ``sections``.
+    """
+
+    @pytest.mark.parametrize(
+        ("method", "args", "section"),
+        [
+            ("get_company_employees", ("testcorp",), "employees"),
+            ("search_people", ("python",), "search_results"),
+            ("search_companies", ("fintech",), "search_results"),
+        ],
+    )
+    async def test_the_reason_is_reported(self, mock_page, method, args, section):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(_RATE_LIMITED_MSG),
+        ):
+            result = await getattr(extractor, method)(*args)
+
+        assert result["sections"] == {}
+        assert result["section_errors"][section]["error_type"] == "rate_limit"
 
 
 class TestSearchPeople:

@@ -55,18 +55,38 @@ _NAV_DELAY = 2.0
 # Backoff before retrying a temporarily blocked page
 _RATE_LIMIT_RETRY_DELAY = 5.0
 
-# Returned as section text when LinkedIn rate-limits the page
+# Returned as section text when a page comes back with its content gone and
+# only LinkedIn's own navigation and footer left.
+#
+# Read carefully: that condition is a *guess* that the page was throttled, not
+# an observation of one. It arrived in d8b4c62 with no cited evidence, LinkedIn
+# documents no such behaviour, and nobody here has reproduced it deliberately —
+# doing so would mean provoking a real throttle on a real account. The log line
+# hedges with "likely" for the same reason.
+#
+# The same empty shell could also be a layout change, a resource this account
+# cannot see, or a load that gave up. A session LinkedIn ended is the one
+# alternative already ruled out elsewhere: every navigation checks the URL
+# against the auth-blocker patterns first, and a redirect to /login, /authwall
+# or /checkpoint raises before extraction is reached. That check stays on URLs
+# deliberately — body text would be a per-locale guess, and this project's
+# rule is that classification never depends on text values.
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
 
 def rate_limited_section_error() -> dict[str, str]:
-    """The ``section_errors`` entry for a section LinkedIn rate-limited.
+    """The ``section_errors`` entry for a section that came back empty.
 
     One shape for every caller, because the alternative is what this codebase
     did until now: most call sites dropped the sentinel and returned the
     section as simply absent. An agent reading an empty section with no error
     concludes there was nothing to find and calls again, which is the opposite
     of what a rate limit asks for. Being told is what lets a client back off.
+
+    Note this reports the *heuristic's* verdict, with the caveats on
+    ``_RATE_LIMITED_MSG`` above, and does not make it more accurate. What it
+    changes is that a wrong verdict is now visible and can be argued with,
+    where a silently missing section could not be.
     """
     return {
         "error_type": "rate_limit",
@@ -1802,7 +1822,16 @@ class LinkedInExtractor:
                     elif extracted.error:
                         section_errors[section_name] = extracted.error
 
-                    if section_name == "main_profile" and profile_urn is None:
+                    # Skipped once the section came back empty: there is no
+                    # content to read a URN from, and a failure here lands in
+                    # the handler below, which would overwrite the entry just
+                    # recorded with a generic diagnostic — losing the one
+                    # finding this section had.
+                    if (
+                        section_name == "main_profile"
+                        and profile_urn is None
+                        and not rate_limited
+                    ):
                         profile_urn = await self._extract_profile_urn()
                 except LinkedInScraperException:
                     raise
