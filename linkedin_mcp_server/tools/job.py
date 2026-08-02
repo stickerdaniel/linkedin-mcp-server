@@ -89,6 +89,8 @@ def register_job_tools(
         easy_apply: bool = False,
         sort_by: str | None = None,
         extractor: Any | None = None,
+        distance_km: float | None = None,
+        days_ago: int | None = None,
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
@@ -106,6 +108,8 @@ def register_job_tools(
             work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
             easy_apply: Only show Easy Apply jobs (default false)
             sort_by: Sort results (date, relevance)
+            distance_km: Distance in km
+            days_ago: Days ago to search
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
@@ -116,10 +120,11 @@ def register_job_tools(
                 ctx, tool_name="search_jobs"
             )
             logger.info(
-                "Searching jobs: keywords='%s', location='%s', max_pages=%d",
+                "Searching jobs: keywords='%s', location='%s', max_pages=%d, distance_km=%s",
                 keywords,
                 location,
                 max_pages,
+                distance_km,
             )
 
             await ctx.report_progress(
@@ -136,6 +141,8 @@ def register_job_tools(
                 work_type=work_type,
                 easy_apply=easy_apply,
                 sort_by=sort_by,
+                distance_km=distance_km,
+                days_ago=days_ago,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")

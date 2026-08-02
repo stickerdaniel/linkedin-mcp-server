@@ -3196,6 +3196,8 @@ class LinkedInExtractor:
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        distance_km: float | None = None,
+        days_ago: int | None = None,
     ) -> str:
         """Build a LinkedIn job search URL with optional filters.
 
@@ -3203,13 +3205,23 @@ class LinkedInExtractor:
         Comma-separated values are normalized individually.
         Unknown values pass through unchanged.
         """
-        params = f"keywords={quote_plus(keywords)}"
+        # Aggiungiamo origin di default
+        params = f"keywords={quote_plus(keywords)}&origin=JOBS_HOME_KEYWORD_HISTORY"
+        
         if location:
             params += f"&location={quote_plus(location)}"
+            
+        if distance_km is not None:
+            distance_miles = distance_km / 1.609344
+            params += f"&distance={distance_miles}"
 
-        if date_posted:
+        if days_ago is not None:
+            secondi = int(days_ago * 86400)
+            params += f"&f_TPR=r{secondi}"
+        elif date_posted:
             mapped = _JOB_DATE_POSTED_MAP.get(date_posted.strip(), date_posted)
             params += f"&f_TPR={quote_plus(mapped)}"
+            
         if job_type:
             params += f"&f_JT={_normalize_csv(job_type, _JOB_TYPE_MAP)}"
         if experience_level:
@@ -3222,7 +3234,8 @@ class LinkedInExtractor:
             mapped = _SORT_BY_MAP.get(sort_by.strip(), sort_by)
             params += f"&sortBy={quote_plus(mapped)}"
 
-        return f"https://www.linkedin.com/jobs/search/?{params}"
+        # Sostituito search/ con search-results/ come richiesto
+        return f"https://www.linkedin.com/jobs/search-results/?{params}"
 
     async def search_jobs(
         self,
@@ -3235,6 +3248,8 @@ class LinkedInExtractor:
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        distance_km: float | None = None,
+        days_ago: int | None = None,
     ) -> dict[str, Any]:
         """Search for jobs with pagination and job ID extraction.
 
@@ -3252,6 +3267,8 @@ class LinkedInExtractor:
             work_type: Filter by work type (on_site, remote, hybrid)
             easy_apply: Only show Easy Apply jobs
             sort_by: Sort results (date, relevance)
+            distance_km: Distance in km
+            days_ago: Days ago to search
 
         Returns:
             {url, sections: {search_results: text}, job_ids: [str]}
@@ -3265,6 +3282,8 @@ class LinkedInExtractor:
             work_type=work_type,
             easy_apply=easy_apply,
             sort_by=sort_by,
+            distance_km=distance_km,
+            days_ago=days_ago,
         )
         all_job_ids: list[str] = []
         seen_ids: set[str] = set()
