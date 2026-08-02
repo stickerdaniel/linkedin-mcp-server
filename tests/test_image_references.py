@@ -44,6 +44,16 @@ POST_IMAGE = (
     "https://media.licdn.com/dms/image/v2/D5622AQH1rhjR5nc6nw"
     "/feedshare-shrink_480/B56Z7XNJhOJoAg-/0/1781727009179"
 )
+# A company page renders its own logo large and every other company small,
+# exactly as a profile does with member photos.
+COMPANY_SUBJECT_LOGO = (
+    "https://media.licdn.com/dms/image/v2/D4D0BAQGZ3dq_qonY0w"
+    "/company-logo_200_200/B4DZpFeaQeGgAQ-/0/1762102192036/nimbus_logo"
+)
+ARTICLE_IMAGE = (
+    "https://media.licdn.com/dms/image/v2/D4E10AQFvKaHallTUrw"
+    "/articleshare-shrink_800/B4EZy0cQDzJcAQ-/0/1772553831073"
+)
 STATIC_ICON = "https://static.licdn.com/aero-v1/sc/h/icon.svg"
 
 
@@ -53,6 +63,7 @@ def cdn(kind: str, size: int, n: int = 0) -> str:
 
 
 PHOTO = "profile-displayphoto-shrink"
+LOGO = "company-logo"
 
 
 def test_returns_the_subject_photo() -> None:
@@ -71,6 +82,63 @@ def test_picks_the_subject_out_of_a_whole_page() -> None:
         {"src": STATIC_ICON, "alt": ""},
     ]
     assert [r["url"] for r in build_image_references(page, "main_profile")] == [SUBJECT]
+
+
+@pytest.mark.parametrize(
+    "src",
+    [OTHER_MEMBER, COMPANY_LOGO, COVER, POST_IMAGE, STATIC_ICON],
+    ids=["other-member", "company-logo", "cover", "post-image", "static-icon"],
+)
+def test_rejects_everything_that_is_not_the_subject(src: str) -> None:
+    assert build_image_references([RawImage(src=src, alt="x")], "main_profile") == []
+
+
+def test_returns_the_company_logo_on_a_company_page() -> None:
+    [ref] = build_image_references(
+        [RawImage(src=COMPANY_SUBJECT_LOGO, alt="Nimbus Structure GmbH logo")],
+        "main_company",
+    )
+    assert ref["url"] == COMPANY_SUBJECT_LOGO
+    # context says which kind it is, so a caller need not parse the URL back.
+    assert ref["context"] == "company logo"
+    assert ref["text"] == "Nimbus Structure GmbH logo"
+
+
+def test_picks_the_subject_out_of_a_whole_company_page() -> None:
+    """Live shape: the page's own logo large, everyone else's small."""
+    page: list[RawImage] = [
+        {"src": OTHER_MEMBER, "alt": "Alexander Sanchez de la Cerda"},
+        {"src": COMPANY_SUBJECT_LOGO, "alt": "Nimbus Structure GmbH logo"},
+        {"src": COMPANY_LOGO, "alt": "ChatGPT page logo"},
+        {"src": ARTICLE_IMAGE, "alt": ""},
+    ]
+    assert [r["url"] for r in build_image_references(page, "main_company")] == [
+        COMPANY_SUBJECT_LOGO
+    ]
+
+
+def test_a_person_photo_is_still_labelled_a_profile_photo() -> None:
+    [ref] = build_image_references([RawImage(src=SUBJECT)], "main_profile")
+    assert ref["context"] == "profile photo"
+
+
+@pytest.mark.parametrize("src", [ARTICLE_IMAGE], ids=["article-image"])
+def test_rejects_article_images(src: str) -> None:
+    assert build_image_references([RawImage(src=src, alt="x")], "main_company") == []
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "",
+        "   ",
+        "/relative.png",
+        "data:image/gif;base64,R0lGOD",
+        "https://example.com/a.jpg",
+    ],
+)
+def test_rejects_anything_off_the_media_cdn(src: str) -> None:
+    assert build_image_references([RawImage(src=src)], "main_profile") == []
 
 
 def test_the_subject_is_whoever_is_largest_not_whoever_clears_a_number() -> None:
@@ -105,9 +173,34 @@ def test_a_lone_thumbnail_is_not_a_subject() -> None:
     One employer logo on a member profile, or one visitor avatar on a company
     page, is a thumbnail — not the thing the page is about.
     """
-    assert build_image_references([{"src": cdn(PHOTO, 100)}], "main_profile") == []
+    assert build_image_references([{"src": cdn(LOGO, 100)}], "main_profile") == []
+    assert build_image_references([{"src": cdn(PHOTO, 100)}], "main_company") == []
     # But a lone image above thumbnail size is the subject of a sparse page.
-    assert build_image_references([{"src": cdn(PHOTO, 400)}], "main_profile")
+    assert build_image_references([{"src": cdn(LOGO, 200)}], "main_company")
+
+
+def test_each_kind_is_judged_separately() -> None:
+    """A member page carries employer logos; a company page carries avatars.
+
+    Comparing a photo against a logo would let one suppress the other.
+    """
+    member_page: list[RawImage] = [
+        {"src": cdn(PHOTO, 800, 1)},
+        {"src": cdn(PHOTO, 100, 2)},
+        {"src": cdn(LOGO, 100, 3)},
+    ]
+    assert [
+        r["context"] for r in build_image_references(member_page, "main_profile")
+    ] == ["profile photo"]
+
+    company_page: list[RawImage] = [
+        {"src": cdn(PHOTO, 100, 1)},
+        {"src": cdn(LOGO, 200, 2)},
+        {"src": cdn(LOGO, 100, 3)},
+    ]
+    assert [
+        r["context"] for r in build_image_references(company_page, "main_company")
+    ] == ["company logo"]
 
 
 def test_does_not_depend_on_rendered_size() -> None:
@@ -157,6 +250,9 @@ def test_context_names_the_kind_not_the_section() -> None:
     """
     [photo] = build_image_references([RawImage(src=SUBJECT)], "experience")
     assert photo["context"] == "profile photo"
+
+    [logo] = build_image_references([RawImage(src=COMPANY_SUBJECT_LOGO)], "posts")
+    assert logo["context"] == "company logo"
 
 
 class TestAgainstARealDom:

@@ -518,6 +518,8 @@ def _is_linkedin_host(host: str) -> bool:
 #
 #   /dms/image/v2/<id>/profile-displayphoto-shrink_800_800/...  the member
 #   /dms/image/v2/<id>/profile-displayphoto-shrink_100_100/...  someone else
+#   /dms/image/v2/<id>/company-logo_200_200/...                 the company
+#   /dms/image/v2/<id>/company-logo_100_100/...                 another company
 #   /dms/image/v2/<id>/profile-displaybackgroundimage-shrink...  the banner
 #   /dms/image/v2/<id>/feedshare-shrink_480/...                  a post
 #
@@ -527,14 +529,20 @@ def _is_linkedin_host(host: str) -> bool:
 _MEDIA_CDN = re.compile(r"^https://media\.licdn\.com/dms/image/", re.IGNORECASE)
 
 _SUBJECT_IMAGE = re.compile(
-    r"/profile-displayphoto-(?:shrink|scale)_(\d+)_(\d+)/",
+    r"/(?P<kind>profile-displayphoto-(?:shrink|scale)|company-logo)_(\d+)_(\d+)/",
     re.IGNORECASE,
 )
 
 # LinkedIn renders every non-subject from its 100px thumbnail — post authors,
-# mutual connections, suggested profiles. Used only to judge a candidate that
-# has nothing to be compared against.
+# mutual connections, suggested profiles, employer logos on a member page. Used
+# only to judge a candidate that has nothing to be compared against.
 _THUMBNAIL_VARIANT = 100
+
+_IMAGE_CONTEXT = {"company-logo": "company logo"}
+
+
+def _image_kind(match: re.Match[str]) -> str:
+    return "company-logo" if match.group("kind").lower() == "company-logo" else "photo"
 
 
 def build_image_references(
@@ -548,15 +556,18 @@ def build_image_references(
     anchor: there is no href to classify, and the signal is the CDN path rather
     than a link target.
 
-    Only the profile subject's own photo is returned. It is identified *relative to the page* rather
+    Only the subject of the page is returned — the member on a profile, the
+    company on a company page. It is identified *relative to the page* rather
     than against a fixed size: the subject is the largest variant of its kind
     present, and it must be strictly larger than the next one down.
 
     That comparison is what makes the rule safe. A page carries dozens of other
-    members' thumbnails, so when every candidate is the same size there is
-    nothing distinguishing a subject and none is returned — the correct answer
-    on a search-results page. A fixed threshold cannot express that, and would
-    emit a stranger the moment LinkedIn rendered one card larger.
+    members' and companies' thumbnails, so when every candidate of a kind is the
+    same size there is nothing distinguishing a subject and none is returned —
+    which is the correct answer on a search-results page, and on a company page
+    where the only member photos are visitor avatars. A fixed threshold cannot
+    express that, and would emit a stranger the moment LinkedIn rendered one
+    card larger.
     """
     candidates: list[tuple[str, int, RawImage]] = []
     # Deduped here, before anything is judged: LinkedIn renders the same image
@@ -573,8 +584,8 @@ def build_image_references(
         if match is None:
             continue
         seen.add(src)
-        variant = max(int(match.group(1)), int(match.group(2)))
-        candidates.append(("photo", variant, raw))
+        variant = max(int(match.group(2)), int(match.group(3)))
+        candidates.append((_image_kind(match), variant, raw))
 
     out: list[Reference] = []
 
@@ -583,8 +594,9 @@ def build_image_references(
         variants = {v for v, _ in of_kind}
         largest = max(variants)
 
-        # Nothing to compare against, so size is the only evidence left, and a
-        # lone thumbnail is somebody else's avatar rather than the subject.
+        # Nothing of this kind to compare against, so size is the only
+        # evidence: a lone thumbnail is an employer logo on a member page or a
+        # visitor avatar on a company page, and neither is the subject.
         if len(variants) == 1 and largest <= _THUMBNAIL_VARIANT:
             continue
         # Several candidates, all the same size: none stands out, so none is
@@ -602,7 +614,7 @@ def build_image_references(
             alt = (raw.get("alt") or "").strip()
             if alt:
                 reference["text"] = alt
-            reference["context"] = "profile photo"
+            reference["context"] = _IMAGE_CONTEXT.get(kind, "profile photo")
             out.append(reference)
             if len(out) >= cap:
                 return out
