@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from linkedin_mcp_server.browser_launch import build_launch_options, describe_launch
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.config.schema import PROFILE_HANDOVER_WAIT_SECONDS
 from linkedin_mcp_server.core import (
@@ -228,21 +229,13 @@ async def _login_into_fresh_profile(
     print(f"   Please log in manually. You have {budget} to complete authentication.")
     print("   (This handles 2FA, captcha, and any security challenges)")
 
-    launch_options: dict[str, Any] = {}
-    if config.browser.chrome_path:
-        launch_options["executable_path"] = config.browser.chrome_path
-
     # The login browser must leave from the same address as later scrapes: a
     # session created on one IP and used from another is what trips LinkedIn's
-    # security checkpoint.
-    proxy = config.browser.proxy_settings()
-    if proxy:
-        launch_options["proxy"] = proxy
-
-    viewport = {
-        "width": config.browser.viewport_width,
-        "height": config.browser.viewport_height,
-    }
+    # security checkpoint. Shared with the runtime path rather than rebuilt
+    # here, so a setting cannot apply to scraping but not to the login that
+    # created the session.
+    launch_options, viewport = build_launch_options(config.browser)
+    describe_launch(launch_options)
 
     manager = BrowserManager(
         user_data_dir=user_data_dir,

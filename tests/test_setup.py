@@ -199,6 +199,35 @@ async def test_interactive_login_forwards_all_browser_params(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_login_keeps_webrtc_on_the_proxy(monkeypatch, tmp_path):
+    """The login browser needs the WebRTC restriction as much as scraping does.
+
+    This is the path that matters most. The login is where the session is
+    created, so a leak here has been attached to that session from its first
+    moment — and this path used to build its own launch options, which is
+    exactly how a setting ends up applying to scraping but not to login.
+    """
+    browser = _make_browser(export_cookies=True)
+    captured_kwargs: dict = {}
+
+    def fake_browser_manager(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _BrowserContextManager(browser)
+
+    config = AppConfig()
+    config.browser.proxy_server = "http://gate.example:7000"
+
+    _patch_login_deps(monkeypatch, browser_factory=fake_browser_manager, config=config)
+
+    await interactive_login(tmp_path / "profile")
+
+    assert captured_kwargs["proxy"]["server"] == "http://gate.example:7000"
+    args = captured_kwargs["args"]
+    assert "--webrtc-ip-handling-policy=disable_non_proxied_udp" in args
+    assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in args
+
+
+@pytest.mark.asyncio
 async def test_interactive_login_passes_slow_mo_to_browser_manager(
     monkeypatch, tmp_path
 ):
