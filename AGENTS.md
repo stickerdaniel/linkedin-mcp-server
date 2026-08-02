@@ -21,6 +21,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Minimize DOM dependence.** Prefer innerText and URL navigation over DOM selectors. When DOM access is unavoidable, use minimal generic selectors (`a[href*="/jobs/view/"]`) — never class names tied to LinkedIn's layout.
 - **Detection must be locale-independent.** Classification logic — connection state, action availability, button identity — must rely on URL patterns (`/preload/custom-invite/?vanityName=USER`, `/in/USER/edit/intro/`, `/messaging/compose/`), attribute *presence* (`aria-label` exists, `aria-expanded` exists, `aria-disabled` exists), or structural counts — never on text values like "Connect", "Follow", "Message", "1st", "Pending". The verb in an `aria-label` is locale-dependent; whether the attribute exists is not. Where text is genuinely the only signal, guard it behind an explicit per-locale table and document the limitation in code.
 
+## Browser Identity Rules
+
+- **The browser must not contradict itself.** Anything it says about itself has
+  to survive being checked against another surface of the same browser: the
+  user-agent against `sec-ch-ua`, the page against its workers and iframes, the
+  reported screen against the window sitting on it. The goal is coherence, not
+  invisibility — invisibility cannot be proven, while a contradiction is a fact
+  and can be found by anyone who looks twice.
+- **Never inject a fingerprint.** No `user_agent`, no custom headers, no
+  spoofed client hints. Patchright's own guidance says the same, and every
+  override measured here made things worse: a `user_agent=` argument changes
+  the string but not the client hints, and never reaches service workers at
+  all ([playwright#5237](https://github.com/microsoft/playwright/issues/5237),
+  closed as an upstream Chromium bug). A browser telling the truth beats one
+  caught lying.
+- **A proxy must contain every egress path, not just HTTP.** WebRTC uses UDP
+  and went around a configured proxy until the switches in
+  `browser_launch.py`. DNS and QUIC belong to the same family; check them
+  before assuming a new setting is contained.
+- **Verify identity changes by measurement.** `docs/browser-fingerprint.md`
+  lists the four detectors, what each one alone would miss, and the values
+  measured so far. A launch-configuration change without a measurement against
+  them is a guess.
+
 ## Tool Return Format
 
 All scraping tools return: `{url, sections: {name: raw_text}}`.
