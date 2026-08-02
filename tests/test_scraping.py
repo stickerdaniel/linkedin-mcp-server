@@ -2898,6 +2898,68 @@ class TestGetSavedJobs:
         assert result["sections"]["saved_jobs"] == "Login page content"
 
 
+class TestExtractSavedPosts:
+    """Tests for extract_saved_posts (scroll-loaded, unlike saved jobs)."""
+
+    async def test_navigates_saved_posts_url_with_activity_scrolling(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.extract_saved_posts(
+                num_posts=10, stop_fingerprints=["already processed"]
+            )
+
+        assert mock_page.goto.await_args.args[0] == (
+            "https://www.linkedin.com/my-items/saved-posts/"
+        )
+        assert result.text == "Sample page text"
+        # /my-items/saved-posts is treated as an activity feed: 1.0s pause,
+        # scroll budget from num_posts, fingerprints forwarded for early stop.
+        mock_scroll.assert_awaited_once_with(
+            mock_page,
+            pause_time=1.0,
+            max_scrolls=2,
+            stop_fingerprints=["already processed"],
+        )
+        # Lazy-loaded content wait ran (is_activity branch)
+        mock_page.wait_for_function.assert_awaited()
+
+    @pytest.mark.parametrize(
+        "num_posts,expected_scrolls", [(1, 1), (10, 2), (50, 10), (200, 20)]
+    )
+    async def test_scroll_budget_scales_with_num_posts(
+        self, mock_page, num_posts, expected_scrolls
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("posts"),
+        ) as mock_extract:
+            await extractor.extract_saved_posts(num_posts=num_posts)
+
+        mock_extract.assert_awaited_once_with(
+            "https://www.linkedin.com/my-items/saved-posts/",
+            section_name="saved_posts",
+            max_scrolls=expected_scrolls,
+            stop_fingerprints=None,
+        )
+
+
 class TestSearchPeople:
     async def test_search_people_omits_orphaned_references(self, mock_page):
         extractor = LinkedInExtractor(mock_page)

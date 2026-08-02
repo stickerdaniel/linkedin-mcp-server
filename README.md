@@ -54,6 +54,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | [#526](https://github.com/stickerdaniel/linkedin-mcp-server/issues/526) |
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
+| `get_saved_posts` | List posts saved (bookmarked) by the authenticated user | working |
 | `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) | working |
 | `close_session` | Close browser session and clean up resources | working |
 

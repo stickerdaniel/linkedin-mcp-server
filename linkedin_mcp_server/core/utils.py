@@ -66,7 +66,10 @@ async def detect_rate_limit(page: Page) -> None:
 
 
 async def scroll_to_bottom(
-    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
+    page: Page,
+    pause_time: float = 1.0,
+    max_scrolls: int = 10,
+    stop_fingerprints: list[str] | None = None,
 ) -> None:
     """Scroll to the bottom of the page to trigger lazy loading.
 
@@ -74,8 +77,22 @@ async def scroll_to_bottom(
         page: Patchright page object
         pause_time: Time to pause between scrolls (seconds)
         max_scrolls: Maximum number of scroll attempts
+        stop_fingerprints: Stop as soon as any of these strings appears in the
+            page text. Lets a caller that already processed part of a feed
+            avoid lazy-loading content it would discard anyway. Empty strings
+            are dropped: they match every page and would stop the first scroll.
     """
+    fingerprints = [fp for fp in stop_fingerprints or [] if fp]
+
     for i in range(max_scrolls):
+        if fingerprints:
+            current_text: str = await page.evaluate(
+                "() => (document.querySelector('main') || document.body).innerText"
+            )
+            if any(fp in current_text for fp in fingerprints):
+                logger.debug("Stop fingerprint found after %d scrolls, halting", i)
+                return
+
         previous_height = await page.evaluate("document.body.scrollHeight")
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await asyncio.sleep(pause_time)

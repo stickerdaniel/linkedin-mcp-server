@@ -442,6 +442,19 @@ class TestBuildReferences:
         assert references[0]["url"] == "/jobs/view/0/"
         assert references[-1]["url"] == "/jobs/view/7/"
 
+    def test_caps_saved_posts_at_num_posts_ceiling(self):
+        raw: list[RawReference] = [
+            {
+                "href": f"https://www.linkedin.com/feed/update/urn:li:activity:{idx}/",
+                "text": f"Post {idx}",
+            }
+            for idx in range(60)
+        ]
+
+        references = build_references(raw, "saved_posts")
+
+        assert len(references) == 50
+
     def test_uses_default_cap_for_unknown_section(self):
         raw: list[RawReference] = [
             {

@@ -108,3 +108,92 @@ def register_feed_tools(
                 raise_tool_error(relogin_exc, "get_feed")
         except Exception as e:
             raise_tool_error(e, "get_feed")
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Saved Posts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"feed", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_saved_posts(
+        ctx: Context,
+        num_posts: Annotated[int, Field(ge=1, le=50)] = 10,
+        stop_fingerprints: Annotated[
+            list[str] | None,
+            Field(
+                default=None,
+                description=(
+                    "Stop scrolling as soon as any of these strings appears in the "
+                    "page text. Pass the first ~80 chars of already-processed posts "
+                    "to avoid loading content that was already handled."
+                ),
+            ),
+        ] = None,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get posts saved (bookmarked) by the authenticated user.
+
+        Navigates to linkedin.com/my-items/saved-posts/ and scrolls to load
+        the requested number of posts. Stops early when a known post is detected.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            num_posts: Number of saved posts to fetch (1-50, default 10).
+            stop_fingerprints: Substrings of already-processed posts. Scroll
+                stops as soon as any appears in the page, minimising network
+                and compute cost.
+
+        Returns:
+            Dict with url, sections (name -> raw text), and optional keys:
+            - references["saved_posts"]: list of post reference objects.
+            - section_errors: present when rate-limited or extraction fails.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_saved_posts"
+            )
+            logger.info("Scraping saved posts (num_posts=%d)", num_posts)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Starting saved posts scrape"
+            )
+
+            extracted = await extractor.extract_saved_posts(
+                num_posts=num_posts,
+                stop_fingerprints=stop_fingerprints,
+            )
+
+            url = "https://www.linkedin.com/my-items/saved-posts/"
+            sections: dict[str, str] = {}
+            references: dict[str, list[Reference]] = {}
+            section_errors: dict[str, dict[str, Any]] = {}
+            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                sections["saved_posts"] = extracted.text
+                if extracted.references:
+                    references["saved_posts"] = extracted.references
+            elif extracted.text == _RATE_LIMITED_MSG:
+                section_errors["saved_posts"] = {
+                    "error_type": "rate_limit",
+                    "error_message": extracted.text,
+                }
+            elif extracted.error:
+                section_errors["saved_posts"] = extracted.error
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            result: dict[str, Any] = {"url": url, "sections": sections}
+            if references:
+                result["references"] = references
+            if section_errors:
+                result["section_errors"] = section_errors
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_saved_posts")
+        except Exception as e:
+            raise_tool_error(e, "get_saved_posts")

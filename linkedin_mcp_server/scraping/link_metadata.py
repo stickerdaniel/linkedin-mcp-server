@@ -105,6 +105,9 @@ _REFERENCE_CAPS = {
     # Kept in sync with the literal cap=50 in extractor._build_feed_references
     # where SDUI-derived /posts/<slug> permalinks are appended.
     "feed": 50,
+    # Same headroom for get_saved_posts' num_posts ceiling (Field(ge=1, le=50)),
+    # otherwise the text carries posts absent from the reference list.
+    "saved_posts": 50,
 }
 
 # A label must carry at least one letter or digit in any script, so the class is

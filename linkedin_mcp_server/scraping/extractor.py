@@ -63,6 +63,8 @@ _PAGE_SIZE = 25
 
 _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 
+_SAVED_POSTS_URL = "https://www.linkedin.com/my-items/saved-posts/"
+
 # The my-items lists page in 10s, unlike job search. Verified live: ?start=10
 # returns the 11th saved job, while ?start=25 lands past the end of a two-page
 # list and yields nothing.
@@ -1242,6 +1244,32 @@ class LinkedInExtractor:
                 error=build_issue_diagnostics(e, context="extract_feed"),
             )
 
+    async def extract_saved_posts(
+        self,
+        num_posts: int = 10,
+        stop_fingerprints: list[str] | None = None,
+    ) -> ExtractedSection:
+        """Scrape the saved posts page (``/my-items/saved-posts/``).
+
+        Unlike ``/my-items/saved-jobs/``, this list lazy-loads on scroll rather
+        than paginating with ``?start=``, so it runs through the standard page
+        pipeline with a scroll budget derived from *num_posts* (~5 posts load
+        per scroll).
+
+        Args:
+            num_posts: Rough number of posts wanted; sizes the scroll budget.
+            stop_fingerprints: Scrolling stops as soon as any of these strings
+                appears in the page, so a caller resuming an earlier run does
+                not lazy-load posts it already processed.
+        """
+        max_scrolls = min(max(1, (num_posts + 4) // 5), 20)
+        return await self.extract_page(
+            _SAVED_POSTS_URL,
+            section_name="saved_posts",
+            max_scrolls=max_scrolls,
+            stop_fingerprints=stop_fingerprints,
+        )
+
     async def _extract_feed_once(
         self,
         num_posts: int,
@@ -1412,6 +1440,7 @@ class LinkedInExtractor:
         url: str,
         section_name: str,
         max_scrolls: int | None = None,
+        stop_fingerprints: list[str] | None = None,
     ) -> ExtractedSection:
         """Navigate to a URL, scroll to load lazy content, and extract innerText.
 
@@ -1424,14 +1453,18 @@ class LinkedInExtractor:
         Returns empty string for unexpected non-domain failures (error isolation).
         """
         try:
-            result = await self._extract_page_once(url, section_name, max_scrolls)
+            result = await self._extract_page_once(
+                url, section_name, max_scrolls, stop_fingerprints
+            )
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
             # Retry once after backoff
             logger.info("Retrying %s after %.0fs backoff", url, _RATE_LIMIT_RETRY_DELAY)
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            return await self._extract_page_once(url, section_name, max_scrolls)
+            return await self._extract_page_once(
+                url, section_name, max_scrolls, stop_fingerprints
+            )
 
         except LinkedInScraperException:
             raise
@@ -1453,16 +1486,20 @@ class LinkedInExtractor:
         url: str,
         section_name: str,
         max_scrolls: int | None = None,
+        stop_fingerprints: list[str] | None = None,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll, and extract innerText."""
         await self._navigate_to_page(url)
-        return await self._extract_loaded_section(url, section_name, max_scrolls)
+        return await self._extract_loaded_section(
+            url, section_name, max_scrolls, stop_fingerprints
+        )
 
     async def _extract_loaded_section(
         self,
         url: str,
         section_name: str,
         max_scrolls: int | None = None,
+        stop_fingerprints: list[str] | None = None,
     ) -> ExtractedSection:
         """Run the post-navigation extraction pipeline on the current page.
 
@@ -1483,13 +1520,16 @@ class LinkedInExtractor:
         await handle_modal_close(self._page)
 
         # Activity feed pages lazy-load post content after the tab header.
-        # Company posts pages (/company/<slug>/posts/) lazy-load the same way
-        # but don't carry a /recent-activity/ path, so match them too. Matched
-        # on the parsed path, since the url can carry a query string
-        # (?viewAsMember=true) that a raw suffix check would miss.
+        # Company posts pages (/company/<slug>/posts/) and the saved posts list
+        # (/my-items/saved-posts/) lazy-load the same way but don't carry a
+        # /recent-activity/ path, so match them too. Matched on the parsed
+        # path, since the url can carry a query string (?viewAsMember=true)
+        # that a raw suffix check would miss.
         path = urlparse(url).path
-        is_activity = "/recent-activity/" in path or (
-            "/company/" in path and path.rstrip("/").endswith("/posts")
+        is_activity = (
+            "/recent-activity/" in path
+            or ("/company/" in path and path.rstrip("/").endswith("/posts"))
+            or "/my-items/saved-posts" in path
         )
         if is_activity:
             try:
@@ -1590,10 +1630,20 @@ class LinkedInExtractor:
         # Scroll to trigger lazy loading
         if is_activity:
             scrolls = max_scrolls if max_scrolls is not None else 10
-            await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=scrolls)
+            await scroll_to_bottom(
+                self._page,
+                pause_time=1.0,
+                max_scrolls=scrolls,
+                stop_fingerprints=stop_fingerprints,
+            )
         else:
             scrolls = max_scrolls if max_scrolls is not None else 5
-            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
+            await scroll_to_bottom(
+                self._page,
+                pause_time=0.5,
+                max_scrolls=scrolls,
+                stop_fingerprints=stop_fingerprints,
+            )
 
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])
