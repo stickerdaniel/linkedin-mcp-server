@@ -559,6 +559,7 @@ class TestCompanyTools:
         tool_fn = await get_tool_fn(mcp, "get_company_posts")
         result = await tool_fn("testcorp", mock_context, extractor=mock_extractor)
         assert result["sections"] == {}
+        assert result["section_errors"]["posts"]["error_type"] == "rate_limit"
 
     async def test_get_company_posts_returns_section_errors(self, mock_context):
         mock_extractor = MagicMock()
