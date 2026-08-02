@@ -30,6 +30,7 @@ from linkedin_mcp_server.core import (
 )
 
 
+from linkedin_mcp_server.browser_launch import build_launch_options, describe_launch
 from linkedin_mcp_server.common_utils import utcnow_iso
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.debug_trace import record_page_trace
@@ -262,20 +263,8 @@ async def _feed_auth_succeeds(
 
 
 def _launch_options() -> tuple[dict[str, Any], dict[str, int]]:
-    config = get_config()
-    viewport = {
-        "width": config.browser.viewport_width,
-        "height": config.browser.viewport_height,
-    }
-    launch_options: dict[str, Any] = {}
-    if config.browser.chrome_path:
-        launch_options["executable_path"] = config.browser.chrome_path
-        logger.info("Using custom Chrome path: %s", config.browser.chrome_path)
-    proxy = config.browser.proxy_settings()
-    if proxy:
-        launch_options["proxy"] = proxy
-        # Only the server: the credentials must not reach the log.
-        logger.info("Routing browser traffic through proxy %s", proxy["server"])
+    launch_options, viewport = build_launch_options(get_config().browser)
+    describe_launch(launch_options)
     return launch_options, viewport
 
 
