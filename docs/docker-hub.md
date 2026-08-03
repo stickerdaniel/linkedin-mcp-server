@@ -57,6 +57,14 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
+> **Note:** In HTTP mode the endpoint has no authentication, so the address it
+> is published on is the only thing limiting who can use your LinkedIn session.
+> Publish to loopback: `-p 127.0.0.1:8080:8080` together with
+> `--host 0.0.0.0`. The wildcard host is required for the server to be reachable
+> inside the container at all; the `127.0.0.1:` prefix on `-p` is what keeps it
+> off your network. Without that prefix Docker publishes on every interface.
+> Only expose it more widely behind something that authenticates.
+>
 > **Note:** Tool calls are serialized to protect the shared LinkedIn browser
 > session, both within one server process and between separate ones. Only one
 > process uses the browser at a time; others wait briefly and take over when it

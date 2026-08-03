@@ -372,10 +372,21 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```bash
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
+
+Both halves of that are needed, and they do different jobs. `--host 0.0.0.0`
+makes the server reachable *inside* the container: a process bound to
+`127.0.0.1` in there cannot be reached through a published port at all. The
+`127.0.0.1:` in front of `-p` is what limits it *outside*, to this machine.
+Drop that prefix and Docker publishes on every interface, which puts an
+endpoint with no authentication on your network. The server cannot tell the two
+apart, so it warns either way.
+
+Note that other containers on the same host still reach it through
+`host.docker.internal`.
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
