@@ -167,6 +167,19 @@
                 "focus": true
             },
             "problemMatcher": []
+        },
+        {
+            "label": "opencode",
+            "detail": "Launch OpenCode AI coding agent",
+            "type": "shell",
+            "command": "opencode",
+            "args": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "new",
+                "focus": true
+            },
+            "problemMatcher": []
         }
     ]
 }
