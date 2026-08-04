@@ -385,8 +385,10 @@ Drop that prefix and Docker publishes on every interface, which puts an
 endpoint with no authentication on your network. The server cannot tell the two
 apart, so it warns either way.
 
-Note that other containers on the same host still reach it through
-`host.docker.internal`.
+Loopback publishing limits this to the machine, not to the container. Other
+containers on the same host can still reach it through `host.docker.internal`
+wherever that name resolves, which is the default on Docker Desktop and
+OrbStack but not on native Linux Docker.
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
 

@@ -64,10 +64,15 @@ def test_documented_http_command_publishes_to_loopback(block: str):
             "on every interface. Publish to loopback instead, e.g. "
             "-p 127.0.0.1:8080:8080."
         )
+        # Literal addresses only. A name would have to be resolved, and
+        # `localhost` can carry both 127.0.0.1 and ::1, so what a reader ends up
+        # bound to depends on their resolver. A documented command should not
+        # leave that open.
         host = spec.rsplit(":", 2)[0]
-        assert host in {"127.0.0.1", "[::1]", "localhost"}, (
-            f"documented HTTP command publishes on {host!r}, which is not "
-            "loopback. The MCP endpoint has no authentication."
+        assert host in {"127.0.0.1", "[::1]"}, (
+            f"documented HTTP command publishes on {host!r}. Use a literal "
+            "loopback address: the MCP endpoint has no authentication, so what "
+            "this resolves to is the whole guarantee."
         )
 
 
