@@ -8,6 +8,20 @@ import pytest
 from linkedin_mcp_server.core.browser import BrowserManager
 
 
+def test_a_user_agent_is_refused_rather_than_applied(tmp_path):
+    """The one funnel every browser goes through must reject an override.
+
+    ``launch_options`` is spread into the context options, so without this a
+    caller reintroducing ``user_agent=`` would silently reach Patchright and
+    the browser would go back to contradicting its own client hints.
+    """
+    with pytest.raises(TypeError, match="user_agent"):
+        BrowserManager(
+            user_data_dir=tmp_path / "profile",
+            user_agent="Mozilla/5.0 (test) Chrome/143.0.0.0",
+        )
+
+
 def _make_cookie(
     name: str,
     value: str = "value",

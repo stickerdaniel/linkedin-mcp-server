@@ -560,15 +560,15 @@ class TestFailingFast:
         # The handshake timeout is reached only if the spawn gets that far. The
         # configuration is written to the child's pipe first, and a pipe buffer
         # is small — 64 KiB on Linux — while the configuration has no size limit
-        # at all: user_agent, proxy_bypass and the paths are free-form strings.
-        # A child that neither reads nor exits blocks that write indefinitely,
-        # before any budget applies, with both processes holding the lock.
+        # at all: proxy_bypass and the paths are free-form strings. A child that
+        # neither reads nor exits blocks that write indefinitely, before any
+        # budget applies, with both processes holding the lock.
         #
-        # Reproduced with a 10 MiB user agent and a child that only sleeps: the
+        # Reproduced with a 10 MiB bypass list and a child that only sleeps: the
         # outer process timeout fired and the wait was never entered.
         profile = _profile(tmp_path)
         config = _config(profile)
-        config.browser.user_agent = "x" * (10 * 1024 * 1024)
+        config.browser.proxy_bypass = "x" * (10 * 1024 * 1024)
         auth_root = profile.parent
 
         sleepers: list[subprocess.Popen[Any]] = []

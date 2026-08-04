@@ -90,36 +90,10 @@ async def test_interactive_login_writes_source_state_when_cookie_export_succeeds
     browser.export_cookies.assert_awaited_once_with(
         portable_cookie_path(tmp_path / "profile")
     )
-    # No UA override configured -> record None (runtime default is stable).
-    write_source_state.assert_called_once_with(tmp_path / "profile", user_agent=None)
+    write_source_state.assert_called_once_with(tmp_path / "profile")
     captured = capsys.readouterr()
     assert "cookies exported for docker portability" in captured.out.lower()
     assert "source session generation: gen-123" in captured.out.lower()
-
-
-@pytest.mark.asyncio
-async def test_interactive_login_records_override_user_agent(monkeypatch, tmp_path):
-    """A configured UA override is the fingerprint the manual-login cookie was
-    minted under, so it must be recorded in source-state (else a later replay
-    without the override falls back to a different UA)."""
-    browser = _make_browser(export_cookies=True)
-    write_source_state = MagicMock(
-        return_value=SimpleNamespace(login_generation="gen-1")
-    )
-    config = AppConfig()
-    config.browser.user_agent = "CustomAgent/1.0"
-
-    _patch_login_deps(
-        monkeypatch,
-        browser_factory=lambda **kwargs: _BrowserContextManager(browser),
-        config=config,
-        write_source_state=write_source_state,
-    )
-
-    assert await interactive_login(tmp_path / "profile") is True
-    write_source_state.assert_called_once_with(
-        tmp_path / "profile", user_agent="CustomAgent/1.0"
-    )
 
 
 @pytest.mark.asyncio
@@ -181,7 +155,6 @@ async def test_interactive_login_forwards_all_browser_params(monkeypatch, tmp_pa
     config = AppConfig()
     config.browser.chrome_path = "/custom/chrome"
     config.browser.slow_mo = 250
-    config.browser.user_agent = "CustomAgent/1.0"
     config.browser.viewport_width = 1920
     config.browser.viewport_height = 1080
 
@@ -193,7 +166,6 @@ async def test_interactive_login_forwards_all_browser_params(monkeypatch, tmp_pa
     assert captured_kwargs["user_data_dir"] == profile
     assert captured_kwargs["headless"] is False
     assert captured_kwargs["slow_mo"] == 250
-    assert captured_kwargs["user_agent"] == "CustomAgent/1.0"
     assert captured_kwargs["viewport"] == {"width": 1920, "height": 1080}
     assert captured_kwargs["executable_path"] == "/custom/chrome"
 
@@ -250,10 +222,15 @@ async def test_interactive_login_passes_slow_mo_to_browser_manager(
 
 
 @pytest.mark.asyncio
-async def test_interactive_login_passes_user_agent_to_browser_manager(
-    monkeypatch, tmp_path
-):
-    """When config.browser.user_agent is set, it must reach BrowserManager."""
+async def test_login_never_overrides_the_user_agent(monkeypatch, tmp_path):
+    """No user agent reaches BrowserManager, even from a config carrying one.
+
+    ``BrowserConfig.user_agent`` still exists, because the daemon's
+    configuration fingerprint hashes it and removing a field there breaks owner
+    turnover. Nothing may read it: the login is where the session is minted, so
+    a UA applied here would be the one every later contradiction is measured
+    against.
+    """
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
 
@@ -268,7 +245,7 @@ async def test_interactive_login_passes_user_agent_to_browser_manager(
 
     await interactive_login(tmp_path / "profile")
 
-    assert captured_kwargs.get("user_agent") == "CustomAgent/1.0"
+    assert "user_agent" not in captured_kwargs
 
 
 @pytest.mark.asyncio

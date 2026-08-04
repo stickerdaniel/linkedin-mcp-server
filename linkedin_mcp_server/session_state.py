@@ -50,11 +50,6 @@ class SourceState:
     created_at: str
     profile_path: str
     cookies_path: str
-    # The user agent the session's cookies were minted under (synthesized from
-    # the source browser during import, see browser_import/user_agent.py). None
-    # for manual logins (the cookie is minted in the runtime browser itself, so
-    # its default UA already matches) and for pre-existing state files.
-    user_agent: str | None = None
 
 
 @dataclass
@@ -427,12 +422,14 @@ def load_source_state(source_profile_dir: Path | None = None) -> SourceState | N
         return None
 
 
-def write_source_state(
-    source_profile_dir: Path | None = None,
-    *,
-    user_agent: str | None = None,
-) -> SourceState:
-    """Write a fresh source session generation after successful login."""
+def write_source_state(source_profile_dir: Path | None = None) -> SourceState:
+    """Write a fresh source session generation after successful login.
+
+    State files written before the user-agent override was removed still carry
+    a ``user_agent`` key. :func:`load_source_state` filters to the fields the
+    dataclass declares, so those files keep loading and shed the key the next
+    time this runs.
+    """
     profile_dir = (
         (source_profile_dir or get_source_profile_dir()).expanduser().resolve()
     )
@@ -443,7 +440,6 @@ def write_source_state(
         created_at=utcnow_iso(),
         profile_path=str(profile_dir),
         cookies_path=str(portable_cookie_path(profile_dir)),
-        user_agent=user_agent,
     )
     _write_json(source_state_path(profile_dir), asdict(state))
     return state

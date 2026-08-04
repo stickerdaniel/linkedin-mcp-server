@@ -64,14 +64,25 @@ class BrowserManager:
         headless: bool = True,
         slow_mo: int = 0,
         viewport: dict[str, int] | None = None,
-        user_agent: str | None = None,
         **launch_options: Any,
     ):
+        # ``launch_options`` is spread straight into the context options, so a
+        # stray ``user_agent`` here would reach Patchright and take effect
+        # without anything in between noticing. Refused rather than dropped:
+        # this is the one funnel every browser in the process goes through, and
+        # an override that fails loudly cannot come back by accident. See the
+        # browser identity rules in AGENTS.md.
+        if "user_agent" in launch_options:
+            raise TypeError(
+                "BrowserManager does not accept a user_agent. The browser "
+                "reports its own identity; an override changes the string but "
+                "not the client hints, and never reaches service workers."
+            )
+
         self.user_data_dir = str(Path(user_data_dir).expanduser())
         self.headless = headless
         self.slow_mo = slow_mo
         self.viewport = viewport or {"width": 1280, "height": 720}
-        self.user_agent = user_agent
         self.launch_options = launch_options
 
         self._playwright: Playwright | None = None
@@ -115,9 +126,11 @@ class BrowserManager:
                 "locale": "en-US",
             }
 
-            if self.user_agent:
-                context_options["user_agent"] = self.user_agent
-
+            # No ``user_agent`` here, deliberately. Patchright leaves the client
+            # hints reporting the real browser, so an override contradicts
+            # itself on the first surface anyone checks, and it never reaches
+            # service workers at all. See the browser identity rules in
+            # AGENTS.md and the measurements in docs/browser-fingerprint.md.
             self._context = await self._playwright.chromium.launch_persistent_context(
                 self.user_data_dir,
                 **context_options,

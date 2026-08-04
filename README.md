@@ -516,7 +516,6 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 - `--status` - Check if current session is valid and exit
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile)
 - `--slow-mo MS` - Delay between browser actions in milliseconds (default: 0, useful for debugging)
-- `--user-agent STRING` - Custom browser user agent
 - `--viewport WxH` - Browser viewport size (default: 1280x720)
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
 - `--proxy-server URL` - Route the browser through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD` (no flag, so it stays out of the process list)

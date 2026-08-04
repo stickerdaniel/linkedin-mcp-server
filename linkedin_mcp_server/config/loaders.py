@@ -89,6 +89,33 @@ def credential_free_url(value: str) -> str:
     return value
 
 
+# Refused rather than ignored. A user who set this did so to change how the
+# browser presents itself, and dropping it silently would leave them believing
+# it still applies. The setting never worked the way it reads: Patchright only
+# overrides the user-agent string, so the client hints kept reporting the real
+# browser and the page saw two different answers to the same question. Service
+# workers never received the override at all
+# (https://github.com/microsoft/playwright/issues/5237, closed upstream).
+#
+# The second sentence about a running server is not padding. A shared owner
+# started by an older version carries its user agent in the configuration
+# fingerprint, and a client of this version can only compute ``None`` because
+# the setting is refused here. ``daemon.py`` rejects a fingerprint mismatch
+# before it ever compares package versions, so that owner can no longer be
+# asked to stand down: it keeps running and keeps the profile. Removing the
+# setting is therefore only half the fix, and the other half is invisible
+# unless this message says it.
+_USER_AGENT_REMOVED = (
+    "{setting} is no longer supported and the server will not start with it "
+    "set. Overriding the user agent left the browser contradicting itself: the "
+    "string changed but the client hints did not, and service workers kept the "
+    "original either way. The browser now reports its own identity "
+    "consistently. Remove the setting to start. If a shared server from an "
+    "earlier version is still running with it, stop that process too: it "
+    "cannot be retired automatically."
+)
+
+
 class EnvironmentKeys:
     """Environment variable names used by the application."""
 
@@ -244,9 +271,8 @@ def load_from_env(config: AppConfig) -> AppConfig:
             )
         setattr(config.browser, attribute, value)
 
-    # Custom user agent
-    if user_agent_env := os.environ.get(EnvironmentKeys.USER_AGENT):
-        config.browser.user_agent = user_agent_env
+    if os.environ.get(EnvironmentKeys.USER_AGENT):
+        raise ConfigurationError(_USER_AGENT_REMOVED.format(setting="USER_AGENT"))
 
     # HTTP server host
     if host_env := os.environ.get(EnvironmentKeys.HOST):
@@ -391,11 +417,13 @@ def load_from_args(config: AppConfig) -> AppConfig:
         help="Slow down browser actions by N milliseconds (debugging)",
     )
 
+    # Still accepted by the parser so using it produces the explanation above
+    # rather than argparse's bare "unrecognized arguments".
     parser.add_argument(
         "--user-agent",
         type=str,
         default=None,
-        help="Custom browser user agent",
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -646,7 +674,7 @@ def load_from_args(config: AppConfig) -> AppConfig:
         config.browser.slow_mo = args.slow_mo
 
     if args.user_agent:
-        config.browser.user_agent = args.user_agent
+        raise ConfigurationError(_USER_AGENT_REMOVED.format(setting="--user-agent"))
 
     # Viewport (validated in BrowserConfig.validate())
     if args.viewport:
