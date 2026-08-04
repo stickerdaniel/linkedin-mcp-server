@@ -464,12 +464,27 @@ class AppConfig:
         if not self.server.port:
             raise ConfigurationError("HTTP transport requires a valid port")
         if not is_loopback_host(self.server.host):
+            # Warned about rather than refused, and the distinction is not
+            # timidity. A container has to bind the wildcard: a process bound to
+            # 127.0.0.1 inside one is unreachable through a published port at
+            # all, so refusing this would break the documented Docker command
+            # while protecting nobody. What actually decides exposure is the
+            # publish address on the host, and this process cannot see it --
+            # `-p 127.0.0.1:8080:8080` and `-p 8080:8080` look identical from in
+            # here. Container detection is no way out either, since
+            # LINKEDIN_MCP_CONTAINER is a full override and therefore not a
+            # security boundary. So the honest thing is to say what it costs and
+            # name both remedies.
             logger.warning(
                 "HTTP transport is binding to %s, which is reachable from "
                 "outside this machine. The MCP endpoint has no authentication, "
                 "so anyone who can reach that address can use your LinkedIn "
-                "session. Use 127.0.0.1 (default) unless you understand the "
-                "risk.",
+                "session. Host and origin checking is not access control; it "
+                "stops a website from pointing a name at this server, not "
+                "someone who can reach the address. Outside Docker, use "
+                "--host 127.0.0.1. In Docker, keep --host 0.0.0.0 and publish "
+                "to loopback instead: -p 127.0.0.1:PORT:PORT. For remote "
+                "access, forward the port over SSH rather than exposing it.",
                 self.server.host,
             )
 
