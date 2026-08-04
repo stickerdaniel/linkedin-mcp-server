@@ -175,11 +175,16 @@ class BrowserConfig:
     # user's keychain and degrades to manual login, and no cookie crosses the
     # network.
     auto_import_from_browser: bool | None = None
-    # Install full Chrome for Testing up front during background setup instead
-    # of lazily on the first headed login. Off by default: the headless scrape +
-    # auto-import path needs only the headless shell, so a headless-only operator
-    # never downloads the larger full-chromium binary unless interactive login is
-    # actually triggered. Set True to pre-warm the headed login fallback.
+    # Read by nothing, and accepted anyway. It used to choose between installing
+    # the full browser up front or lazily on the first headed login; there is
+    # only one browser now, so both answers describe the same install.
+    #
+    # It stays for the same reason ``user_agent`` above does: it is part of the
+    # daemon's configuration fingerprint (``SHARED_CONFIG_FIELDS``), and
+    # ``daemon.py`` rejects a fingerprint mismatch *before* it compares package
+    # versions. Drop the field and a running owner of the other version stops
+    # being readable, so it can never be asked to stand down. Both can go once
+    # owner turnover survives a fingerprint change.
     eager_full_chromium: bool = False
 
     def validate(self) -> None:

@@ -605,27 +605,24 @@ def load_from_args(config: AppConfig) -> AppConfig:
         ),
     )
 
+    # Accepted and inert. There is one browser now, so "up front" and "lazily"
+    # describe the same install. Kept rather than removed so an existing command
+    # line or compose file does not stop working over a setting that no longer
+    # decides anything; hidden from help so nobody adopts it.
     eager_full_group = parser.add_mutually_exclusive_group()
     eager_full_group.add_argument(
         "--eager-full-chromium",
         dest="eager_full_chromium",
         action="store_true",
         default=None,
-        help=(
-            "Install full Chrome for Testing up front during browser setup "
-            "instead of lazily on the first headed login (pre-warms the headed "
-            "login fallback at the cost of a larger initial download)"
-        ),
+        help=argparse.SUPPRESS,
     )
     eager_full_group.add_argument(
         "--no-eager-full-chromium",
         dest="eager_full_chromium",
         action="store_false",
         default=None,
-        help=(
-            "Install full Chrome for Testing lazily on the first headed login "
-            "(default; overrides EAGER_FULL_CHROMIUM=true)."
-        ),
+        help=argparse.SUPPRESS,
     )
 
     daemon_group = parser.add_mutually_exclusive_group()
