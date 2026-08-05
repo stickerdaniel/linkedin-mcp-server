@@ -431,7 +431,10 @@ def load_from_args(config: AppConfig) -> AppConfig:
         type=str,
         default=None,
         metavar="WxH",
-        help="Browser viewport size (default: 1280x720)",
+        help=(
+            "Browser viewport size (default: 1280x720). Applies to the normal "
+            "windowless mode only; a headed launch uses the real window size."
+        ),
     )
 
     parser.add_argument(

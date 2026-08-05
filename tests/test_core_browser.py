@@ -22,6 +22,71 @@ def test_a_user_agent_is_refused_rather_than_applied(tmp_path):
         )
 
 
+class TestGeometry:
+    """Which window geometry a launch gets, and why it depends on the mode.
+
+    The contradiction this fixes was measured: a headed window reported an
+    outer height of 805 while the same browser reported a screen 720 tall,
+    because an emulated viewport was forced onto a real window.
+    """
+
+    def test_headless_keeps_an_explicit_viewport(self, tmp_path):
+        """Headless plus `no_viewport` collapses the screen to 800x600, so the
+        explicit size stays for the mode that has no real window."""
+        manager = BrowserManager(user_data_dir=tmp_path, headless=True)
+
+        assert manager._geometry() == {"viewport": {"width": 1280, "height": 720}}
+
+    def test_headless_honours_a_configured_viewport(self, tmp_path):
+        manager = BrowserManager(
+            user_data_dir=tmp_path,
+            headless=True,
+            viewport={"width": 1920, "height": 1080},
+        )
+
+        assert manager._geometry() == {"viewport": {"width": 1920, "height": 1080}}
+
+    def test_headed_sends_no_viewport_at_all(self, tmp_path):
+        """A real window reports the size it really is.
+
+        `no_viewport` has to be the only geometry key: sending a viewport
+        alongside it is what emulated a screen the window did not fit on.
+        """
+        manager = BrowserManager(user_data_dir=tmp_path, headless=False)
+
+        assert manager._geometry() == {"no_viewport": True}
+
+    def test_headed_ignores_a_configured_viewport(self, tmp_path):
+        """VIEWPORT stops applying to headed launches, deliberately.
+
+        Documented behaviour change: the setting now describes the windowless
+        default mode only.
+        """
+        manager = BrowserManager(
+            user_data_dir=tmp_path,
+            headless=False,
+            viewport={"width": 1920, "height": 1080},
+        )
+
+        assert manager._geometry() == {"no_viewport": True}
+
+    def test_the_mode_comes_from_the_launch_not_the_configuration(self, tmp_path):
+        """Only this object knows the answer.
+
+        The manual login always constructs with `headless=False` while the
+        configuration default stays `True`, so a decision made from the
+        configuration would be wrong for exactly the launch that opens a window.
+        """
+        assert (
+            "no_viewport"
+            in BrowserManager(user_data_dir=tmp_path, headless=False)._geometry()
+        )
+        assert (
+            "viewport"
+            in BrowserManager(user_data_dir=tmp_path, headless=True)._geometry()
+        )
+
+
 def _make_cookie(
     name: str,
     value: str = "value",

@@ -82,7 +82,12 @@ class BrowserManager:
         self.user_data_dir = str(Path(user_data_dir).expanduser())
         self.headless = headless
         self.slow_mo = slow_mo
-        self.viewport = viewport or {"width": 1280, "height": 720}
+        # Kept as passed, including ``None``. The old ``viewport or {...}``
+        # meant "no viewport" could not be expressed at all, which is what
+        # forced an emulated screen onto a headed window and produced the
+        # measured contradiction: an outer window of 805 pixels standing on a
+        # screen the same browser reported as 720 tall.
+        self.viewport = viewport
         self.launch_options = launch_options
 
         self._playwright: Playwright | None = None
@@ -108,6 +113,25 @@ class BrowserManager:
         self._close_confirmed = False
         self._close_confirmed = await self.close()
 
+    def _geometry(self) -> dict[str, Any]:
+        """The viewport options, decided by the mode this browser actually runs in.
+
+        This lives here rather than in ``build_launch_options`` because only
+        this object knows the answer. The builder is a pure function of the
+        configuration, and the configuration says ``headless=True`` by default
+        even when the manual login is about to launch headed -- the login passes
+        ``headless=False`` directly. A builder reading the configuration would
+        get it wrong for exactly the launch that puts a window on screen.
+
+        Headed gets no viewport at all, so the window reports the size it really
+        is. Headless keeps an explicit one, because a headless browser with
+        ``no_viewport`` collapses its screen to 800x600, which is its own
+        oddity.
+        """
+        if self.headless:
+            return {"viewport": self.viewport or {"width": 1280, "height": 720}}
+        return {"no_viewport": True}
+
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
         if self._context is not None:
@@ -121,7 +145,7 @@ class BrowserManager:
             context_options: dict[str, Any] = {
                 "headless": self.headless,
                 "slow_mo": self.slow_mo,
-                "viewport": self.viewport,
+                **self._geometry(),
                 **self.launch_options,
                 "locale": "en-US",
             }

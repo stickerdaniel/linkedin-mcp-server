@@ -94,7 +94,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
-| `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
+| `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT. Applies to the normal windowless mode only; a headed launch uses the real window size. |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
 | `PROXY_SERVER` | - | Optional, and most setups are better off without one: LinkedIn advises against proxies and scores the addresses a session signs in from, so a stable known address beats a commercial exit node. Worth it when the container runs somewhere its address is obviously a data centre, and even then a WireGuard or Tailscale exit node on your own network is preferable. Route the browser through a proxy, as `scheme://host:port` (`http`, `https`, `socks4`, `socks5`). May also carry credentials directly (`http://user:pass@host:port`), which is how most providers hand them out. Inside a container `127.0.0.1` is the container itself: for a relay running on the host use `host.docker.internal` (on native Linux Docker, add `--add-host=host.docker.internal:host-gateway`). Only browser traffic is routed, not the MCP transport. |
 | `PROXY_USERNAME` | - | Username for the proxy |
