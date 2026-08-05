@@ -65,7 +65,26 @@ def build_launch_options(
     launch_options: dict[str, Any] = {}
 
     if browser.chrome_path:
+        # An explicit operator choice. No channel alongside it: Patchright would
+        # let the path win anyway, but two competing selectors in one options
+        # dict is a trap for whoever reads this next.
         launch_options["executable_path"] = browser.chrome_path
+    else:
+        # Without a channel, Playwright picks the *binary* from `headless`
+        # alone -- `coreBundle.js`, `getExecutableName()`:
+        #
+        #     return options2.headless ? "chromium-headless-shell" : "chromium";
+        #
+        # `--login` forces headless=False and so mints every session in the full
+        # browser, while scraping defaults to headless=True and uses the
+        # stripped headless shell, which has no plugins, no `window.chrome` and
+        # an incoherent notification permission. One session, two browsers.
+        #
+        # Naming the channel resolves the same entry either way, so both paths
+        # get the full Chrome for Testing. It does *not* stop the browser
+        # announcing itself as headless: that comes from the mode, not the
+        # binary, and is dealt with separately.
+        launch_options["channel"] = "chromium"
 
     proxy = browser.proxy_settings()
     if proxy:

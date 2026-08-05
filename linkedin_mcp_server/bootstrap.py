@@ -310,11 +310,19 @@ def _metadata_shape_ok() -> Path | None:
     return configured_browsers_path
 
 
-def shell_ready() -> bool:
-    """Return whether the headless-shell binary is installed and current.
+def browser_ready() -> bool:
+    """Return whether the full Chrome for Testing is installed and current.
 
-    The default headless scrape + auto-import path launches only the headless
-    shell, so this is the readiness signal that gates a headless-mode server.
+    Only the full browser, and deliberately not the headless shell. Every launch
+    now names ``channel="chromium"``, so the shell is never started and its
+    absence is not a reason to reinstall anything.
+
+    The previous version of this checked *every* install-by-default target, so a
+    full-only install read as permanently not ready. Combined with a launch that
+    demands the full browser, that is an unbounded loop: the gate opens on a
+    shell-only install, the launch fails, only the metadata is invalidated, and
+    the next setup installs the shell again.
+
     Pure: no mutation.
     """
     configured = _metadata_shape_ok()
@@ -323,42 +331,21 @@ def shell_ready() -> bool:
     targets = _patchright_install_targets()
     if not targets:
         return False
-    revision = targets.get(_SHELL_DIR_PREFIX)
+    revision = targets.get(_FULL_DIR_PREFIX)
     if revision is None:
         return False
-    return _has_install_for(configured, _SHELL_DIR_PREFIX, revision)
-
-
-def full_chromium_ready() -> bool:
-    """Return whether every chromium binary is installed and current.
-
-    Requires both the full Chrome for Testing and the headless shell. This is
-    the readiness signal that gates a headed (``--no-headless``) server and the
-    interactive-login fallback. Pure: no mutation.
-    """
-    configured = _metadata_shape_ok()
-    if configured is None:
-        return False
-    targets = _patchright_install_targets()
-    if not targets:
-        return False
-    for prefix, revision in targets.items():
-        if not _has_install_for(configured, prefix, revision):
-            return False
-    return True
+    return _has_install_for(configured, _FULL_DIR_PREFIX, revision)
 
 
 def browser_setup_ready() -> bool:
-    """Return whether the install required for the configured launch mode is current.
+    """Return whether the browser this server launches is installed and current.
 
-    Mode-aware: a headless-mode server needs only the headless shell; a headed
-    (``--no-headless``) server needs full chromium. Pure: no mutation of
+    No longer mode-aware. ``headless`` selects a *mode*, not a binary, so it has
+    nothing to say about which install is required. Pure: no mutation of
     metadata or in-memory state. Mutation happens in
     :func:`invalidate_browser_setup`, called by the gate paths.
     """
-    if get_config().browser.headless:
-        return shell_ready()
-    return full_chromium_ready()
+    return browser_ready()
 
 
 def invalidate_browser_setup() -> None:
@@ -428,105 +415,54 @@ def _write_install_metadata(
     )
 
 
-def _needs_full_chromium() -> bool:
-    """Return whether the full-chromium stage should run during background setup.
-
-    The shell alone covers the default headless scrape + auto-import path. Full
-    chromium is installed up front only for a headed (``--no-headless``) run or
-    when the operator opts into pre-warming the headed login fallback.
-    """
-    config = get_config()
-    return (not config.browser.headless) or config.browser.eager_full_chromium
-
-
 async def _run_browser_setup() -> None:
-    """Install the headless shell first, then full chromium when needed.
+    """Install full Chrome for Testing, in one stage.
 
-    Stage one (``--only-shell``) lands the headless shell + ffmpeg so the
-    headless first-run path becomes usable as early as possible; metadata is
-    written after it so a crash before stage two still records the shell as
-    ready. Stage two (``--no-shell``) adds full Chrome for Testing for the
-    headed login fallback / ``--no-headless`` mode, and runs only when needed.
+    The two-stage shell-first arrangement existed to make the headless path
+    usable sooner. Nothing launches the shell now, so staging it would download
+    92 MiB nobody runs.
+
+    Worth being straight about the effect on download size, because it cuts both
+    ways. Measured against the CDN for 148.0.7778.96 mac-arm64: this is 170 MiB,
+    against 263 MiB for anyone who previously ended up needing the full browser,
+    and against 92 MiB for the default headless user who only ever fetched the
+    shell. The second comparison is the one users will notice.
     """
     browser_dir = configure_browser_environment()
     secure_mkdir(browser_dir)
 
-    await _run_patchright_install("--only-shell")
-    _write_install_metadata(
-        browser_dir,
-        {_SHELL_DIR_PREFIX: True, _FULL_DIR_PREFIX: False},
-    )
-
-    if _needs_full_chromium():
-        await _run_patchright_install("--no-shell")
-        _write_install_metadata(
-            browser_dir,
-            {_SHELL_DIR_PREFIX: True, _FULL_DIR_PREFIX: True},
-        )
-
-
-async def _ensure_full_chromium_installed() -> None:
-    """Install full chromium on demand, e.g. before the headed login launch.
-
-    A no-op once full chromium is present. Used by the lazy path so the headed
-    interactive-login fallback never launches against a shell-only install.
-    """
-    if full_chromium_ready():
-        return
-    browser_dir = configure_browser_environment()
-    secure_mkdir(browser_dir)
-    if not shell_ready():
-        await _run_patchright_install("--only-shell")
-        # Record the shell before the full stage so a --no-shell failure leaves
-        # the shell marked ready and a retry skips re-installing it.
-        _write_install_metadata(
-            browser_dir,
-            {_SHELL_DIR_PREFIX: True, _FULL_DIR_PREFIX: False},
-        )
     await _run_patchright_install("--no-shell")
     _write_install_metadata(
         browser_dir,
-        {_SHELL_DIR_PREFIX: True, _FULL_DIR_PREFIX: True},
+        {_SHELL_DIR_PREFIX: False, _FULL_DIR_PREFIX: True},
     )
 
 
-def ensure_browser_installed(*, full: bool = False) -> None:
-    """Install the Patchright Chromium binaries a CLI mode needs, if absent.
+async def _ensure_browser_installed() -> None:
+    """Install the browser on demand. A no-op once it is present."""
+    if browser_ready():
+        return
+    await _run_browser_setup()
 
-    Used by CLI modes (--login, --status, --import-from-browser) to guarantee
-    the right binary exists before launching it: ``--status`` and
-    ``--import-from-browser`` run headless and need only the shell, while
-    ``--login`` is headed and needs full chromium. The normal server path uses
-    async background setup instead (non-blocking).
+
+def ensure_browser_installed() -> None:
+    """Install the Patchright Chromium browser for a CLI mode, if absent.
+
+    Used by ``--login``, ``--status`` and ``--import-from-browser``. They no
+    longer differ in what they need: the mode each runs in selects headed or
+    headless behaviour, and both come from the same binary. The normal server
+    path uses async background setup instead (non-blocking).
     """
     configure_browser_environment()
-    if full:
-        if full_chromium_ready():
-            return
-    elif shell_ready():
+    if browser_ready():
         return
     print("   Installing Patchright Chromium browser...")
     try:
-        if full:
-            asyncio.run(_ensure_full_chromium_installed())
-        else:
-            asyncio.run(_run_install_shell_only())
+        asyncio.run(_ensure_browser_installed())
     except Exception as exc:
         print(f"   ❌ Browser installation failed: {exc}")
         raise
     print("   Browser installed.")
-
-
-async def _run_install_shell_only() -> None:
-    """Install just the headless shell for the headless CLI modes."""
-    browser_dir = configure_browser_environment()
-    secure_mkdir(browser_dir)
-    full_present = full_chromium_ready()
-    await _run_patchright_install("--only-shell")
-    _write_install_metadata(
-        browser_dir,
-        {_SHELL_DIR_PREFIX: True, _FULL_DIR_PREFIX: full_present},
-    )
 
 
 def _safe_task_done(task: asyncio.Task[None] | None) -> bool:
@@ -1285,13 +1221,13 @@ async def _run_login_flow() -> None:
     being held is the whole window that matters.
     """
     _state.auth_state = AuthState.IN_PROGRESS
-    # The manual-login fallback launches headed, which needs full chromium.
-    # In the default headless flow only the shell is installed eagerly, so
-    # install full chromium here before the headed launch. A no-op once present
-    # and skipped entirely for a custom executable. The dependencies.py
-    # binary-missing backstop remains as a recovery path.
+    # An idempotent backstop rather than a staging step: background setup now
+    # installs the same browser this launch uses, so by the time anyone reaches
+    # a login there is normally nothing to do. Kept because a login can be
+    # reached before that setup finishes. Skipped for a custom executable, and
+    # the dependencies.py binary-missing path remains the recovery route.
     if not _uses_custom_chrome():
-        await _ensure_full_chromium_installed()
+        await _ensure_browser_installed()
     success = await interactive_login(
         get_profile_dir(), superseded_by=_state.login_supersedes
     )
