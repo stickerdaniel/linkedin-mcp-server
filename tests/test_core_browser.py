@@ -163,31 +163,22 @@ class TestHowNoVisibleWindowIsAchieved:
     """
 
     async def _captured_options(self, tmp_path, *, headless: bool) -> dict:
-        captured: dict = {}
+        """The options a successful launch was given.
 
-        class _Chromium:
-            async def launch_persistent_context(self, user_data_dir, **kwargs):
-                captured.update(kwargs)
-                raise RuntimeError("stop once the options are known")
-
-        class _Playwright:
-            chromium = _Chromium()
-
-            async def stop(self):
-                return None
-
+        Deliberately not "the options recorded before a crash": the launch now
+        retries once when a window is refused, so a fake that raises would be
+        describing the fallback rather than the launch under test.
+        """
+        recorder: dict = {}
+        start, _ = TestTheWindowlessLaunchEndToEnd()._fake_playwright(recorder)
         manager = BrowserManager(user_data_dir=tmp_path, headless=headless)
-
-        async def fake_start():
-            return _Playwright()
 
         with mock.patch(
             "linkedin_mcp_server.core.browser.async_playwright"
         ) as playwright:
-            playwright.return_value.start = fake_start
-            with contextlib.suppress(Exception):
-                await manager.start()
-        return captured
+            playwright.return_value.start = start
+            await manager.start()
+        return recorder["options"]
 
     async def test_launches_headed_where_the_target_is_supported(
         self, tmp_path, monkeypatch
@@ -240,7 +231,13 @@ class TestTheWindowlessLaunchEndToEnd:
     alone. This one runs the launch through and reads what came out.
     """
 
-    def _fake_playwright(self, recorder: dict):
+    def _fake_playwright(
+        self,
+        recorder: dict,
+        *,
+        refuse_headed: bool = False,
+        refuse_headless: bool = False,
+    ):
         from linkedin_mcp_server.hidden_target import ATTACH_TO_OTHER
 
         pages: list = []
@@ -279,6 +276,10 @@ class TestTheWindowlessLaunchEndToEnd:
         class _Chromium:
             async def launch_persistent_context(self, user_data_dir, **kwargs):
                 recorder["options"] = kwargs
+                if refuse_headed and not kwargs.get("headless"):
+                    raise RuntimeError("headed launch refused: no window server")
+                if refuse_headless and kwargs.get("headless"):
+                    raise RuntimeError("headless launch refused too")
                 pages.append(_Page("about:blank"))
                 return _Context()
 
@@ -322,6 +323,59 @@ class TestTheWindowlessLaunchEndToEnd:
         # The startup page went, and only once the hidden one existed.
         assert pages[0].closed is True
         assert recorder["hidden_present_at_close"] is True
+
+    async def test_a_refused_window_falls_back_to_headless(self, tmp_path):
+        """The machine decides, not the platform name.
+
+        A Mac reached over SSH, a launchd daemon and a CI runner with no GUI
+        session all look like macOS and all refuse to open a window. Rather
+        than enumerate those, the attempt answers it -- which is the one check
+        that cannot be wrong about a case nobody thought of.
+        """
+        recorder: dict = {}
+        start, _ = self._fake_playwright(recorder, refuse_headed=True)
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            return_value=True,
+        ):
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.async_playwright"
+            ) as playwright:
+                playwright.return_value.start = start
+                await manager.start()
+
+        # It ran, in headless, and the page is the ordinary startup one.
+        assert recorder["options"]["headless"] is True
+        assert manager.page.url == "about:blank"
+
+    async def test_a_launch_that_fails_either_way_reports_the_first_error(
+        self, tmp_path
+    ):
+        """The retry is a chance, not a cover-up.
+
+        If the browser will not start with or without a window then the problem
+        was never the window, and the first error is the one that says what it
+        actually was. Reporting the second would send someone looking at
+        displays over a corrupt profile.
+        """
+        recorder: dict = {}
+        start, _ = self._fake_playwright(
+            recorder, refuse_headed=True, refuse_headless=True
+        )
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            return_value=True,
+        ):
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.async_playwright"
+            ) as playwright:
+                playwright.return_value.start = start
+                with pytest.raises(Exception, match="headed launch refused"):
+                    await manager.start()
 
     async def test_a_visible_launch_keeps_the_startup_page(self, tmp_path):
         recorder: dict = {}

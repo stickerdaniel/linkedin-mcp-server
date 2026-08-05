@@ -112,6 +112,9 @@ class BrowserManager:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._is_authenticated = False
+        #: Set when a headed launch was attempted and refused, which is the only
+        #: reliable way to learn that this machine has nowhere to put a window.
+        self._no_window_available = False
         # False until a teardown proves Chromium exited. Pessimistic by default:
         # a launch that is cancelled before close runs must not read as clean.
         self._close_confirmed = False
@@ -141,7 +144,11 @@ class BrowserManager:
         headless mode, and the browser then says so on every surface. That is a
         loss worth announcing rather than hiding, which is why it is logged.
         """
-        return self.headless and hidden_target_is_supported()
+        return (
+            self.headless
+            and hidden_target_is_supported()
+            and not self._no_window_available
+        )
 
     def _geometry(self) -> dict[str, Any]:
         """The viewport options, decided by the mode this browser actually runs in.
@@ -204,10 +211,50 @@ class BrowserManager:
             # itself on the first surface anyone checks, and it never reaches
             # service workers at all. See the browser identity rules in
             # AGENTS.md and the measurements in docs/browser-fingerprint.md.
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                self.user_data_dir,
-                **context_options,
-            )
+            try:
+                self._context = (
+                    await self._playwright.chromium.launch_persistent_context(
+                        self.user_data_dir,
+                        **context_options,
+                    )
+                )
+            except Exception as exc:
+                # A headed launch needs somewhere to put a window, and whether
+                # this machine has one cannot be decided from the platform name
+                # alone: a Mac reached over SSH, a launchd daemon, or a CI
+                # runner with no GUI session all look like macOS and all refuse
+                # to open one. Rather than enumerate those, let the attempt
+                # answer it -- that is the one check that cannot be wrong about
+                # a case nobody thought of.
+                #
+                # Narrow on purpose: only when a window was asked for and only
+                # once, so a genuine launch failure still surfaces rather than
+                # being retried into a different error.
+                if not self._windowless:
+                    raise
+                logger.warning(
+                    "Could not start a browser with a window (%s), so Chromium "
+                    "runs in headless mode and will identify itself as "
+                    "HeadlessChrome on every surface.",
+                    type(exc).__name__,
+                )
+                self._no_window_available = True
+                context_options["headless"] = True
+                context_options.pop("no_viewport", None)
+                context_options.update(self._geometry())
+                try:
+                    self._context = (
+                        await self._playwright.chromium.launch_persistent_context(
+                            self.user_data_dir,
+                            **context_options,
+                        )
+                    )
+                except Exception:
+                    # The retry is a chance, not a cover-up. If the browser
+                    # will not start either way the problem was never the
+                    # window, and the first error is the one that says what it
+                    # actually was.
+                    raise exc from None
 
             logger.info(
                 "Persistent browser launched (headless=%s, user_data_dir=%s)",
