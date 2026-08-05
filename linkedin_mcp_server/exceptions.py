@@ -122,6 +122,22 @@ class BrowserBinaryMissingError(LinkedInMCPError):
     """Patchright Chromium binary is absent or stale on disk."""
 
 
+class ProfileRootRefusedError(LinkedInMCPError):
+    """A profile root was named that this server cannot prove it owns.
+
+    Raised before anything is moved or deleted, never after. Six operations move
+    or recursively delete the tree ``USER_DATA_DIR`` names, and three of them
+    reach the *parent* as well, because the portable cookies, the source
+    metadata and the derived runtime profiles live one level above the profile
+    itself. A mistyped path therefore costs a directory nobody meant to name.
+
+    Deliberately not an ``AuthenticationError``: that class is routed into
+    ``invalidate_auth_and_trigger_relogin``, which retires the profile. Treating
+    a refusal to touch a directory as a reason to clear that directory would run
+    exactly the operation being refused.
+    """
+
+
 class CookieDecryptionError(LinkedInMCPError):
     """A browser cookie could not be decrypted."""
 

@@ -38,6 +38,7 @@ from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.exceptions import (
     BrowserBusyError,
     BrowserShutdownUnconfirmedError,
+    ProfileRootRefusedError,
 )
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
 from linkedin_mcp_server.server_role import a_held_profile_means_this_owner_must_go
@@ -513,7 +514,15 @@ async def _bridge_runtime_profile(
                 "The bridge browser did not shut down cleanly, so its runtime "
                 "profile is kept. Restart the server to recover."
             ) from exc
-        clear_runtime_profile(runtime_id, source_profile_dir)
+        try:
+            clear_runtime_profile(runtime_id, source_profile_dir)
+        except ProfileRootRefusedError as refusal:
+            # Cleanup, not a precondition. The bridge has already failed and
+            # that failure is what the caller needs to see; a complaint about
+            # who owns the directory would replace it with something nobody can
+            # act on. The clear at the top of this function is the opposite case
+            # and deliberately lets the refusal through.
+            logger.warning("Leaving the runtime profile in place: %s", refusal)
         raise
 
 

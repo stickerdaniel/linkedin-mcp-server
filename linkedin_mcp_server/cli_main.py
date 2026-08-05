@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import inquirer
@@ -12,6 +13,7 @@ from linkedin_mcp_server.bootstrap import (
     ensure_browser_installed,
 )
 from linkedin_mcp_server.core import AuthenticationError
+from linkedin_mcp_server.exceptions import ProfileRootRefusedError
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.config.schema import AppConfig
@@ -25,6 +27,7 @@ from linkedin_mcp_server.drivers.browser import (
 )
 from linkedin_mcp_server.debug_trace import should_keep_traces
 from linkedin_mcp_server.logging_config import configure_logging, teardown_trace_logging
+from linkedin_mcp_server.profile_claim import ensure_profile_claim
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
     load_runtime_state,
@@ -417,6 +420,23 @@ def main() -> None:
     try:
         configure_browser_environment()
 
+        # Establish, once, that this process may move and delete what
+        # USER_DATA_DIR names. Before everything: the logout below deletes the
+        # whole auth root, bootstrap downloads a browser into it, and daemon
+        # election spawns an owner that would repeat this check anyway. Against
+        # the *configured* root only — a derived runtime profile has its own
+        # nested auth root, and claiming that one would protect the wrong
+        # directory while looking like protection.
+        #
+        # Read off the config already in hand rather than through
+        # `get_source_profile_dir()`. That helper reaches for the global config,
+        # which lazily parses `sys.argv`, and reaching for it a second time here
+        # would re-parse whatever argv happens to hold.
+        ensure_profile_claim(
+            Path(config.browser.user_data_dir),
+            claim_anyway=config.server.claim_profile_root,
+        )
+
         # Set headless mode from config
         set_headless(config.browser.headless)
 
@@ -539,6 +559,17 @@ def main() -> None:
             if config.is_interactive:
                 print(f"\n❌ Server error: {e}")
             exit_gracefully(1)
+
+    except ProfileRootRefusedError as e:
+        # Printed rather than raised through, because a traceback is the wrong
+        # shape for this: nothing went wrong in the code, a path was named that
+        # this server will not delete, and the message already says what to do
+        # about it.
+        logger.error(str(e))
+        if config.is_interactive:
+            print(f"\n❌ {e}")
+        sys.exit(1)
+
     finally:
         teardown_trace_logging(keep_traces=should_keep_traces())
 

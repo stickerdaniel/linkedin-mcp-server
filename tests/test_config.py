@@ -486,6 +486,30 @@ class TestLoaders:
         config = load_from_args(AppConfig())
         assert config.server.tool_timeout_seconds == 7.5
 
+    def test_claim_profile_root_defaults_off(self, monkeypatch):
+        """Taking over an occupied directory is never the default."""
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        assert load_from_args(AppConfig()).server.claim_profile_root is False
+
+    def test_claim_profile_root_is_reachable_from_the_command_line(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--claim-profile-root"])
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        assert load_from_args(AppConfig()).server.claim_profile_root is True
+
+    def test_claim_profile_root_is_not_part_of_the_owner_fingerprint(self):
+        """It decides whether a marker may be written, not what the browser is.
+
+        Listing it would change the configuration fingerprint for everyone and
+        make every existing owner unreadable, which is how an owner stops being
+        retirable at all.
+        """
+        from linkedin_mcp_server.daemon_descriptor import SHARED_CONFIG_FIELDS
+
+        assert "claim_profile_root" not in SHARED_CONFIG_FIELDS
+
     @pytest.mark.parametrize("bad_value", ["0", "-1", "abc", "nan", "inf"])
     def test_load_from_args_invalid_tool_timeout(self, monkeypatch, bad_value):
         monkeypatch.setattr(

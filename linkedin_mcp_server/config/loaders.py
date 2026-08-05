@@ -571,6 +571,18 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
+        "--claim-profile-root",
+        action="store_true",
+        help=(
+            "Take over a non-default profile directory that this server will "
+            "not claim on its own: one whose parent already holds other files, "
+            "or one carrying an ownership marker written for a different path. "
+            "Needed once; this server moves and deletes that whole parent when "
+            "it rotates or clears a session"
+        ),
+    )
+
+    parser.add_argument(
         "--import-from-browser",
         nargs="?",
         const="auto",
@@ -733,6 +745,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.user_data_dir:
         config.browser.user_data_dir = args.user_data_dir
+
+    if args.claim_profile_root:
+        config.server.claim_profile_root = True
 
     if args.import_from_browser is not None:
         value = args.import_from_browser.strip().lower()
