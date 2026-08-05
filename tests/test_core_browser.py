@@ -1,11 +1,27 @@
 """Tests for BrowserManager cookie import/export helpers."""
 
+import contextlib
 import json
+from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from linkedin_mcp_server.core.browser import BrowserManager
+
+
+def test_a_no_viewport_override_is_refused(tmp_path):
+    """The geometry decision must not be overridable through launch options.
+
+    `_geometry()` is spread *before* `**launch_options`, so a caller-supplied
+    `no_viewport` would win. `no_viewport=False` on a headed launch puts the
+    emulated screen back and restores the window-larger-than-screen
+    contradiction this change exists to remove; `no_viewport=True` on a
+    headless one sends both geometry keys at once. Nothing produces either
+    today, which is why it is refused now rather than after something does.
+    """
+    with pytest.raises(TypeError, match="no_viewport"):
+        BrowserManager(user_data_dir=tmp_path / "profile", no_viewport=False)
 
 
 def test_a_user_agent_is_refused_rather_than_applied(tmp_path):
@@ -70,21 +86,67 @@ class TestGeometry:
 
         assert manager._geometry() == {"no_viewport": True}
 
-    def test_the_mode_comes_from_the_launch_not_the_configuration(self, tmp_path):
-        """Only this object knows the answer.
+    def test_the_mode_comes_from_the_launch_not_the_configuration(
+        self, tmp_path, monkeypatch
+    ):
+        """The constructor argument wins over the configuration, which differs.
 
-        The manual login always constructs with `headless=False` while the
-        configuration default stays `True`, so a decision made from the
-        configuration would be wrong for exactly the launch that opens a window.
+        This is the confusion worth pinning. The manual login constructs with
+        `headless=False` while `BrowserConfig.headless` stays `True`, so a
+        decision read from configuration would be wrong for exactly the launch
+        that opens a window. Asserted by making the two disagree.
         """
-        assert (
-            "no_viewport"
-            in BrowserManager(user_data_dir=tmp_path, headless=False)._geometry()
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        config = AppConfig()
+        config.browser.headless = True
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", lambda: config, raising=False
         )
-        assert (
-            "viewport"
-            in BrowserManager(user_data_dir=tmp_path, headless=True)._geometry()
-        )
+
+        headed = BrowserManager(user_data_dir=tmp_path, headless=False)
+
+        assert headed._geometry() == {"no_viewport": True}
+
+    async def test_the_launch_actually_receives_the_geometry(self, tmp_path):
+        """The helper is not the behaviour.
+
+        Every other test here would stay green if `start()` stopped calling
+        `_geometry()` and went back to sending a viewport unconditionally. This
+        one reads the kwargs Patchright is actually handed.
+        """
+        captured: dict = {}
+
+        class _FakeChromium:
+            async def launch_persistent_context(self, user_data_dir, **kwargs):
+                captured.update(kwargs)
+                raise _StopLaunch()
+
+        class _FakePlaywright:
+            chromium = _FakeChromium()
+
+            async def stop(self):
+                return None
+
+        class _StopLaunch(Exception):
+            """Ends the launch once the options have been observed."""
+
+        manager = BrowserManager(user_data_dir=tmp_path, headless=False)
+
+        async def fake_start():
+            return _FakePlaywright()
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.async_playwright"
+        ) as playwright:
+            playwright.return_value.start = fake_start
+            with contextlib.suppress(Exception):
+                await manager.start()
+
+        assert captured.get("no_viewport") is True
+        assert "viewport" not in captured
+        # The locale sits after the spread on purpose and must stay pinned.
+        assert captured.get("locale") == "en-US"
 
 
 def _make_cookie(

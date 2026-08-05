@@ -79,6 +79,19 @@ class BrowserManager:
                 "not the client hints, and never reaches service workers."
             )
 
+        # Same funnel, same hazard. ``_geometry()`` is spread *before*
+        # ``launch_options``, so a stray ``no_viewport`` would win: passing
+        # ``no_viewport=False`` on a headed launch puts the emulated screen back
+        # and restores the window-larger-than-screen contradiction, and passing
+        # ``no_viewport=True`` on a headless one sends both keys at once.
+        # Nothing produces this today; it is refused so it cannot start.
+        if "no_viewport" in launch_options:
+            raise TypeError(
+                "BrowserManager decides no_viewport from the launch mode. Pass "
+                "headless= instead: a headed window must report its real size, "
+                "and a headless one needs an explicit viewport."
+            )
+
         self.user_data_dir = str(Path(user_data_dir).expanduser())
         self.headless = headless
         self.slow_mo = slow_mo
