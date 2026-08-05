@@ -4744,6 +4744,36 @@ class TestGetInbox:
 
 
 class TestGetConversation:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("abc123", "abc123"),
+            ("  2-abc_123:xyz  ", "2-abc_123:xyz"),
+            (
+                "https://www.linkedin.com/messaging/thread/abc123/?foo=bar",
+                "abc123",
+            ),
+            ("/messaging/thread/abc123/", "abc123"),
+        ],
+    )
+    def test_normalize_thread_id_accepts_raw_ids_and_thread_urls(self, raw, expected):
+        assert LinkedInExtractor._normalize_thread_id(raw) == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "",
+            "abc/def",
+            "https://evil.example/messaging/thread/abc123/",
+            "//evil.example/messaging/thread/abc123/",
+            "https://www.linkedin.com/messaging/compose/?recipient=abc123",
+            "/messaging/thread/abc123/other/",
+        ],
+    )
+    def test_normalize_thread_id_rejects_non_thread_targets(self, raw):
+        with pytest.raises(LinkedInScraperException, match="thread_id"):
+            LinkedInExtractor._normalize_thread_id(raw)
+
     async def test_returns_conversation_by_thread_id(self, mock_page):
         """get_conversation with thread_id navigates directly to thread URL."""
         extractor = LinkedInExtractor(mock_page)
@@ -5008,6 +5038,73 @@ class TestGetConversation:
                 LinkedInScraperException, match="Could not find a conversation"
             ):
                 await extractor.get_conversation(linkedin_username="jacki-old")
+
+
+class TestReplyToThread:
+    async def test_dry_run_never_types_and_uses_canonical_thread_url(self, mock_page):
+        """confirm_send=False may inspect but must not focus/type/send anything."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/messaging/thread/abc123/"
+        mock_page.keyboard = MagicMock()
+        mock_page.keyboard.type = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        with (
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as navigate,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_resolve_thread_compose_box",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+        ):
+            result = await extractor.reply_to_thread(
+                "https://www.linkedin.com/messaging/thread/abc123/?source=inbox",
+                "Must remain a draft",
+                confirm_send=False,
+            )
+
+        assert result["status"] == "confirmation_required"
+        assert result["thread_id"] == "abc123"
+        navigate.assert_awaited_once_with(
+            "https://www.linkedin.com/messaging/thread/abc123/"
+        )
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.keyboard.press.assert_not_awaited()
+        mock_page.evaluate.assert_not_awaited()
+
+    async def test_thread_mismatch_returns_before_composer_or_input(self, mock_page):
+        """A redirect or wrong final ID blocks all interaction with the page."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/messaging/thread/other/"
+        mock_page.keyboard = MagicMock()
+        mock_page.keyboard.type = AsyncMock()
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_resolve_thread_compose_box",
+                new_callable=AsyncMock,
+            ) as resolve_compose,
+        ):
+            result = await extractor.reply_to_thread(
+                "abc123", "Never enter this", confirm_send=True
+            )
+
+        assert result["status"] == "thread_mismatch"
+        assert result["sent"] is False
+        resolve_compose.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+        mock_page.evaluate.assert_not_awaited()
 
 
 class TestStripSelectConversationPrefix:

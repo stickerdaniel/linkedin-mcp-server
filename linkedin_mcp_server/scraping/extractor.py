@@ -2758,6 +2758,206 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             return False
 
+    @staticmethod
+    def _normalize_thread_id(thread_id: str) -> str:
+        """Accept a raw thread id or a LinkedIn thread URL, never another route.
+
+        A reply must be pinned to the thread the caller selected.  In particular,
+        accepting a compose URL here would silently downgrade it into a new DM.
+        """
+        raw = thread_id.strip() if isinstance(thread_id, str) else ""
+        if not raw:
+            raise LinkedInScraperException(
+                "thread_id must be a non-empty thread ID or URL."
+            )
+
+        if raw.startswith(("https://", "http://", "/")):
+            parsed = urlparse(raw)
+            if (parsed.scheme and parsed.scheme != "https") or (
+                parsed.netloc
+                and parsed.netloc.lower() not in {"www.linkedin.com", "linkedin.com"}
+            ):
+                raise LinkedInScraperException(
+                    "thread_id URL must target linkedin.com."
+                )
+            match = re.fullmatch(r"/messaging/thread/([A-Za-z0-9:_=-]+)/?", parsed.path)
+            if not match:
+                raise LinkedInScraperException(
+                    "thread_id URL must be exactly a /messaging/thread/{id}/ URL."
+                )
+            return match.group(1)
+
+        if not re.fullmatch(r"[A-Za-z0-9:_=-]+", raw):
+            raise LinkedInScraperException("thread_id contains unsupported characters.")
+        return raw
+
+    @staticmethod
+    def _thread_url(thread_id: str) -> str:
+        """Return the single canonical navigation target for a thread ID."""
+        return f"https://www.linkedin.com/messaging/thread/{thread_id}/"
+
+    async def _active_thread_matches(self, expected_thread_id: str) -> bool:
+        """Check that the browser remained on exactly the requested LinkedIn thread."""
+        current = self._page.url
+        try:
+            return self._normalize_thread_id(current) == expected_thread_id
+        except LinkedInScraperException:
+            logger.warning("Thread-targeted reply refused: final URL was %s", current)
+            return False
+
+    async def _resolve_thread_compose_box(self) -> Any | None:
+        """Find a composer only inside the active messaging page's ``main`` region."""
+        for selector in (
+            'main div[role="textbox"][contenteditable="true"][aria-label*="Write a message"]',
+            'main div[role="textbox"][contenteditable="true"]',
+            'main [contenteditable="true"][aria-label*="message"]',
+        ):
+            locator = self._page.locator(selector)
+            try:
+                if await locator.count():
+                    return locator.last
+            except Exception:
+                logger.debug("Could not resolve active-thread composer", exc_info=True)
+        return None
+
+    async def _thread_message_text_visible(self, message: str) -> bool:
+        """Read back the sent text from ``main`` after re-opening the same thread."""
+        try:
+            await self._page.wait_for_function(
+                """({ expected }) => {
+                    const normalize = value =>
+                        (value || '').replace(/\\s+/g, ' ').trim();
+                    const main = document.querySelector('main');
+                    return Boolean(main && normalize(main.innerText).includes(normalize(expected)));
+                }""",
+                arg={"expected": message},
+            )
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
+    async def reply_to_thread(
+        self, thread_id: str, message: str, *, confirm_send: bool
+    ) -> dict[str, Any]:
+        """Reply only to an existing thread, with URL pinning and read-back verification.
+
+        ``confirm_send=False`` is a dry run: it may navigate and inspect the
+        intended composer but never focuses it or enters message text.
+        """
+        normalized_thread_id = self._normalize_thread_id(thread_id)
+        target_url = self._thread_url(normalized_thread_id)
+        await self._navigate_to_page(target_url)
+        await detect_rate_limit(self._page)
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Thread page did not fully load for %s", normalized_thread_id)
+
+        if not await self._active_thread_matches(normalized_thread_id):
+            return {
+                "url": self._page.url,
+                "thread_id": normalized_thread_id,
+                "status": "thread_mismatch",
+                "message": "LinkedIn did not remain on the requested thread; no text was entered.",
+                "sent": False,
+            }
+
+        compose_box = await self._resolve_thread_compose_box()
+        if compose_box is None:
+            return {
+                "url": self._page.url,
+                "thread_id": normalized_thread_id,
+                "status": "composer_unavailable",
+                "message": "The requested thread has no usable composer in its active main area.",
+                "sent": False,
+            }
+
+        if not confirm_send:
+            return {
+                "url": self._page.url,
+                "thread_id": normalized_thread_id,
+                "status": "confirmation_required",
+                "message": "Set confirm_send=true to enter and send this reply.",
+                "sent": False,
+            }
+
+        # Re-check immediately before the first irreversible input event.
+        if not await self._active_thread_matches(normalized_thread_id):
+            return {
+                "url": self._page.url,
+                "thread_id": normalized_thread_id,
+                "status": "thread_mismatch",
+                "message": "Thread changed before input; no text was entered.",
+                "sent": False,
+            }
+
+        # DOM dependence is required to focus/type. Both the composer and send
+        # control are constrained to main, which is the active thread surface
+        # after the URL/ID pin checks above.
+        focused = await self._page.evaluate(
+            """() => {
+                const main = document.querySelector('main');
+                const box = main?.querySelector(
+                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
+                    + 'div[role="textbox"][contenteditable="true"],'
+                    + '[contenteditable="true"][aria-label*="message"]'
+                );
+                if (!box) return false;
+                box.focus();
+                return true;
+            }"""
+        )
+        if not focused:
+            return {
+                "url": self._page.url,
+                "thread_id": normalized_thread_id,
+                "status": "compose_interact_failed",
+                "message": "Could not focus the requested thread's composer.",
+                "sent": False,
+            }
+        await self._page.keyboard.type(message, delay=15)
+        await asyncio.sleep(0.3)
+        sent_via_js = await self._page.evaluate(
+            """() => {
+                const main = document.querySelector('main');
+                const box = main?.querySelector('[contenteditable="true"]');
+                const root = box?.closest('form, section, article, [role="region"]') || main;
+                const button = Array.from(root?.querySelectorAll(
+                    'button[type="submit"], button[aria-label*="Send"], '
+                    + 'button[aria-label*="send"], button[data-control-name="send"]'
+                ) || []).find(element => !element.disabled &&
+                    (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
+                if (!button) return false;
+                button.click();
+                return true;
+            }"""
+        )
+        if not sent_via_js:
+            await self._page.keyboard.press("Enter")
+
+        # Do not report sent merely because click/Enter was attempted. Re-open
+        # the exact canonical target and inspect its main thread area.
+        await self._navigate_to_page(target_url)
+        await detect_rate_limit(self._page)
+        if await self._active_thread_matches(
+            normalized_thread_id
+        ) and await self._thread_message_text_visible(message):
+            return {
+                "url": self._page.url,
+                "thread_id": normalized_thread_id,
+                "status": "sent",
+                "message": "Reply sent and read back from the requested thread.",
+                "sent": True,
+            }
+        return {
+            "url": self._page.url,
+            "thread_id": normalized_thread_id,
+            "status": "sent_unverified",
+            "message": "A send was attempted, but the reply could not be read back from the requested thread.",
+            "sent": False,
+            "send_attempted": True,
+        }
+
     async def _dismiss_message_ui(self) -> None:
         """Best-effort dismissal for the profile messaging UI."""
         if not await self._locator_is_visible(_MESSAGING_CLOSE_SELECTOR, timeout=750):
