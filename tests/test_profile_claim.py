@@ -625,6 +625,18 @@ class TestTheMarkerOutlivesEveryOperation:
         assert claim_path(isolate_profile_dir).exists()
 
 
+#: These need a second *process* rather than a second thread: the lease and the
+#: claim lock are reference-counted per process, so two threads would both be
+#: granted and prove nothing. ``fork`` is the cheapest way to get one, and it
+#: does not exist on Windows — skipped there rather than left to raise
+#: ``AttributeError``, which is what the CI platform job would report if its
+#: file list ever grew to include this one.
+needs_fork = pytest.mark.skipif(
+    not hasattr(os, "fork"), reason="fork does not exist on Windows"
+)
+
+
+@needs_fork
 class TestTwoProcessesMeetingOneRoot:
     def test_exactly_one_of_two_siblings_wins(self, tmp_path, monkeypatch):
         """Held inside the decision, not merely started together.
