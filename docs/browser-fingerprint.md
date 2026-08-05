@@ -80,6 +80,22 @@ headless".
 | Docker, headed under Xvfb | 0% / 44% | No headless token, native hints; needs `xauth` |
 | Docker, Xvfb + Mesa llvmpipe | 0% / 44% | Restores WebGL; renderer string is a known software renderer |
 
+Window geometry, read from a page's own `<script>` on a loopback origin:
+
+| Configuration | Outer | Screen | DPR | Window fits its screen |
+|---|---|---|---|---|
+| Headless, explicit viewport | 1280x720 | 1280x720 | 1 | yes |
+| Headed, `no_viewport=True` | 1200x958 | 1728x1117 | 2 | yes |
+| Headed with an emulated viewport (before) | 1280x805 | 1280x720 | 1 | **no** |
+
+The last row is the contradiction this was measured to remove: an outer window
+taller than the screen the same browser reported standing on. Any page can read
+both and compare them. Note the headed row now shows the real display and a
+Retina DPR of 2, which is an ordinary Mac rather than a shape nothing sells.
+
+Headless keeps an explicit viewport deliberately: headless plus `no_viewport`
+collapses the screen to 800x600.
+
 Network layer, same machine:
 
 | | Real Chrome 150 | Bundled Chromium 148 |
