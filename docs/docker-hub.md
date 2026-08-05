@@ -79,7 +79,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `USER_DATA_DIR` | `~/.linkedin-mcp/profile` | Path to persistent browser profile directory |
+| `USER_DATA_DIR` | `~/.linkedin-mcp/profile` | Path to persistent browser profile directory. The container default is always usable; any other path needs a `profile-claim.json` marker in its parent, or one run with `--claim-profile-root` |
 | `LOG_LEVEL` | `WARNING` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
 | `TOOL_TIMEOUT` | `180` | Per-tool MCP execution timeout in seconds. Increase further for heavy scrapes (multi-section profiles, cold-start Chromium, slow networks/containers). |

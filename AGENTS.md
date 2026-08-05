@@ -45,6 +45,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   measured so far. A launch-configuration change without a measurement against
   them is a guess.
 
+## Profile Safety Rules
+
+- **Nothing is moved or deleted under a root the server cannot prove it owns.**
+  Every operation that calls `rmtree`, `shutil.move`, `unlink` or `rename` on a
+  user-supplied path goes through `_owned()` in `session_state.py`, which
+  answers from `profile_claim.require_profile_claim`. Adding a destructive
+  operation without routing it through that is the one change this rule exists
+  to catch: `USER_DATA_DIR` accepts any path, and a mistyped one costs a
+  directory nobody meant to name.
+- **Guard the configured source root, once, before any short-circuit.** Not the
+  derived paths, which are computed from a root that already passed, and not
+  after an exists-or-empty check, which a foreign directory reaches without ever
+  being judged. A check on a derived runtime profile is worse than none: it
+  asks about a nested auth root the server deletes on purpose, while reading as
+  protection.
+- **The auth root is the blast radius, not the profile.** `cookies.json`,
+  `source-state.json`, `runtime-profiles/` and every `invalid-state-*` live one
+  level *above* `USER_DATA_DIR`, so the emptiness of the profile says nothing
+  about what a rotation takes with it.
+- **Expand and resolve together, always.** Doing one without the other lets a
+  symlink move the profile out of one directory while its sidecars come from
+  another. Use `session_state.canonical()`.
+
 ## Tool Return Format
 
 All scraping tools return: `{url, sections: {name: raw_text}}`.

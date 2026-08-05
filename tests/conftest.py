@@ -144,6 +144,15 @@ def isolate_profile_dir(ignore_the_developers_environment, tmp_path, monkeypatch
         except AttributeError:
             pass
 
+    # Claim it, the same way `main()` does on the first run against a fresh
+    # custom root. Without this every test that rotates, restores, resets or
+    # clears would be refused: tmp_path is not the canonical default, and the
+    # guard exists precisely to refuse roots nobody claimed. Tests that prove
+    # the refusal use a *different* directory, which stays unclaimed.
+    from linkedin_mcp_server.profile_claim import ensure_profile_claim
+
+    ensure_profile_claim(fake_profile)
+
     return fake_profile
 
 

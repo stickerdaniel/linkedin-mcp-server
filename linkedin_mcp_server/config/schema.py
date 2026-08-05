@@ -73,6 +73,14 @@ AUTH_REPAIR_LOGIN_WAIT_FRACTION: float = 5 / 6
 # long: a reopen costs one more LinkedIn request. 0 disables it.
 DEFAULT_BROWSER_IDLE_TIMEOUT_SECONDS: float = 600.0
 
+#: The one profile root this server may destroy without being told it owns it.
+#: Spelled with ``~`` rather than resolved here so it follows the account that
+#: runs the process: on the host that is the user's home, and in the published
+#: image it is ``/home/pwuser``, which is what ``docker-compose.yml`` mounts.
+#: ``profile_claim`` compares against it, so it has to be one string rather than
+#: a literal repeated at both ends.
+DEFAULT_USER_DATA_DIR: str = "~/.linkedin-mcp/profile"
+
 
 # Proxy schemes Chromium understands on --proxy-server. The SOCKS ones are
 # usable without credentials only: the browser cannot answer a SOCKS auth
@@ -138,7 +146,7 @@ class BrowserConfig:
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
-    user_data_dir: str = "~/.linkedin-mcp/profile"  # Persistent browser profile
+    user_data_dir: str = DEFAULT_USER_DATA_DIR  # Persistent browser profile
     # Proxy for the browser's own traffic. The server's MCP transport is not
     # routed through it. ``proxy_server`` accepts scheme://host:port and, from
     # the environment only, a provider string carrying credentials; validate()
@@ -409,6 +417,11 @@ class ServerConfig:
     login: bool = False
     status: bool = False  # Check session validity and exit
     logout: bool = False
+    # Take over a USER_DATA_DIR that is neither the default nor already ours.
+    # Not in SHARED_CONFIG_FIELDS and deliberately so: it changes nothing about
+    # the browser a client would be served, only whether this process is allowed
+    # to write an ownership marker once.
+    claim_profile_root: bool = False
     # Browser key or "auto"; triggers import-from-browser-and-exit.
     import_from_browser: str | None = None
     # HTTP transport configuration

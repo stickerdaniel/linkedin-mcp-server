@@ -5,6 +5,7 @@ import socket
 
 import pytest
 
+from linkedin_mcp_server.profile_claim import ensure_profile_claim
 from linkedin_mcp_server.session_state import (
     clear_auth_state,
     get_runtime_id,
@@ -436,6 +437,9 @@ class TestRestoreSourceProfile:
         """--user-data-dir can point away from the configured default, and
         restoring to the configured one would strand the session elsewhere."""
         elsewhere = tmp_path / "elsewhere" / "profile"
+        # A second --user-data-dir is a second auth root, and each one is
+        # claimed on its own before anything may be moved out of it.
+        ensure_profile_claim(elsewhere)
         _seed_session(elsewhere)
         backup = rotate_source_profile(elsewhere)
         assert backup is not None

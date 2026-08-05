@@ -10,6 +10,7 @@ import pytest
 
 import linkedin_mcp_server.cli_main as cli_main
 from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.exceptions import ProfileRootRefusedError
 
 
 def _make_config(
@@ -537,6 +538,141 @@ def test_main_dispatches_import_before_login(monkeypatch, tmp_path):
     assert exit_info.value.code == 0
     # Install gate ran, import dispatched, login never reached.
     assert calls == ["ensure", "import"]
+
+
+class TestTheProfileRootIsClaimedBeforeAnythingTouchesIt:
+    """The ordering is the whole protection.
+
+    Logout deletes the auth root, the browser install downloads into it and the
+    daemon spawns an owner that opens it. Any of those running before the claim
+    would mean the refusal arrives after the damage.
+    """
+
+    def test_it_runs_before_logout(self, monkeypatch, tmp_path):
+        config = _make_config(
+            is_interactive=False, transport="stdio", transport_explicitly_set=False
+        )
+        config.browser.user_data_dir = str(tmp_path / "custom" / "profile")
+        config.server.logout = True
+        _patch_main_dependencies(monkeypatch, config)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.configure_browser_environment", lambda: None
+        )
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.ensure_profile_claim",
+            lambda path, claim_anyway=False: calls.append("claim") or path,
+        )
+
+        def fake_logout() -> None:
+            calls.append("logout")
+            raise SystemExit(0)
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.clear_profile_and_exit", fake_logout
+        )
+
+        with pytest.raises(SystemExit):
+            cli_main.main()
+
+        assert calls == ["claim", "logout"]
+
+    def test_a_refusal_exits_without_a_traceback(self, monkeypatch, tmp_path, capsys):
+        config = _make_config(
+            is_interactive=True, transport="stdio", transport_explicitly_set=True
+        )
+        config.browser.user_data_dir = str(tmp_path / "Documents" / "profile")
+        config.server.logout = True
+        _patch_main_dependencies(monkeypatch, config)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.configure_browser_environment", lambda: None
+        )
+
+        def refuse(path, claim_anyway=False):
+            raise ProfileRootRefusedError("that directory is not ours")
+
+        monkeypatch.setattr("linkedin_mcp_server.cli_main.ensure_profile_claim", refuse)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.clear_profile_and_exit",
+            lambda: pytest.fail("logout must not run after a refusal"),
+        )
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli_main.main()
+
+        assert exit_info.value.code == 1
+        assert "that directory is not ours" in capsys.readouterr().out
+
+    def test_a_fresh_custom_root_really_claims_through_the_real_startup(
+        self, monkeypatch, tmp_path
+    ):
+        """The real ordering, with the real predicate, and nothing stubbed out.
+
+        Every other test here replaces `ensure_profile_claim`, and the ones in
+        `test_profile_claim.py` call it with no startup in front of it. Both
+        miss what `main()` does *before* the claim: `configure_logging` creates
+        a trace directory in the auth root, because trace capture defaults to
+        on_error rather than off. Measured against the real entry point, that
+        made a genuinely empty custom root read as occupied and refused every
+        first run, telling the user to point at an empty directory.
+        """
+        from linkedin_mcp_server.profile_claim import claim_path
+
+        target = tmp_path / "custom" / "profile"
+        target.parent.mkdir(parents=True)
+        config = _make_config(
+            is_interactive=False, transport="stdio", transport_explicitly_set=False
+        )
+        config.browser.user_data_dir = str(target)
+        config.server.logout = True
+        # Deliberately not `_patch_main_dependencies`: it stubs
+        # `configure_logging`, which is the very thing that runs first.
+        monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: config)
+        monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.set_headless", lambda _x: None
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.configure_browser_environment", lambda: None
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.clear_profile_and_exit",
+            lambda: (_ for _ in ()).throw(SystemExit(0)),
+        )
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli_main.main()
+
+        assert exit_info.value.code == 0, "the claim refused a genuinely empty root"
+        assert claim_path(target).exists()
+
+    def test_the_operator_flag_reaches_the_claim(self, monkeypatch, tmp_path):
+        config = _make_config(
+            is_interactive=False, transport="stdio", transport_explicitly_set=False
+        )
+        config.browser.user_data_dir = str(tmp_path / "custom" / "profile")
+        config.server.claim_profile_root = True
+        config.server.logout = True
+        _patch_main_dependencies(monkeypatch, config)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.configure_browser_environment", lambda: None
+        )
+
+        seen: list[bool] = []
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.ensure_profile_claim",
+            lambda path, claim_anyway=False: seen.append(claim_anyway) or path,
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.clear_profile_and_exit",
+            lambda: (_ for _ in ()).throw(SystemExit(0)),
+        )
+
+        with pytest.raises(SystemExit):
+            cli_main.main()
+
+        assert seen == [True]
 
 
 def test_clear_profile_and_exit_clears_all_auth_state(
