@@ -742,8 +742,77 @@ class TestTwoStageInstall:
         assert calls == ["--no-shell"]
 
 
+class TestEnsureBrowserInstalledSkipsCustomChrome:
+    """A custom executable must not trigger a managed download.
+
+    The gap this closes was survivable while two of the three CLI modes needed
+    only the 92 MiB shell. Now they all want the full browser, so it is 170 MiB
+    fetched for something that is never launched -- and for an operator whose
+    network cannot reach the CDN, it is the difference between signing in and
+    not. `_uses_custom_chrome()` already existed and said so in its docstring;
+    only this caller never asked.
+    """
+
+    def test_custom_chrome_skips_the_download(self, isolate_profile_dir, monkeypatch):
+        _patch_targets_and_version(monkeypatch)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._uses_custom_chrome", lambda: True
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.browser_ready", lambda: False
+        )
+
+        called = {"value": 0}
+
+        async def fake_install() -> None:
+            called["value"] += 1
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._ensure_browser_installed", fake_install
+        )
+
+        ensure_browser_installed()
+
+        assert called["value"] == 0
+
+    def test_managed_chrome_still_downloads(self, isolate_profile_dir, monkeypatch):
+        """The short circuit must be about the custom path, not about skipping."""
+        _patch_targets_and_version(monkeypatch)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._uses_custom_chrome", lambda: False
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.browser_ready", lambda: False
+        )
+
+        called = {"value": 0}
+
+        async def fake_install() -> None:
+            called["value"] += 1
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._ensure_browser_installed", fake_install
+        )
+
+        ensure_browser_installed()
+
+        assert called["value"] == 1
+
+
 class TestEnsureBrowserInstalled:
     """The CLI installer: one browser, the same one for every mode."""
+
+    @pytest.fixture(autouse=True)
+    def _managed_browser(self, monkeypatch):
+        """No custom executable, stated rather than assumed.
+
+        `ensure_browser_installed` now asks whether CHROME_PATH is set, and
+        answering that reads the configuration, which pytest cannot resolve on
+        its own.
+        """
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._uses_custom_chrome", lambda: False
+        )
 
     def _stub(self, monkeypatch):
         calls = {"value": 0}

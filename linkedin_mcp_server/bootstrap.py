@@ -65,11 +65,12 @@ _REGISTRY_NAME_TO_DIR_PREFIX = {
     "chromium-headless-shell": "chromium_headless_shell-",
 }
 
-# On-disk dir prefix of the headless shell — the only binary the default
-# headless scrape + auto-import path launches.
+# On-disk dir prefix of the headless shell. Nothing launches it any more —
+# every launch names ``channel="chromium"`` — but the prefix is still needed to
+# recognise one in an install written before that change.
 _SHELL_DIR_PREFIX = "chromium_headless_shell-"
-# On-disk dir prefix of full Chrome for Testing — needed only for the headed
-# interactive-login fallback or an operator-configured --no-headless run.
+# On-disk dir prefix of full Chrome for Testing: the browser this server runs,
+# in either mode.
 _FULL_DIR_PREFIX = "chromium-"
 
 
@@ -372,8 +373,9 @@ def _start_browser_setup_task_locked() -> None:
 async def _run_patchright_install(extra_arg: str) -> None:
     """Run one ``patchright install chromium`` stage with the given flag.
 
-    The patchright registry lock serializes concurrent installs, so the two
-    stages always run one after the other on the same browsers path.
+    The patchright registry lock serializes concurrent installs, so two
+    processes reaching this at once queue on the same browsers path rather than
+    corrupting it.
     """
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -454,6 +456,14 @@ def ensure_browser_installed() -> None:
     path uses async background setup instead (non-blocking).
     """
     configure_browser_environment()
+    # An operator-supplied executable is the one that gets launched, so the
+    # managed browser would be downloaded and never run. That was survivable
+    # while two of these three modes needed only the 92 MiB shell; now they all
+    # want the full browser, so it is 170 MiB spent on nothing -- and for
+    # someone whose network cannot reach the CDN, it is the difference between
+    # signing in and not.
+    if _uses_custom_chrome():
+        return
     if browser_ready():
         return
     print("   Installing Patchright Chromium browser...")
