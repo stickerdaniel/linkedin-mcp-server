@@ -127,7 +127,13 @@ class BrowserConfig:
 
     headless: bool = True
     slow_mo: int = 0  # Milliseconds between browser actions (debugging)
-    user_agent: str | None = None  # Custom browser user agent
+    # Always None: the override was removed and both settings that used to fill
+    # this are now refused at startup. The field stays because
+    # ``SHARED_CONFIG_FIELDS`` hashes it into the daemon's configuration
+    # fingerprint, and dropping a field there makes a running owner unreadable
+    # to a client of the other version instead of merely mismatched. Remove it
+    # once owner turnover survives a fingerprint change.
+    user_agent: str | None = None
     viewport_width: int = 1280
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
@@ -169,11 +175,16 @@ class BrowserConfig:
     # user's keychain and degrades to manual login, and no cookie crosses the
     # network.
     auto_import_from_browser: bool | None = None
-    # Install full Chrome for Testing up front during background setup instead
-    # of lazily on the first headed login. Off by default: the headless scrape +
-    # auto-import path needs only the headless shell, so a headless-only operator
-    # never downloads the larger full-chromium binary unless interactive login is
-    # actually triggered. Set True to pre-warm the headed login fallback.
+    # Read by nothing, and accepted anyway. It used to choose between installing
+    # the full browser up front or lazily on the first headed login; there is
+    # only one browser now, so both answers describe the same install.
+    #
+    # It stays for the same reason ``user_agent`` above does: it is part of the
+    # daemon's configuration fingerprint (``SHARED_CONFIG_FIELDS``), and
+    # ``daemon.py`` rejects a fingerprint mismatch *before* it compares package
+    # versions. Drop the field and a running owner of the other version stops
+    # being readable, so it can never be asked to stand down. Both can go once
+    # owner turnover survives a fingerprint change.
     eager_full_chromium: bool = False
 
     def validate(self) -> None:
@@ -458,12 +469,27 @@ class AppConfig:
         if not self.server.port:
             raise ConfigurationError("HTTP transport requires a valid port")
         if not is_loopback_host(self.server.host):
+            # Warned about rather than refused, and the distinction is not
+            # timidity. A container has to bind the wildcard: a process bound to
+            # 127.0.0.1 inside one is unreachable through a published port at
+            # all, so refusing this would break the documented Docker command
+            # while protecting nobody. What actually decides exposure is the
+            # publish address on the host, and this process cannot see it --
+            # `-p 127.0.0.1:8080:8080` and `-p 8080:8080` look identical from in
+            # here. Container detection is no way out either, since
+            # LINKEDIN_MCP_CONTAINER is a full override and therefore not a
+            # security boundary. So the honest thing is to say what it costs and
+            # name both remedies.
             logger.warning(
                 "HTTP transport is binding to %s, which is reachable from "
                 "outside this machine. The MCP endpoint has no authentication, "
                 "so anyone who can reach that address can use your LinkedIn "
-                "session. Use 127.0.0.1 (default) unless you understand the "
-                "risk.",
+                "session. Host and origin checking is not access control; it "
+                "stops a website from pointing a name at this server, not "
+                "someone who can reach the address. Outside Docker, use "
+                "--host 127.0.0.1. In Docker, keep --host 0.0.0.0 and publish "
+                "to loopback instead: -p 127.0.0.1:PORT:PORT. For remote "
+                "access, forward the port over SSH rather than exposing it.",
                 self.server.host,
             )
 

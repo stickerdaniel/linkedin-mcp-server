@@ -309,6 +309,39 @@ class TestConfigSingleton:
         assert first is not second
 
 
+class TestUserAgentRefusal:
+    """Both ways of setting a user agent must stop the server, not be ignored.
+
+    Someone who set this wanted the browser to present itself differently.
+    Starting anyway would leave them believing it still applies while the
+    browser reports something else entirely, so the failure is loud and says
+    what to remove.
+    """
+
+    def test_env_user_agent_refuses_to_start(self, monkeypatch):
+        monkeypatch.setenv("USER_AGENT", "CustomAgent/1.0")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match="USER_AGENT"):
+            load_from_env(AppConfig())
+
+    def test_empty_env_user_agent_is_not_a_setting(self, monkeypatch):
+        """An empty value is nobody's intent, so it must not block startup."""
+        monkeypatch.setenv("USER_AGENT", "")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        assert load_from_env(AppConfig()).browser.user_agent is None
+
+    def test_cli_user_agent_refuses_to_start(self, monkeypatch):
+        monkeypatch.setattr(
+            "sys.argv", ["linkedin-mcp-server", "--user-agent", "CustomAgent/1.0"]
+        )
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        with pytest.raises(ConfigurationError, match="--user-agent"):
+            load_from_args(AppConfig())
+
+
 class TestLoaders:
     def test_load_from_env_headless_false(self, monkeypatch):
         monkeypatch.setenv("HEADLESS", "false")

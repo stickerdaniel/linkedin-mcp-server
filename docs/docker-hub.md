@@ -57,6 +57,14 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
+> **Note:** In HTTP mode the endpoint has no authentication, so the address it
+> is published on is the only thing limiting who can use your LinkedIn session.
+> Publish to loopback: `-p 127.0.0.1:8080:8080` together with
+> `--host 0.0.0.0`. The wildcard host is required for the server to be reachable
+> inside the container at all; the `127.0.0.1:` prefix on `-p` is what keeps it
+> off your network. Without that prefix Docker publishes on every interface.
+> Only expose it more widely behind something that authenticates.
+>
 > **Note:** Tool calls are serialized to protect the shared LinkedIn browser
 > session, both within one server process and between separate ones. Only one
 > process uses the browser at a time; others wait briefly and take over when it
@@ -81,13 +89,12 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `BROWSER_MIN_HOLD` | `20` | Shortest time (seconds) a process keeps the shared browser before handing it to a waiting process. Higher means fewer browser restarts but longer waits for other clients; clamped below `BROWSER_WAIT` so a waiting client is served before its own timeout. `0` hands over after every tool call. |
 | `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the shared profile after this many seconds without a tool call. `0` keeps it open until the server exits. |
 | `AUTO_IMPORT_FROM_BROWSER` | on by default | Auto-import a LinkedIn session from a locally logged-in browser on the first no-session tool call, before falling back to manual login. On by default across interactive and non-interactive desktop runs; set `false` to require `--login` / `--import-from-browser`. No effect in containers (no host browser or keychain) or on a non-loopback HTTP bind. On macOS the OS keychain may prompt once for Safe Storage access. |
-| `USER_AGENT` | - | Custom browser user agent |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
-| `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT |
+| `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT. Applies to the normal windowless mode only; a headed launch uses the real window size. |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
 | `PROXY_SERVER` | - | Optional, and most setups are better off without one: LinkedIn advises against proxies and scores the addresses a session signs in from, so a stable known address beats a commercial exit node. Worth it when the container runs somewhere its address is obviously a data centre, and even then a WireGuard or Tailscale exit node on your own network is preferable. Route the browser through a proxy, as `scheme://host:port` (`http`, `https`, `socks4`, `socks5`). May also carry credentials directly (`http://user:pass@host:port`), which is how most providers hand them out. Inside a container `127.0.0.1` is the container itself: for a relay running on the host use `host.docker.internal` (on native Linux Docker, add `--add-host=host.docker.internal:host-gateway`). Only browser traffic is routed, not the MCP transport. |
 | `PROXY_USERNAME` | - | Username for the proxy |

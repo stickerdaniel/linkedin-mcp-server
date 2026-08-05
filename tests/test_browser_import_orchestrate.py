@@ -158,11 +158,16 @@ async def test_import_writes_full_set_then_persists_source_state(
 
 
 @pytest.mark.asyncio
-async def test_import_persists_synthesized_user_agent(isolate_profile_dir, monkeypatch):
-    """The source browser's UA reaches validation AND source-state.json."""
+async def test_import_records_no_user_agent(isolate_profile_dir, monkeypatch):
+    """An import neither synthesizes a UA nor records one.
+
+    The runtime browser reports its own identity, so nothing about the source
+    browser's user agent is carried forward. Asserted rather than assumed: an
+    override reintroduced here would be invisible until a page compared the UA
+    against its client hints.
+    """
     user_data_dir = isolate_profile_dir
     profile = _profile("chrome")
-    ua = "Mozilla/5.0 (test) Chrome/148.0.0.0"
 
     monkeypatch.setattr(
         orchestrate, "discover_profiles", lambda browser=None: [profile]
@@ -171,7 +176,6 @@ async def test_import_persists_synthesized_user_agent(isolate_profile_dir, monke
     monkeypatch.setattr(
         orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
     )
-    monkeypatch.setattr(orchestrate, "synthesize_user_agent", lambda p: ua)
     validate = AsyncMock(return_value=True)
     monkeypatch.setattr(
         "linkedin_mcp_server.drivers.browser.validate_imported_cookies", validate
@@ -181,9 +185,9 @@ async def test_import_persists_synthesized_user_agent(isolate_profile_dir, monke
 
     assert ok is True
     assert validate.await_args is not None
-    assert validate.await_args.kwargs.get("user_agent") == ua
+    assert "user_agent" not in validate.await_args.kwargs
     state = json.loads(source_state_path(user_data_dir).read_text())
-    assert state["user_agent"] == ua
+    assert "user_agent" not in state
 
 
 @pytest.mark.asyncio
@@ -406,7 +410,6 @@ async def test_import_retires_the_previous_profile_first(monkeypatch, tmp_path):
         "extract_linkedin_cookies",
         lambda p: (order.append("stage"), [_cookie("li_at")])[1],
     )
-    monkeypatch.setattr(orchestrate, "synthesize_user_agent", lambda p: None)
     monkeypatch.setattr(
         orchestrate,
         "rotate_shielded",
@@ -440,7 +443,6 @@ async def test_import_restores_the_session_when_every_candidate_is_rejected(
     monkeypatch.setattr(
         orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
     )
-    monkeypatch.setattr(orchestrate, "synthesize_user_agent", lambda p: None)
     monkeypatch.setattr(orchestrate, "rotate_shielded", AsyncMock(return_value=retired))
     monkeypatch.setattr(orchestrate, "restore_source_profile", restore)
     monkeypatch.setattr(

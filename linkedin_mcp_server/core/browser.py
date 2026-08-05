@@ -64,14 +64,43 @@ class BrowserManager:
         headless: bool = True,
         slow_mo: int = 0,
         viewport: dict[str, int] | None = None,
-        user_agent: str | None = None,
         **launch_options: Any,
     ):
+        # ``launch_options`` is spread straight into the context options, so a
+        # stray ``user_agent`` here would reach Patchright and take effect
+        # without anything in between noticing. Refused rather than dropped:
+        # this is the one funnel every browser in the process goes through, and
+        # an override that fails loudly cannot come back by accident. See the
+        # browser identity rules in AGENTS.md.
+        if "user_agent" in launch_options:
+            raise TypeError(
+                "BrowserManager does not accept a user_agent. The browser "
+                "reports its own identity; an override changes the string but "
+                "not the client hints, and never reaches service workers."
+            )
+
+        # Same funnel, same hazard. ``_geometry()`` is spread *before*
+        # ``launch_options``, so a stray ``no_viewport`` would win: passing
+        # ``no_viewport=False`` on a headed launch puts the emulated screen back
+        # and restores the window-larger-than-screen contradiction, and passing
+        # ``no_viewport=True`` on a headless one sends both keys at once.
+        # Nothing produces this today; it is refused so it cannot start.
+        if "no_viewport" in launch_options:
+            raise TypeError(
+                "BrowserManager decides no_viewport from the launch mode. Pass "
+                "headless= instead: a headed window must report its real size, "
+                "and a headless one needs an explicit viewport."
+            )
+
         self.user_data_dir = str(Path(user_data_dir).expanduser())
         self.headless = headless
         self.slow_mo = slow_mo
-        self.viewport = viewport or {"width": 1280, "height": 720}
-        self.user_agent = user_agent
+        # Kept as passed, including ``None``. The old ``viewport or {...}``
+        # meant "no viewport" could not be expressed at all, which is what
+        # forced an emulated screen onto a headed window and produced the
+        # measured contradiction: an outer window of 805 pixels standing on a
+        # screen the same browser reported as 720 tall.
+        self.viewport = viewport
         self.launch_options = launch_options
 
         self._playwright: Playwright | None = None
@@ -97,6 +126,25 @@ class BrowserManager:
         self._close_confirmed = False
         self._close_confirmed = await self.close()
 
+    def _geometry(self) -> dict[str, Any]:
+        """The viewport options, decided by the mode this browser actually runs in.
+
+        This lives here rather than in ``build_launch_options`` because only
+        this object knows the answer. The builder is a pure function of the
+        configuration, and the configuration says ``headless=True`` by default
+        even when the manual login is about to launch headed -- the login passes
+        ``headless=False`` directly. A builder reading the configuration would
+        get it wrong for exactly the launch that puts a window on screen.
+
+        Headed gets no viewport at all, so the window reports the size it really
+        is. Headless keeps an explicit one, because a headless browser with
+        ``no_viewport`` collapses its screen to 800x600, which is its own
+        oddity.
+        """
+        if self.headless:
+            return {"viewport": self.viewport or {"width": 1280, "height": 720}}
+        return {"no_viewport": True}
+
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
         if self._context is not None:
@@ -110,14 +158,16 @@ class BrowserManager:
             context_options: dict[str, Any] = {
                 "headless": self.headless,
                 "slow_mo": self.slow_mo,
-                "viewport": self.viewport,
+                **self._geometry(),
                 **self.launch_options,
                 "locale": "en-US",
             }
 
-            if self.user_agent:
-                context_options["user_agent"] = self.user_agent
-
+            # No ``user_agent`` here, deliberately. Patchright leaves the client
+            # hints reporting the real browser, so an override contradicts
+            # itself on the first surface anyone checks, and it never reaches
+            # service workers at all. See the browser identity rules in
+            # AGENTS.md and the measurements in docs/browser-fingerprint.md.
             self._context = await self._playwright.chromium.launch_persistent_context(
                 self.user_data_dir,
                 **context_options,

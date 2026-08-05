@@ -761,8 +761,8 @@ def _hand_over_config(
 
     The obvious ``child.stdin.write(...)`` blocks once the pipe buffer is full,
     and the buffer is small — 64 KiB on Linux, less on some platforms — while
-    the configuration has no size limit at all: ``user_agent``, ``proxy_bypass``
-    and the paths are free-form strings. A child that neither reads nor exits
+    the configuration has no size limit at all: ``proxy_bypass`` and the paths
+    are free-form strings. A child that neither reads nor exits
     therefore blocks this write indefinitely, *before* the handshake timeout is
     ever reached. Reproduced with a 10 MiB user agent and a child that only
     sleeps: the outer process timeout fired and the wait below was never
