@@ -1,5 +1,6 @@
 """Tests for BrowserManager cookie import/export helpers."""
 
+import asyncio
 import contextlib
 import json
 import os
@@ -150,14 +151,15 @@ class TestGeometry:
         assert captured.get("locale") == "en-US"
 
 
-class TestTheBrowserIsAlwaysHeaded:
-    """`headless` keeps its public meaning but no longer selects the mode.
+class TestHowNoVisibleWindowIsAchieved:
+    """`headless` keeps its public meaning but no longer names the mechanism.
 
     Chromium's headless *mode* is what makes a browser announce itself: it
     prepends the bare string `Headless` to the product name at runtime, so both
-    the user agent and the `sec-ch-ua` brands read `HeadlessChrome`. No choice of
-    binary removes that. So the browser runs headed either way, and "no visible
-    window" comes from a hidden target instead.
+    the user agent and the `sec-ch-ua` brands read `HeadlessChrome`. Where the
+    platform allows it the browser runs headed and hides its page in a target
+    instead. Where it does not, headless is the only way to run at all, and the
+    token comes back.
     """
 
     async def _captured_options(self, tmp_path, *, headless: bool) -> dict:
@@ -187,17 +189,39 @@ class TestTheBrowserIsAlwaysHeaded:
                 await manager.start()
         return captured
 
-    async def test_headless_still_launches_headed(self, tmp_path):
+    async def test_launches_headed_where_the_target_is_supported(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            lambda: True,
+        )
+
         options = await self._captured_options(tmp_path, headless=True)
 
         assert options["headless"] is False
 
-    async def test_headed_launches_headed(self, tmp_path):
+    async def test_falls_back_to_real_headless_where_it_is_not(
+        self, tmp_path, monkeypatch
+    ):
+        """Not a preference. Measured in the container image: a headed launch
+        with no display fails outright, and under Xvfb closing the last window
+        kills Chromium and takes the hidden page with it."""
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            lambda: False,
+        )
+
+        options = await self._captured_options(tmp_path, headless=True)
+
+        assert options["headless"] is True
+
+    async def test_a_visible_window_is_always_headed(self, tmp_path):
         options = await self._captured_options(tmp_path, headless=False)
 
         assert options["headless"] is False
 
-    async def test_the_attach_flag_is_not_left_behind(self, tmp_path):
+    async def test_the_attach_flag_is_not_left_behind(self, tmp_path):  # noqa: D401
         """It makes Playwright promote every `other` target, so it is scoped."""
         from linkedin_mcp_server.hidden_target import ATTACH_TO_OTHER
 
@@ -205,6 +229,151 @@ class TestTheBrowserIsAlwaysHeaded:
         await self._captured_options(tmp_path, headless=True)
 
         assert os.environ.get(ATTACH_TO_OTHER) == before
+
+
+class TestTheWindowlessLaunchEndToEnd:
+    """The contract `start()` owes, not the helper it delegates to.
+
+    Every other test here passes if `open_hidden_page()` is deleted from
+    `start()` outright, or if its result is never assigned to `self._page`,
+    because they stop the launch before page selection or exercise the helper
+    alone. This one runs the launch through and reads what came out.
+    """
+
+    def _fake_playwright(self, recorder: dict):
+        from linkedin_mcp_server.hidden_target import ATTACH_TO_OTHER
+
+        pages: list = []
+
+        class _Page:
+            def __init__(self, url: str):
+                self.url = url
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+                recorder["hidden_present_at_close"] = any(
+                    p.url.startswith("about:blank#") for p in pages
+                )
+
+        class _Session:
+            async def send(self, method, params):
+                if method == "Target.createTarget":
+
+                    async def surface():
+                        await asyncio.sleep(0.01)
+                        pages.append(_Page(params["url"]))
+
+                    asyncio.get_running_loop().create_task(surface())
+                return {"targetId": "T"}
+
+        class _Browser:
+            async def new_browser_cdp_session(self):
+                return _Session()
+
+        class _Context:
+            def __init__(self):
+                self.pages = pages
+                self.browser = _Browser()
+
+        class _Chromium:
+            async def launch_persistent_context(self, user_data_dir, **kwargs):
+                recorder["options"] = kwargs
+                pages.append(_Page("about:blank"))
+                return _Context()
+
+        class _Playwright:
+            chromium = _Chromium()
+
+            async def stop(self):
+                return None
+
+        async def start():
+            # The flag has to be set at the moment the driver process is
+            # created, which is what this records.
+            recorder["flag_at_driver_start"] = os.environ.get(ATTACH_TO_OTHER)
+            return _Playwright()
+
+        return start, pages
+
+    async def test_the_hidden_page_becomes_the_working_page(self, tmp_path):
+        from linkedin_mcp_server.hidden_target import ATTACH_TO_OTHER
+
+        recorder: dict = {}
+        start, pages = self._fake_playwright(recorder)
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            return_value=True,
+        ):
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.async_playwright"
+            ) as playwright:
+                playwright.return_value.start = start
+                await manager.start()
+
+        # The page handed to callers is the windowless one, not the startup one.
+        assert manager.page.url.startswith("about:blank#")
+        # The driver saw the flag; setting it afterwards would be too late.
+        assert recorder["flag_at_driver_start"] == "1"
+        # And it did not leak past the launch.
+        assert ATTACH_TO_OTHER not in os.environ
+        # The startup page went, and only once the hidden one existed.
+        assert pages[0].closed is True
+        assert recorder["hidden_present_at_close"] is True
+
+    async def test_a_visible_launch_keeps_the_startup_page(self, tmp_path):
+        recorder: dict = {}
+        start, pages = self._fake_playwright(recorder)
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=False)
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.async_playwright"
+        ) as playwright:
+            playwright.return_value.start = start
+            await manager.start()
+
+        assert manager.page is pages[0]
+        assert pages[0].closed is False
+
+    async def test_a_visible_launch_does_not_get_the_attach_flag(self, tmp_path):
+        """The driver keeps the flag for its whole life, so scope matters.
+
+        Restoring the parent's environment afterwards does nothing to the child
+        process. A login that never creates a hidden target would otherwise
+        spend its entire run promoting extension and other `other` targets into
+        `context.pages`.
+        """
+        recorder: dict = {}
+        start, _ = self._fake_playwright(recorder)
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=False)
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.async_playwright"
+        ) as playwright:
+            playwright.return_value.start = start
+            await manager.start()
+
+        assert recorder["flag_at_driver_start"] is None
+
+    async def test_a_platform_fallback_does_not_get_the_attach_flag(self, tmp_path):
+        """Same reasoning where the platform cannot support a hidden target."""
+        recorder: dict = {}
+        start, _ = self._fake_playwright(recorder)
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+            return_value=False,
+        ):
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.async_playwright"
+            ) as playwright:
+                playwright.return_value.start = start
+                await manager.start()
+
+        assert recorder["flag_at_driver_start"] is None
 
 
 def _make_cookie(

@@ -24,6 +24,7 @@ from linkedin_mcp_server.common_utils import (
 from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
 from linkedin_mcp_server.hidden_target import (
     attaching_to_other_targets,
+    hidden_target_is_supported,
     open_hidden_page,
 )
 
@@ -130,6 +131,18 @@ class BrowserManager:
         self._close_confirmed = False
         self._close_confirmed = await self.close()
 
+    @property
+    def _windowless(self) -> bool:
+        """Whether this launch hides its page in a target rather than a mode.
+
+        Both conditions, and the second is not a preference. Asking for no
+        visible window is not enough on a machine that cannot open one: a headed
+        launch there fails outright, so the only way to run at all is Chromium's
+        headless mode, and the browser then says so on every surface. That is a
+        loss worth announcing rather than hiding, which is why it is logged.
+        """
+        return self.headless and hidden_target_is_supported()
+
     def _geometry(self) -> dict[str, Any]:
         """The viewport options, decided by the mode this browser actually runs in.
 
@@ -154,22 +167,32 @@ class BrowserManager:
         if self._context is not None:
             raise RuntimeError("Browser already started. Call close() first.")
         try:
-            # The flag has to be in the environment before the driver
-            # subprocess exists, and it is scoped so a launch that does not need
-            # it does not inherit it.
-            with attaching_to_other_targets():
+            # Only where a hidden target is actually going to be created. The
+            # flag has to exist before the driver subprocess does, and it then
+            # lives in that process for its whole lifetime -- restoring it here
+            # afterwards does nothing to the child. So a visible login, or a
+            # platform that falls back to real headless, would otherwise spend
+            # its entire run promoting extension and other `other` targets into
+            # `context.pages` for no reason.
+            if self._windowless:
+                with attaching_to_other_targets():
+                    self._playwright = await async_playwright().start()
+            else:
                 self._playwright = await async_playwright().start()
 
             secure_mkdir(Path(self.user_data_dir))
             harden_linkedin_tree(Path(self.user_data_dir))
 
             context_options: dict[str, Any] = {
-                # Always headed, in both modes. ``self.headless`` keeps its
-                # public meaning -- "no visible window" -- but it is no longer
-                # how that is achieved, because Chromium's headless *mode* is
-                # what makes the browser announce itself as headless. A
+                # Headed wherever a window can exist, in both public modes.
+                # ``self.headless`` keeps its meaning -- "no visible window" --
+                # but it is no longer how that is achieved, because Chromium's
+                # headless *mode* is what makes the browser announce itself. A
                 # windowless page comes from a hidden target instead.
-                "headless": False,
+                #
+                # Where no display exists there is no choice: a headed launch
+                # dies before any of that can happen. See ``_windowless``.
+                "headless": self.headless and not self._windowless,
                 "slow_mo": self.slow_mo,
                 **self._geometry(),
                 **self.launch_options,
@@ -191,13 +214,20 @@ class BrowserManager:
                 self.headless,
                 self.user_data_dir,
             )
+            if self.headless and not self._windowless:
+                logger.info(
+                    "Chromium runs in headless mode on this platform and so "
+                    "identifies itself as HeadlessChrome on every surface. A "
+                    "windowless page needs a browser that survives losing its "
+                    "last window, which is measured only on macOS."
+                )
 
             startup = (
                 self._context.pages[0]
                 if self._context.pages
                 else await self._context.new_page()
             )
-            if self.headless:
+            if self._windowless:
                 # Fails closed. Falling back to real headless would restore the
                 # token the caller believes is gone, and falling back to the
                 # visible window would put one on their screen unannounced.

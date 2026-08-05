@@ -29,6 +29,8 @@ import contextlib
 import logging
 import os
 import secrets
+import sys
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -51,6 +53,35 @@ _ATTACH_TIMEOUT_SECONDS = 10.0
 _POLL_SECONDS = 0.02
 
 
+def hidden_target_is_supported() -> bool:
+    """Whether this platform can work in a window that never opens.
+
+    Two things have to be true, and only one of them is about displays.
+
+    A headed browser needs a display server. Measured in the published
+    container image: with no ``DISPLAY``, ``launch_persistent_context(
+    headless=False)`` fails with a ``TargetClosedError`` before any of this code
+    runs.
+
+    And the browser has to survive losing its last visible window, because that
+    is exactly what this does. Measured, same image, under Xvfb: closing the
+    startup page kills Chromium and the hidden page dies with it, while keeping
+    that page open leaves everything working. macOS does not quit an application
+    when its last window closes, which is why the mechanism works there.
+
+    So this is deliberately narrow. macOS is measured and supported. Windows is
+    *not* measured -- it plausibly behaves like Linux -- and claiming it without
+    looking would be the kind of guess this file exists to avoid. Everything
+    else falls back to Chromium's headless mode and says so.
+
+    Linux is not a gap so much as a different answer: under a virtual display
+    nobody is looking at the screen, so an ordinary window is already invisible
+    and there is nothing to hide. That is the container's path, and it belongs
+    with the change that gives the container a display.
+    """
+    return sys.platform == "darwin"
+
+
 class HiddenTargetError(RuntimeError):
     """The windowless page could not be created.
 
@@ -59,6 +90,22 @@ class HiddenTargetError(RuntimeError):
     window would put one on their screen unannounced. Both are worse than
     stopping.
     """
+
+
+#: Guards the flag against overlapping launches. ``os.environ`` is
+#: process-global while the block it scopes contains an ``await``, so two
+#: launches can interleave: measured, two concurrent driver starts left the flag
+#: set afterwards in two runs out of five, and the opposite ordering would let
+#: the second launch miss it entirely. Today's production paths are serialised
+#: by the bootstrap and browser-creation locks, but ``BrowserManager`` is public
+#: and nothing about it promises that.
+_flag_lock = threading.Lock()
+#: How many launches are inside the block. The first sets, the last restores.
+#: Counting rather than locking around the whole block, because that would
+#: serialise driver startup for no reason -- concurrent launches all want the
+#: flag set, so they can share it.
+_flag_depth = 0
+_flag_previous: str | None = None
 
 
 @contextlib.contextmanager
@@ -72,16 +119,26 @@ def attaching_to_other_targets():
     The value has to be in the environment before the driver subprocess starts,
     which is why this wraps ``async_playwright().start()`` rather than the
     context launch.
+
+    Safe to nest and to overlap: see ``_flag_depth``.
     """
-    previous = os.environ.get(ATTACH_TO_OTHER)
-    os.environ[ATTACH_TO_OTHER] = "1"
+    global _flag_depth, _flag_previous
+    with _flag_lock:
+        if _flag_depth == 0:
+            _flag_previous = os.environ.get(ATTACH_TO_OTHER)
+        _flag_depth += 1
+        os.environ[ATTACH_TO_OTHER] = "1"
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop(ATTACH_TO_OTHER, None)
-        else:
-            os.environ[ATTACH_TO_OTHER] = previous
+        with _flag_lock:
+            _flag_depth -= 1
+            if _flag_depth == 0:
+                if _flag_previous is None:
+                    os.environ.pop(ATTACH_TO_OTHER, None)
+                else:
+                    os.environ[ATTACH_TO_OTHER] = _flag_previous
+                _flag_previous = None
 
 
 async def open_hidden_page(context: "BrowserContext", startup: "Page") -> "Page":

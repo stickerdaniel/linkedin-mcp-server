@@ -77,7 +77,7 @@ headless".
 | Bundled Chromium, headless, UA claiming 143 | 33% / 88% | `hasMissingChromeObject` high severity; UA and hints disagree |
 | Full Chromium headless (`channel="chromium"`) | 67% / 50% | Two high-severity fpscanner rules from the headless token |
 | Headless shell (the old default) | — | `plugins.length = 0`, no `window.chrome`, notification permission incoherent |
-| Hidden target, windowless mode | — | No headless token in UA or brands; `visible` / focused; rAF at 100% of a control window |
+| Hidden target, windowless mode (macOS) | — | No headless token in UA or brands; `visible` / focused; rAF at 100% of a control window |
 | Docker, headed under Xvfb | 0% / 44% | No headless token, native hints; needs `xauth` |
 | Docker, Xvfb + Mesa llvmpipe | 0% / 44% | Restores WebGL; renderer string is a known software renderer |
 
@@ -97,6 +97,20 @@ The windowless mode, measured end to end through `BrowserManager`:
 The rAF figure is the one that mattered: hiding the application at OS level
 throttled it to about 1 Hz against 120, which is what disqualified that
 approach. A hidden target runs at the same rate as an ordinary window.
+
+**It applies to macOS only, and that is a measured limit rather than a
+scoping decision.** The mechanism needs the browser to survive losing its last
+visible window, because removing that window is the whole point. Measured in the
+published container image, under Xvfb: closing the startup page kills Chromium
+and the hidden page dies with it, while keeping that page open leaves everything
+working. Without a display a headed launch does not start at all
+(`TargetClosedError`). macOS does not quit an application when its last window
+closes, which is why it works there. Windows is untested and plausibly behaves
+like Linux, so it is not claimed.
+
+Linux is less a gap than a different answer: under a virtual display nobody is
+looking at the screen, so an ordinary window is already invisible and there is
+nothing to hide.
 
 Two things this does not claim. The half second of visible window on every
 browser start cannot be shortened from here — roughly 250 ms passes before

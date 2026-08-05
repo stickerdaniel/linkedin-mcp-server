@@ -8,6 +8,7 @@ vanishes later.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from types import SimpleNamespace
 from typing import Any, cast
@@ -18,6 +19,7 @@ from linkedin_mcp_server.hidden_target import (
     ATTACH_TO_OTHER,
     HiddenTargetError,
     attaching_to_other_targets,
+    hidden_target_is_supported,
     open_hidden_page,
 )
 
@@ -39,9 +41,17 @@ class _Session:
     async def send(self, method: str, params: dict):
         self.sent.append((method, params))
         if method == "Target.createTarget" and self._create:
-            self._pages.append(SimpleNamespace(url=params["url"], close=_noop))
-            if self._trailing is not None:
-                self._pages.append(self._trailing)
+            # Surfaced on a later tick, not synchronously. Chromium answers
+            # `createTarget` before Playwright has attached and exposed a Page,
+            # and a fake that appends immediately hides every ordering mistake:
+            # the page is already there by the time anything checks.
+            async def _surface() -> None:
+                await asyncio.sleep(0.03)
+                self._pages.append(SimpleNamespace(url=params["url"], close=_noop))
+                if self._trailing is not None:
+                    self._pages.append(self._trailing)
+
+            asyncio.get_running_loop().create_task(_surface())
         return {"targetId": "T1"}
 
 
@@ -88,6 +98,41 @@ class TestTheAttachFlag:
 
         with attaching_to_other_targets():
             assert os.environ[ATTACH_TO_OTHER] == "1"
+
+        assert os.environ[ATTACH_TO_OTHER] == "operator-set"
+
+    async def test_overlapping_launches_do_not_leave_it_set(self, monkeypatch):
+        """Two launches in flight at once must still restore exactly once.
+
+        `os.environ` is process-global and the block it scopes contains an
+        `await`, so the two interleave. Measured before the counter existed: the
+        flag was left set afterwards in two runs out of five, and the opposite
+        ordering lets the second launch miss it entirely. Today's production
+        paths are serialised by other locks, but nothing about the public
+        `BrowserManager` promises that.
+        """
+        monkeypatch.delenv(ATTACH_TO_OTHER, raising=False)
+        seen: list[str | None] = []
+
+        async def launch(delay: float) -> None:
+            with attaching_to_other_targets():
+                await asyncio.sleep(delay)
+                seen.append(os.environ.get(ATTACH_TO_OTHER))
+
+        await asyncio.gather(launch(0.02), launch(0.001))
+
+        # Both saw it set while inside, and nothing is left behind after.
+        assert seen == ["1", "1"]
+        assert ATTACH_TO_OTHER not in os.environ
+
+    async def test_an_overlapping_launch_restores_a_previous_value(self, monkeypatch):
+        monkeypatch.setenv(ATTACH_TO_OTHER, "operator-set")
+
+        async def launch(delay: float) -> None:
+            with attaching_to_other_targets():
+                await asyncio.sleep(delay)
+
+        await asyncio.gather(launch(0.02), launch(0.001))
 
         assert os.environ[ATTACH_TO_OTHER] == "operator-set"
 
@@ -149,23 +194,26 @@ class TestFindingTheRightPage:
     async def test_closes_the_startup_page_only_after_the_hidden_one_exists(self):
         """Closing first would leave the context empty and Chromium may exit.
 
-        Asserting that the close eventually happened proves nothing about the
-        order, so the startup page records what the session had been asked for
-        at the moment it was closed.
+        The contract is not "createTarget was sent before close" -- Chromium
+        answers that call before Playwright has attached anything, so it holds
+        even when the close is far too early. What has to be true is that the
+        hidden page was already *there*.
         """
         pages: list = []
         session = _Session(pages)
         context = _Context(pages, _Browser(session))
 
         class _RecordingStartup(_Startup):
-            methods_at_first_close: list[str] | None = None
+            hidden_present_at_close: bool | None = None
 
             async def close(self):
-                # First close only. A close-before-create mutation calls this
-                # twice, and letting the second overwrite the record is exactly
-                # how this test would stop catching anything.
-                if self.methods_at_first_close is None:
-                    self.methods_at_first_close = [m for m, _ in session.sent]
+                # First close only: a close-before-wait mutation calls this
+                # twice, and letting the second overwrite the record is how
+                # this test would stop catching anything.
+                if self.hidden_present_at_close is None:
+                    self.hidden_present_at_close = any(
+                        str(page.url).startswith("about:blank#") for page in pages
+                    )
                 await super().close()
 
         startup = _RecordingStartup()
@@ -174,7 +222,7 @@ class TestFindingTheRightPage:
         await open_hidden_page(cast(Any, context), cast(Any, startup))
 
         assert startup.closed is True
-        assert startup.methods_at_first_close == ["Target.createTarget"]
+        assert startup.hidden_present_at_close is True
 
 
 class TestItFailsClosed:
@@ -214,3 +262,27 @@ class TestItFailsClosed:
 
         # The visible page is left alone: a caller that recovers still has one.
         assert startup.closed is False
+
+
+class TestPlatformSupport:
+    """Where the mechanism is claimed to work, and where it is not."""
+
+    def test_macos_is_supported(self, monkeypatch):
+        monkeypatch.setattr("sys.platform", "darwin")
+
+        assert hidden_target_is_supported() is True
+
+    def test_linux_is_not(self, monkeypatch):
+        """Measured in the container image: with a display, closing the startup
+        page kills Chromium and the hidden page with it; without one, a headed
+        launch never starts."""
+        monkeypatch.setattr("sys.platform", "linux")
+
+        assert hidden_target_is_supported() is False
+
+    def test_windows_is_not_claimed(self, monkeypatch):
+        """Unmeasured, and it plausibly behaves like Linux. Claiming support
+        without looking is the guess this module exists to avoid."""
+        monkeypatch.setattr("sys.platform", "win32")
+
+        assert hidden_target_is_supported() is False
