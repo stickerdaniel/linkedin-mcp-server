@@ -1556,7 +1556,24 @@ class TestRealOwner:
                         raise_on_error=False,
                     )
 
+            # Retried until the owner has something to say about *auth*.
+            #
+            # A real owner answers whichever gate it reaches first, and browser
+            # setup runs in the background: arrive before it finishes and the
+            # answer is "still installing", which carries no auth marker and is
+            # a correct answer to a different question. Measured at roughly one
+            # run in eight, which is frequent enough to cost CI runs and rare
+            # enough to look like something else.
+            #
+            # A client does exactly this, so the retry is not a workaround so
+            # much as the shape of the thing being tested.
+            deadline = time.monotonic() + 60
             answered = asyncio.run(call_it())
+            while (answered.meta or {}).get(
+                MARKER_KEY
+            ) is None and time.monotonic() < deadline:
+                time.sleep(0.5)
+                answered = asyncio.run(call_it())
 
             assert answered.is_error is True
             marker = (answered.meta or {}).get(MARKER_KEY)
