@@ -2808,9 +2808,8 @@ class LinkedInExtractor:
     async def _resolve_thread_compose_box(self) -> Any | None:
         """Find a composer only inside the active messaging page's ``main`` region."""
         for selector in (
-            'main div[role="textbox"][contenteditable="true"][aria-label*="Write a message"]',
             'main div[role="textbox"][contenteditable="true"]',
-            'main [contenteditable="true"][aria-label*="message"]',
+            'main [contenteditable="true"]',
         ):
             locator = self._page.locator(selector)
             try:
@@ -2820,21 +2819,46 @@ class LinkedInExtractor:
                 logger.debug("Could not resolve active-thread composer", exc_info=True)
         return None
 
-    async def _thread_message_text_visible(self, message: str) -> bool:
-        """Read back the sent text from ``main`` after re-opening the same thread."""
-        try:
-            await self._page.wait_for_function(
-                """({ expected }) => {
-                    const normalize = value =>
-                        (value || '').replace(/\\s+/g, ' ').trim();
-                    const main = document.querySelector('main');
-                    return Boolean(main && normalize(main.innerText).includes(normalize(expected)));
-                }""",
-                arg={"expected": message},
-            )
-            return True
-        except PlaywrightTimeoutError:
-            return False
+    async def _thread_message_snapshot(self, message: str) -> set[str]:
+        """Return identity signatures for visible thread messages matching ``message``.
+
+        The snapshot deliberately reads message-item structure rather than
+        ``main.innerText``: a matching string elsewhere, or one that predates
+        this operation, cannot establish that this operation sent a reply.
+        LinkedIn's rows vary between versions, so event/message attributes are
+        preferred and generic list-item structure is the fallback.
+        """
+        signatures = await self._page.evaluate(
+            """({ expected }) => {
+                const normalize = value =>
+                    (value || '').replace(/\\s+/g, ' ').trim();
+                const main = document.querySelector('main');
+                if (!main || !normalize(expected)) return [];
+                const candidates = Array.from(main.querySelectorAll(
+                    '[data-event-urn], [data-message-id], [data-urn], [role="listitem"]'
+                ));
+                return candidates.flatMap((element, index) => {
+                    const text = normalize(element.innerText || element.textContent || '');
+                    if (!text.includes(normalize(expected))) return [];
+                    const stableId = [
+                        'data-event-urn', 'data-message-id', 'data-urn', 'id'
+                    ].map(name => element.getAttribute(name)).find(Boolean);
+                    // When LinkedIn exposes no event id, the message-row path
+                    // still distinguishes a newly appended matching row.
+                    const path = [];
+                    let node = element;
+                    while (node && node !== main) {
+                        const parent = node.parentElement;
+                        if (!parent) break;
+                        path.unshift(Array.prototype.indexOf.call(parent.children, node));
+                        node = parent;
+                    }
+                    return [stableId || `${index}:${path.join('.')}:${text}`];
+                });
+            }""",
+            arg={"expected": message},
+        )
+        return {str(signature) for signature in signatures}
 
     async def reply_to_thread(
         self, thread_id: str, message: str, *, confirm_send: bool
@@ -2846,6 +2870,17 @@ class LinkedInExtractor:
         """
         normalized_thread_id = self._normalize_thread_id(thread_id)
         target_url = self._thread_url(normalized_thread_id)
+        normalized_message = (
+            " ".join(message.split()) if isinstance(message, str) else ""
+        )
+        if not normalized_message:
+            return {
+                "url": target_url,
+                "thread_id": normalized_thread_id,
+                "status": "message_empty",
+                "message": "Reply text must contain at least one non-whitespace character.",
+                "sent": False,
+            }
         await self._navigate_to_page(target_url)
         await detect_rate_limit(self._page)
         try:
@@ -2859,6 +2894,16 @@ class LinkedInExtractor:
                 "thread_id": normalized_thread_id,
                 "status": "thread_mismatch",
                 "message": "LinkedIn did not remain on the requested thread; no text was entered.",
+                "sent": False,
+            }
+
+        before_snapshot = await self._thread_message_snapshot(normalized_message)
+        if before_snapshot:
+            return {
+                "url": self._page.url,
+                "thread_id": normalized_thread_id,
+                "status": "message_already_present",
+                "message": "This reply text is already visible in the requested thread; no send was attempted.",
                 "sent": False,
             }
 
@@ -2898,9 +2943,8 @@ class LinkedInExtractor:
             """() => {
                 const main = document.querySelector('main');
                 const box = main?.querySelector(
-                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
-                    + 'div[role="textbox"][contenteditable="true"],'
-                    + '[contenteditable="true"][aria-label*="message"]'
+                    'div[role="textbox"][contenteditable="true"],'
+                    + '[contenteditable="true"]'
                 );
                 if (!box) return false;
                 box.focus();
@@ -2915,7 +2959,7 @@ class LinkedInExtractor:
                 "message": "Could not focus the requested thread's composer.",
                 "sent": False,
             }
-        await self._page.keyboard.type(message, delay=15)
+        await self._page.keyboard.type(normalized_message, delay=15)
         await asyncio.sleep(0.3)
         sent_via_js = await self._page.evaluate(
             """() => {
@@ -2923,8 +2967,7 @@ class LinkedInExtractor:
                 const box = main?.querySelector('[contenteditable="true"]');
                 const root = box?.closest('form, section, article, [role="region"]') || main;
                 const button = Array.from(root?.querySelectorAll(
-                    'button[type="submit"], button[aria-label*="Send"], '
-                    + 'button[aria-label*="send"], button[data-control-name="send"]'
+                    'button[type="submit"]'
                 ) || []).find(element => !element.disabled &&
                     (element.offsetWidth || element.offsetHeight || element.getClientRects().length));
                 if (!button) return false;
@@ -2936,24 +2979,25 @@ class LinkedInExtractor:
             await self._page.keyboard.press("Enter")
 
         # Do not report sent merely because click/Enter was attempted. Re-open
-        # the exact canonical target and inspect its main thread area.
+        # the exact canonical target and require a matching message row that
+        # was absent from the snapshot immediately before typing.
         await self._navigate_to_page(target_url)
         await detect_rate_limit(self._page)
-        if await self._active_thread_matches(
-            normalized_thread_id
-        ) and await self._thread_message_text_visible(message):
+        if await self._active_thread_matches(normalized_thread_id) and (
+            await self._thread_message_snapshot(normalized_message) - before_snapshot
+        ):
             return {
                 "url": self._page.url,
                 "thread_id": normalized_thread_id,
                 "status": "sent",
-                "message": "Reply sent and read back from the requested thread.",
+                "message": "Reply sent and verified as a new message in the requested thread.",
                 "sent": True,
             }
         return {
             "url": self._page.url,
             "thread_id": normalized_thread_id,
             "status": "sent_unverified",
-            "message": "A send was attempted, but the reply could not be read back from the requested thread.",
+            "message": "A send was attempted, but no new matching message was verified in the requested thread.",
             "sent": False,
             "send_attempted": True,
         }

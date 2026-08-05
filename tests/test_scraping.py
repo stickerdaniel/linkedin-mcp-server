@@ -5041,6 +5041,136 @@ class TestGetConversation:
 
 
 class TestReplyToThread:
+    async def test_empty_message_returns_without_navigation_or_input(self, mock_page):
+        """Blank replies must never be treated as a successful send attempt."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard = MagicMock()
+        mock_page.keyboard.type = AsyncMock()
+
+        with patch.object(
+            extractor, "_navigate_to_page", new_callable=AsyncMock
+        ) as navigate:
+            result = await extractor.reply_to_thread(
+                "abc123", " \n\t ", confirm_send=True
+            )
+
+        assert result["status"] == "message_empty"
+        assert result["sent"] is False
+        navigate.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+
+    async def test_existing_message_returns_without_composer_or_input(self, mock_page):
+        """An existing matching message cannot prove this call sent a new reply."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/messaging/thread/abc123/"
+        mock_page.keyboard = MagicMock()
+        mock_page.keyboard.type = AsyncMock()
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_thread_message_snapshot",
+                new_callable=AsyncMock,
+                return_value={"existing-message"},
+            ),
+            patch.object(
+                extractor,
+                "_resolve_thread_compose_box",
+                new_callable=AsyncMock,
+            ) as resolve_compose,
+        ):
+            result = await extractor.reply_to_thread(
+                "abc123", "Already in the thread", confirm_send=True
+            )
+
+        assert result["status"] == "message_already_present"
+        assert result["sent"] is False
+        resolve_compose.assert_not_awaited()
+        mock_page.keyboard.type.assert_not_awaited()
+
+    async def test_send_requires_a_new_message_snapshot(self, mock_page):
+        """Post-send text alone is insufficient: the matching message must be new."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/messaging/thread/abc123/"
+        mock_page.keyboard = MagicMock()
+        mock_page.keyboard.type = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_resolve_thread_compose_box",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                extractor,
+                "_thread_message_snapshot",
+                new_callable=AsyncMock,
+                side_effect=[set(), set()],
+            ),
+        ):
+            mock_page.evaluate = AsyncMock(side_effect=[True, True])
+            result = await extractor.reply_to_thread(
+                "abc123", "Only report a new message", confirm_send=True
+            )
+
+        assert result["status"] == "sent_unverified"
+        assert result["sent"] is False
+
+    async def test_send_reports_sent_only_for_a_new_message_snapshot(self, mock_page):
+        """A newly identified matching message row is the sole success condition."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/messaging/thread/abc123/"
+        mock_page.keyboard = MagicMock()
+        mock_page.keyboard.type = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_resolve_thread_compose_box",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                extractor,
+                "_thread_message_snapshot",
+                new_callable=AsyncMock,
+                side_effect=[set(), {"new-message-row"}],
+            ),
+        ):
+            mock_page.evaluate = AsyncMock(side_effect=[True, True])
+            result = await extractor.reply_to_thread(
+                "abc123", "Verified new reply", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+
+    def test_thread_reply_selectors_do_not_depend_on_english_aria_labels(self):
+        """Thread composer/send detection must work regardless of UI language."""
+        import inspect
+
+        source = inspect.getsource(LinkedInExtractor.reply_to_thread)
+        source += inspect.getsource(LinkedInExtractor._resolve_thread_compose_box)
+        assert "aria-label*=" not in source
+
     async def test_dry_run_never_types_and_uses_canonical_thread_url(self, mock_page):
         """confirm_send=False may inspect but must not focus/type/send anything."""
         extractor = LinkedInExtractor(mock_page)
@@ -5061,6 +5191,12 @@ class TestReplyToThread:
                 "_resolve_thread_compose_box",
                 new_callable=AsyncMock,
                 return_value=MagicMock(),
+            ),
+            patch.object(
+                extractor,
+                "_thread_message_snapshot",
+                new_callable=AsyncMock,
+                return_value=set(),
             ),
         ):
             result = await extractor.reply_to_thread(
