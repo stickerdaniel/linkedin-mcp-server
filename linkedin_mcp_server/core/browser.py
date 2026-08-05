@@ -22,6 +22,11 @@ from linkedin_mcp_server.common_utils import (
 )
 
 from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+from linkedin_mcp_server.hidden_target import (
+    attaching_to_other_targets,
+    hidden_target_is_supported,
+    open_hidden_page,
+)
 
 from .exceptions import NetworkError, ProxyConnectionError
 
@@ -107,6 +112,13 @@ class BrowserManager:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._is_authenticated = False
+        #: Set when a headed launch was attempted and refused, which is the only
+        #: reliable way to learn that this machine has nowhere to put a window.
+        #: Per instance rather than per process, deliberately: a fresh manager
+        #: is built for each browser, so this saves a second doomed attempt
+        #: within one launch without cacheing a machine-wide answer that could
+        #: go stale when somebody logs into a desktop session.
+        self._no_window_available = False
         # False until a teardown proves Chromium exited. Pessimistic by default:
         # a launch that is cancelled before close runs must not read as clean.
         self._close_confirmed = False
@@ -125,6 +137,22 @@ class BrowserManager:
         # than claiming a shutdown that never completed.
         self._close_confirmed = False
         self._close_confirmed = await self.close()
+
+    @property
+    def _windowless(self) -> bool:
+        """Whether this launch hides its page in a target rather than a mode.
+
+        Both conditions, and the second is not a preference. Asking for no
+        visible window is not enough on a machine that cannot open one: a headed
+        launch there fails outright, so the only way to run at all is Chromium's
+        headless mode, and the browser then says so on every surface. That is a
+        loss worth announcing rather than hiding, which is why it is logged.
+        """
+        return (
+            self.headless
+            and hidden_target_is_supported()
+            and not self._no_window_available
+        )
 
     def _geometry(self) -> dict[str, Any]:
         """The viewport options, decided by the mode this browser actually runs in.
@@ -150,13 +178,32 @@ class BrowserManager:
         if self._context is not None:
             raise RuntimeError("Browser already started. Call close() first.")
         try:
-            self._playwright = await async_playwright().start()
+            # Only where a hidden target is actually going to be created. The
+            # flag has to exist before the driver subprocess does, and it then
+            # lives in that process for its whole lifetime -- restoring it here
+            # afterwards does nothing to the child. So a visible login, or a
+            # platform that falls back to real headless, would otherwise spend
+            # its entire run promoting extension and other `other` targets into
+            # `context.pages` for no reason.
+            if self._windowless:
+                with attaching_to_other_targets():
+                    self._playwright = await async_playwright().start()
+            else:
+                self._playwright = await async_playwright().start()
 
             secure_mkdir(Path(self.user_data_dir))
             harden_linkedin_tree(Path(self.user_data_dir))
 
             context_options: dict[str, Any] = {
-                "headless": self.headless,
+                # Headed wherever a window can exist, in both public modes.
+                # ``self.headless`` keeps its meaning -- "no visible window" --
+                # but it is no longer how that is achieved, because Chromium's
+                # headless *mode* is what makes the browser announce itself. A
+                # windowless page comes from a hidden target instead.
+                #
+                # Where no display exists there is no choice: a headed launch
+                # dies before any of that can happen. See ``_windowless``.
+                "headless": self.headless and not self._windowless,
                 "slow_mo": self.slow_mo,
                 **self._geometry(),
                 **self.launch_options,
@@ -168,21 +215,111 @@ class BrowserManager:
             # itself on the first surface anyone checks, and it never reaches
             # service workers at all. See the browser identity rules in
             # AGENTS.md and the measurements in docs/browser-fingerprint.md.
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                self.user_data_dir,
-                **context_options,
-            )
+            try:
+                self._context = (
+                    await self._playwright.chromium.launch_persistent_context(
+                        self.user_data_dir,
+                        **context_options,
+                    )
+                )
+            except Exception as exc:
+                # A headed launch needs somewhere to put a window, and whether
+                # this machine has one cannot be decided from the platform name
+                # alone: a Mac reached over SSH, a launchd daemon, or a CI
+                # runner with no GUI session all look like macOS and all refuse
+                # to open one. Rather than enumerate those, let the attempt
+                # answer it -- that is the one check that cannot be wrong about
+                # a case nobody thought of.
+                #
+                # Narrow on purpose: only when a window was asked for and only
+                # once, so a genuine launch failure still surfaces rather than
+                # being retried into a different error.
+                if not self._windowless:
+                    raise
+                logger.warning(
+                    "Could not start a browser with a window (%s), so Chromium "
+                    "runs in headless mode and will identify itself as "
+                    "HeadlessChrome on every surface.",
+                    type(exc).__name__,
+                )
+                self._no_window_available = True
+
+                # The driver has to be replaced, not reused. It was started
+                # with the attach flag, and that flag lives in *its* process for
+                # its whole life -- restoring the parent environment does
+                # nothing to a child that already read it. A driver that keeps
+                # promoting `other` targets would put a component extension's
+                # page into `context.pages`, and the code below takes the first
+                # one as the page to authenticate and scrape with.
+                # Bounded, and its failure survived, for the same reason
+                # ``close()`` bounds its own cleanup: a wedged driver can hang
+                # ``stop()`` indefinitely. Turning a recoverable launch into a
+                # permanent hang would be the worse trade, so a driver that will
+                # not stop is left behind and said so.
+                try:
+                    await asyncio.wait_for(
+                        self._playwright.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS
+                    )
+                except Exception as stop_exc:
+                    logger.warning(
+                        "The refused driver did not stop (%s); continuing with a "
+                        "fresh one.",
+                        type(stop_exc).__name__,
+                    )
+                self._playwright = await async_playwright().start()
+
+                context_options["headless"] = True
+                context_options.pop("no_viewport", None)
+                context_options.update(self._geometry())
+                try:
+                    self._context = (
+                        await self._playwright.chromium.launch_persistent_context(
+                            self.user_data_dir,
+                            **context_options,
+                        )
+                    )
+                except Exception as retry_exc:
+                    # Logged before it is discarded. The raise below keeps the
+                    # first error because that is the one that says what went
+                    # wrong, but losing the second entirely would leave whoever
+                    # debugs this unable to see that the fallback was even
+                    # tried, let alone how it failed.
+                    logger.warning(
+                        "The headless fallback did not start either: %s: %s",
+                        type(retry_exc).__name__,
+                        retry_exc,
+                    )
+                    # The retry is a chance, not a cover-up. If the browser
+                    # will not start either way the problem was never the
+                    # window, and the first error is the one that says what it
+                    # actually was.
+                    raise exc from None
 
             logger.info(
                 "Persistent browser launched (headless=%s, user_data_dir=%s)",
                 self.headless,
                 self.user_data_dir,
             )
+            if self.headless and not self._windowless:
+                logger.info(
+                    "Chromium runs in headless mode on this platform and so "
+                    "identifies itself as HeadlessChrome on every surface. A "
+                    "windowless page needs a browser that survives losing its "
+                    "last window, which is measured only on macOS."
+                )
 
-            if self._context.pages:
-                self._page = self._context.pages[0]
+            startup = (
+                self._context.pages[0]
+                if self._context.pages
+                else await self._context.new_page()
+            )
+            if self._windowless:
+                # Fails closed. Falling back to real headless would restore the
+                # token the caller believes is gone, and falling back to the
+                # visible window would put one on their screen unannounced.
+                self._page = await open_hidden_page(self._context, startup)
             else:
-                self._page = await self._context.new_page()
+                self._page = startup
 
             logger.info("Browser context and page ready")
 

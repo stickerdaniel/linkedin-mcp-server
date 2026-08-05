@@ -77,8 +77,49 @@ headless".
 | Bundled Chromium, headless, UA claiming 143 | 33% / 88% | `hasMissingChromeObject` high severity; UA and hints disagree |
 | Full Chromium headless (`channel="chromium"`) | 67% / 50% | Two high-severity fpscanner rules from the headless token |
 | Headless shell (the old default) | — | `plugins.length = 0`, no `window.chrome`, notification permission incoherent |
+| Hidden target, windowless mode (macOS) | — | No headless token in UA or brands; `visible` / focused; rAF at 100% of a control window |
 | Docker, headed under Xvfb | 0% / 44% | No headless token, native hints; needs `xauth` |
 | Docker, Xvfb + Mesa llvmpipe | 0% / 44% | Restores WebGL; renderer string is a known software renderer |
+
+The windowless mode, measured end to end through `BrowserManager`:
+
+| | Value |
+|---|---|
+| User agent | `…Chrome/148.0.0.0…`, no `HeadlessChrome` |
+| `sec-ch-ua` brands | `Not/A)Brand`, `Chromium` |
+| `navigator.webdriver` | `false` |
+| `document.visibilityState` / `hasFocus()` | `visible` / `true` |
+| `requestAnimationFrame` | 122/s against a control visible window at 122/s |
+| Cookie across a full restart | survives |
+| Window on screen once settled | none |
+| Window on screen during startup | ~550 ms, median of five runs (504-593) |
+
+The rAF figure is the one that mattered: hiding the application at OS level
+throttled it to about 1 Hz against 120, which is what disqualified that
+approach. A hidden target runs at the same rate as an ordinary window.
+
+**It applies to macOS only, and that is a measured limit rather than a
+scoping decision.** The mechanism needs the browser to survive losing its last
+visible window, because removing that window is the whole point. Measured in the
+published container image, under Xvfb: closing the startup page kills Chromium
+and the hidden page dies with it, while keeping that page open leaves everything
+working. Without a display a headed launch does not start at all
+(`TargetClosedError`). macOS does not quit an application when its last window
+closes, which is why it works there. Windows is untested and plausibly behaves
+like Linux, so it is not claimed.
+
+Linux is less a gap than a different answer: under a virtual display nobody is
+looking at the screen, so an ordinary window is already invisible and there is
+nothing to hide.
+
+Two things this does not claim. The half second of visible window on every
+browser start cannot be shortened from here — roughly 250 ms passes before
+`launch_persistent_context()` returns and about 340 ms is macOS tearing the
+window down, leaving about 90 ms that is ours. And the windowless page reports
+`outerWidth == screen.width`, which no real window does, since a real one has
+chrome and sits inside its display. That is unchanged from the previous
+headless default rather than introduced here, and it stays on the list of
+things worth fixing.
 
 Window geometry, read from a page's own `<script>` on a loopback origin:
 
