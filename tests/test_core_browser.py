@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import os
+import time
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
@@ -237,6 +238,7 @@ class TestTheWindowlessLaunchEndToEnd:
         *,
         refuse_headed: bool = False,
         refuse_headless: bool = False,
+        stop_hangs: bool = False,
     ):
         from linkedin_mcp_server.hidden_target import ATTACH_TO_OTHER
 
@@ -294,6 +296,8 @@ class TestTheWindowlessLaunchEndToEnd:
         class _Playwright2(_Playwright):
             async def stop(self):
                 stops["count"] += 1
+                if stop_hangs:
+                    await asyncio.sleep(30)
                 return None
 
         async def start():
@@ -366,6 +370,41 @@ class TestTheWindowlessLaunchEndToEnd:
         # which is where the working page is taken from.
         assert recorder["flags_at_driver_start"] == ["1", None]
         assert recorder["driver_stops"]["count"] == 1
+
+    async def test_a_driver_that_will_not_stop_does_not_block_the_fallback(
+        self, tmp_path
+    ):
+        """A wedged driver must not turn a recoverable launch into a hang.
+
+        `close()` bounds its own cleanup for exactly this reason. Leaving one
+        driver behind is the lesser cost against never returning.
+        """
+        recorder: dict = {}
+        start, _ = self._fake_playwright(recorder, refuse_headed=True, stop_hangs=True)
+        manager = BrowserManager(user_data_dir=tmp_path / "p", headless=True)
+
+        began = time.monotonic()
+        with mock.patch(
+            "linkedin_mcp_server.core.browser._CLEANUP_TIMEOUT_SECONDS", 0.05
+        ):
+            with mock.patch(
+                "linkedin_mcp_server.core.browser.hidden_target_is_supported",
+                return_value=True,
+            ):
+                with mock.patch(
+                    "linkedin_mcp_server.core.browser.async_playwright"
+                ) as playwright:
+                    playwright.return_value.start = start
+                    await manager.start()
+        elapsed = time.monotonic() - began
+
+        assert recorder["options"]["headless"] is True
+        assert recorder["flags_at_driver_start"] == ["1", None]
+        # The timing is the assertion, not decoration. Without the bound this
+        # still *succeeds* -- it just waits out the wedged driver first, which
+        # is precisely the behaviour being ruled out. The fake hangs for 30s;
+        # anything near that means the bound was skipped.
+        assert elapsed < 5, f"the wedged driver was waited out ({elapsed:.1f}s)"
 
     async def test_a_launch_that_fails_either_way_reports_the_first_error(
         self, tmp_path

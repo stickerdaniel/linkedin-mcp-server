@@ -114,6 +114,10 @@ class BrowserManager:
         self._is_authenticated = False
         #: Set when a headed launch was attempted and refused, which is the only
         #: reliable way to learn that this machine has nowhere to put a window.
+        #: Per instance rather than per process, deliberately: a fresh manager
+        #: is built for each browser, so this saves a second doomed attempt
+        #: within one launch without cacheing a machine-wide answer that could
+        #: go stale when somebody logs into a desktop session.
         self._no_window_available = False
         # False until a teardown proves Chromium exited. Pessimistic by default:
         # a launch that is cancelled before close runs must not read as clean.
@@ -247,7 +251,21 @@ class BrowserManager:
                 # promoting `other` targets would put a component extension's
                 # page into `context.pages`, and the code below takes the first
                 # one as the page to authenticate and scrape with.
-                await self._playwright.stop()
+                # Bounded, and its failure survived, for the same reason
+                # ``close()`` bounds its own cleanup: a wedged driver can hang
+                # ``stop()`` indefinitely. Turning a recoverable launch into a
+                # permanent hang would be the worse trade, so a driver that will
+                # not stop is left behind and said so.
+                try:
+                    await asyncio.wait_for(
+                        self._playwright.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS
+                    )
+                except Exception as stop_exc:
+                    logger.warning(
+                        "The refused driver did not stop (%s); continuing with a "
+                        "fresh one.",
+                        type(stop_exc).__name__,
+                    )
                 self._playwright = await async_playwright().start()
 
                 context_options["headless"] = True
@@ -260,7 +278,17 @@ class BrowserManager:
                             **context_options,
                         )
                     )
-                except Exception:
+                except Exception as retry_exc:
+                    # Logged before it is discarded. The raise below keeps the
+                    # first error because that is the one that says what went
+                    # wrong, but losing the second entirely would leave whoever
+                    # debugs this unable to see that the fallback was even
+                    # tried, let alone how it failed.
+                    logger.warning(
+                        "The headless fallback did not start either: %s: %s",
+                        type(retry_exc).__name__,
+                        retry_exc,
+                    )
                     # The retry is a chance, not a cover-up. If the browser
                     # will not start either way the problem was never the
                     # window, and the first error is the one that says what it
