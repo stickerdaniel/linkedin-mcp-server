@@ -289,11 +289,21 @@ class TestTheWindowlessLaunchEndToEnd:
             async def stop(self):
                 return None
 
+        stops = {"count": 0}
+
+        class _Playwright2(_Playwright):
+            async def stop(self):
+                stops["count"] += 1
+                return None
+
         async def start():
-            # The flag has to be set at the moment the driver process is
-            # created, which is what this records.
-            recorder["flag_at_driver_start"] = os.environ.get(ATTACH_TO_OTHER)
-            return _Playwright()
+            # Every driver start, not just the first: a fallback launch starts a
+            # second one, and whether *that* inherited the flag is the point.
+            recorder.setdefault("flags_at_driver_start", []).append(
+                os.environ.get(ATTACH_TO_OTHER)
+            )
+            recorder["driver_stops"] = stops
+            return _Playwright2()
 
         return start, pages
 
@@ -317,7 +327,7 @@ class TestTheWindowlessLaunchEndToEnd:
         # The page handed to callers is the windowless one, not the startup one.
         assert manager.page.url.startswith("about:blank#")
         # The driver saw the flag; setting it afterwards would be too late.
-        assert recorder["flag_at_driver_start"] == "1"
+        assert recorder["flags_at_driver_start"] == ["1"]
         # And it did not leak past the launch.
         assert ATTACH_TO_OTHER not in os.environ
         # The startup page went, and only once the hidden one existed.
@@ -349,6 +359,13 @@ class TestTheWindowlessLaunchEndToEnd:
         # It ran, in headless, and the page is the ordinary startup one.
         assert recorder["options"]["headless"] is True
         assert manager.page.url == "about:blank"
+        # The driver was replaced rather than reused. The first one read the
+        # attach flag into its own process, where restoring the parent
+        # environment cannot reach it, and a driver that keeps promoting
+        # `other` targets would put an extension page into `context.pages` --
+        # which is where the working page is taken from.
+        assert recorder["flags_at_driver_start"] == ["1", None]
+        assert recorder["driver_stops"]["count"] == 1
 
     async def test_a_launch_that_fails_either_way_reports_the_first_error(
         self, tmp_path
@@ -409,7 +426,7 @@ class TestTheWindowlessLaunchEndToEnd:
             playwright.return_value.start = start
             await manager.start()
 
-        assert recorder["flag_at_driver_start"] is None
+        assert recorder["flags_at_driver_start"] == [None]
 
     async def test_a_platform_fallback_does_not_get_the_attach_flag(self, tmp_path):
         """Same reasoning where the platform cannot support a hidden target."""
@@ -427,7 +444,7 @@ class TestTheWindowlessLaunchEndToEnd:
                 playwright.return_value.start = start
                 await manager.start()
 
-        assert recorder["flag_at_driver_start"] is None
+        assert recorder["flags_at_driver_start"] == [None]
 
 
 def _make_cookie(

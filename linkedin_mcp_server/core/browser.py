@@ -239,6 +239,17 @@ class BrowserManager:
                     type(exc).__name__,
                 )
                 self._no_window_available = True
+
+                # The driver has to be replaced, not reused. It was started
+                # with the attach flag, and that flag lives in *its* process for
+                # its whole life -- restoring the parent environment does
+                # nothing to a child that already read it. A driver that keeps
+                # promoting `other` targets would put a component extension's
+                # page into `context.pages`, and the code below takes the first
+                # one as the page to authenticate and scrape with.
+                await self._playwright.stop()
+                self._playwright = await async_playwright().start()
+
                 context_options["headless"] = True
                 context_options.pop("no_viewport", None)
                 context_options.update(self._geometry())
