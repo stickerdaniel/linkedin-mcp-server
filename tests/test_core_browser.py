@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import os
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
@@ -147,6 +148,63 @@ class TestGeometry:
         assert "viewport" not in captured
         # The locale sits after the spread on purpose and must stay pinned.
         assert captured.get("locale") == "en-US"
+
+
+class TestTheBrowserIsAlwaysHeaded:
+    """`headless` keeps its public meaning but no longer selects the mode.
+
+    Chromium's headless *mode* is what makes a browser announce itself: it
+    prepends the bare string `Headless` to the product name at runtime, so both
+    the user agent and the `sec-ch-ua` brands read `HeadlessChrome`. No choice of
+    binary removes that. So the browser runs headed either way, and "no visible
+    window" comes from a hidden target instead.
+    """
+
+    async def _captured_options(self, tmp_path, *, headless: bool) -> dict:
+        captured: dict = {}
+
+        class _Chromium:
+            async def launch_persistent_context(self, user_data_dir, **kwargs):
+                captured.update(kwargs)
+                raise RuntimeError("stop once the options are known")
+
+        class _Playwright:
+            chromium = _Chromium()
+
+            async def stop(self):
+                return None
+
+        manager = BrowserManager(user_data_dir=tmp_path, headless=headless)
+
+        async def fake_start():
+            return _Playwright()
+
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.async_playwright"
+        ) as playwright:
+            playwright.return_value.start = fake_start
+            with contextlib.suppress(Exception):
+                await manager.start()
+        return captured
+
+    async def test_headless_still_launches_headed(self, tmp_path):
+        options = await self._captured_options(tmp_path, headless=True)
+
+        assert options["headless"] is False
+
+    async def test_headed_launches_headed(self, tmp_path):
+        options = await self._captured_options(tmp_path, headless=False)
+
+        assert options["headless"] is False
+
+    async def test_the_attach_flag_is_not_left_behind(self, tmp_path):
+        """It makes Playwright promote every `other` target, so it is scoped."""
+        from linkedin_mcp_server.hidden_target import ATTACH_TO_OTHER
+
+        before = os.environ.get(ATTACH_TO_OTHER)
+        await self._captured_options(tmp_path, headless=True)
+
+        assert os.environ.get(ATTACH_TO_OTHER) == before
 
 
 def _make_cookie(

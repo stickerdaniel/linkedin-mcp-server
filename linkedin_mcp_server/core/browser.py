@@ -22,6 +22,10 @@ from linkedin_mcp_server.common_utils import (
 )
 
 from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+from linkedin_mcp_server.hidden_target import (
+    attaching_to_other_targets,
+    open_hidden_page,
+)
 
 from .exceptions import NetworkError, ProxyConnectionError
 
@@ -150,13 +154,22 @@ class BrowserManager:
         if self._context is not None:
             raise RuntimeError("Browser already started. Call close() first.")
         try:
-            self._playwright = await async_playwright().start()
+            # The flag has to be in the environment before the driver
+            # subprocess exists, and it is scoped so a launch that does not need
+            # it does not inherit it.
+            with attaching_to_other_targets():
+                self._playwright = await async_playwright().start()
 
             secure_mkdir(Path(self.user_data_dir))
             harden_linkedin_tree(Path(self.user_data_dir))
 
             context_options: dict[str, Any] = {
-                "headless": self.headless,
+                # Always headed, in both modes. ``self.headless`` keeps its
+                # public meaning -- "no visible window" -- but it is no longer
+                # how that is achieved, because Chromium's headless *mode* is
+                # what makes the browser announce itself as headless. A
+                # windowless page comes from a hidden target instead.
+                "headless": False,
                 "slow_mo": self.slow_mo,
                 **self._geometry(),
                 **self.launch_options,
@@ -179,10 +192,18 @@ class BrowserManager:
                 self.user_data_dir,
             )
 
-            if self._context.pages:
-                self._page = self._context.pages[0]
+            startup = (
+                self._context.pages[0]
+                if self._context.pages
+                else await self._context.new_page()
+            )
+            if self.headless:
+                # Fails closed. Falling back to real headless would restore the
+                # token the caller believes is gone, and falling back to the
+                # visible window would put one on their screen unannounced.
+                self._page = await open_hidden_page(self._context, startup)
             else:
-                self._page = await self._context.new_page()
+                self._page = startup
 
             logger.info("Browser context and page ready")
 
