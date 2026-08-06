@@ -34,6 +34,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
+    mock.reply_to_thread = AsyncMock(return_value=scrape_result)
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
@@ -866,6 +867,38 @@ class TestMessagingTools:
                 mock_context,
                 extractor=mock_extractor,
             )
+
+    async def test_reply_to_thread_passes_confirmation_gate(self, mock_context):
+        """The tool delegates to the thread-targeted extractor method only."""
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/abc123/",
+            "thread_id": "abc123",
+            "status": "confirmation_required",
+            "sent": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "reply_to_thread")
+
+        result = await tool_fn(
+            "https://www.linkedin.com/messaging/thread/abc123/?foo=bar",
+            "Draft only",
+            False,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "confirmation_required"
+        assert result["sent"] is False
+        mock_extractor.reply_to_thread.assert_awaited_once_with(
+            "https://www.linkedin.com/messaging/thread/abc123/?foo=bar",
+            "Draft only",
+            confirm_send=False,
+        )
 
 
 class TestGetMyProfileTool:
