@@ -29,6 +29,7 @@ from linkedin_mcp_server.exceptions import (
     AuthenticationStartedError,
     BrowserBinaryMissingError,
     BrowserBusyError,
+    BrowserDowngradeError,
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
     CredentialsNotFoundError,
@@ -183,6 +184,14 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     elif isinstance(exception, BrowserBinaryMissingError):
         logger.warning("Browser binary missing%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
+
+    # Diagnostics-free, following BrowserBusyError. A browser refusing a profile
+    # a newer one wrote is the guard doing its job, and the message already
+    # names both versions and the two ways out. Appending an issue template
+    # would send users to the tracker for something working as intended.
+    elif isinstance(exception, BrowserDowngradeError):
+        logger.warning("Browser older than the profile%s: %s", ctx, exception)
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, SessionExpiredError):

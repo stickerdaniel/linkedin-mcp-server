@@ -37,6 +37,7 @@ from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.exceptions import (
     BrowserBusyError,
+    BrowserDowngradeError,
     BrowserShutdownUnconfirmedError,
     ProfileRootRefusedError,
 )
@@ -715,10 +716,20 @@ async def _create_browser_locked() -> BrowserManager:
             _browser = browser
             _browser_cookie_export_path = None
             return _browser
-        except AuthenticationError:
+        except (AuthenticationError, BrowserDowngradeError) as exc:
+            # A downgrade belongs here and nowhere else. On the *source* profile
+            # it has to reach the user, because that directory holds the session
+            # and throwing it away to satisfy an old browser is the damage, not
+            # the repair. A derived runtime profile is the opposite: it is
+            # rebuilt from the source cookies on demand, and the re-bridge below
+            # deletes it first, so the older browser gets a directory it wrote
+            # itself. Reachable whenever a container image moves backwards with
+            # EXPERIMENTAL_PERSIST_DERIVED_RUNTIME set.
             logger.warning(
-                "Derived runtime profile auth failed for %s; re-bridging from source cookies",
+                "Derived runtime profile is unusable for %s (%s); re-bridging "
+                "from source cookies",
                 current_runtime_id,
+                type(exc).__name__,
             )
 
     if force_bridge:

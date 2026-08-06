@@ -21,7 +21,11 @@ from linkedin_mcp_server.common_utils import (
     secure_write_text,
 )
 
-from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
+from linkedin_mcp_server.browser_downgrade import refuse_a_downgrade
+from linkedin_mcp_server.exceptions import (
+    BrowserDowngradeError,
+    BrowserShutdownUnconfirmedError,
+)
 from linkedin_mcp_server.hidden_target import (
     attaching_to_other_targets,
     hidden_target_is_supported,
@@ -173,6 +177,41 @@ class BrowserManager:
             return {"viewport": self.viewport or {"width": 1280, "height": 720}}
         return {"no_viewport": True}
 
+    def _executable_about_to_run(self) -> str | None:
+        """The binary this launch will use, or None if it cannot be named.
+
+        An explicit ``executable_path`` is the operator's own choice and wins,
+        exactly as it does inside Playwright (``_prepareToLaunch``). Otherwise
+        the registry answers, and with ``channel="chromium"`` set by
+        ``build_launch_options`` that is the same full Chrome for Testing in
+        both modes: ``getExecutableName()`` returns the channel unchanged
+        before it ever reaches the headless/shell split, and
+        ``executablePath()`` looks up the same registry entry. (Not via
+        ``isChromiumAlias``, which holds only ``chrome-for-testing``.)
+
+        None on anything unexpected, deliberately. Not being able to name the
+        binary says nothing about whether it is older than the profile, and the
+        launch that follows reports a missing browser far better than a guard
+        pretending to know one is there.
+        """
+        custom = self.launch_options.get("executable_path")
+        if custom:
+            return str(custom)
+        playwright = self._playwright
+        if playwright is None:
+            return None
+        try:
+            registry_path = playwright.chromium.executable_path
+        except Exception as exc:
+            logger.debug("Could not resolve the browser executable: %s", exc)
+            return None
+        # The registry answers with `... || ""` when nothing is installed, and
+        # an empty string is not a name. Passed on it would buy a doomed
+        # `subprocess.run(["", "--version"])` and then a warning naming no
+        # binary at all. The launch below is what reports a missing browser,
+        # and it says so with the path.
+        return str(registry_path) if registry_path else None
+
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
         if self._context is not None:
@@ -190,6 +229,19 @@ class BrowserManager:
                     self._playwright = await async_playwright().start()
             else:
                 self._playwright = await async_playwright().start()
+
+            # Before the profile directory is so much as created, and long
+            # before it is opened. The driver had to start first, because only
+            # it can say which binary the registry will hand this launch, but
+            # nothing beyond that has happened yet -- a refusal here leaves the
+            # profile exactly as it was found, which is the whole point of
+            # refusing. Off the event loop: asking a binary for its version
+            # spawns a process and waits ~35 ms for it.
+            await asyncio.to_thread(
+                refuse_a_downgrade,
+                Path(self.user_data_dir),
+                self._executable_about_to_run(),
+            )
 
             secure_mkdir(Path(self.user_data_dir))
             harden_linkedin_tree(Path(self.user_data_dir))
@@ -335,7 +387,27 @@ class BrowserManager:
             # real (a tool timeout racing server shutdown), and a second one
             # landing on the shield would discard the very result that decides
             # whether the profile may be handed on.
-            if not await _await_deferring_cancels(self.close()):
+            closed = await _await_deferring_cancels(self.close())
+            if isinstance(e, BrowserDowngradeError):
+                # Through untouched, and ahead of the shutdown check rather than
+                # after it. Both wrappings below carry a recovery that would
+                # make this worse: `NetworkError` is read downstream as a
+                # missing binary and reinstalls the same old revision, and the
+                # auth path rotates the profile away, destroying an intact
+                # session whose only fault is being newer than the browser
+                # asking for it.
+                #
+                # `BrowserShutdownUnconfirmedError` would be the third, and it
+                # is the reason for the ordering. This refusal happens before
+                # `launch_persistent_context`, so no Chromium ever existed and
+                # nothing can be holding the profile -- only the driver process
+                # is up. Yet a driver that misses its 10 s stop would replace an
+                # actionable message with a generic one *and* leave the caller
+                # marking the profile busy for the rest of this process's life,
+                # over a profile that was never opened. The close still runs;
+                # only its verdict is set aside, and only here.
+                raise
+            if not closed:
                 raise BrowserShutdownUnconfirmedError(
                     "The browser failed to start and did not shut down cleanly, "
                     "so the profile is kept. Restart the server to recover."
