@@ -83,6 +83,7 @@ _SECTION_CONTEXTS = {
     "job_posting": "job posting",
     "inbox": "inbox",
     "conversation": "conversation",
+    "notifications": "notification",
 }
 
 _DEFAULT_REFERENCE_CAP = 12
@@ -101,6 +102,9 @@ _REFERENCE_CAPS = {
     "contact_info": 8,
     "inbox": 30,
     "conversation": 12,
+    # Notification cards each carry an actor plus (often) a target entity;
+    # keep the cap proportional to the 50-notification tool ceiling.
+    "notifications": 50,
     # Headroom for get_feed's num_posts ceiling (Field(ge=1, le=50)).
     # Kept in sync with the literal cap=50 in extractor._build_feed_references
     # where SDUI-derived /posts/<slug> permalinks are appended.
