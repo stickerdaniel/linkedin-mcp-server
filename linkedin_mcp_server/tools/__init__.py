@@ -11,7 +11,7 @@ Available Tools:
 - Company tools: Company profile and information extraction
 - Job tools: Job posting details and search functionality
 - Messaging tools: Inbox, conversations, search, and sending messages
-- Feed tools: Home feed scraping
+- Feed tools: Home feed and notifications scraping
 - Post tools: Global post/content search
 
 Architecture:
