@@ -429,6 +429,14 @@ async def _run_browser_setup() -> None:
     against 263 MiB for anyone who previously ended up needing the full browser,
     and against 92 MiB for the default headless user who only ever fetched the
     shell. The second comparison is the one users will notice.
+
+    Those three figures are one revision's *and one platform's*, not a
+    constant. The bundled browser moves with the lockfile and is past 148 now,
+    and the sizes differ by platform as well: the arm64 container does not get
+    Chrome for Testing at all, it gets Playwright's own Chromium build. What
+    the argument needs is only that the full browser is substantially larger
+    than the shell everywhere, which holds; quoting these particular numbers
+    anywhere user-facing means re-measuring them for the platform in question.
     """
     browser_dir = configure_browser_environment()
     secure_mkdir(browser_dir)
@@ -458,10 +466,10 @@ def ensure_browser_installed() -> None:
     configure_browser_environment()
     # An operator-supplied executable is the one that gets launched, so the
     # managed browser would be downloaded and never run. That was survivable
-    # while two of these three modes needed only the 92 MiB shell; now they all
-    # want the full browser, so it is 170 MiB spent on nothing -- and for
-    # someone whose network cannot reach the CDN, it is the difference between
-    # signing in and not.
+    # while two of these three modes needed only the much smaller shell; now
+    # they all want the full browser, so it is the whole download spent on
+    # nothing -- and for someone whose network cannot reach the CDN, it is the
+    # difference between signing in and not.
     if _uses_custom_chrome():
         return
     if browser_ready():

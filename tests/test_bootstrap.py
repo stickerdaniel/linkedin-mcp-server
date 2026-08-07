@@ -746,11 +746,11 @@ class TestEnsureBrowserInstalledSkipsCustomChrome:
     """A custom executable must not trigger a managed download.
 
     The gap this closes was survivable while two of the three CLI modes needed
-    only the 92 MiB shell. Now they all want the full browser, so it is 170 MiB
-    fetched for something that is never launched -- and for an operator whose
-    network cannot reach the CDN, it is the difference between signing in and
-    not. `_uses_custom_chrome()` already existed and said so in its docstring;
-    only this caller never asked.
+    only the much smaller shell. Now they all want the full browser, so it is
+    the whole download fetched for something that is never launched -- and for
+    an operator whose network cannot reach the CDN, it is the difference
+    between signing in and not. `_uses_custom_chrome()` already existed and
+    said so in its docstring; only this caller never asked.
     """
 
     def test_custom_chrome_skips_the_download(self, isolate_profile_dir, monkeypatch):

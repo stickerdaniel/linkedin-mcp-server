@@ -147,6 +147,46 @@ Network layer, same machine:
 The TLS handshakes differ by one extension. That is invisible to every
 JavaScript test above and cannot be influenced by any launch option.
 
+### Re-measured on Chrome for Testing 149
+
+The windowless-mode table near the top of this section is stamped at patchright
+1.60.1. When the lock moved to 1.61.2 (macOS bundles Chrome for Testing
+149.0.7827.55; the arm64 Linux image bundles Playwright's own Chromium build at
+the same revision, which is why the product names differ by platform), those
+identity properties were taken again through `BrowserManager` on macOS.
+
+Against a loopback origin rather than `about:blank`: `navigator.userAgentData`
+needs a secure context, and `about:blank` is not one, so a probe there measures
+nothing. Verified rather than assumed — `about:blank` reports
+`isSecureContext: false` and `userAgentData: undefined`, loopback reports
+`true` and an object.
+
+| | Value on 149 |
+|---|---|
+| User agent | `…Chrome/149.0.0.0…`, no `HeadlessChrome` |
+| `sec-ch-ua` brands | `Chromium/149`, `Not)A;Brand/24`, major agreeing with the UA |
+| High-entropy hints | `arm`, `64`, two `fullVersionList` entries |
+| `navigator.webdriver` | `false` |
+| `document.visibilityState` / `hasFocus()` | `visible` / `true` |
+| Outer window vs screen | 1280x720 on 1280x720, so it fits, but see below |
+| `navigator.plugins.length` / `window.chrome` | 5 / `object` |
+| `Notification.permission` | `default` |
+| `requestAnimationFrame` | 122/s, matching the 148 figure |
+
+The geometry row is not a clean result. `outerWidth == screen.width` is the
+open item recorded above: it fits, which is all the coherence bar asks, but no
+real window reports it, and 149 did not change that either way.
+
+Not re-measured on 149: the CreepJS and fpscanner scores, the JA4 and HTTP/2
+fingerprints, the startup-flash timing, and the cookie-across-restart check.
+Those rows stay 148 measurements and are labelled as such rather than assumed
+to carry over.
+
+"Window on screen once settled" is not in that list and not in the table
+either, because it is implied rather than skipped: the windowless path fails
+closed, so a run that produced these values had a hidden target and no window.
+That is an inference, not a CoreGraphics poll like the 148 row was.
+
 ## Things that look like fixes and are not
 
 - **`--user-agent` as a browser switch.** Reaches every target including
