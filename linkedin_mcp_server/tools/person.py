@@ -114,6 +114,7 @@ def register_person_tools(
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 1,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -134,9 +135,17 @@ def register_person_tools(
                 exposed under references["about"]. For company-wide employee
                 demographics (location/education/function breakdown) plus a
                 slug-based lookup, use get_company_employees instead.
+            max_pages: Number of result pages to load, 1-10 (default 1).
+                LinkedIn returns 10 people per page, so max_pages=10 yields up
+                to 100. Pagination stops early once a page adds no new people.
+                Raise this when you need more than a top-10 sample -- e.g.
+                enumerating 1st-degree connections in a region with
+                network=["F"].
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
+            Pages are joined by a "---" line in the raw text; references are
+            deduplicated by URL across pages.
             The LLM should parse the raw text to extract individual people and their profiles.
         """
         try:
@@ -144,11 +153,13 @@ def register_person_tools(
                 ctx, tool_name="search_people"
             )
             logger.info(
-                "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
+                "Searching people: keywords='%s', location='%s', network=%s, "
+                "current_company='%s', max_pages=%d",
                 keywords,
                 location,
                 network,
                 current_company,
+                max_pages,
             )
 
             await ctx.report_progress(
@@ -161,6 +172,7 @@ def register_person_tools(
                     location,
                     network=network,
                     current_company=current_company,
+                    max_pages=max_pages,
                 )
             except FilterValidationError as e:
                 # Validation messages carry actionable detail; surface

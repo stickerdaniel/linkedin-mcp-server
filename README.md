@@ -51,7 +51,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter | working |
 | `search_jobs` | Search for jobs with keywords and location filters | working |
 | `get_saved_jobs` | List job postings saved by the authenticated user | working |
-| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | [#526](https://github.com/stickerdaniel/linkedin-mcp-server/issues/526) |
+| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company, with `max_pages` pagination (1-10, 10 people per page) | working |
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) | working |

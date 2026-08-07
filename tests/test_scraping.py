@@ -3118,6 +3118,93 @@ class TestSearchPeople:
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
 
 
+class TestSearchPeoplePagination:
+    """``max_pages`` walks LinkedIn's ``&page=N`` facet (issue #526)."""
+
+    @staticmethod
+    def _page(n: int) -> ExtractedSection:
+        """One results page holding a single, page-unique person."""
+        return extracted(
+            f"Person {n}",
+            [{"kind": "person", "url": f"/in/person{n}/", "text": f"Person {n}"}],
+        )
+
+    async def test_default_fetches_only_first_page(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            side_effect=[self._page(1), self._page(2)],
+        ) as fetch:
+            result = await extractor.search_people("engineer")
+
+        assert fetch.await_count == 1
+        assert "&page=" not in fetch.await_args_list[0].args[0]
+        assert result["sections"]["search_results"] == "Person 1"
+
+    async def test_pages_are_joined_and_references_merged(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            side_effect=[self._page(1), self._page(2), self._page(3)],
+        ) as fetch:
+            with patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep"):
+                result = await extractor.search_people("engineer", max_pages=3)
+
+        assert fetch.await_count == 3
+        urls = [call.args[0] for call in fetch.await_args_list]
+        assert "&page=" not in urls[0]
+        assert urls[1].endswith("&page=2")
+        assert urls[2].endswith("&page=3")
+        assert (
+            result["sections"]["search_results"]
+            == "Person 1\n---\nPerson 2\n---\nPerson 3"
+        )
+        assert [r["url"] for r in result["references"]["search_results"]] == [
+            "/in/person1/",
+            "/in/person2/",
+            "/in/person3/",
+        ]
+        # Paged results collapse onto the unpaged URL, so the caller can rerun it.
+        assert "&page=" not in result["url"]
+
+    async def test_stops_when_a_page_repeats_people(self, mock_page):
+        """Running past the last page re-serves it; stop instead of looping."""
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            side_effect=[self._page(1), self._page(1), self._page(3)],
+        ) as fetch:
+            with patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep"):
+                result = await extractor.search_people("engineer", max_pages=10)
+
+        assert fetch.await_count == 2
+        # The repeated page is kept -- it is real text, just not new people.
+        assert result["sections"]["search_results"] == "Person 1\n---\nPerson 1"
+        assert [r["url"] for r in result["references"]["search_results"]] == [
+            "/in/person1/"
+        ]
+
+    async def test_rate_limit_midway_keeps_earlier_pages(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            side_effect=[self._page(1), extracted(_RATE_LIMITED_MSG)],
+        ):
+            with patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep"):
+                result = await extractor.search_people("engineer", max_pages=5)
+
+        assert result["sections"]["search_results"] == "Person 1"
+        assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
+
+
 class TestBuildContentSearchUrl:
     """Tests for _build_content_search_url URL construction."""
 
