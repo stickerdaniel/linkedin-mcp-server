@@ -93,6 +93,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   written by a fork is therefore still refused; that one is not repairable from
   `Last Version`, and the error says so by naming the number to go back to
   rather than a browser.
+- **Never trim `_COMPARABLE_PRODUCTS` to one name.** At the current lock two
+  are live at once, on the same release: Playwright downloads its own Chromium
+  build for Linux arm64 and Chrome for Testing everywhere else, so the
+  published arm64 container reports `Chromium` while the amd64 one and macOS
+  report `Google Chrome for Testing`, at the same revision. Dropping either
+  entry turns the guard off for a shipped platform. That is the split *at the
+  lock* and it does not hold across the whole supported range: at the declared
+  floor every platform reports `Chromium`, and revision 1200 moved macOS and
+  Linux x64 together, leaving only Linux arm64 behind. Which is the point:
+  both managed names occur, and which one where depends on when and where, so
+  neither is redundant. The third entry, `google chrome`, is not a managed
+  browser at all but what an operator's own binary reports under `CHROME_PATH`,
+  and it earns its place only when *that* Chrome is the older one: the guard
+  reads the running binary, never the profile's writer. `browsers.json` is not
+  evidence here: its `title` key dates from patchright 1.58.0 and omits the
+  `Google` the binary prints. See `_COMPARABLE_PRODUCTS` for the measurements.
 
 ## Tool Return Format
 

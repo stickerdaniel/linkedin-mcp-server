@@ -207,6 +207,33 @@ class TestWhichProductsCompare:
     def test_the_chrome_family_compares(self, product):
         assert is_comparable(product) is True
 
+    def test_an_operators_own_chrome_is_refused_when_it_is_the_older_one(
+        self, tmp_path
+    ):
+        """The only direction in which the `google chrome` entry does any work.
+
+        The obvious case for it -- a profile written by an auto-updating Chrome
+        and then opened by the bundled browser -- does not need it: the guard
+        reads the *running* binary, never the profile's writer, so the two
+        managed names carry that one. What needs it is the reverse, a
+        `CHROME_PATH` at a real Chrome that is itself behind the profile.
+
+        Without this test the entry looks removable: every other assertion here
+        passes with `google chrome` dropped from the set, and the launch it
+        protects would then be waved through with an info-level line nobody
+        sees at the default level.
+        """
+        profile = _profile_last_opened_by(tmp_path, "151.0.7922.76")
+
+        with mock.patch(
+            "linkedin_mcp_server.browser_downgrade.version_of",
+            return_value=BrowserBuild("Google Chrome", (149, 0, 7827, 55)),
+        ):
+            with pytest.raises(BrowserDowngradeError) as raised:
+                refuse_a_downgrade(profile, "/Applications/Google Chrome.app")
+
+        assert raised.value.browser_product == "Google Chrome"
+
     @pytest.mark.parametrize(
         "product",
         [

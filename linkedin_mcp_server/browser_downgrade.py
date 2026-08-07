@@ -94,10 +94,98 @@ _VERSION = re.compile(r"(?:^|(?<=\s))\d+(?:\.\d+){2,}")
 #: whichever browser produced that number again, which is the way out.
 #:
 #: An unrecognised name costs the guard, never a false refusal, which is the
-#: right direction to be wrong in. Measured strings behind each entry:
-#: `Chromium 148.0.7778.0` (the Linux image, full browser and headless shell
-#: alike), `Google Chrome 150.0.7871.189`, `Google Chrome for Testing
-#: 148.0.7778.96` (the bundled browser *and* the headless shell on macOS).
+#: right direction to be wrong in.
+#:
+#: **Two of these entries are needed at the same time, on the same release, and
+#: the axis is the platform rather than the version.** Playwright downloads
+#: Chrome for Testing for most targets but its own Chromium build for Linux
+#: arm64, and the two binaries name themselves differently. From the driver's
+#: own `DOWNLOAD_PATHS` at the current lock:
+#:
+#: * every supported `ubuntu*-arm64` and `debian*-arm64` ->
+#:   `chromium-linux-arm64.zip`, which unpacks to `chrome-linux/` and reports
+#:   `Chromium`
+#: * Linux x64, every macOS, and `win64` -> `cftUrl(...)`, which unpacks to
+#:   `chrome-linux64/` or `Google Chrome for Testing.app` and reports `Google
+#:   Chrome for Testing`
+#:
+#: (`ubuntu18.04-*` is `void 0` in that table on both branches: patchright will
+#: not install there at all, so it names nothing.)
+#:
+#: Both container architectures are published, so both names are in the field
+#: on any given release. Dropping either entry as redundant would silently turn
+#: the guard off for a shipped platform, which is the mistake this paragraph
+#: exists to prevent.
+#:
+#: There is a version axis underneath as well, and it is the smaller one.
+#: Revision 1200 (patchright 1.57.0) moved macOS *and* Linux x64 to Chrome for
+#: Testing together; only Linux arm64 stayed on Playwright's own build, and
+#: that is the split that survives to the lock. Read it off `EXECUTABLE_PATHS`
+#: rather than the download table: at 1.57.0 `linux-x64` is
+#: `["chrome-linux64", "chrome"]` while `linux-arm64` is still
+#: `["chrome-linux", "chrome"]`, carrying the driver's own `// non-cft build`
+#: comment.
+#:
+#: Two separate events are easy to conflate here, and conflating them is how
+#: the first version of this paragraph got the story wrong: *what* is packaged
+#: changed at revision 1200, while *where it is fetched from* changed at
+#: patchright 1.58.0, when `cftUrl(...)` first appears. That second move is not
+#: a move to Google: `cftUrl` points at Playwright's own CDN in both eras,
+#: `cdn.playwright.dev/chrome-for-testing-public/<version>/...` at 1.58.0 and
+#: `cdn.playwright.dev/builds/cft/<version>/...` at the lock. Nothing here ever
+#: fetches from `storage.googleapis.com`.
+#:
+#: For anyone allowlisting egress, one host is not the whole answer. Every
+#: plain `builds/...` entry goes through `PLAYWRIGHT_CDN_MIRRORS`, three hosts
+#: tried in order: `cdn.playwright.dev/dbazure/download/playwright`,
+#: `playwright.download.prss.microsoft.com/dbazure/download/playwright`, then
+#: `cdn.playwright.dev`. That covers the arm64 image's browser, and ffmpeg on
+#: *every* platform, since `patchright install chromium` resolves that too and
+#: its entries are plain templates. Where `cftUrl` entries exist they are the
+#: other shape:
+#: one host, `cdn.playwright.dev`, and no fallback at all. Allowing only
+#: `cdn.playwright.dev` therefore installs everything, because two of the three
+#: mirrors are on it; what is lost is the Microsoft-hosted fallback, so the gap
+#: shows up only when the primary CDN is degraded.
+#:
+#: At the floor every target still reads from `builds/chromium/`, which says
+#: nothing about which browser is inside. Binaries run directly: revision
+#: 1194 ->
+#: `Chromium 141.0.7390.37`, revision 1200 -> `Google Chrome for Testing
+#: 143.0.7499.4`, and revisions 1217, 1223 and 1228 -> `Google Chrome for
+#: Testing`, all on macOS arm64. On Linux arm64 the container reported
+#: `Chromium 148.0.7778.0` at revision 1223 -- the same revision that reports
+#: `Google Chrome for Testing 148.0.7778.96` on macOS. One revision, two names,
+#: decided by the platform: that pair is the clearest statement of the rule.
+#:
+#: The other platforms, measured under Docker rather than reasoned about, since
+#: reasoning is what got this paragraph wrong the first time. At the floor
+#: (revision 1187) linux-x64 and linux-arm64 both report `Chromium
+#: 140.0.7339.16`, exactly as macOS does -- so at the floor there is no
+#: platform split at all. At the lock (revision 1228) linux-x64 reports `Google
+#: Chrome for Testing 149.0.7827.55` while linux-arm64 reports `Chromium
+#: 149.0.7827.0`, note the differing final component. Windows never answers:
+#: :func:`a_version_can_be_asked_for` refuses before any binary is asked.
+#:
+#: The third entry is not a managed browser at all. `Google Chrome
+#: 150.0.7871.189` is what an operator's own binary reports when `CHROME_PATH`
+#: points at real Chrome.
+#:
+#: Note carefully which direction needs it, because the obvious one does not.
+#: :func:`is_comparable` is only ever asked about the *running* binary, never
+#: about whatever wrote the profile -- `Last Version` records no product to ask
+#: about. So the familiar case, a Chrome-written profile opened by the bundled
+#: browser, is carried by the two managed names and would still be refused with
+#: this entry gone. What needs it is the reverse: `CHROME_PATH` at a real
+#: Chrome that is itself the older binary, against a profile a newer Chrome or
+#: the bundled Chrome for Testing already wrote. Drop the entry and that launch
+#: stops being checked at all, silently.
+#:
+#: Do not infer any of this from `browsers.json`. Its `title` key did not exist
+#: before patchright 1.58.0, and where it does exist it reads `Chrome for
+#: Testing` without the `Google` the binary prints. It says which family a
+#: build belongs to and nothing about the string matched here.
+#:
 #: Distribution and snap builds put the build host after the number, and the
 #: beta and dev channels put the channel there, so all of those still read as
 #: `Chromium` or `Google Chrome`.
