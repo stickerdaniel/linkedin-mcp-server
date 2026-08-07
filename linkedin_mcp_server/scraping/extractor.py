@@ -196,6 +196,125 @@ _MESSAGING_CLOSE_SELECTOR = (
     'button[aria-label*="Close"]'
 )
 
+# Shared by baseline counting and post-send polling so both paths always use
+# identical visibility and editable-ancestor rules.
+_MESSAGE_CONFIRMATION_RETRY_TIMEOUT_MS = 5_000
+_PROFILE_INFO_SHARE_PROMPT_LOCALES = {
+    "de": {
+        "prompts": (
+            "profilinformationen teilen",
+            "profil teilen",
+            "kontaktdaten teilen",
+        ),
+        "negative_actions": (
+            "nicht teilen",
+            "jetzt nicht",
+            "überspringen",
+            "nein, danke",
+        ),
+    },
+    "en": {
+        "prompts": (
+            "profile information",
+            "share profile",
+            "share your profile",
+            "share your contact",
+        ),
+        "negative_actions": (
+            "don't share",
+            "do not share",
+            "not now",
+            "skip",
+            "no, thanks",
+        ),
+    },
+    "es": {
+        "prompts": (
+            "compartir la información del perfil",
+            "compartir tu perfil",
+            "compartir tus datos de contacto",
+        ),
+        "negative_actions": (
+            "no compartir",
+            "ahora no",
+            "omitir",
+            "no, gracias",
+        ),
+    },
+    "fr": {
+        "prompts": (
+            "partager les informations du profil",
+            "partager votre profil",
+            "partager vos coordonnées",
+        ),
+        "negative_actions": (
+            "ne pas partager",
+            "pas maintenant",
+            "ignorer",
+            "non merci",
+        ),
+    },
+    "pl": {
+        "prompts": (
+            "udostępn",
+            "informacje profil",
+        ),
+        "negative_actions": (
+            "nie udostępniaj",
+            "nie teraz",
+            "pomiń",
+            "odrzuć",
+        ),
+    },
+    "pt": {
+        "prompts": (
+            "compartilhar informações do perfil",
+            "compartilhar seu perfil",
+            "compartilhar suas informações de contato",
+        ),
+        "negative_actions": (
+            "não compartilhar",
+            "agora não",
+            "pular",
+            "não, obrigado",
+            "não, obrigada",
+        ),
+    },
+}
+_MESSAGE_TEXT_OCCURRENCES_OUTSIDE_COMPOSER_JS = r"""({ expected, afterCount }) => {
+    const normalize = value =>
+        (value || '').replace(/\s+/g, ' ').trim();
+    const target = normalize(expected);
+    if (!target) return afterCount === null ? 0 : false;
+    const root = document.querySelector('main') || document.body;
+    if (!root) return afterCount === null ? 0 : false;
+    const walker = document.createTreeWalker(
+        root,
+        NodeFilter.SHOW_TEXT,
+        {
+            acceptNode: node => {
+                const parent = node.parentElement;
+                if (!parent) return NodeFilter.FILTER_REJECT;
+                if (parent.closest('[contenteditable="true"], [role="textbox"]')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                if (!(parent.offsetWidth || parent.offsetHeight || parent.getClientRects().length)) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            },
+        }
+    );
+    let count = 0;
+    let node;
+    while ((node = walker.nextNode())) {
+        if (normalize(node.nodeValue || '').includes(target)) {
+            count++;
+        }
+    }
+    return afterCount === null ? count : count > afterCount;
+}"""
+
 # Shared JS function that walks up from any /messaging/compose/ anchor
 # inside <main> to find the smallest ancestor that satisfies the
 # action-root predicate (>=2 interactive children, >=1 button). This is
@@ -2739,23 +2858,111 @@ class LinkedInExtractor:
         )
         return bool(matched)
 
-    async def _message_text_visible(self, message: str) -> bool:
-        """Wait until the compose page visibly contains the just-sent message text.
+    async def _message_text_occurrences_outside_composer(self, message: str) -> int:
+        """Count visible message text occurrences outside editable compose boxes."""
+        return int(
+            await self._page.evaluate(
+                _MESSAGE_TEXT_OCCURRENCES_OUTSIDE_COMPOSER_JS,
+                {"expected": message, "afterCount": None},
+            )
+        )
 
-        Uses the page-level default timeout (``BrowserConfig.default_timeout``).
-        """
+    async def _message_text_visible_outside_composer(
+        self,
+        message: str,
+        *,
+        after_count: int = 0,
+        timeout_ms: float | None = None,
+    ) -> bool:
+        """Wait until message text gains a non-composer occurrence."""
+        wait_options: dict[str, Any] = {
+            "arg": {"expected": message, "afterCount": after_count}
+        }
+        if timeout_ms is not None:
+            wait_options["timeout"] = timeout_ms
         try:
             await self._page.wait_for_function(
-                """({ expected }) => {
-                    const normalize = value =>
-                        (value || '').replace(/\\s+/g, ' ').trim();
-                    const bodyText = normalize(document.body?.innerText || '');
-                    return bodyText.includes(normalize(expected));
-                }""",
-                arg={"expected": message},
+                _MESSAGE_TEXT_OCCURRENCES_OUTSIDE_COMPOSER_JS,
+                **wait_options,
             )
             return True
         except PlaywrightTimeoutError:
+            return False
+
+    async def _handle_profile_info_share_prompt(self) -> bool:
+        """Dismiss LinkedIn's optional profile-info sharing prompt after Send.
+
+        Some InMail/message sends show a post-click dialog asking whether to
+        share profile/contact information with the recipient. If the operator
+        has already approved the exact message text, the safe/default action is
+        to send the message without sharing extra profile information.
+
+        DOM dependency: LinkedIn exposes this as a transient modal without a
+        stable URL or data attribute, so text matching is the only practical
+        signal. Matching is selected from an explicit per-locale table using
+        the document language; unsupported locales are left untouched.
+        """
+        try:
+            handled = await self._page.evaluate(
+                r"""({ localeTable }) => {
+                    const visible = el => !!(
+                        el &&
+                        (el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+                    );
+                    const norm = value => (value || '')
+                        .replace(/\s+/g, ' ')
+                        .trim()
+                        .toLowerCase();
+
+                    const language = norm(document.documentElement.lang || 'en')
+                        .split('-')[0];
+                    const locale = localeTable[language];
+                    if (!locale) return false;
+                    const promptNeedles = locale.prompts.map(norm);
+                    const negativeButtonNeedles = locale.negative_actions.map(norm);
+
+                    const dialogSelectors = [
+                        'dialog[open]',
+                        '[role="dialog"]',
+                        '[aria-modal="true"]',
+                    ];
+                    const dialogs = [...new Set(
+                        dialogSelectors.flatMap(sel => [...document.querySelectorAll(sel)])
+                    )].filter(visible);
+
+                    for (const dialog of dialogs) {
+                        const dialogText = norm(dialog.innerText || dialog.textContent || '');
+                        if (!promptNeedles.some(needle => dialogText.includes(needle))) {
+                            continue;
+                        }
+                        const buttons = [...dialog.querySelectorAll('button, [role="button"]')]
+                            .filter(visible);
+                        const negative = buttons.find(button => {
+                            const text = norm(
+                                (button.innerText || button.textContent || '') + ' ' +
+                                (button.getAttribute('aria-label') || '')
+                            );
+                            return negativeButtonNeedles.some(needle => text.includes(needle));
+                        });
+                        if (!negative) {
+                            return false;
+                        }
+                        negative.click();
+                        return true;
+                    }
+                    return false;
+                }""",
+                {"localeTable": _PROFILE_INFO_SHARE_PROMPT_LOCALES},
+            )
+            if handled:
+                await asyncio.sleep(1.0)
+                logger.debug("Dismissed LinkedIn profile-info sharing prompt")
+            return bool(handled)
+        except Exception:
+            logger.debug(
+                "Could not handle LinkedIn profile-info sharing prompt",
+                exc_info=True,
+            )
             return False
 
     async def _dismiss_message_ui(self) -> None:
@@ -4085,6 +4292,127 @@ class LinkedInExtractor:
             references=references,
         )
 
+    async def _send_current_message_surface(
+        self,
+        message: str,
+        *,
+        confirm_send: bool,
+        recipient_selected: bool = True,
+    ) -> dict[str, Any]:
+        """Type and send a message on the currently-open LinkedIn composer."""
+        compose_box = await self._resolve_message_compose_box()
+        if compose_box is None:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "composer_unavailable",
+                "LinkedIn did not expose a usable message composer.",
+                recipient_selected=recipient_selected,
+            )
+
+        if not confirm_send:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "confirmation_required",
+                "Set confirm_send=true to send the message.",
+                recipient_selected=recipient_selected,
+            )
+
+        pre_send_count = await self._message_text_occurrences_outside_composer(message)
+
+        # patchright actionability can block normal locator.click()/type flows on
+        # LinkedIn's composer. Evaluating on the resolved locator scopes the
+        # focus step to the composer selected above without relying on global
+        # document order.
+        focused = await compose_box.evaluate(
+            """el => {
+                el.focus();
+                return document.activeElement === el || el.contains(document.activeElement);
+            }"""
+        )
+        if not focused:
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "compose_interact_failed",
+                "Could not focus compose box via JavaScript.",
+                recipient_selected=recipient_selected,
+            )
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(message, delay=15)
+        await asyncio.sleep(0.3)
+
+        await asyncio.sleep(1.0)
+        sent_via_js = await self._page.evaluate(
+            """() => {
+                const visible = el => !!(
+                    el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+                );
+                const textbox = document.activeElement?.closest(
+                    '[contenteditable="true"], [role="textbox"]'
+                );
+                if (!textbox) return false;
+                const sendSelector = [
+                    'button[type="submit"]',
+                    'button[data-control-name="send"]',
+                ].join(',');
+                let scope = textbox;
+                while (scope && scope !== document.body) {
+                    const btn = Array.from(scope.querySelectorAll(sendSelector))
+                        .find(b => !b.disabled && visible(b));
+                    if (btn) {
+                        btn.click();
+                        return true;
+                    }
+                    scope = scope.parentElement;
+                }
+                return false;
+            }"""
+        )
+        if not sent_via_js:
+            await self._page.keyboard.press("Enter")
+
+        # Give LinkedIn time to either clear the composer, mount its optional
+        # profile-info sharing prompt, or render the outbound message. Without
+        # this pause a generic body-text check can see the still-typed composer
+        # text and falsely report sent=true before the click is processed.
+        await asyncio.sleep(1.5)
+        await self._handle_profile_info_share_prompt()
+
+        if not await self._message_text_visible_outside_composer(
+            message,
+            after_count=pre_send_count,
+        ):
+            if await self._handle_profile_info_share_prompt():
+                if await self._message_text_visible_outside_composer(
+                    message,
+                    after_count=pre_send_count,
+                    timeout_ms=_MESSAGE_CONFIRMATION_RETRY_TIMEOUT_MS,
+                ):
+                    return self._message_action_result(
+                        self._page.url,
+                        "sent",
+                        "Message sent.",
+                        recipient_selected=recipient_selected,
+                        sent=True,
+                    )
+            await self._dismiss_message_ui()
+            return self._message_action_result(
+                self._page.url,
+                "send_unavailable",
+                "LinkedIn did not confirm that the message was sent.",
+                recipient_selected=recipient_selected,
+            )
+
+        return self._message_action_result(
+            self._page.url,
+            "sent",
+            "Message sent.",
+            recipient_selected=recipient_selected,
+            sent=True,
+        )
+
     async def send_message(
         self,
         linkedin_username: str,
@@ -4209,85 +4537,10 @@ class LinkedInExtractor:
             )
         recipient_selected = True
 
-        if not confirm_send:
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "confirmation_required",
-                "Set confirm_send=true to send the message.",
-                recipient_selected=recipient_selected,
-            )
-
-        # patchright quirk: compose_box.click() and press_sequentially() use
-        # actionability checks internally and hit the same wait_for timeout.
-        # Instead: focus via page.evaluate() (no actionability check) and type
-        # via page.keyboard.type() which operates on the active element directly
-        # and fires the real keydown/input/keyup events React needs to enable Send.
-        #
-        # DOM dependency: innerText extraction is not applicable here — we need
-        # to call .focus() on the element reference, which requires querySelector.
-        # Selectors use only role + contenteditable + aria-label (ARIA attributes,
-        # not layout class names) so they are stable across LinkedIn UI changes.
-        focused = await self._page.evaluate(
-            """() => {
-                const el = document.querySelector(
-                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
-                    + 'div[role="textbox"][contenteditable="true"]'
-                );
-                if (!el) return false;
-                el.focus();
-                return true;
-            }"""
-        )
-        if not focused:
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "compose_interact_failed",
-                "Could not focus compose box via JavaScript.",
-                recipient_selected=recipient_selected,
-            )
-        await asyncio.sleep(0.1)
-        await self._page.keyboard.type(message, delay=15)
-        await asyncio.sleep(0.3)
-
-        # patchright actionability also blocks send_button.click(). Use JS click
-        # on any visible, enabled send button; fall back to Enter key which
-        # LinkedIn's composer also accepts for submission.
-        #
-        # DOM dependency: we need btn.click() on the element reference — not
-        # achievable via innerText or URL navigation. Selectors use only type,
-        # aria-label, and data attributes (no layout class names).
-        await asyncio.sleep(1.0)  # allow React to process keyboard input
-        sent_via_js = await self._page.evaluate(
-            """() => {
-                const btn = Array.from(document.querySelectorAll(
-                    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
-                    + 'button[data-control-name="send"]'
-                )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
-                if (!btn) return false;
-                btn.click();
-                return true;
-            }"""
-        )
-        if not sent_via_js:
-            await self._page.keyboard.press("Enter")
-
-        if not await self._message_text_visible(message):
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "send_unavailable",
-                "LinkedIn did not confirm that the message was sent.",
-                recipient_selected=recipient_selected,
-            )
-
-        return self._message_action_result(
-            self._page.url,
-            "sent",
-            "Message sent.",
+        return await self._send_current_message_surface(
+            message,
+            confirm_send=confirm_send,
             recipient_selected=recipient_selected,
-            sent=True,
         )
 
     async def _extract_root_content(
