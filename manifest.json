@@ -122,6 +122,18 @@
     {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
+    },
+    {
+      "name": "start_enrichment_job",
+      "description": "Create a resumable bulk profile-enrichment job from a list of usernames or profile URLs (queues only, visits nothing)"
+    },
+    {
+      "name": "run_enrichment_bunch",
+      "description": "Visit the next few profiles in an enrichment job with human-paced randomized delays, a rolling 24-hour action budget and working-hours limits; returns when to call it again"
+    },
+    {
+      "name": "get_enrichment_status",
+      "description": "Report progress and collected results for a bulk enrichment job, or list all jobs"
     }
   ],
   "user_config": {
