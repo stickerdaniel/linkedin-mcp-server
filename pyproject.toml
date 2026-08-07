@@ -3,7 +3,7 @@ name = "mcp-server-linkedin"
 version = "4.20.1"
 description = "MCP server that gives AI assistants like Claude access to LinkedIn profiles, companies, and job postings through the user's own browser session."
 readme = "README.md"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.14,<3.15"
 authors = [
     { name = "Daniel Sticker", email = "daniel@sticker.name" }
 ]
