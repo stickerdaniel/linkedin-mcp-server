@@ -204,6 +204,8 @@ while a container is running.
 
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - LinkedIn may show a captcha challenge during login. Run `uvx mcp-server-linkedin@latest --login` which opens a browser where you can solve it manually.
+- If Google rejects the managed browser as insecure, use direct LinkedIn email/password login in that browser and let `--login` exit cleanly, then run `--status` and follow any bridge/runtime guidance it reports.
+- If `--status` explicitly reports a valid session but MCP tools still return `Transport closed`, restart the MCP client session; the client transport may be stale even though LinkedIn authentication is valid.
 
 **Timeout issues:**
 
