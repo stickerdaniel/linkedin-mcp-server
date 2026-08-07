@@ -17,6 +17,7 @@ ReferenceKind = Literal[
     "school",
     "conversation",
     "external",
+    "image",
 ]
 
 
@@ -28,6 +29,15 @@ class Reference(TypedDict):
     text: NotRequired[str]
     context: NotRequired[str]
     value: NotRequired[str]
+
+
+class RawImage(TypedDict, total=False):
+    """Raw ``<img>`` data collected from the browser DOM."""
+
+    src: str
+    alt: str
+    width: int
+    height: int
 
 
 class RawReference(TypedDict, total=False):
@@ -498,3 +508,126 @@ def _is_linkedin_chrome(path: str) -> bool:
 
 def _is_linkedin_host(host: str) -> bool:
     return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
+# --- images -----------------------------------------------------------------
+
+# LinkedIn serves media from its CDN under a path naming both the kind of image
+# and its size variant, and a page renders its own subject from a larger variant
+# than anyone else:
+#
+#   /dms/image/v2/<id>/profile-displayphoto-shrink_800_800/...  the member
+#   /dms/image/v2/<id>/profile-displayphoto-shrink_100_100/...  someone else
+#   /dms/image/v2/<id>/company-logo_200_200/...                 the company
+#   /dms/image/v2/<id>/company-logo_100_100/...                 another company
+#   /dms/image/v2/<id>/profile-displaybackgroundimage-shrink...  the banner
+#   /dms/image/v2/<id>/feedshare-shrink_480/...                  a post
+#
+# The grammar is the whole signal. Rendered size is not usable: extraction runs
+# before LinkedIn lays the image out, so the subject's own image reports 0x0 as
+# often as not, and class names are hashed and change between deploys.
+_MEDIA_CDN = re.compile(r"^https://media\.licdn\.com/dms/image/", re.IGNORECASE)
+
+_SUBJECT_IMAGE = re.compile(
+    r"/(?P<kind>profile-displayphoto-(?:shrink|scale)|company-logo)_(\d+)_(\d+)/",
+    re.IGNORECASE,
+)
+
+# LinkedIn renders every non-subject from its 100px thumbnail — post authors,
+# mutual connections, suggested profiles, employer logos on a member page. Used
+# only to judge a candidate that has nothing to be compared against.
+_THUMBNAIL_VARIANT = 100
+
+_IMAGE_CONTEXT = {"company-logo": "company logo"}
+
+
+def _image_kind(match: re.Match[str]) -> str:
+    return "company-logo" if match.group("kind").lower() == "company-logo" else "photo"
+
+
+def build_image_references(
+    raw_images: list[RawImage],
+    section_name: str,
+) -> list[Reference]:
+    """Normalize raw ``<img>`` data into ``image`` references.
+
+    Kept separate from :func:`build_references` because an image is not an
+    anchor: there is no href to classify, and the signal is the CDN path rather
+    than a link target.
+
+    Only the subject of the page is returned — the member on a profile, the
+    company on a company page. It is identified *relative to the page* rather
+    than against a fixed size: the subject is the largest variant of its kind
+    present, and it must be strictly larger than the next one down.
+
+    At most one image per kind is returned, so a page yields the member's
+    photo and — where the page renders one larger than the rest — a company
+    logo, never a list of strangers.
+
+    That comparison is what makes the rule safe. A page carries dozens of other
+    members' and companies' thumbnails, so when every candidate of a kind is the
+    same size there is nothing distinguishing a subject and none is returned —
+    which is the correct answer on a search-results page, and on a company page
+    where the only member photos are visitor avatars. A fixed threshold cannot
+    express that, and would emit a stranger the moment LinkedIn rendered one
+    card larger.
+    """
+    # One entry per distinct image, keyed by the path up to the size segment.
+    # That prefix is the media id, which is stable across both signings and
+    # size variants; the whole URL is not. LinkedIn renders the same photo more
+    # than once — the top-card image reappears in the sticky header — and signs
+    # each rendering separately, so identical pictures arrive as different
+    # strings. Counted apart they tie for largest, and a tie is read below as
+    # "no subject": the photo would be dropped on exactly the pages that show
+    # it most prominently.
+    best: dict[str, tuple[str, int, RawImage]] = {}
+
+    for raw in raw_images:
+        src = (raw.get("src") or "").strip()
+        if not src or not _MEDIA_CDN.match(src):
+            continue
+        match = _SUBJECT_IMAGE.search(src)
+        if match is None:
+            continue
+        variant = max(int(match.group(2)), int(match.group(3)))
+        identity = src[: match.start()]
+        previous = best.get(identity)
+        # The same image offered at several sizes is still one image, and is
+        # represented by the largest size it offers.
+        if previous is None or variant > previous[1]:
+            best[identity] = (_image_kind(match), variant, raw)
+
+    candidates = list(best.values())
+
+    out: list[Reference] = []
+
+    for kind in dict.fromkeys(k for k, _, _ in candidates):
+        of_kind = [(v, raw) for k, v, raw in candidates if k == kind]
+        largest = max(v for v, _ in of_kind)
+        tied = [raw for v, raw in of_kind if v == largest]
+
+        # Nothing of this kind to compare against, so size is the only
+        # evidence: a lone thumbnail is an employer logo on a member page or a
+        # visitor avatar on a company page, and neither is the subject.
+        if len(of_kind) == 1 and largest <= _THUMBNAIL_VARIANT:
+            continue
+        # Distinct images sharing the largest size: none stands out, so none is
+        # the subject. Returning them all would be worse than returning none —
+        # a caller reading "the subject" would get a stranger half the time.
+        # This is also the right answer on a search-results page, where every
+        # card is an equal-sized thumbnail.
+        if len(tied) > 1:
+            continue
+
+        raw = tied[0]
+        reference: Reference = {
+            "kind": "image",
+            "url": (raw.get("src") or "").strip(),
+        }
+        alt = (raw.get("alt") or "").strip()
+        if alt:
+            reference["text"] = alt
+        reference["context"] = _IMAGE_CONTEXT.get(kind, "profile photo")
+        out.append(reference)
+
+    return out
