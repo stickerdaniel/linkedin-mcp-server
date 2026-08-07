@@ -67,6 +67,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Expand and resolve together, always.** Doing one without the other lets a
   symlink move the profile out of one directory while its sidecars come from
   another. Use `session_state.canonical()`.
+- **A browser older than the profile is refused, and only that direction.**
+  `browser_downgrade.refuse_a_downgrade()` runs in `BrowserManager.start()`
+  before anything is created or opened. Chromium does not stop a downgrade on
+  macOS or Linux: it opens the profile and lets each store decide for itself,
+  and a store that answers `INIT_TOO_NEW` is dropped in silence. Losing the
+  cookie store that way looks exactly like an expired session. Every unknown
+  here fails open (an unreadable marker, a binary that will not name itself),
+  because not knowing is not evidence. That trade is one-shot per profile: the
+  older browser then rewrites `Last Version` down to its own number, so the
+  evidence is gone for good, which is why those two branches warn.
+- **Never ask a Windows browser for its version.** Chromium compiles
+  `HandleVersionSwitches` only under `BUILDFLAG(IS_POSIX)`, so there `--version`
+  is an unrecognised switch and the binary starts a browser on whatever profile
+  it defaults to. The guard is off on Windows on purpose; a version could only
+  come from the executable's file-version resource.
+- **Two versions only compare inside one product.** `Last Version` records a
+  number and no product, so a comparison across products compares two
+  numbering schemes: Vivaldi is on 7.x and Edge's build number sits an order
+  of magnitude below Chrome's under the same major. Only the Chrome-family
+  names in `_COMPARABLE_PRODUCTS` are compared, matched **whole and never as a
+  prefix** — a prefix scan accepted a launcher script announcing itself as
+  `Chromium launcher 1.2.3` and refused the newer browser behind it. And only
+  for the *running* binary, which is all `--version` can identify. A profile
+  written by a fork is therefore still refused; that one is not repairable from
+  `Last Version`, and the error says so by naming the number to go back to
+  rather than a browser.
 
 ## Tool Return Format
 

@@ -75,6 +75,38 @@ def test_profile_not_found_skips_issue_diagnostics(monkeypatch):
         raise_tool_error(ProfileNotFoundError("gone"))
 
 
+def test_browser_downgrade_skips_issue_diagnostics():
+    """A browser refused for being older than the profile is the guard working.
+
+    Without its own branch it falls into the ``LinkedInMCPError`` catch-all,
+    which appends the issue-report template and sends the user to the tracker
+    for something behaving exactly as designed. It also has to keep its own
+    message: both versions and the two ways out are in it, and a generic
+    summary would leave nobody able to act.
+
+    Asserted on the surfaced text, not by patching ``build_issue_diagnostics``:
+    that builder's failures are swallowed, so a patched-out one makes the
+    catch-all fall back to a template-free message and the mutation survives.
+    Measured, exactly as it was for the owner-auth branch above.
+    """
+    from linkedin_mcp_server.exceptions import BrowserDowngradeError
+
+    error = BrowserDowngradeError(
+        profile_version="151.0.7922.34",
+        browser_version="148.0.7778.96",
+        browser_product="Google Chrome for Testing",
+        profile_dir="/home/pwuser/.linkedin-mcp/profile",
+    )
+
+    with pytest.raises(ToolError) as caught:
+        raise_tool_error(error, "get_person_profile")
+
+    surfaced = str(caught.value)
+    assert surfaced == str(error)
+    assert "Diagnostics:" not in surfaced
+    assert "issue" not in surfaced.lower()
+
+
 def test_raises_tool_error_for_network_error():
     with pytest.raises(ToolError, match="Network error"):
         raise_tool_error(NetworkError("timeout"))

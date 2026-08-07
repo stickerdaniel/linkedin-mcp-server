@@ -285,6 +285,82 @@ def test_main_non_interactive_no_auth_still_starts_server(
     assert captured.out == ""
 
 
+def test_profile_info_reports_a_downgrade_plainly(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    tmp_path,
+) -> None:
+    """`--status` is the first thing a puzzled user runs, so a refused browser
+    must not arrive there as an unexpected internal error.
+
+    Without its own branch it goes through `logger.exception` ("Unexpected
+    error checking session") and then prints "Could not validate session ...
+    Check logs and browser configuration" over a message that already names
+    both versions and the exact fix.
+    """
+    from linkedin_mcp_server.exceptions import BrowserDowngradeError
+
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "Default").mkdir(parents=True)
+    (profile_dir / "Default" / "Cookies").write_text("placeholder")
+    (tmp_path / "cookies.json").write_text(json.dumps([{"name": "li_at"}]))
+    (tmp_path / "source-state.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_runtime_id": "macos-arm64-host",
+                "login_generation": "gen-1",
+                "created_at": "2026-03-12T17:00:00Z",
+                "profile_path": str(profile_dir),
+                "cookies_path": str(tmp_path / "cookies.json"),
+            }
+        )
+    )
+
+    async def refuse() -> bool:
+        raise BrowserDowngradeError(
+            profile_version="151.0.7922.34",
+            browser_version="148.0.7778.96",
+            browser_product="Google Chrome for Testing",
+        )
+
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_profile_dir", lambda: profile_dir
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_runtime_id", lambda: "macos-arm64-host"
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", lambda: AppConfig())
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.configure_logging", lambda **_kwargs: None
+    )
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.get_version", lambda: "4.0.0")
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.get_or_create_browser", lambda: refuse()
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.cli_main.close_browser", AsyncMock(return_value=None)
+    )
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(SystemExit) as exit_info:
+            cli_main.profile_info_and_exit()
+
+    assert exit_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "151.0.7922.34" in captured.out
+    assert "148.0.7778.96" in captured.out
+    assert "check logs and browser configuration" not in captured.out.lower()
+    # And no traceback logged as an unexpected failure either. The two halves
+    # of "internal error" are the printed advice and the ERROR-level trace, and
+    # each has its own branch to skip.
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], [
+        r.getMessage() for r in caplog.records
+    ]
+
+
 def test_profile_info_reports_bridge_required_for_foreign_runtime(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

@@ -13,7 +13,10 @@ from linkedin_mcp_server.bootstrap import (
     ensure_browser_installed,
 )
 from linkedin_mcp_server.core import AuthenticationError
-from linkedin_mcp_server.exceptions import ProfileRootRefusedError
+from linkedin_mcp_server.exceptions import (
+    BrowserDowngradeError,
+    ProfileRootRefusedError,
+)
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.config.schema import AppConfig
@@ -252,6 +255,12 @@ def profile_info_and_exit() -> None:
             return browser.is_authenticated
         except AuthenticationError:
             return False
+        except BrowserDowngradeError:
+            # Not "unexpected", and no traceback. This is the guard doing its
+            # job, the message already says which two versions and what to do,
+            # and `--status` is the first thing a puzzled user runs. The tool
+            # path treats it the same way, in `error_handler`.
+            raise
         except Exception as e:
             logger.exception(f"Unexpected error checking session: {e}")
             raise
@@ -274,6 +283,11 @@ def profile_info_and_exit() -> None:
 
     try:
         valid = asyncio.run(check_session())
+    except BrowserDowngradeError as e:
+        # Ahead of the generic handler, which would add "Check logs and browser
+        # configuration" to a message that already names the fix exactly.
+        print(f"\n❌ {e}")
+        sys.exit(1)
     except Exception as e:
         print(f"❌ Could not validate session: {e}")
         print("   Check logs and browser configuration.")
