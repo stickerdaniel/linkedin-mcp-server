@@ -12,8 +12,11 @@ condition, which is the point: the failure belongs to Windows and the reasoning
 about it should not need one.
 """
 
-import importlib
+import subprocess
 import sys
+import tomllib
+from importlib.metadata import version
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -72,6 +75,31 @@ class TestOnWindows:
         assert "Microsoft Visual C++ Redistributable" in message
         assert "latest-supported-vc-redist" in message
 
+    def test_the_loader_is_quoted_rather_than_diagnosed(self, greenlet_fails):
+        # ``DLL load failed`` is what CPython writes for every LoadLibraryExW
+        # that fails, so it does not identify MSVCP140.dll. A corrupt or
+        # architecture-mismatched .pyd reaches here too, and the reader can only
+        # tell the difference from what the loader actually said.
+        greenlet_fails(ImportError("DLL load failed while importing _greenlet: bogus"))
+
+        with pytest.raises(VisualCPPRuntimeMissingError) as caught:
+            explain_a_missing_runtime()
+
+        message = str(caught.value)
+        assert "bogus" in message
+        assert "usually a missing Visual C++ runtime" in message
+        assert "already installed" in message
+
+    def test_the_installed_version_is_named(self, greenlet_fails):
+        # The measured range is 3.3.1 through 3.5.4, so the reader needs to know
+        # which version is on disk to place it against that.
+        greenlet_fails(ImportError(_REAL_MESSAGE))
+
+        with pytest.raises(VisualCPPRuntimeMissingError) as caught:
+            explain_a_missing_runtime()
+
+        assert f"Installed greenlet: {version('greenlet')}" in str(caught.value)
+
     def test_the_original_error_is_kept(self, greenlet_fails):
         original = ImportError(_REAL_MESSAGE)
         greenlet_fails(original)
@@ -123,14 +151,75 @@ class TestElsewhere:
         assert explain_a_missing_runtime() is None
 
 
-class TestBothEntryPaths:
-    def test_the_package_probes_before_patchright_is_reachable(self):
-        # The failure happens while importing cli_main, so the check has to sit
-        # somewhere both the console script and ``python -m`` pass through
-        # first. Only the package __init__ does.
-        source = importlib.import_module("linkedin_mcp_server").__file__
-        assert source is not None
-        text = open(source, encoding="utf-8").read()
+#: Refuses greenlet the way the loader would, then takes one of the two routes
+#: an installed server is started by. Run in a child process because both routes
+#: import this package for real, and because ``sys.platform`` has to be a lie
+#: the whole process believes.
+_ENTRY_PATH_SCRIPT = """
+import sys
 
-        assert "explain_a_missing_runtime()" in text
-        assert text.index("explain_a_missing_runtime()") < text.index("__version__")
+# Loaded before the platform is renamed. Both branch on it at import time and
+# reach for _winapi, which does not exist on the machine running this test. The
+# server's own import chain raises in the package __init__ before it can get far
+# enough to care.
+import runpy
+import shutil
+import importlib.metadata
+
+class Refusing:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "greenlet":
+            raise ImportError(
+                "DLL load failed while importing _greenlet: "
+                "The specified module could not be found."
+            )
+        return None
+
+sys.platform = "win32"
+sys.meta_path.insert(0, Refusing())
+{body}
+"""
+
+_ENTRY_PATHS = {
+    # What the console script generated from pyproject.toml does.
+    "console_script": "from linkedin_mcp_server.cli_main import main",
+    # What ``python -m linkedin_mcp_server`` does, which is also the MCPB
+    # manifest command and the Dockerfile CMD.
+    "python_m": "runpy.run_module('linkedin_mcp_server', run_name='__main__')",
+}
+
+
+class TestBothEntryPaths:
+    """Started for real, because the point is an import that happens too early.
+
+    A test that reads ``__init__`` and looks for the call proves the call is
+    written down, not that it runs before patchright is reached. Someone adding
+    an import above it would keep such a test green and the server would die on
+    the bare DLL error again.
+    """
+
+    @pytest.mark.parametrize("route", sorted(_ENTRY_PATHS))
+    def test_the_guard_speaks_before_patchright_is_reached(self, route):
+        finished = subprocess.run(
+            [sys.executable, "-c", _ENTRY_PATH_SCRIPT.format(body=_ENTRY_PATHS[route])],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).resolve().parent.parent,
+        )
+
+        assert finished.returncode != 0
+        assert "VisualCPPRuntimeMissingError" in finished.stderr
+        assert "MSVCP140.dll" in finished.stderr
+        # The loader's own words survive, which is the only machine-specific
+        # detail and the only way to tell this cause from another DLL failure.
+        assert "DLL load failed while importing _greenlet" in finished.stderr
+
+    def test_the_console_script_still_goes_through_the_package(self):
+        # The route above is only the real one while the entry point names a
+        # module inside this package, which is what makes __init__ run first.
+        pyproject = tomllib.loads(
+            (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
+        )
+        target = pyproject["project"]["scripts"]["mcp-server-linkedin"]
+
+        assert target.split(":")[0].startswith("linkedin_mcp_server.")
