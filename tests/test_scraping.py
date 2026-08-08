@@ -5997,24 +5997,77 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
 class TestScheduleFormatHelpers:
     """The schedule dialog's prefill is the format example the helpers copy."""
 
-    def test_date_en_prefill_month_first(self):
-        assert _format_schedule_date(2026, 8, 15, "8/8/2026") == "8/15/2026"
+    def test_date_month_first_proven_by_prefill_window(self):
+        # Prefill 8/7 read month-first is Aug 7 (inside the today window);
+        # read day-first it is Jul 8 (outside). Order proven, not guessed.
+        import datetime as dt
 
-    def test_date_day_first_when_prefill_day_exceeds_twelve(self):
-        # A first number that cannot be a month names the day slot.
-        assert _format_schedule_date(2026, 8, 15, "31/8/2026") == "15/8/2026"
+        value, order = _format_schedule_date(
+            2026, 8, 15, "8/7/2026", today=dt.date(2026, 8, 7)
+        )
+        assert (value, order) == ("8/15/2026", ("m", "d", "y"))
 
-    def test_date_month_first_when_second_number_exceeds_twelve(self):
-        assert _format_schedule_date(2026, 8, 15, "8/31/2026") == "8/15/2026"
+    def test_date_day_first_proven_by_prefill_window(self):
+        import datetime as dt
 
-    def test_date_preserves_separator(self):
-        assert _format_schedule_date(2026, 8, 15, "31.8.2026") == "15.8.2026"
+        value, order = _format_schedule_date(
+            2026, 8, 15, "7/8/2026", today=dt.date(2026, 8, 7)
+        )
+        assert (value, order) == ("15/8/2026", ("d", "m", "y"))
+
+    def test_date_ambiguous_prefill_decided_by_placeholder(self):
+        # On a day==month date the prefill reads the same both ways; the
+        # placeholder's m-token breaks the tie.
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "8/8/2026", "dd/mm/yyyy", today=dt.date(2026, 8, 8)
+        )
+        assert (value, order) == ("15/8/2026", ("d", "m", "y"))
+
+    def test_date_german_placeholder_and_separator(self):
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "8.8.2026", "TT.MM.JJJJ", today=dt.date(2026, 8, 8)
+        )
+        assert (value, order) == ("15.8.2026", ("d", "m", "y"))
+
+    def test_date_undecidable_refuses_distinct_day_month(self):
+        # Neither the prefill (day == month) nor a placeholder decides the
+        # order: refusing beats gambling the calendar day, because a reversed
+        # date is a valid date and passes every later check.
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "8/8/2026", "", today=dt.date(2026, 8, 8)
+        )
+        assert (value, order) == (None, None)
+
+    def test_date_undecidable_allows_equal_day_month(self):
+        # Both orders write the same digits, so nothing is gambled.
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 9, 9, "8/8/2026", "", today=dt.date(2026, 8, 8)
+        )
+        assert value == "9/9/2026"
 
     def test_date_iso_prefill_keeps_year_position(self):
-        assert _format_schedule_date(2026, 8, 15, "2026-08-31") == "2026-8-15"
+        import datetime as dt
 
-    def test_date_unparseable_prefill_falls_back_to_en(self):
-        assert _format_schedule_date(2026, 8, 15, "") == "8/15/2026"
+        value, order = _format_schedule_date(
+            2026, 8, 15, "2026-08-07", today=dt.date(2026, 8, 7)
+        )
+        assert (value, order) == ("2026-8-15", ("y", "m", "d"))
+
+    def test_date_empty_prefill_decided_by_placeholder(self):
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "", "mm/dd/yyyy", today=dt.date(2026, 8, 8)
+        )
+        assert (value, order) == ("8/15/2026", ("m", "d", "y"))
 
     def test_time_twelve_hour_from_meridiem_prefill(self):
         assert _format_schedule_time(17, 30, "2:00 PM") == "5:30 PM"

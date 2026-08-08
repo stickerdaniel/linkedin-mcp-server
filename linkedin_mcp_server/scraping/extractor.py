@@ -221,41 +221,93 @@ _SCHEDULE_TIME_INPUT_SELECTOR = "input#share-post__scheduled-time"
 _COMPOSER_DISMISS_SELECTOR = "button[data-test-modal-close-btn]"
 
 
-def _format_schedule_date(year: int, month: int, day: int, current_value: str) -> str:
-    """Format a date the way the schedule dialog's own prefill formats one.
+def _resolve_date_order(
+    current_value: str, placeholder: str, today: datetime.date
+) -> tuple[str, str, str] | None:
+    """Determine the date input's slot order, e.g. ``("m", "d", "y")``.
 
-    The date input arrives prefilled with *today* in the profile's locale
-    (measured: ``8/8/2026`` for en with placeholder ``mm/dd/yyyy``). Today's
-    components are known, so the prefill doubles as a worked example of the
-    expected order and separator — a measurement, not a translation table.
-    Only when today's day and month are equal (~1 day a month) is the order
-    unreadable from the example; then the en ``month/day/year`` order is
-    assumed. Locales whose *order* differs from en and whose prefill is
-    ambiguous that day may mis-order — a bounded, dated limitation.
+    Two independent measurements, tried in turn; None when neither decides.
+
+    1. The prefill is LinkedIn's rendering of its own "today", which can sit
+       at most one calendar day from the server's UTC today. Reading the two
+       small numbers both ways yields two *different* dates whenever day and
+       month differ, and two distinct readings are never both inside a
+       three-consecutive-day window — so a reading that lands in the window is
+       proof of the order, not a guess.
+    2. The placeholder's short tokens. Across the Latin-script locales
+       LinkedIn ships, the month token is the one starting with ``m`` (en
+       ``mm``, de ``MM``/Monat, fr ``mm``/mois, es mes, it mese, pt mês, nl
+       maand) while the day letter varies (``dd``, ``TT``, ``jj``, ``gg``) —
+       a per-locale table in the sense the scraping rules require, documented
+       here as such. Locales outside it (non-Latin scripts) fall through.
     """
     numbers = re.findall(r"\d+", current_value)
+    if len(numbers) == 3:
+        values = [int(n) for n in numbers]
+        year_pos = max(range(3), key=lambda i: (len(numbers[i]) >= 4, values[i]))
+        rest = [i for i in range(3) if i != year_pos]
+        a, b = values[rest[0]], values[rest[1]]
+        year = values[year_pos]
+
+        def order_of(day_first: bool) -> tuple[str, str, str]:
+            slots = ["", "", ""]
+            slots[year_pos] = "y"
+            slots[rest[0]] = "d" if day_first else "m"
+            slots[rest[1]] = "m" if day_first else "d"
+            return (slots[0], slots[1], slots[2])
+
+        window = {today + datetime.timedelta(days=k) for k in (-1, 0, 1)}
+
+        def in_window(month: int, day: int) -> bool:
+            try:
+                return datetime.date(year, month, day) in window
+            except ValueError:
+                return False
+
+        month_first = in_window(a, b)
+        day_first = in_window(b, a)
+        if month_first != day_first:
+            return order_of(day_first)
+
+    tokens = re.findall(r"[^\W\d_]+", placeholder or "")
+    if len(tokens) == 3:
+        parts = [
+            "y" if len(t) > 2 else ("m" if t.lower().startswith("m") else "d")
+            for t in tokens
+        ]
+        if sorted(parts) == ["d", "m", "y"]:
+            return (parts[0], parts[1], parts[2])
+    return None
+
+
+def _format_schedule_date(
+    year: int,
+    month: int,
+    day: int,
+    current_value: str,
+    placeholder: str = "",
+    today: datetime.date | None = None,
+) -> tuple[str | None, tuple[str, str, str] | None]:
+    """Format a date the way the schedule dialog's own prefill formats one.
+
+    Returns ``(value, order)``. The order comes from `_resolve_date_order`;
+    when it cannot be proven and the target's day differs from its month,
+    ``(None, None)`` is returned so the caller refuses rather than gambling
+    the calendar day — a reversed date passes every later check LinkedIn
+    offers, because both readings are valid dates.
+    """
+    if today is None:
+        today = datetime.datetime.now(datetime.timezone.utc).date()
     separators = re.findall(r"\D+", current_value)
     separator = separators[0] if separators else "/"
-    if len(numbers) != 3:
-        return f"{month}/{day}/{year}"
-    prefill = [int(n) for n in numbers]
-    year_pos = max(range(3), key=lambda i: prefill[i])
-    rest = [i for i in range(3) if i != year_pos]
-    first, second = prefill[rest[0]], prefill[rest[1]]
-    slots = {year_pos: str(year)}
-    if first > 12 or (first != second and second > 12):
-        # A number that cannot be a month names the day slot outright.
-        day_first = first > 12
-    else:
-        # Both fit a month: read the order off the machine's own today, which
-        # matches LinkedIn's prefill except across a midnight timezone skew.
-        today = datetime.date.today()
-        day_first = first != second and first == today.day and second == today.month
-    if day_first:
-        slots[rest[0]], slots[rest[1]] = str(day), str(month)
-    else:
-        slots[rest[0]], slots[rest[1]] = str(month), str(day)
-    return separator.join(slots[i] for i in range(3))
+    order = _resolve_date_order(current_value, placeholder, today)
+    if order is None:
+        if day != month:
+            return None, None
+        # Either order writes the same digits; en order names the slots.
+        order = ("m", "d", "y")
+    mapping = {"y": str(year), "m": str(month), "d": str(day)}
+    return separator.join(mapping[slot] for slot in order), order
 
 
 def _format_schedule_time(hour: int, minute: int, current_value: str) -> str:
@@ -4481,9 +4533,22 @@ class LinkedInExtractor:
 
         # The prefilled values are LinkedIn's own rendering of a date and a
         # time in this profile's locale; format ours the same way.
-        date_value = _format_schedule_date(
-            year, month, day, await date_input.input_value()
+        date_value, date_order = _format_schedule_date(
+            year,
+            month,
+            day,
+            await date_input.input_value(),
+            await date_input.get_attribute("placeholder") or "",
         )
+        if date_value is None or date_order is None:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_rejected",
+                "The profile's date-component order could not be proven from "
+                "the schedule dialog, and a reversed day/month would schedule "
+                "the wrong calendar day, so nothing was scheduled.",
+            )
         time_value = _format_schedule_time(hour, minute, await time_input.input_value())
         await date_input.fill(date_value)
         await time_input.fill(time_value)
@@ -4493,9 +4558,15 @@ class LinkedInExtractor:
 
         accepted_date = await date_input.input_value()
         accepted_time = await time_input.input_value()
-        # Compare as numbers so zero-padding differences don't fail the check.
-        accepted_numbers = {int(n) for n in re.findall(r"\d+", accepted_date)}
-        if accepted_numbers != {year, month, day}:
+        # Position-by-position against the proven order — an unordered
+        # comparison would wave a reversed day/month through, since the
+        # reversal permutes the same numbers. Ints, so zero-padding
+        # normalization cannot fail the check.
+        expected_by_pos = [
+            {"y": year, "m": month, "d": day}[slot] for slot in date_order
+        ]
+        accepted_by_pos = [int(n) for n in re.findall(r"\d+", accepted_date)]
+        if accepted_by_pos != expected_by_pos:
             await self._clear_and_dismiss_composer()
             return self._schedule_post_result(
                 self._page.url,
