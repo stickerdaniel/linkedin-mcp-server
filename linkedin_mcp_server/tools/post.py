@@ -439,6 +439,10 @@ def register_post_tools(
             verified by the entry's absence from the list afterwards.
         """
         try:
+            if not match_text.strip():
+                raise ToolError(
+                    "match_text is empty; pass a snippet of the post's body text."
+                )
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="delete_scheduled_post"
             )
@@ -462,6 +466,8 @@ def register_post_tools(
 
             return result
 
+        except ToolError:
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)

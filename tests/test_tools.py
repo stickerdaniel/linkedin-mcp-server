@@ -1543,6 +1543,36 @@ class TestPostTools:
             confirm_delete=False,
         )
 
+    async def test_delete_scheduled_post_rejects_blank_match_text(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "delete_scheduled_post")
+        mock_extractor = _make_mock_extractor({})
+        with pytest.raises(ToolError, match="match_text is empty"):
+            await tool_fn("   ", True, mock_context, extractor=mock_extractor)
+        mock_extractor.delete_scheduled_post.assert_not_awaited()
+
+    async def test_edit_scheduled_post_rejects_blank_match_text(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "edit_scheduled_post")
+        mock_extractor = _make_mock_extractor({})
+        with pytest.raises(ToolError, match="match_text is empty"):
+            await tool_fn(
+                "", True, mock_context, new_text="x", extractor=mock_extractor
+            )
+        mock_extractor.edit_scheduled_post.assert_not_awaited()
+
     async def test_delete_scheduled_post_error(self, mock_context):
         from fastmcp.exceptions import ToolError
 

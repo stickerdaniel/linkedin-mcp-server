@@ -5087,12 +5087,12 @@ class LinkedInExtractor:
             failure = await self._open_scheduled_posts_list()
             if failure is not None:
                 return self._scheduled_action_result(self._page.url, *failure)
-            resolved = await self._resolve_scheduled_entry(match_text, occurrence)
-            if isinstance(resolved, tuple):
+            entries: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
+            resolved = _match_scheduled_entries(entries, match_text, occurrence)
+            if not isinstance(resolved, _ScheduledEntryMatch):
                 await self._dismiss_scheduled_posts_list()
                 return self._scheduled_action_result(self._page.url, *resolved)
-            entries: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
-            preview = entries[resolved][:200] if resolved < len(entries) else ""
+            preview = entries[resolved.index][:200]
             await self._dismiss_scheduled_posts_list()
             return self._scheduled_action_result(
                 self._page.url,
@@ -5105,9 +5105,9 @@ class LinkedInExtractor:
         opened = await self._open_scheduled_entry_action(
             match_text, occurrence, _SCHEDULED_MENU_DELETE_SELECTOR
         )
-        if isinstance(opened, tuple):
+        if not isinstance(opened, _OpenedScheduledEntry):
             return self._scheduled_action_result(self._page.url, *opened)
-        entry_preview = opened[:200]
+        entry_preview = opened.entry_text[:200]
 
         # The confirmation is the visible dialog holding no entry overflow
         # icons — the list modal has one per entry and stays open underneath,
@@ -5139,20 +5139,26 @@ class LinkedInExtractor:
             )
         await asyncio.sleep(1.5)
 
-        # The list modal stays open; the entry's absence from it is the
-        # evidence of deletion, checked the same way resolution matched it.
+        # The list modal stays open; the evidence of deletion is the match
+        # count dropping by exactly one. Checking for *absence* would fail
+        # whenever other entries also contain the snippet (an explicit
+        # occurrence among duplicates): the survivors would read as "still
+        # listed", and a caller retrying the reported failure would delete a
+        # second, different post.
         remaining = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
         needle = " ".join(match_text.split()).casefold()
-        still_there = any(
-            needle in " ".join(entry.split()).casefold() for entry in remaining
+        remaining_matches = sum(
+            1 for entry in remaining if needle in " ".join(entry.split()).casefold()
         )
         url = self._page.url
         await self._dismiss_scheduled_posts_list()
-        if still_there:
+        if remaining_matches != opened.match_count - 1:
             return self._scheduled_action_result(
                 url,
                 "delete_unconfirmed",
-                "The entry is still listed after the delete confirmation.",
+                f"Expected {opened.match_count - 1} matching entr(ies) after "
+                f"deletion but the list shows {remaining_matches}. Re-read "
+                "the list with get_scheduled_posts before retrying anything.",
                 entry_preview=entry_preview,
             )
         return self._scheduled_action_result(

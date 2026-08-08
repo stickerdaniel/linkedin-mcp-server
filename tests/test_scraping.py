@@ -6067,6 +6067,52 @@ class TestMatchScheduledEntries:
             assert result[0] == "entry_not_found"
 
 
+class TestDeleteScheduledPostVerification:
+    """Deletion evidence is the match count dropping by one, not absence."""
+
+    async def _run_confirmed_delete(self, match_count, remaining_entries):
+        from unittest.mock import patch
+
+        from linkedin_mcp_server.scraping.extractor import _OpenedScheduledEntry
+
+        page = MagicMock()
+        page.url = "https://www.linkedin.com/feed/?shareActive=true"
+        page.evaluate = AsyncMock(return_value=remaining_entries)
+        confirm = page.locator.return_value.filter.return_value.filter.return_value.last
+        confirm.wait_for = AsyncMock()
+        confirm.locator.return_value.filter.return_value.last.click = AsyncMock()
+        extractor = LinkedInExtractor(page)
+        with (
+            patch.object(
+                extractor,
+                "_open_scheduled_entry_action",
+                AsyncMock(
+                    return_value=_OpenedScheduledEntry(
+                        entry_text="Posting X\nabout x 1",
+                        match_count=match_count,
+                    )
+                ),
+            ),
+            patch.object(extractor, "_dismiss_scheduled_posts_list", AsyncMock()),
+        ):
+            return await extractor.delete_scheduled_post(
+                "about x", occurrence=0, confirm_delete=True
+            )
+
+    async def test_surviving_duplicates_still_verify_as_deleted(self):
+        # Two entries matched; one was deleted; the survivor must not read as
+        # "still listed" — that report invited a retry that would delete a
+        # second, different post.
+        result = await self._run_confirmed_delete(2, ["about x 2", "other"])
+        assert result["status"] == "deleted"
+        assert result["done"] is True
+
+    async def test_unchanged_count_reports_unconfirmed(self):
+        result = await self._run_confirmed_delete(2, ["about x 1", "about x 2"])
+        assert result["status"] == "delete_unconfirmed"
+        assert result["done"] is False
+
+
 class TestOpenScheduledEntryAction:
     async def test_entry_moved_between_resolution_and_click(self):
         """The click is positional against a live queue: when the pre-click
