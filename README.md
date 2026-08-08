@@ -193,7 +193,7 @@ while a container is running.
 - Ensure you have uv installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - Check uv version: `uv --version` (should be 0.4.0 or higher)
 - On first run, `uvx` downloads all Python dependencies. On slow connections, uv's default 30s HTTP timeout may be too short. The recommended config above already sets `UV_HTTP_TIMEOUT=300` (seconds) to avoid this.
-- *Windows, `DLL load failed while importing _greenlet`*: install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll` from it, and neither the python.org installer nor the `uv`-managed builds carry that DLL. Without administrator rights, `uvx --with "greenlet<=3.3.0" mcp-server-linkedin` works instead on x86-64; that build links the runtime statically, and it has no Windows ARM64 wheel. Tracked upstream as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525).
+- *Windows, `DLL load failed while importing _greenlet`*: install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). The published Windows wheels for greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll` from it, and neither the python.org installer nor the `uv`-managed builds carry that DLL. A greenlet built from source can need it at any version. Without administrator rights, `uvx --with "greenlet<=3.3.0" mcp-server-linkedin` works instead on x86-64; that build links the runtime statically, and it has no Windows ARM64 wheel. Tracked upstream as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525).
 
 **Session issues:**
 
@@ -273,7 +273,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 - Claude Desktop starts the bundle immediately; browser setup continues in the background
 - If the Patchright Chromium browser is still downloading, retry the tool after a short wait
 - Managed browser downloads are shared under `~/.linkedin-mcp/patchright-browsers/`
-- *Windows, the bundle exits with `DLL load failed while importing _greenlet`*: install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll` from it, and neither the python.org installer nor the `uv`-managed builds carry that DLL. The server names this itself on startup, and only after checking that the loader cannot produce that DLL. Tracked upstream as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525).
+- *Windows, the bundle exits with `DLL load failed while importing _greenlet`*: install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). The published Windows wheels for greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll` from it, and neither the python.org installer nor the `uv`-managed builds carry that DLL. A greenlet built from source can need it at any version. The server names this itself on startup, and only after checking that the loader cannot produce that DLL. Tracked upstream as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525).
 
 **Login issues:**
 

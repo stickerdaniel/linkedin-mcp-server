@@ -5,7 +5,8 @@ from ``_impl/_connection.py``, on the async-only path too, so its C extension is
 loaded in every run this server makes and a failure there stops the server
 before any of our code executes.
 
-Since 3.3.1 that extension needs a DLL the machine may not have. greenlet built
+Since 3.3.1 the published wheels of that extension need a DLL the machine may
+not have. greenlet built
 its Windows wheels on Appveyor with ``GREENLET_STATIC_RUNTIME=1``, which
 ``setup.py`` turns into ``/MT``; the move to GitHub Actions dropped the variable
 and nothing replaced it, so the C++ runtime is linked dynamically now. Measured
@@ -151,15 +152,16 @@ be loaded on this machine either. The loader reported:
 
 Installed greenlet: {_installed_greenlet()}
 
-The Windows wheels for greenlet 3.3.1 through 3.5.4 link the Visual C++ runtime
-dynamically, so _greenlet.pyd needs MSVCP140.dll. It comes with the
-Microsoft Visual C++ Redistributable, and installing that is the fix when the
-machine has none.
+The published Windows wheels for greenlet 3.3.1 through 3.5.4 link the Visual
+C++ runtime dynamically, so their _greenlet.pyd needs MSVCP140.dll. The wheels
+up to 3.3.0 carry that runtime inside the extension instead. A greenlet
+built from source follows whichever way it was built, which is how a version
+below 3.3.1 can need the DLL all the same.
 
-Two things this cannot tell you. If the redistributable is already installed,
-the copy the loader reaches will not load for some other reason, and the line
-above is what it said. And if the greenlet above is 3.3.0 or older, its wheel
-carries its own C++ runtime, so the failure is probably something else.
+MSVCP140.dll comes with the Microsoft Visual C++ Redistributable, and installing
+that is the fix when the machine has none. If it is already installed, the copy
+the loader reaches will not load for some other reason, and the line above is
+what it said.
 
 To fix this:
   Install the redistributable, then start the server again

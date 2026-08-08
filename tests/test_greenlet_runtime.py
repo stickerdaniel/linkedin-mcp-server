@@ -1,7 +1,8 @@
 """What a Windows machine without the Visual C++ runtime is told.
 
-greenlet's C extension links that runtime dynamically since 3.3.1, so on a
-machine without the redistributable it fails to load and the server stops with
+greenlet's published Windows wheels link that runtime dynamically from 3.3.1 on,
+so on a machine without the redistributable the extension fails to load and the
+server stops with
 ``DLL load failed while importing _greenlet`` and nothing naming the cause.
 patchright imports greenlet even on the async-only path this server uses, so the
 failure arrives before any of our code runs and there is nothing to catch it
@@ -215,11 +216,28 @@ class TestOnWindows:
         monkeypatch.setattr(greenlet_runtime, "version", lambda _name: installed)
         greenlet_fails(ImportError(_REAL_MESSAGE))
 
-        with pytest.raises(VisualCPPRuntimeUnavailableError) as caught:
+        with pytest.raises(VisualCPPRuntimeUnavailableError):
             explain_a_missing_runtime()
 
-        # Said in the message instead, where the reader can weigh it.
-        assert "3.3.0 or older" in str(caught.value)
+    def test_the_diagnosis_reads_the_same_at_every_version(self, monkeypatch):
+        # The predicate was taken out of the control flow because a version
+        # cannot say how an artifact was linked. Saying it in prose instead
+        # would put the same wrong claim in front of the reader: telling a
+        # 3.2.5 user that "its wheel" carries the runtime describes a wheel
+        # that was never published. Only the reported version may differ.
+        def message_for(installed: str) -> str:
+            monkeypatch.setattr(greenlet_runtime, "version", lambda _name: installed)
+            body = greenlet_runtime._explain("DLL load failed while importing x: y")
+            return "\n".join(
+                line
+                for line in body.splitlines()
+                if not line.startswith("Installed greenlet:")
+            )
+
+        assert message_for("3.2.5") == message_for("3.5.4")
+        # And it says what was actually measured, plus the case that is neither.
+        assert "published Windows wheels" in message_for("3.5.4")
+        assert "built from source" in message_for("3.5.4")
 
     @pytest.mark.parametrize("installed", ["unknown", "not-a-version"])
     def test_an_unusable_version_still_gets_the_message(
