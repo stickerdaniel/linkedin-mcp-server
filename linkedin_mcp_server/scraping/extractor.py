@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 from dataclasses import dataclass
 import json
 import logging
@@ -195,6 +196,85 @@ _MESSAGING_CLOSE_SELECTOR = (
     'button[aria-label*="Dismiss"], '
     'button[aria-label*="Close"]'
 )
+
+# --- Share composer (feed post creation) -----------------------------------
+#
+# The composer renders inside an open shadow root (`#interop-outlet`, LinkedIn's
+# SDUI interop surface). Patchright locators pierce shadow roots, so plain CSS
+# works here; `page.evaluate` + `querySelectorAll` does not — keep any JS out of
+# this flow. All selectors below are structural (role/state/test hooks), never
+# layout class names and never label text.
+#
+# Opened by URL (`/feed/?shareActive=true`) rather than by clicking the
+# "Start a post" trigger, whose only stable identity is its label text.
+_COMPOSER_EDITOR_SELECTOR = 'div[role="textbox"][contenteditable="true"]'
+# The clock icon is the schedule affordance. `data-test-icon` is LinkedIn's own
+# test hook and carries the icon's name, not a translation.
+_COMPOSER_SCHEDULE_BUTTON_SELECTOR = (
+    'button:has(svg[data-test-icon="clock-medium"]), '
+    'button:has(use[href="#clock-medium"])'
+)
+# Semantic element ids, stable across sessions (unlike `ember\d+` ids).
+_SCHEDULE_DATE_INPUT_SELECTOR = "input#share-post__scheduled-date"
+_SCHEDULE_TIME_INPUT_SELECTOR = "input#share-post__scheduled-time"
+# LinkedIn's modal close button carries this test hook in the composer.
+_COMPOSER_DISMISS_SELECTOR = "button[data-test-modal-close-btn]"
+
+
+def _format_schedule_date(year: int, month: int, day: int, current_value: str) -> str:
+    """Format a date the way the schedule dialog's own prefill formats one.
+
+    The date input arrives prefilled with *today* in the profile's locale
+    (measured: ``8/8/2026`` for en with placeholder ``mm/dd/yyyy``). Today's
+    components are known, so the prefill doubles as a worked example of the
+    expected order and separator — a measurement, not a translation table.
+    Only when today's day and month are equal (~1 day a month) is the order
+    unreadable from the example; then the en ``month/day/year`` order is
+    assumed. Locales whose *order* differs from en and whose prefill is
+    ambiguous that day may mis-order — a bounded, dated limitation.
+    """
+    numbers = re.findall(r"\d+", current_value)
+    separators = re.findall(r"\D+", current_value)
+    separator = separators[0] if separators else "/"
+    if len(numbers) != 3:
+        return f"{month}/{day}/{year}"
+    prefill = [int(n) for n in numbers]
+    year_pos = max(range(3), key=lambda i: prefill[i])
+    rest = [i for i in range(3) if i != year_pos]
+    first, second = prefill[rest[0]], prefill[rest[1]]
+    slots = {year_pos: str(year)}
+    if first > 12 or (first != second and second > 12):
+        # A number that cannot be a month names the day slot outright.
+        day_first = first > 12
+    else:
+        # Both fit a month: read the order off the machine's own today, which
+        # matches LinkedIn's prefill except across a midnight timezone skew.
+        today = datetime.date.today()
+        day_first = first != second and first == today.day and second == today.month
+    if day_first:
+        slots[rest[0]], slots[rest[1]] = str(day), str(month)
+    else:
+        slots[rest[0]], slots[rest[1]] = str(month), str(day)
+    return separator.join(slots[i] for i in range(3))
+
+
+def _format_schedule_time(hour: int, minute: int, current_value: str) -> str:
+    """Format a time the way the timepicker's own prefill formats one.
+
+    The timepicker prefills a suggested slot (measured: ``2:00 PM``). A
+    meridiem marker in the prefill means the locale renders 12-hour time; the
+    en markers are the only ones tabled here, and 24-hour ``HH:MM`` is the
+    fallback for every other locale. Documented limitation: a non-English
+    12-hour locale would get a 24-hour string, which LinkedIn's parser may
+    reject — the caller verifies the input's value after filling and reports
+    rejection rather than scheduling at a wrong time.
+    """
+    if re.search(r"\b[AP]\.?M\.?\b", current_value, re.IGNORECASE):
+        marker = "AM" if hour < 12 else "PM"
+        hour12 = hour % 12 or 12
+        return f"{hour12}:{minute:02d} {marker}"
+    return f"{hour:02d}:{minute:02d}"
+
 
 # Shared JS function that walks up from any /messaging/compose/ anchor
 # inside <main> to find the smallest ancestor that satisfies the
@@ -4288,6 +4368,226 @@ class LinkedInExtractor:
             "Message sent.",
             recipient_selected=recipient_selected,
             sent=True,
+        )
+
+    @staticmethod
+    def _schedule_post_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        scheduled: bool = False,
+        scheduled_for: str | None = None,
+        composer_text: str | None = None,
+    ) -> dict[str, Any]:
+        """Build a structured response for the schedule_post tool."""
+        result: dict[str, Any] = {
+            "url": url,
+            "status": status,
+            "message": message,
+            "scheduled": scheduled,
+        }
+        if scheduled_for is not None:
+            result["scheduled_for"] = scheduled_for
+        if composer_text is not None:
+            result["composer_text"] = composer_text
+        return result
+
+    def _composer_dialog(self) -> Any:
+        """The dialog that holds the share composer's editor."""
+        return self._page.locator(_DIALOG_SELECTOR).filter(
+            has=self._page.locator(_COMPOSER_EDITOR_SELECTOR)
+        )
+
+    async def _clear_and_dismiss_composer(self) -> None:
+        """Empty the editor, then close the composer without a draft prompt.
+
+        Escape does not close this composer, and the discard-prompt buttons
+        have no locale-independent identity — but an *empty* composer closes
+        from its Dismiss button without any prompt (measured), so emptiness is
+        the dismissal strategy rather than prompt-button classification.
+        """
+        try:
+            editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
+            if await editor.is_visible():
+                await editor.click(timeout=2000)
+                await self._page.keyboard.press("ControlOrMeta+a")
+                await self._page.keyboard.press("Delete")
+            dismiss = self._page.locator(_COMPOSER_DISMISS_SELECTOR).first
+            await dismiss.click(timeout=3000)
+            await editor.wait_for(state="hidden", timeout=5000)
+        except Exception:
+            logger.debug("Composer dismissal failed", exc_info=True)
+
+    async def schedule_post(
+        self,
+        text: str,
+        *,
+        year: int,
+        month: int,
+        day: int,
+        hour: int,
+        minute: int,
+        confirm_schedule: bool,
+    ) -> dict[str, Any]:
+        """Schedule a feed post via LinkedIn's native Schedule-for-later flow.
+
+        The scheduled time is set *before* the text is typed: the composer
+        rebuilds its editor on the schedule round-trip and drops typed content
+        (measured), while text typed after the round-trip survives.
+
+        Args:
+            text: The post body.
+            year/month/day/hour/minute: Scheduled moment, interpreted by
+                LinkedIn in the profile's own timezone.
+            confirm_schedule: Must be True to actually schedule (False does a
+                dry run that fills everything and then discards).
+        """
+        await self._navigate_to_page("https://www.linkedin.com/feed/?shareActive=true")
+        await detect_rate_limit(self._page)
+
+        editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
+        try:
+            await editor.wait_for(state="visible", timeout=15000)
+        except PlaywrightTimeoutError:
+            return self._schedule_post_result(
+                self._page.url,
+                "composer_unavailable",
+                "LinkedIn did not open the share composer.",
+            )
+
+        schedule_button = self._page.locator(_COMPOSER_SCHEDULE_BUTTON_SELECTOR).first
+        try:
+            await schedule_button.click(timeout=8000)
+        except Exception:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_unavailable",
+                "LinkedIn did not expose a schedule (clock) action in the composer.",
+            )
+
+        date_input = self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR).first
+        time_input = self._page.locator(_SCHEDULE_TIME_INPUT_SELECTOR).first
+        try:
+            await date_input.wait_for(state="visible", timeout=8000)
+        except PlaywrightTimeoutError:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_unavailable",
+                "The schedule dialog did not open.",
+            )
+
+        # The prefilled values are LinkedIn's own rendering of a date and a
+        # time in this profile's locale; format ours the same way.
+        date_value = _format_schedule_date(
+            year, month, day, await date_input.input_value()
+        )
+        time_value = _format_schedule_time(hour, minute, await time_input.input_value())
+        await date_input.fill(date_value)
+        await time_input.fill(time_value)
+        # Blur so the pickers parse and commit what was typed.
+        await self._page.keyboard.press("Tab")
+        await asyncio.sleep(0.5)
+
+        accepted_date = await date_input.input_value()
+        accepted_time = await time_input.input_value()
+        # Compare as numbers so zero-padding differences don't fail the check.
+        accepted_numbers = {int(n) for n in re.findall(r"\d+", accepted_date)}
+        if accepted_numbers != {year, month, day}:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_rejected",
+                f"The date picker did not accept {date_value!r}; it shows {accepted_date!r}.",
+            )
+        if accepted_time.strip() != time_value:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_rejected",
+                f"The time picker did not accept {time_value!r}; it shows {accepted_time!r}.",
+            )
+
+        # Confirm the schedule: the dialog's primary action is its last button
+        # (Back/Next here — the same last-button convention the rest of this
+        # file relies on), scoped to the dialog that holds the date input so
+        # hidden video-player dialogs elsewhere on the feed cannot shift the
+        # count.
+        schedule_dialog = self._page.locator(_DIALOG_SELECTOR).filter(
+            has=self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR)
+        )
+        try:
+            await (
+                schedule_dialog.locator("button")
+                .filter(visible=True)
+                .last.click(timeout=5000)
+            )
+            await date_input.wait_for(state="hidden", timeout=8000)
+        except Exception:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_rejected",
+                "LinkedIn did not accept the scheduled date and time.",
+            )
+
+        # Now the text — clearing first, because the composer restores drafts.
+        await editor.click(timeout=5000)
+        await self._page.keyboard.press("ControlOrMeta+a")
+        await self._page.keyboard.press("Delete")
+        await self._page.keyboard.type(text, delay=10)
+        await asyncio.sleep(1.0)  # let the composer enable its primary action
+
+        composer_dialog = self._composer_dialog()
+        composer_text = ""
+        try:
+            composer_text = await composer_dialog.first.inner_text()
+        except Exception:
+            logger.debug("Could not read composer text", exc_info=True)
+
+        scheduled_for = f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}"
+        if not confirm_schedule:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "confirmation_required",
+                "Dry run complete. Set confirm_schedule=true to schedule the post.",
+                scheduled_for=scheduled_for,
+                composer_text=composer_text,
+            )
+
+        primary = composer_dialog.locator("button").filter(visible=True).last
+        try:
+            if await primary.is_disabled():
+                await self._clear_and_dismiss_composer()
+                return self._schedule_post_result(
+                    self._page.url,
+                    "schedule_unavailable",
+                    "The composer's Schedule action stayed disabled after typing.",
+                    scheduled_for=scheduled_for,
+                    composer_text=composer_text,
+                )
+            await primary.click(timeout=8000)
+            await editor.wait_for(state="hidden", timeout=10000)
+        except Exception:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_unconfirmed",
+                "LinkedIn did not confirm that the post was scheduled.",
+                scheduled_for=scheduled_for,
+                composer_text=composer_text,
+            )
+
+        return self._schedule_post_result(
+            self._page.url,
+            "scheduled",
+            "Post scheduled.",
+            scheduled=True,
+            scheduled_for=scheduled_for,
+            composer_text=composer_text,
         )
 
     async def _extract_root_content(

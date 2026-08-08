@@ -20,6 +20,8 @@ from linkedin_mcp_server.scraping.extractor import (
     _CONTENT_DATE_POSTED_MAP,
     _RATE_LIMITED_MSG,
     _build_feed_references,
+    _format_schedule_date,
+    _format_schedule_time,
     _truncate_linkedin_noise,
     strip_conversation_chrome,
     strip_linkedin_noise,
@@ -5990,3 +5992,38 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         # The raw error must not survive as a cause either: the handlers
         # downstream print the whole chain.
         assert excinfo.value.__cause__ is None
+
+
+class TestScheduleFormatHelpers:
+    """The schedule dialog's prefill is the format example the helpers copy."""
+
+    def test_date_en_prefill_month_first(self):
+        assert _format_schedule_date(2026, 8, 15, "8/8/2026") == "8/15/2026"
+
+    def test_date_day_first_when_prefill_day_exceeds_twelve(self):
+        # A first number that cannot be a month names the day slot.
+        assert _format_schedule_date(2026, 8, 15, "31/8/2026") == "15/8/2026"
+
+    def test_date_month_first_when_second_number_exceeds_twelve(self):
+        assert _format_schedule_date(2026, 8, 15, "8/31/2026") == "8/15/2026"
+
+    def test_date_preserves_separator(self):
+        assert _format_schedule_date(2026, 8, 15, "31.8.2026") == "15.8.2026"
+
+    def test_date_iso_prefill_keeps_year_position(self):
+        assert _format_schedule_date(2026, 8, 15, "2026-08-31") == "2026-8-15"
+
+    def test_date_unparseable_prefill_falls_back_to_en(self):
+        assert _format_schedule_date(2026, 8, 15, "") == "8/15/2026"
+
+    def test_time_twelve_hour_from_meridiem_prefill(self):
+        assert _format_schedule_time(17, 30, "2:00 PM") == "5:30 PM"
+        assert _format_schedule_time(9, 5, "2:00 PM") == "9:05 AM"
+
+    def test_time_twelve_hour_boundaries(self):
+        assert _format_schedule_time(0, 5, "1:45 PM") == "12:05 AM"
+        assert _format_schedule_time(12, 0, "1:45 PM") == "12:00 PM"
+
+    def test_time_twenty_four_hour_without_meridiem(self):
+        assert _format_schedule_time(17, 30, "14:00") == "17:30"
+        assert _format_schedule_time(9, 5, "14:00") == "09:05"
