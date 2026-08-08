@@ -154,11 +154,33 @@ def _mode_results() -> dict:
 
 
 async def _for_mode(tmp_path_factory, cache: dict, headless: bool) -> dict:
+    """The cached description of one launch, successful or not.
+
+    The failure is cached too, which is not symmetry for its own sake. Thirteen
+    cases read the default launch and twelve read the headed one, so a mode
+    that fails would otherwise be attempted once per case: a browser that will
+    not start costs a timeout each time, and a run whose real answer is "this
+    browser is broken" spends a quarter of an hour finding that out twelve more
+    times.
+
+    ``BaseException`` because the outcomes worth remembering are the ones
+    pytest raises. ``pytest.fail`` and ``pytest.skip`` both raise from
+    ``OutcomeException``, which does not descend from ``Exception``, and either
+    one re-raised for the remaining cases is exactly the right answer for them.
+    """
     key = "headless" if headless else "headed"
     if key not in cache:
         base = tmp_path_factory.mktemp(f"identity-{key}")
-        cache[key] = await _describe(base, headless=headless)
-    return cache[key]
+        try:
+            cache[key] = (None, await _describe(base, headless=headless))
+        except BaseException as exc:
+            cache[key] = (exc, None)
+            raise
+
+    failure, described = cache[key]
+    if failure is not None:
+        raise failure
+    return described
 
 
 @pytest.fixture

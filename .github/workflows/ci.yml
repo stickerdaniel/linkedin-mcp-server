@@ -140,6 +140,13 @@ jobs:
       # rather than Chrome for Testing. Windows runs neither: it falls back to
       # headless mode the way Linux x64 does, so it would pay a browser
       # download for a third copy of an answer CI already has.
+      #
+      # These two legs report rather than block. Branch protection on `main`
+      # requires `lint-and-check` and `test` only, which is how this job has
+      # always stood, so a red macOS or arm64 leg is visible on the pull
+      # request and does not stop a merge. The Linux x64 half of the gate is
+      # inside `test` and does block. Adding both names to the required list
+      # is a repository setting rather than anything this file can do.
       - name: Resolve the patchright version
         if: matrix.identity
         id: patchright
