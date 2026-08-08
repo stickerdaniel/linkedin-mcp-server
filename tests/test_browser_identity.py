@@ -227,6 +227,29 @@ def _structured_string(value: str | None) -> str | None:
     return value.strip().strip('"') or None
 
 
+def _brand_list(value: str | None) -> dict[str, str | None]:
+    """A ``"brand";v="version"`` list as a mapping, or empty if there is none.
+
+    Split on the comma at the top level and on the *last* ``;v=`` in each item.
+    Both are safe against the GREASE entry, whose separators Chromium draws
+    from a fixed set that contains ``;`` but no comma, and which cannot produce
+    the sequence ``;v=`` because what follows a separator is always ``A`` or
+    ``Brand``. Order is not preserved, deliberately: the list is shuffled on
+    purpose and reading it positionally is the mistake it exists to prevent.
+    """
+    if not value:
+        return {}
+    listed: dict[str, str | None] = {}
+    for part in value.split(","):
+        brand, _, version = part.strip().rpartition(";v=")
+        if not brand:  # an item with no version at all
+            brand, version = version, ""
+        name = _structured_string(brand)
+        if name is not None:
+            listed[name] = _structured_string(version)
+    return listed
+
+
 def _realms(described: dict) -> dict[str, dict]:
     return {
         "page": described["page"],
@@ -385,7 +408,19 @@ class TestTheHintsAgreeWithTheUserAgent:
                 f"says {hints[js]!r}"
             )
 
-        assert headers.get("sec-ch-ua-full-version-list")
+        # The version list gets the same treatment rather than a presence
+        # check, which a stale or GREASE-only list would also satisfy. The
+        # contradiction worth catching is a wire header still naming the
+        # previous build while JavaScript names the current one, and only a
+        # comparison sees that.
+        sent_brands = _brand_list(headers.get("sec-ch-ua-full-version-list"))
+        assert sent_brands, headers.get("sec-ch-ua-full-version-list")
+        assert sent_brands == {
+            b["brand"]: b["version"] for b in hints["fullVersionList"]
+        }, (
+            f"sec-ch-ua-full-version-list says {sent_brands} and "
+            f"getHighEntropyValues says {hints['fullVersionList']}"
+        )
 
     async def test_the_header_brand_major_matches_too(self, either_mode):
         headers = either_mode["page"]["headers"]
