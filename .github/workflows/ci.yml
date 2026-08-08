@@ -106,7 +106,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - os: macos-latest
+            identity: true
+            browsers: ~/Library/Caches/ms-playwright
+          - os: windows-latest
+            identity: false
+          # Here for the browser rather than for the operating system.
+          # Patchright ships Chrome for Testing everywhere except Linux arm64,
+          # which gets Playwright's own Chromium build, and the release
+          # publishes an arm64 image. Without this leg an identity regression
+          # in that build reaches the container with both other jobs green.
+          - os: ubuntu-24.04-arm
+            identity: true
+            browsers: ~/.cache/ms-playwright
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -119,38 +132,54 @@ jobs:
       - name: Run platform behaviour tests
         run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py tests/test_daemon_lock.py tests/test_greenlet_runtime.py
 
-      # The identity gate belongs here as much as on Ubuntu, and for the same
-      # reason this job exists at all: the mechanism it guards is a different
-      # one per platform. `hidden_target_is_supported()` is macOS-only, so the
-      # hidden target -- the whole reason the default mode can run without
-      # announcing itself as headless -- is never launched by the Ubuntu job.
-      # A regression in it would be invisible everywhere CI looks.
-      #
-      # macOS only. Windows falls back to Chromium's headless mode like Linux
-      # does, so the Ubuntu job already covers that shape, and this job would
-      # pay a second browser download for a third copy of the same answer.
+      # The identity gate runs where the Ubuntu job's browser is not the one
+      # that ships. Two legs qualify and for different reasons: macOS is the
+      # only platform with a hidden target, which is the whole reason the
+      # default mode can run without announcing itself as headless, and Linux
+      # arm64 is the only platform whose bundle is Playwright's own Chromium
+      # rather than Chrome for Testing. Windows runs neither: it falls back to
+      # headless mode the way Linux x64 does, so it would pay a browser
+      # download for a third copy of an answer CI already has.
       - name: Resolve the patchright version
-        if: runner.os == 'macOS'
+        if: matrix.identity
         id: patchright
         run: |
           version=$(uv run python -c 'from importlib.metadata import version; print(version("patchright"))')
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Restore the browser
-        if: runner.os == 'macOS'
+        if: matrix.identity
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/Library/Caches/ms-playwright
-          key: ms-playwright-${{ runner.os }}-${{ steps.patchright.outputs.version }}
+          path: ${{ matrix.browsers }}
+          key: ms-playwright-${{ matrix.os }}-${{ steps.patchright.outputs.version }}
 
-      # No `--with-deps` here: playwright installs system dependencies on
-      # Ubuntu and Windows only, and macOS needs none.
+      # `--with-deps` only where playwright has any to install: it acts on
+      # Ubuntu and Windows, and macOS needs none.
       - name: Install the browser
-        if: runner.os == 'macOS'
-        run: uv run patchright install chromium --no-shell
+        if: matrix.identity
+        run: uv run patchright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium --no-shell
+
+      # Same reason as the Ubuntu job: the headed half of the gate needs
+      # somewhere to put a window, and the default half does not.
+      - name: Start a display
+        if: matrix.identity && runner.os == 'Linux'
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          for _ in $(seq 1 100); do
+            if [ -S /tmp/.X11-unix/X99 ]; then exit 0; fi
+            sleep 0.1
+          done
+          echo "Xvfb never created /tmp/.X11-unix/X99:" >&2
+          cat /tmp/xvfb.log >&2
+          exit 1
 
       - name: Run the identity gate
-        if: runner.os == 'macOS'
+        if: matrix.identity
+        env:
+          # Only where one was started. macOS ignores it, but naming a display
+          # that does not exist is the kind of thing someone later debugs.
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
         run: uv run pytest tests/test_browser_identity.py
 
       - run: uv cache prune --ci

@@ -28,6 +28,13 @@ real headless mode on Linux, where it does announce itself. Asserting "no
 headless token" against the default would therefore be an assertion that
 catches nothing on the platform CI runs. The headed mode is the one the
 container image is heading for, and it is where that assertion bites.
+
+Only three cases are about a particular mode: the headless token, whether the
+hidden target was used, and whether the default mode matches its own claim.
+Everything else is true of a browser however it was started, so it runs against
+both, which costs nothing because both launches are already cached. A
+regression that appears in headed Chromium alone is otherwise invisible here,
+and headed is not the cheaper mode to leave uncovered.
 """
 
 from __future__ import annotations
@@ -167,6 +174,37 @@ async def headed_mode(tmp_path_factory, _mode_results) -> dict:
     return await _for_mode(tmp_path_factory, _mode_results, headless=False)
 
 
+@pytest.fixture(params=[True, False], ids=["default", "headed"])
+async def either_mode(request, tmp_path_factory, _mode_results) -> dict:
+    """Both launches, for every relation that does not depend on the mode.
+
+    Most of what this file asserts is true of a browser regardless of how it
+    was started, and running it against one mode only halves the gate for free:
+    a regression that shows up in headed Chromium alone would leave the two
+    headed assertions and every default-mode assertion untouched. Headed is
+    also the mode the container image is heading for, so it is not the cheaper
+    one to leave uncovered.
+
+    No extra launches. Both modes are already started and cached for the module,
+    so this only decides which of the two an existing case reads.
+    """
+    return await _for_mode(tmp_path_factory, _mode_results, headless=request.param)
+
+
+def _structured_string(value: str | None) -> str | None:
+    """The text inside a structured-field string, or None if there is none.
+
+    Client hints arrive quoted: ``Sec-CH-UA-Arch: "arm"``. So a hint the browser
+    left blank arrives as two quote characters, which is a perfectly truthy
+    Python string, and ``assert headers.get(...)`` accepts it. Blank is exactly
+    the failure worth catching here, since it is what a browser emits when it
+    has the value in JavaScript and cannot put it on the wire.
+    """
+    if value is None:
+        return None
+    return value.strip().strip('"') or None
+
+
 def _realms(described: dict) -> dict[str, dict]:
     return {
         "page": described["page"],
@@ -188,15 +226,15 @@ class TestEveryRealmTellsTheSameStory:
     other surface it routinely misses.
     """
 
-    async def test_all_three_realms_report_one_user_agent(self, default_mode):
-        agents = {name: realm["ua"] for name, realm in _realms(default_mode).items()}
+    async def test_every_realm_reports_one_user_agent(self, either_mode):
+        agents = {name: realm["ua"] for name, realm in _realms(either_mode).items()}
 
         assert len(set(agents.values())) == 1, agents
 
-    async def test_each_realm_sends_what_it_says(self, default_mode):
+    async def test_each_realm_sends_what_it_says(self, either_mode):
         """The JS value and the request header are different channels, and an
         override that changes the string reaches only the first."""
-        for name, realm in _realms(default_mode).items():
+        for name, realm in _realms(either_mode).items():
             assert realm["headers"]["user-agent"] == realm["ua"], name
 
 
@@ -248,7 +286,7 @@ class TestNothingAnnouncesAutomation:
             f"HeadlessChrome present={has_token}"
         )
 
-    async def test_webdriver_is_false_and_unremarkable(self, default_mode):
+    async def test_webdriver_is_false_and_unremarkable(self, either_mode):
         """`false` is not enough on its own: how it got there is also readable.
 
         A native ``Navigator.prototype.webdriver`` is an accessor with a getter,
@@ -261,26 +299,26 @@ class TestNothingAnnouncesAutomation:
         The getter's source does give it away. A native accessor stringifies to
         ``[native code]``; anything written in JavaScript stringifies to itself.
         """
-        assert default_mode["page"]["webdriver"] is False
-        descriptor = default_mode["webdriverDescriptor"]
+        assert either_mode["page"]["webdriver"] is False
+        descriptor = either_mode["webdriverDescriptor"]
         assert descriptor is not None
         assert descriptor["get"] == "function", descriptor
         assert descriptor["set"] == "undefined", descriptor
         assert descriptor["configurable"] is True, descriptor
         assert "[native code]" in descriptor["getSource"], descriptor
 
-    async def test_no_automation_globals_in_the_pages_own_realm(self, default_mode):
+    async def test_no_automation_globals_in_the_pages_own_realm(self, either_mode):
         """`__pwInitScripts`, `$cdc_*` and friends. Read from the page's own
         script rather than through `page.evaluate()`, which runs somewhere a
         website cannot see."""
-        assert default_mode["automationGlobals"] == []
+        assert either_mode["automationGlobals"] == []
 
 
 class TestTheHintsAgreeWithTheUserAgent:
-    async def test_the_brand_major_matches_the_user_agent_major(self, default_mode):
+    async def test_the_brand_major_matches_the_user_agent_major(self, either_mode):
         """Order is not pinned: the brand list is deliberately shuffled and
         salted with a GREASE entry to stop anyone reading it positionally."""
-        page = default_mode["page"]
+        page = either_mode["page"]
         ua_major = re.search(r"Chrome/(\d+)", page["ua"])
         assert ua_major, page["ua"]
         real = [b for b in page["brands"] if not _GREASE.search(b["brand"])]
@@ -291,16 +329,16 @@ class TestTheHintsAgreeWithTheUserAgent:
             f"{[(b['brand'], b['version']) for b in real]}"
         )
 
-    async def test_the_high_entropy_values_are_populated(self, default_mode):
+    async def test_the_high_entropy_values_are_populated(self, either_mode):
         """`platformVersion` is deliberately not checked: it is normatively
         empty on Linux, so asserting it would fail for a correct browser."""
-        hints = default_mode["page"]["highEntropy"]
+        hints = either_mode["page"]["highEntropy"]
 
         assert hints["architecture"], hints
         assert hints["bitness"], hints
         assert hints["fullVersionList"], hints
 
-    async def test_the_header_channel_carries_them_too(self, default_mode):
+    async def test_the_header_channel_carries_them_too(self, either_mode):
         """A different channel from `getHighEntropyValues()`, and it only fills
         in on a request *after* the server has asked with `Accept-CH`. The page
         fetches the echo endpoint for exactly that reason.
@@ -308,15 +346,28 @@ class TestTheHintsAgreeWithTheUserAgent:
         Asserted on the page alone: measured, the high-entropy headers do not
         appear on dedicated-worker or service-worker requests even though every
         response carries `Accept-CH`.
-        """
-        headers = default_mode["page"]["headers"]
 
-        assert headers.get("sec-ch-ua-arch"), headers.get("sec-ch-ua-arch")
+        Compared against the JavaScript channel rather than merely required to
+        be present, because "present" is the one thing a blank hint also is.
+        Two channels agreeing is the relation worth holding; it is also what a
+        browser fails when it knows the value and cannot put it on the wire.
+        """
+        headers = either_mode["page"]["headers"]
+        hints = either_mode["page"]["highEntropy"]
+
+        for header, js in (("arch", "architecture"), ("bitness", "bitness")):
+            sent = _structured_string(headers.get(f"sec-ch-ua-{header}"))
+            assert sent, f"sec-ch-ua-{header} = {headers.get(f'sec-ch-ua-{header}')!r}"
+            assert sent == hints[js], (
+                f"sec-ch-ua-{header} says {sent!r} and getHighEntropyValues "
+                f"says {hints[js]!r}"
+            )
+
         assert headers.get("sec-ch-ua-full-version-list")
 
-    async def test_the_header_brand_major_matches_too(self, default_mode):
-        headers = default_mode["page"]["headers"]
-        ua_major = re.search(r"Chrome/(\d+)", default_mode["page"]["ua"])
+    async def test_the_header_brand_major_matches_too(self, either_mode):
+        headers = either_mode["page"]["headers"]
+        ua_major = re.search(r"Chrome/(\d+)", either_mode["page"]["ua"])
         assert ua_major
 
         brands = headers.get("sec-ch-ua", "")
@@ -326,17 +377,11 @@ class TestTheHintsAgreeWithTheUserAgent:
 
 
 class TestTheWindowFitsTheScreenItStandsOn:
-    async def test_the_outer_window_does_not_exceed_the_screen(self, default_mode):
+    async def test_the_outer_window_does_not_exceed_the_screen(self, either_mode):
         """The contradiction this was measured to remove: an emulated viewport
         forced onto a headed window produced an outer height of 805 against a
         screen the same browser reported as 720 tall. Any page can read both."""
-        geometry = default_mode["geometry"]
-
-        assert geometry["outerWidth"] <= geometry["screenWidth"], geometry
-        assert geometry["outerHeight"] <= geometry["screenHeight"], geometry
-
-    async def test_headed_fits_too(self, headed_mode):
-        geometry = headed_mode["geometry"]
+        geometry = either_mode["geometry"]
 
         assert geometry["outerWidth"] <= geometry["screenWidth"], geometry
         assert geometry["outerHeight"] <= geometry["screenHeight"], geometry
@@ -350,8 +395,8 @@ class TestItIsTheFullBrowser:
     deciding to. These three are what the shell gets wrong.
     """
 
-    async def test_plugins_are_present(self, default_mode):
-        assert default_mode["plugins"] > 0
+    async def test_plugins_are_present(self, either_mode):
+        assert either_mode["plugins"] > 0
 
-    async def test_the_chrome_object_exists(self, default_mode):
-        assert default_mode["hasChromeObject"] == "object"
+    async def test_the_chrome_object_exists(self, either_mode):
+        assert either_mode["hasChromeObject"] == "object"
