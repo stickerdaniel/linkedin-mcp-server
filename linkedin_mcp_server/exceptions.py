@@ -190,7 +190,7 @@ class BrowserDowngradeError(LinkedInMCPError):
         )
 
 
-class VisualCPPRuntimeMissingError(LinkedInMCPError):
+class VisualCPPRuntimeUnavailableError(LinkedInMCPError):
     """greenlet's C extension needs a Visual C++ runtime this machine lacks.
 
     Its own class because the failure is neither ours nor recoverable from

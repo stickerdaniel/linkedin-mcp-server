@@ -273,7 +273,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 - Claude Desktop starts the bundle immediately; browser setup continues in the background
 - If the Patchright Chromium browser is still downloading, retry the tool after a short wait
 - Managed browser downloads are shared under `~/.linkedin-mcp/patchright-browsers/`
-- *Windows, the bundle exits with `DLL load failed while importing _greenlet`*: install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll` from it, and neither the python.org installer nor the `uv`-managed builds carry that DLL. The server names this itself on startup, and only after checking that the DLL is genuinely absent. Tracked upstream as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525).
+- *Windows, the bundle exits with `DLL load failed while importing _greenlet`*: install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll` from it, and neither the python.org installer nor the `uv`-managed builds carry that DLL. The server names this itself on startup, and only after checking that the installed greenlet needs that DLL and that the loader cannot produce it. Tracked upstream as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525).
 
 **Login issues:**
 

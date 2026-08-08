@@ -15,6 +15,7 @@ about it should not need one.
 import subprocess
 import sys
 import tomllib
+from ctypes.util import find_library
 from importlib.metadata import version
 from pathlib import Path
 from types import ModuleType
@@ -22,7 +23,7 @@ from types import ModuleType
 import pytest
 
 from linkedin_mcp_server import greenlet_runtime
-from linkedin_mcp_server.exceptions import VisualCPPRuntimeMissingError
+from linkedin_mcp_server.exceptions import VisualCPPRuntimeUnavailableError
 from linkedin_mcp_server.greenlet_runtime import explain_a_missing_runtime
 
 #: What CPython raises when a ``.pyd`` cannot find a DLL it imports. The prefix
@@ -64,11 +65,18 @@ class TestOnWindows:
     @pytest.fixture(autouse=True)
     def _windows(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")
+        # Stated rather than inherited from the host. Off Windows the real probe
+        # answers True because no machine here has an msvcp140.dll at all, which
+        # is the right answer for the wrong reason; on a healthy Windows box it
+        # answers False and every test below would fail.
+        monkeypatch.setattr(
+            greenlet_runtime, "_the_runtime_cannot_be_loaded", lambda: True
+        )
 
     def test_a_dll_failure_names_the_runtime(self, greenlet_fails):
         greenlet_fails(ImportError(_REAL_MESSAGE))
 
-        with pytest.raises(VisualCPPRuntimeMissingError) as caught:
+        with pytest.raises(VisualCPPRuntimeUnavailableError) as caught:
             explain_a_missing_runtime()
 
         message = str(caught.value)
@@ -79,7 +87,7 @@ class TestOnWindows:
     def test_the_loader_is_quoted(self, greenlet_fails):
         greenlet_fails(ImportError("DLL load failed while importing _greenlet: bogus"))
 
-        with pytest.raises(VisualCPPRuntimeMissingError) as caught:
+        with pytest.raises(VisualCPPRuntimeUnavailableError) as caught:
             explain_a_missing_runtime()
 
         assert "bogus" in str(caught.value)
@@ -93,13 +101,15 @@ class TestOnWindows:
         # would send that user after the wrong thing, and it would be worst on
         # the 3.3.0 stopgap this very message suggests, which links the runtime
         # statically and needs none of it.
-        monkeypatch.setattr(greenlet_runtime, "_the_runtime_is_absent", lambda: False)
+        monkeypatch.setattr(
+            greenlet_runtime, "_the_runtime_cannot_be_loaded", lambda: False
+        )
         greenlet_fails(ImportError(_REAL_MESSAGE))
 
         with pytest.raises(ImportError) as caught:
             explain_a_missing_runtime()
 
-        assert not isinstance(caught.value, VisualCPPRuntimeMissingError)
+        assert not isinstance(caught.value, VisualCPPRuntimeUnavailableError)
         assert str(caught.value) == _REAL_MESSAGE
 
     def test_an_unreadable_version_does_not_mask_the_failure(
@@ -114,7 +124,7 @@ class TestOnWindows:
         monkeypatch.setattr(greenlet_runtime, "version", boom)
         greenlet_fails(ImportError(_REAL_MESSAGE))
 
-        with pytest.raises(VisualCPPRuntimeMissingError) as caught:
+        with pytest.raises(VisualCPPRuntimeUnavailableError) as caught:
             explain_a_missing_runtime()
 
         assert "Installed greenlet: unknown" in str(caught.value)
@@ -124,7 +134,7 @@ class TestOnWindows:
         # which version is on disk to place it against that.
         greenlet_fails(ImportError(_REAL_MESSAGE))
 
-        with pytest.raises(VisualCPPRuntimeMissingError) as caught:
+        with pytest.raises(VisualCPPRuntimeUnavailableError) as caught:
             explain_a_missing_runtime()
 
         assert f"Installed greenlet: {version('greenlet')}" in str(caught.value)
@@ -133,7 +143,7 @@ class TestOnWindows:
         original = ImportError(_REAL_MESSAGE)
         greenlet_fails(original)
 
-        with pytest.raises(VisualCPPRuntimeMissingError) as caught:
+        with pytest.raises(VisualCPPRuntimeUnavailableError) as caught:
             explain_a_missing_runtime()
 
         # Chained, not swallowed: whoever reads the traceback still sees which
@@ -147,7 +157,7 @@ class TestOnWindows:
         # user may have neither them nor anyone to ask.
         greenlet_fails(ImportError(_REAL_MESSAGE))
 
-        with pytest.raises(VisualCPPRuntimeMissingError) as caught:
+        with pytest.raises(VisualCPPRuntimeUnavailableError) as caught:
             explain_a_missing_runtime()
 
         assert "greenlet<=3.3.0" in str(caught.value)
@@ -160,13 +170,69 @@ class TestOnWindows:
         with pytest.raises(ImportError) as caught:
             explain_a_missing_runtime()
 
-        assert not isinstance(caught.value, VisualCPPRuntimeMissingError)
+        assert not isinstance(caught.value, VisualCPPRuntimeUnavailableError)
         assert "No module named" in str(caught.value)
 
     def test_an_importable_greenlet_says_nothing(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "greenlet", ModuleType("greenlet"))
 
         assert explain_a_missing_runtime() is None
+
+    def test_a_statically_linked_greenlet_is_left_alone(
+        self, monkeypatch, greenlet_fails
+    ):
+        # 3.3.0 is the stopgap this very message recommends. It carries its own
+        # C++ runtime, so a DLL failure there is never about the redistributable
+        # and saying so would send that user after the wrong thing.
+        monkeypatch.setattr(greenlet_runtime, "version", lambda _name: "3.3.0")
+        greenlet_fails(ImportError(_REAL_MESSAGE))
+
+        with pytest.raises(ImportError) as caught:
+            explain_a_missing_runtime()
+
+        assert not isinstance(caught.value, VisualCPPRuntimeUnavailableError)
+
+    @pytest.mark.parametrize("installed", ["3.3.1", "3.5.4", "4.0.0"])
+    def test_a_dynamically_linked_greenlet_is_explained(
+        self, monkeypatch, greenlet_fails, installed
+    ):
+        monkeypatch.setattr(greenlet_runtime, "version", lambda _name: installed)
+        greenlet_fails(ImportError(_REAL_MESSAGE))
+
+        with pytest.raises(VisualCPPRuntimeUnavailableError):
+            explain_a_missing_runtime()
+
+    @pytest.mark.parametrize("installed", ["unknown", "not-a-version"])
+    def test_an_unusable_version_still_gets_the_message(
+        self, monkeypatch, greenlet_fails, installed
+    ):
+        # Withholding the explanation because the metadata is damaged would
+        # withhold it exactly where the install is already in trouble.
+        monkeypatch.setattr(greenlet_runtime, "version", lambda _name: installed)
+        greenlet_fails(ImportError(_REAL_MESSAGE))
+
+        with pytest.raises(VisualCPPRuntimeUnavailableError):
+            explain_a_missing_runtime()
+
+
+class TestTheProbeItself:
+    """The one part that talks to the real loader, so no test may stub it out."""
+
+    def test_a_library_that_is_not_there_reads_as_unloadable(self, monkeypatch):
+        monkeypatch.setattr(
+            greenlet_runtime, "_RUNTIME_DLL", "no-such-library-4c1f9a.dll"
+        )
+
+        assert greenlet_runtime._the_runtime_cannot_be_loaded() is True
+
+    def test_a_library_that_is_there_reads_as_loadable(self, monkeypatch):
+        # Whatever this host can actually load, so the False branch is exercised
+        # on every platform rather than only where msvcp140.dll exists.
+        present = "kernel32.dll" if sys.platform == "win32" else find_library("c")
+        assert present, "no reference library to load on this platform"
+        monkeypatch.setattr(greenlet_runtime, "_RUNTIME_DLL", present)
+
+        assert greenlet_runtime._the_runtime_cannot_be_loaded() is False
 
 
 class TestElsewhere:
@@ -204,6 +270,24 @@ class Refusing:
             )
         return None
 
+# The runtime's presence is stated, not inherited from the machine running
+# this test. Without it the child would agree for the wrong reason off
+# Windows, and disagree on a healthy Windows host.
+import ctypes
+_real_cdll = ctypes.CDLL
+
+def _cdll(name, *args, **kwargs):
+    if str(name).lower() == "msvcp140.dll":
+        if {runtime_loads}:
+            return _real_cdll(_reference_library)
+        raise OSError("[WinError 126] The specified module could not be found")
+    return _real_cdll(name, *args, **kwargs)
+
+_reference_library = "kernel32.dll" if {on_windows} else __import__(
+    "ctypes.util", fromlist=["find_library"]
+).find_library("c")
+ctypes.CDLL = _cdll
+
 sys.platform = "win32"
 sys.meta_path.insert(0, Refusing())
 {body}
@@ -227,20 +311,41 @@ class TestBothEntryPaths:
     the bare DLL error again.
     """
 
-    @pytest.mark.parametrize("route", sorted(_ENTRY_PATHS))
-    def test_the_guard_speaks_before_patchright_is_reached(self, route):
-        finished = subprocess.run(
-            [sys.executable, "-c", _ENTRY_PATH_SCRIPT.format(body=_ENTRY_PATHS[route])],
+    def _run(self, route: str, runtime_loads: bool) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _ENTRY_PATH_SCRIPT.format(
+                    body=_ENTRY_PATHS[route],
+                    runtime_loads=runtime_loads,
+                    on_windows=repr(sys.platform == "win32"),
+                ),
+            ],
             capture_output=True,
             text=True,
             cwd=Path(__file__).resolve().parent.parent,
         )
 
+    @pytest.mark.parametrize("route", sorted(_ENTRY_PATHS))
+    def test_the_guard_speaks_before_patchright_is_reached(self, route):
+        finished = self._run(route, runtime_loads=False)
+
         assert finished.returncode != 0
-        assert "VisualCPPRuntimeMissingError" in finished.stderr
+        assert "VisualCPPRuntimeUnavailableError" in finished.stderr
         assert "MSVCP140.dll" in finished.stderr
         # The loader's own words survive, which is the only machine-specific
         # detail and the only way to tell this cause from another DLL failure.
+        assert "DLL load failed while importing _greenlet" in finished.stderr
+
+    @pytest.mark.parametrize("route", sorted(_ENTRY_PATHS))
+    def test_a_loadable_runtime_leaves_the_error_alone(self, route):
+        # What a healthy Windows machine looks like: the extension fails for
+        # some other reason and the redistributable has nothing to do with it.
+        finished = self._run(route, runtime_loads=True)
+
+        assert finished.returncode != 0
+        assert "VisualCPPRuntimeUnavailableError" not in finished.stderr
         assert "DLL load failed while importing _greenlet" in finished.stderr
 
     def test_the_console_script_still_goes_through_the_package(self):
