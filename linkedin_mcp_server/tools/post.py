@@ -218,3 +218,57 @@ def register_post_tools(
                 raise_tool_error(relogin_exc, "schedule_post")
         except Exception as e:
             raise_tool_error(e, "schedule_post")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Scheduled Posts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"post", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_scheduled_posts(
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List the authenticated user's scheduled posts.
+
+        Reads LinkedIn's "Scheduled posts" view (the share composer's clock
+        button -> "View all scheduled posts"). Read-only in effect: the
+        composer is opened to reach the list, never typed into, and dismissed
+        empty. Entries appear in the returned text in LinkedIn's own order
+        (soonest first), each as a "Posting <day>, <date> at <time>" line
+        followed by a body preview.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url and sections (scheduled_posts -> raw text). When the
+            list cannot be reached, a dict with url, status and message
+            instead. The LLM should parse the raw text to extract each entry's
+            scheduled moment and body preview.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_scheduled_posts"
+            )
+            logger.info("Listing scheduled posts")
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Opening scheduled posts"
+            )
+
+            result = await extractor.get_scheduled_posts()
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_scheduled_posts")
+        except Exception as e:
+            raise_tool_error(e, "get_scheduled_posts")  # NoReturn

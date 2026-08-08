@@ -124,6 +124,10 @@
       "description": "Schedule a LinkedIn feed post via LinkedIn's native Schedule-for-later flow, with explicit confirmation and a dry-run mode"
     },
     {
+      "name": "get_scheduled_posts",
+      "description": "List the authenticated user's scheduled posts with each entry's scheduled moment and body preview"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
     }

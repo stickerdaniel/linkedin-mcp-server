@@ -219,6 +219,12 @@ _SCHEDULE_DATE_INPUT_SELECTOR = "input#share-post__scheduled-date"
 _SCHEDULE_TIME_INPUT_SELECTOR = "input#share-post__scheduled-time"
 # LinkedIn's modal close button carries this test hook in the composer.
 _COMPOSER_DISMISS_SELECTOR = "button[data-test-modal-close-btn]"
+# "View all scheduled posts" inside the schedule dialog: the only button there
+# carrying the forward-arrow icon (again a test-hook name, not a translation).
+_SCHEDULE_VIEW_ALL_BUTTON_SELECTOR = (
+    'button:has(svg[data-test-icon="arrow-right-small"]), '
+    'button:has(use[href="#arrow-right-small"])'
+)
 
 
 def _resolve_date_order(
@@ -4471,6 +4477,106 @@ class LinkedInExtractor:
         except Exception:
             logger.debug("Composer dismissal failed", exc_info=True)
 
+    async def _open_schedule_dialog(self) -> tuple[str, str] | None:
+        """Open the share composer and its schedule dialog.
+
+        Returns None on success, or a ``(status, message)`` pair after
+        dismissing whatever partial surface was reached. The composer is opened
+        by URL; the schedule dialog by the clock button.
+        """
+        await self._navigate_to_page("https://www.linkedin.com/feed/?shareActive=true")
+        await detect_rate_limit(self._page)
+
+        editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
+        try:
+            await editor.wait_for(state="visible", timeout=15000)
+        except PlaywrightTimeoutError:
+            return (
+                "composer_unavailable",
+                "LinkedIn did not open the share composer.",
+            )
+
+        schedule_button = self._page.locator(_COMPOSER_SCHEDULE_BUTTON_SELECTOR).first
+        try:
+            await schedule_button.click(timeout=8000)
+        except Exception:
+            await self._clear_and_dismiss_composer()
+            return (
+                "schedule_unavailable",
+                "LinkedIn did not expose a schedule (clock) action in the composer.",
+            )
+
+        try:
+            await self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR).first.wait_for(
+                state="visible", timeout=8000
+            )
+        except PlaywrightTimeoutError:
+            await self._clear_and_dismiss_composer()
+            return ("schedule_unavailable", "The schedule dialog did not open.")
+        return None
+
+    async def _open_scheduled_posts_list(self) -> tuple[str, str] | None:
+        """From anywhere, open the Scheduled posts modal.
+
+        LinkedIn exposes the list only behind the composer's schedule dialog
+        ("View all scheduled posts") — the modal replaces the dialog in place
+        and the address bar never changes, so there is no URL to navigate to.
+        Returns None with the modal open, or ``(status, message)``.
+        """
+        failure = await self._open_schedule_dialog()
+        if failure is not None:
+            return failure
+
+        schedule_dialog = self._page.locator(_DIALOG_SELECTOR).filter(
+            has=self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR)
+        )
+        view_all = schedule_dialog.locator(_SCHEDULE_VIEW_ALL_BUTTON_SELECTOR).first
+        try:
+            await view_all.click(timeout=5000)
+            await self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR).first.wait_for(
+                state="hidden", timeout=8000
+            )
+        except Exception:
+            await self._clear_and_dismiss_composer()
+            return (
+                "list_unavailable",
+                "LinkedIn did not open the scheduled posts view.",
+            )
+        await asyncio.sleep(1.0)  # let the list hydrate
+        return None
+
+    async def _dismiss_scheduled_posts_list(self) -> None:
+        """Close the Scheduled posts modal and any composer left behind it."""
+        try:
+            await self._page.locator(_COMPOSER_DISMISS_SELECTOR).first.click(
+                timeout=3000
+            )
+        except Exception:
+            logger.debug("Scheduled posts modal dismissal failed", exc_info=True)
+        # Defensive: tolerates the composer already being gone.
+        await self._clear_and_dismiss_composer()
+
+    async def get_scheduled_posts(self) -> dict[str, Any]:
+        """List the authenticated user's scheduled posts.
+
+        Read-only in effect: the composer is opened, never typed into, and
+        dismissed empty on every path.
+        """
+        failure = await self._open_scheduled_posts_list()
+        if failure is not None:
+            status, message = failure
+            return {"url": self._page.url, "status": status, "message": message}
+
+        list_dialog = self._page.locator(_DIALOG_SELECTOR).filter(visible=True)
+        text = ""
+        try:
+            text = await list_dialog.first.inner_text()
+        except Exception:
+            logger.debug("Could not read scheduled posts modal", exc_info=True)
+        url = self._page.url
+        await self._dismiss_scheduled_posts_list()
+        return self._single_section_result(url, "scheduled_posts", text)
+
     async def schedule_post(
         self,
         text: str,
@@ -4495,41 +4601,13 @@ class LinkedInExtractor:
             confirm_schedule: Must be True to actually schedule (False does a
                 dry run that fills everything and then discards).
         """
-        await self._navigate_to_page("https://www.linkedin.com/feed/?shareActive=true")
-        await detect_rate_limit(self._page)
+        failure = await self._open_schedule_dialog()
+        if failure is not None:
+            return self._schedule_post_result(self._page.url, *failure)
 
         editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
-        try:
-            await editor.wait_for(state="visible", timeout=15000)
-        except PlaywrightTimeoutError:
-            return self._schedule_post_result(
-                self._page.url,
-                "composer_unavailable",
-                "LinkedIn did not open the share composer.",
-            )
-
-        schedule_button = self._page.locator(_COMPOSER_SCHEDULE_BUTTON_SELECTOR).first
-        try:
-            await schedule_button.click(timeout=8000)
-        except Exception:
-            await self._clear_and_dismiss_composer()
-            return self._schedule_post_result(
-                self._page.url,
-                "schedule_unavailable",
-                "LinkedIn did not expose a schedule (clock) action in the composer.",
-            )
-
         date_input = self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR).first
         time_input = self._page.locator(_SCHEDULE_TIME_INPUT_SELECTOR).first
-        try:
-            await date_input.wait_for(state="visible", timeout=8000)
-        except PlaywrightTimeoutError:
-            await self._clear_and_dismiss_composer()
-            return self._schedule_post_result(
-                self._page.url,
-                "schedule_unavailable",
-                "The schedule dialog did not open.",
-            )
 
         # The prefilled values are LinkedIn's own rendering of a date and a
         # time in this profile's locale; format ours the same way.

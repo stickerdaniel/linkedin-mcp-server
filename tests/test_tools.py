@@ -38,6 +38,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
     mock.schedule_post = AsyncMock(return_value=scrape_result)
+    mock.get_scheduled_posts = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -1322,6 +1323,43 @@ class TestPostTools:
             minute=5,
             confirm_schedule=False,
         )
+
+    async def test_get_scheduled_posts_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "sections": {"scheduled_posts": "Posting Tue, Aug 11 at 10:00 AM\nHello"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_scheduled_posts")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        assert "scheduled_posts" in result["sections"]
+        mock_extractor.get_scheduled_posts.assert_awaited_once_with()
+
+    async def test_get_scheduled_posts_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.get_scheduled_posts = AsyncMock(
+            side_effect=SessionExpiredError()
+        )
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_scheduled_posts")
+        with pytest.raises(ToolError):
+            await tool_fn(mock_context, extractor=mock_extractor)
 
     async def test_schedule_post_rejects_bad_date_format(self, mock_context):
         from fastmcp.exceptions import ToolError
