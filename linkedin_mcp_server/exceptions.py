@@ -198,6 +198,11 @@ class VisualCPPRuntimeMissingError(LinkedInMCPError):
     configuration changes the answer, so the only useful thing the server can do
     is say which one is missing and where it comes from.
 
+    The name is an assertion, so it is only raised once the loader has been
+    asked for ``MSVCP140.dll`` and could not produce it. A DLL failure alone
+    does not justify it: CPython reports every failed load with the same words,
+    and a corrupt or architecture-mismatched extension reaches that path too.
+
     Raised while importing the package, which is the only moment early enough:
     patchright pulls greenlet in on the way to ``patchright.async_api``, long
     before any entry point runs. See ``greenlet_runtime``.

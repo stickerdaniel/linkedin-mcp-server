@@ -1,4 +1,4 @@
-"""Name the likely missing Visual C++ runtime instead of letting a DLL error stand.
+"""Name the missing Visual C++ runtime instead of letting a DLL error stand.
 
 greenlet is not ours and we never call it. patchright imports it unconditionally
 from ``_impl/_connection.py``, on the async-only path too, so its C extension is
@@ -16,12 +16,16 @@ on the published ``cp312-win_amd64`` wheels, reading the PE import table of
     3.3.0              KERNEL32.dll, python312.dll
     3.3.1 .. 3.5.4     + MSVCP140.dll, VCRUNTIME140.dll, VCRUNTIME140_1.dll
 
-``MSVCP140.dll`` ships with the Microsoft Visual C++ Redistributable and with no
-Python distribution. Both distributions people actually run here carry
-``vcruntime140.dll`` and ``vcruntime140_1.dll`` and stop there: the python.org
-embeddable package, and the python-build-standalone builds ``uv`` installs. A
-``uvx`` user is therefore more exposed than most, because a uv-managed Python is
-a self-contained tree that never inherits anything from a system install.
+``MSVCP140.dll`` ships with the Microsoft Visual C++ Redistributable. It does
+not ship with either distribution this server is normally started from: the
+python.org embeddable package and the python-build-standalone builds ``uv``
+installs both carry ``vcruntime140.dll`` and ``vcruntime140_1.dll`` and stop
+there. Not a universal claim about Python on Windows -- a conda environment
+pulls ``vc14_runtime``, which does carry it -- and not a claim that the
+interpreter is sealed off either, since the loader still searches ``System32``
+and finds a system-wide redistributable there. It is a statement about what the
+tree brings with it when nothing else on the machine has ever installed one,
+which is the situation a ``uvx`` user is most likely to be in.
 
 Reported upstream as python-greenlet/greenlet#525 with the fix in #526. That
 does not retire this module. The affected wheels stay on PyPI for good, and any
@@ -29,16 +33,19 @@ resolver that lands on one of them reproduces the failure years from now.
 
 Three decisions worth stating, because each looks like something else:
 
-The message names a *likely* cause and never a certain one. ``DLL load failed``
-is what CPython writes in ``dynload_win.c`` for every ``LoadLibraryExW`` that
-fails, so it covers a corrupt ``.pyd``, an architecture mismatch and a missing
-dependency that is not this one. Nothing available at import time separates
-those. So the loader's own words are quoted back verbatim, the installed
-greenlet version is named so the reader can check it against the range above,
-and the redistributable is offered as the usual explanation rather than the
-diagnosis. Matching that prefix at all is locale-independent despite being a
-text match: CPython formats it itself and it is English on every install, while
-only the operating-system text after the colon is translated.
+The cause is measured, not inferred from the message. ``DLL load failed`` is
+what CPython writes in ``dynload_win.c`` for every ``LoadLibraryExW`` that
+fails, so on its own it also covers a corrupt ``.pyd``, an architecture
+mismatch, and a different missing dependency; the operating-system text after
+the colon does not name which module was not found. Reading that prefix
+therefore only says a load failed, and the question of *why* is answered by
+asking the loader for ``MSVCP140.dll`` directly. If it loads, this is some other
+failure and the original error is re-raised untouched, which matters most for
+the 3.3.0 stopgap suggested below: that build needs no C++ runtime at all, so
+translating its DLL errors would be certainly wrong. The one imprecision left is
+that a ``.pyd`` is loaded with ``LOAD_WITH_ALTERED_SEARCH_PATH`` and so also
+searches its own directory, while this probe does not; a ``MSVCP140.dll`` placed
+next to ``_greenlet.pyd`` and nowhere else would be missed.
 
 The probe imports greenlet eagerly rather than waiting for patchright to do it.
 It has to, because the failure happens while importing ``cli_main`` -- through
@@ -60,44 +67,69 @@ failure this exists to prevent. One unconditional check is worth an error
 message on a machine that was already broken.
 """
 
+import ctypes
 import sys
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import version
 
 from linkedin_mcp_server.exceptions import VisualCPPRuntimeMissingError
 
 _DLL_LOAD_FAILED = "DLL load failed"
 
+#: The C++ standard library from the redistributable. ``VCRUNTIME140*`` are
+#: imported too, but those the Python distributions do ship, so this one is
+#: what actually decides.
+_RUNTIME_DLL = "msvcp140.dll"
+
+
+def _the_runtime_is_absent() -> bool:
+    """Whether the loader can find the C++ runtime at all.
+
+    Asked of the loader rather than of a path, so it answers with the same
+    search order that failed for ``_greenlet.pyd``. ``CDLL`` rather than
+    ``WinDLL`` because the two differ only in calling convention and nothing is
+    ever called through this handle.
+    """
+    try:
+        ctypes.CDLL(_RUNTIME_DLL)
+    except OSError:
+        return True
+    return False
+
 
 def _installed_greenlet() -> str:
-    """The greenlet version on disk, which is readable even when it will not load."""
+    """The greenlet version on disk, which is readable even when it will not load.
+
+    Every failure here is swallowed. This runs inside an import that is already
+    failing, and a broken ``METADATA`` masking the real error with a decoding
+    problem would be a worse outcome than an unnamed version.
+    """
     try:
-        return version("greenlet")
-    except PackageNotFoundError:  # pragma: no cover - greenlet is a hard dependency
+        return version("greenlet") or "unknown"
+    except Exception:
         return "unknown"
 
 
 def _explain(loader_said: str) -> str:
-    return f"""greenlet could not load its C extension. The loader reported:
+    return f"""greenlet could not load its C extension, and {_RUNTIME_DLL} cannot
+be loaded on this machine either. The loader reported:
 
   {loader_said}
 
 Installed greenlet: {_installed_greenlet()}
 
-On Windows this is usually a missing Visual C++ runtime. greenlet 3.3.1 through
-3.5.4 link that runtime dynamically, so _greenlet.pyd needs MSVCP140.dll, which
-ships with the Microsoft Visual C++ Redistributable and with no Python
-distribution.
+greenlet 3.3.1 through 3.5.4 link the Visual C++ runtime dynamically, so
+_greenlet.pyd needs MSVCP140.dll. It comes with the
+Microsoft Visual C++ Redistributable, which nothing on this machine has
+installed.
 
 To fix this:
   Install the redistributable, then start the server again
   https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist
 
-Without administrator rights, an older greenlet works as a stopgap
+Without administrator rights, an older greenlet works as a stopgap. It links
+that runtime statically and needs none of this
 (x86-64 only, the older wheels have no ARM64 build):
   uvx --with "greenlet<=3.3.0" mcp-server-linkedin
-
-If the redistributable is already installed, the loader is reporting a different
-problem and the line above says which.
 
 Tracked upstream at https://github.com/python-greenlet/greenlet/issues/525"""
 
@@ -107,8 +139,8 @@ def explain_a_missing_runtime() -> None:
 
     Does nothing off Windows, where the dynamic link is not a problem, and
     nothing when greenlet imports normally. An import failure that is not the
-    loader's is re-raised as it came, so a greenlet that is merely absent still
-    says so instead of being handed advice about a redistributable.
+    loader's is re-raised as it came, and so is a load that failed while the
+    runtime is present, because then it is not this problem.
     """
     if sys.platform != "win32":
         return
@@ -117,5 +149,7 @@ def explain_a_missing_runtime() -> None:
         import greenlet  # noqa: F401
     except ImportError as exc:
         if _DLL_LOAD_FAILED not in str(exc):
+            raise
+        if not _the_runtime_is_absent():
             raise
         raise VisualCPPRuntimeMissingError(_explain(str(exc))) from exc

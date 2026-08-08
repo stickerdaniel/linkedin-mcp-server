@@ -21,6 +21,7 @@ from types import ModuleType
 
 import pytest
 
+from linkedin_mcp_server import greenlet_runtime
 from linkedin_mcp_server.exceptions import VisualCPPRuntimeMissingError
 from linkedin_mcp_server.greenlet_runtime import explain_a_missing_runtime
 
@@ -75,20 +76,48 @@ class TestOnWindows:
         assert "Microsoft Visual C++ Redistributable" in message
         assert "latest-supported-vc-redist" in message
 
-    def test_the_loader_is_quoted_rather_than_diagnosed(self, greenlet_fails):
-        # ``DLL load failed`` is what CPython writes for every LoadLibraryExW
-        # that fails, so it does not identify MSVCP140.dll. A corrupt or
-        # architecture-mismatched .pyd reaches here too, and the reader can only
-        # tell the difference from what the loader actually said.
+    def test_the_loader_is_quoted(self, greenlet_fails):
         greenlet_fails(ImportError("DLL load failed while importing _greenlet: bogus"))
 
         with pytest.raises(VisualCPPRuntimeMissingError) as caught:
             explain_a_missing_runtime()
 
-        message = str(caught.value)
-        assert "bogus" in message
-        assert "usually a missing Visual C++ runtime" in message
-        assert "already installed" in message
+        assert "bogus" in str(caught.value)
+
+    def test_a_present_runtime_means_this_is_a_different_problem(
+        self, monkeypatch, greenlet_fails
+    ):
+        # ``DLL load failed`` is what CPython writes for every LoadLibraryExW
+        # that fails, so a corrupt or architecture-mismatched .pyd reaches here
+        # too. Claiming a missing redistributable when the loader can produce it
+        # would send that user after the wrong thing, and it would be worst on
+        # the 3.3.0 stopgap this very message suggests, which links the runtime
+        # statically and needs none of it.
+        monkeypatch.setattr(greenlet_runtime, "_the_runtime_is_absent", lambda: False)
+        greenlet_fails(ImportError(_REAL_MESSAGE))
+
+        with pytest.raises(ImportError) as caught:
+            explain_a_missing_runtime()
+
+        assert not isinstance(caught.value, VisualCPPRuntimeMissingError)
+        assert str(caught.value) == _REAL_MESSAGE
+
+    def test_an_unreadable_version_does_not_mask_the_failure(
+        self, monkeypatch, greenlet_fails
+    ):
+        # This runs inside an import that is already failing. A broken METADATA
+        # raising through the message builder would replace the useful error
+        # with a decoding one.
+        def boom(_name: str) -> str:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "broken METADATA")
+
+        monkeypatch.setattr(greenlet_runtime, "version", boom)
+        greenlet_fails(ImportError(_REAL_MESSAGE))
+
+        with pytest.raises(VisualCPPRuntimeMissingError) as caught:
+            explain_a_missing_runtime()
+
+        assert "Installed greenlet: unknown" in str(caught.value)
 
     def test_the_installed_version_is_named(self, greenlet_fails):
         # The measured range is 3.3.1 through 3.5.4, so the reader needs to know
