@@ -413,7 +413,7 @@ def register_post_tools(
         match_text: str,
         confirm_delete: bool,
         ctx: Context,
-        occurrence: Annotated[int, Field(ge=0)] = 0,
+        occurrence: Annotated[int, Field(ge=0)] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -430,6 +430,8 @@ def register_post_tools(
             confirm_delete: Must be True to actually delete the post.
             ctx: FastMCP context for progress reporting
             occurrence: 0-based selector among entries matching match_text.
+                Omit to require a unique match; several matches then error
+                rather than silently picking the first.
 
         Returns:
             Dict with url, status, message, done (bool), and entry_preview

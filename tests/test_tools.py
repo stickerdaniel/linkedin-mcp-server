@@ -1510,7 +1510,7 @@ class TestPostTools:
         assert result["status"] == "deleted"
         mock_extractor.delete_scheduled_post.assert_awaited_once_with(
             "old snippet",
-            occurrence=0,
+            occurrence=None,
             confirm_delete=True,
         )
 

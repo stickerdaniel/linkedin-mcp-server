@@ -5073,7 +5073,7 @@ class LinkedInExtractor:
         self,
         match_text: str,
         *,
-        occurrence: int = 0,
+        occurrence: int | None = None,
         confirm_delete: bool,
     ) -> dict[str, Any]:
         """Delete a scheduled post via its entry's Delete action.
