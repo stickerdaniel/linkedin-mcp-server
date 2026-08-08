@@ -1,4 +1,4 @@
-"""A loopback origin that lets a browser describe itself, in three realms.
+"""Two loopback origins that let a browser describe itself, in four realms.
 
 Kept apart from the test so the same harness can run inside the container
 image, which has no dev dependencies. Nothing here imports pytest, and the only
@@ -103,7 +103,14 @@ _PAGE = b"""<!doctype html>
       .filter(n => /^(__pw|__playwright|\\$cdc_|__driver|__selenium|__webdriver)/.test(n)),
     webdriverDescriptor: (() => {
       const d = Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver');
-      return d ? {get: typeof d.get, set: typeof d.set, configurable: d.configurable} : null;
+      // The getter's own source, because that is what distinguishes a native
+      // accessor from one somebody redefined. The descriptor alone does not:
+      // redefining an existing configurable property leaves every attribute
+      // the caller did not name exactly as it was.
+      return d ? {
+        get: typeof d.get, set: typeof d.set, configurable: d.configurable,
+        getSource: d.get ? String(d.get) : null,
+      } : null;
     })(),
   };
   document.getElementById('out').textContent = JSON.stringify(result);

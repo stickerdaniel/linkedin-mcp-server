@@ -243,9 +243,13 @@ class TestNothingAnnouncesAutomation:
 
         A native ``Navigator.prototype.webdriver`` is an accessor with a getter,
         no setter, and configurable. Redefining it to return ``false`` is the
-        usual way to hide automation, and the cheapest tell it leaves is a
-        descriptor that is no longer configurable. The value would match; the
-        shape would not.
+        usual way to hide automation, and the descriptor does not give that
+        away: ``Object.defineProperty`` on an existing configurable property
+        leaves every attribute the caller did not name exactly as it was, so
+        the shape still matches. Measured, against exactly that mutation.
+
+        The getter's source does give it away. A native accessor stringifies to
+        ``[native code]``; anything written in JavaScript stringifies to itself.
         """
         assert default_mode["page"]["webdriver"] is False
         descriptor = default_mode["webdriverDescriptor"]
@@ -253,6 +257,7 @@ class TestNothingAnnouncesAutomation:
         assert descriptor["get"] == "function", descriptor
         assert descriptor["set"] == "undefined", descriptor
         assert descriptor["configurable"] is True, descriptor
+        assert "[native code]" in descriptor["getSource"], descriptor
 
     async def test_no_automation_globals_in_the_pages_own_realm(self, default_mode):
         """`__pwInitScripts`, `$cdc_*` and friends. Read from the page's own
