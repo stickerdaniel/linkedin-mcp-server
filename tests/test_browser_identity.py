@@ -39,10 +39,19 @@ from pathlib import Path
 
 import pytest
 
+from linkedin_mcp_server.browser_launch import build_launch_options
+from linkedin_mcp_server.config.schema import BrowserConfig
 from linkedin_mcp_server.core.browser import BrowserManager
 from browser_identity_harness import IdentityServer, describe_browser
 
-pytestmark = pytest.mark.browser_identity
+#: The group keeps every case in this file on one xdist worker, so the two
+#: cached launches are two launches rather than two per worker. It only has an
+#: effect under ``--dist loadgroup``, which the CI job passes; without it the
+#: mark is inert and the tests still pass, only slower.
+pytestmark = [
+    pytest.mark.browser_identity,
+    pytest.mark.xdist_group("browser_identity"),
+]
 
 #: GREASE brands exist to stop anyone parsing the list positionally. They carry
 #: deliberately meaningless versions, so a real brand has to be found by
@@ -67,9 +76,30 @@ def _unavailable(reason: str) -> None:
 
 
 async def _describe(tmp_path: Path, *, headless: bool) -> dict:
+    """Launch the way the product does, and ask the browser what it is.
+
+    The options come from ``build_launch_options`` rather than being written
+    out here, because a gate that assembles its own launch measures a browser
+    nobody ships. Measured, and the reason this is not a stylistic preference:
+    constructing ``BrowserManager`` bare leaves out ``channel="chromium"``, so
+    on Linux, where the default mode is physically headless, Playwright
+    resolves the binary from that flag alone and asks for the headless shell
+    the setup no longer installs. Every default-mode case then skips itself
+    while the shipped configuration is fine.
+
+    ``BrowserConfig()`` rather than ``get_config()``: the global parses
+    ``sys.argv`` and aborts under pytest, and the defaults are what the gate is
+    about anyway.
+    """
+    launch_options, viewport = build_launch_options(BrowserConfig())
     profile = tmp_path / f"identity-{'headless' if headless else 'headed'}"
     try:
-        manager = BrowserManager(user_data_dir=profile, headless=headless)
+        manager = BrowserManager(
+            user_data_dir=profile,
+            headless=headless,
+            viewport=viewport,
+            **launch_options,
+        )
         async with manager as browser:
             with IdentityServer() as server:
                 described = await describe_browser(browser.page, server.url)
