@@ -19,7 +19,7 @@ from linkedin_mcp_server.exceptions import (
 )
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.config.schema import AppConfig, ConfigurationError
 from linkedin_mcp_server.drivers.browser import (
     experimental_persist_derived_runtime,
     close_browser,
@@ -414,7 +414,21 @@ def get_version() -> str:
 
 def main() -> None:
     """Main application entry point."""
-    config = get_config()
+    try:
+        config = get_config()
+    except ConfigurationError as e:
+        # Every other failure in this file reaches a handler that says what
+        # happened. A bad setting did not: it left the loader as an exception
+        # nothing caught, so Python printed the whole stack down through the
+        # loader and the process died. Under a stdio host that stack is all the
+        # user sees behind "Server disconnected", with the setting at fault on
+        # its last line and everything above it looking like a crash.
+        #
+        # Printed rather than logged, because logging is configured from the
+        # configuration that just failed to load. stderr for the same reason it
+        # carries every other diagnostic here: stdout belongs to the protocol.
+        print(f"❌ Configuration error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Configure logging
     configure_logging(

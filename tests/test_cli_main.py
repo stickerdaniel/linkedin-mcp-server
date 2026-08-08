@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import linkedin_mcp_server.cli_main as cli_main
-from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.config.schema import AppConfig, ConfigurationError
 from linkedin_mcp_server.exceptions import ProfileRootRefusedError
 
 
@@ -981,3 +981,44 @@ class TestForwardingToASharedOwner:
         cli_main.main()
 
         assert called == [], "an HTTP server must not elect a daemon"
+
+
+class TestConfigurationErrorAtStartup:
+    """A bad setting has to name itself, not arrive as a stack trace.
+
+    Under a stdio host the process has no console: stderr is the log file and
+    stdout is the protocol. An unhandled ConfigurationError put eleven frames
+    of this package into that log and the actual problem on the last line,
+    behind a "Server disconnected" the host reports for any early exit.
+    """
+
+    def _raise(self, monkeypatch: pytest.MonkeyPatch, message: str) -> None:
+        def boom() -> AppConfig:
+            raise ConfigurationError(message)
+
+        monkeypatch.setattr("linkedin_mcp_server.cli_main.get_config", boom)
+
+    def test_it_exits_with_the_message_and_no_traceback(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._raise(monkeypatch, "proxy_server needs a host and an explicit port")
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli_main.main()
+
+        assert exit_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "proxy_server needs a host and an explicit port" in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_it_leaves_stdout_to_the_protocol(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A stdio client parses stdout as JSON-RPC. A diagnostic there is worse
+        # than no diagnostic: it corrupts the stream it is trying to explain.
+        self._raise(monkeypatch, "PORT must be an integer")
+
+        with pytest.raises(SystemExit):
+            cli_main.main()
+
+        assert capsys.readouterr().out == ""
