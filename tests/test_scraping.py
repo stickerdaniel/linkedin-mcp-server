@@ -6089,6 +6089,29 @@ class TestScheduleFormatHelpers:
         )
         assert (value, order) == ("2026-8-15", ("y", "m", "d"))
 
+    def test_date_day_slot_proven_by_over_twelve(self):
+        # 31 cannot be a month, so it names the day slot whatever date the
+        # prefill renders — no today knowledge needed.
+        value, order = _format_schedule_date(
+            2026, 8, 15, "31/8/2026", prefill_renders_today=False
+        )
+        assert (value, order) == ("15/8/2026", ("d", "m", "y"))
+
+    def test_date_edit_prefill_withholds_window_proof(self):
+        # An edit prefill renders the post's schedule, not today; a window
+        # hit there would be a coincidence, so with both numbers <= 12 and no
+        # placeholder the order stays unproven and the format refuses.
+        value, order = _format_schedule_date(
+            2026, 8, 15, "7/8/2026", "", prefill_renders_today=False
+        )
+        assert (value, order) == (None, None)
+
+    def test_date_edit_prefill_still_decided_by_placeholder(self):
+        value, order = _format_schedule_date(
+            2026, 8, 15, "7/8/2026", "dd/mm/yyyy", prefill_renders_today=False
+        )
+        assert (value, order) == ("15/8/2026", ("d", "m", "y"))
+
     def test_date_empty_prefill_decided_by_placeholder(self):
         import datetime as dt
 
