@@ -40,6 +40,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.schedule_post = AsyncMock(return_value=scrape_result)
     mock.get_scheduled_posts = AsyncMock(return_value=scrape_result)
     mock.edit_scheduled_post = AsyncMock(return_value=scrape_result)
+    mock.delete_scheduled_post = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -1483,6 +1484,83 @@ class TestPostTools:
                 extractor=mock_extractor,
             )
         mock_extractor.edit_scheduled_post.assert_not_awaited()
+
+    async def test_delete_scheduled_post_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "deleted",
+            "message": "Scheduled post deleted.",
+            "done": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "delete_scheduled_post")
+        result = await tool_fn(
+            "old snippet",
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "deleted"
+        mock_extractor.delete_scheduled_post.assert_awaited_once_with(
+            "old snippet",
+            occurrence=0,
+            confirm_delete=True,
+        )
+
+    async def test_delete_scheduled_post_dry_run(self, mock_context):
+        expected = {
+            "url": "u",
+            "status": "confirmation_required",
+            "message": "m",
+            "done": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "delete_scheduled_post")
+        result = await tool_fn(
+            "snippet",
+            False,
+            mock_context,
+            occurrence=1,
+            extractor=mock_extractor,
+        )
+        assert result["done"] is False
+        mock_extractor.delete_scheduled_post.assert_awaited_once_with(
+            "snippet",
+            occurrence=1,
+            confirm_delete=False,
+        )
+
+    async def test_delete_scheduled_post_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.delete_scheduled_post = AsyncMock(
+            side_effect=SessionExpiredError()
+        )
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "delete_scheduled_post")
+        with pytest.raises(ToolError):
+            await tool_fn("snippet", True, mock_context, extractor=mock_extractor)
 
     async def test_schedule_post_rejects_bad_date_format(self, mock_context):
         from fastmcp.exceptions import ToolError

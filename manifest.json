@@ -132,6 +132,10 @@
       "description": "Edit a scheduled post's body text and/or scheduled moment in place, selected by a snippet of its current body, with explicit confirmation and a dry-run mode"
     },
     {
+      "name": "delete_scheduled_post",
+      "description": "Delete a scheduled post, selected by a snippet of its body, with explicit confirmation and a dry-run mode; deletion is not recoverable"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
     }

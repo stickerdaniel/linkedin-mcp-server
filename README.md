@@ -58,6 +58,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `schedule_post` | Schedule a feed post via LinkedIn's native Schedule-for-later flow (requires confirmation; publishes even when this server is offline) | working |
 | `get_scheduled_posts` | List the authenticated user's scheduled posts (scheduled moment + body preview per entry) | working |
 | `edit_scheduled_post` | Edit a scheduled post's body and/or scheduled moment in place, selected by a body-text snippet (requires confirmation) | working |
+| `delete_scheduled_post` | Delete a scheduled post, selected by a body-text snippet (requires confirmation; not recoverable) | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 <br/>

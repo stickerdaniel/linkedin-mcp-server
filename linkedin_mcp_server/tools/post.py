@@ -401,3 +401,69 @@ def register_post_tools(
                 raise_tool_error(relogin_exc, "edit_scheduled_post")
         except Exception as e:
             raise_tool_error(e, "edit_scheduled_post")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Delete Scheduled Post",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"post", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def delete_scheduled_post(
+        match_text: str,
+        confirm_delete: bool,
+        ctx: Context,
+        occurrence: Annotated[int, Field(ge=0)] = 0,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Delete a scheduled post. LinkedIn cannot recover a deleted one.
+
+        The post is identified by match_text, a snippet of its body, resolved
+        against the live scheduled-posts list at action time (same selection
+        as edit_scheduled_post; use get_scheduled_posts to pick a snippet).
+        With confirm_delete False the tool only resolves the entry and reports
+        what would be deleted — LinkedIn's confirmation dialog is not opened.
+
+        Args:
+            match_text: Snippet of the scheduled post's body text.
+            confirm_delete: Must be True to actually delete the post.
+            ctx: FastMCP context for progress reporting
+            occurrence: 0-based selector among entries matching match_text.
+
+        Returns:
+            Dict with url, status, message, done (bool), and entry_preview
+            (the matched entry's scheduled moment and body head). Deletion is
+            verified by the entry's absence from the list afterwards.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="delete_scheduled_post"
+            )
+            logger.info(
+                "Deleting scheduled post matching %r (confirm_delete=%s)",
+                match_text[:60],
+                confirm_delete,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Deleting scheduled post"
+            )
+
+            result = await extractor.delete_scheduled_post(
+                match_text,
+                occurrence=occurrence,
+                confirm_delete=confirm_delete,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "delete_scheduled_post")
+        except Exception as e:
+            raise_tool_error(e, "delete_scheduled_post")  # NoReturn

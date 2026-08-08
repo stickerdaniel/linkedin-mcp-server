@@ -5069,6 +5069,100 @@ class LinkedInExtractor:
             composer_text=composer_text,
         )
 
+    async def delete_scheduled_post(
+        self,
+        match_text: str,
+        *,
+        occurrence: int = 0,
+        confirm_delete: bool,
+    ) -> dict[str, Any]:
+        """Delete a scheduled post via its entry's Delete action.
+
+        The dry run stops after resolving the entry — LinkedIn's own dialog
+        warns "You won't be able to recover it", so the confirmation surface
+        is never even opened without confirm_delete. The confirm dialog's
+        primary is its last button (measured: Dismiss, Cancel, Delete).
+        """
+        if not confirm_delete:
+            failure = await self._open_scheduled_posts_list()
+            if failure is not None:
+                return self._scheduled_action_result(self._page.url, *failure)
+            resolved = await self._resolve_scheduled_entry(match_text, occurrence)
+            if isinstance(resolved, tuple):
+                await self._dismiss_scheduled_posts_list()
+                return self._scheduled_action_result(self._page.url, *resolved)
+            entries: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
+            preview = entries[resolved][:200] if resolved < len(entries) else ""
+            await self._dismiss_scheduled_posts_list()
+            return self._scheduled_action_result(
+                self._page.url,
+                "confirmation_required",
+                "Dry run complete. Set confirm_delete=true to delete this "
+                "scheduled post; LinkedIn cannot recover a deleted one.",
+                entry_preview=preview,
+            )
+
+        opened = await self._open_scheduled_entry_action(
+            match_text, occurrence, _SCHEDULED_MENU_DELETE_SELECTOR
+        )
+        if isinstance(opened, tuple):
+            return self._scheduled_action_result(self._page.url, *opened)
+        entry_preview = opened[:200]
+
+        # The confirmation is the visible dialog holding no entry overflow
+        # icons — the list modal has one per entry and stays open underneath,
+        # and DOM order does not put the topmost dialog last, so "last visible
+        # dialog" resolved to the covered list modal (measured: its trailing
+        # Back button failed actionability under the confirmation overlay).
+        confirm_dialog = (
+            self._page.locator(f"{_DIALOG_SELECTOR}, [role='alertdialog']")
+            .filter(visible=True)
+            .filter(has_not=self._page.locator('svg[data-test-icon*="overflow"]'))
+            .last
+        )
+        try:
+            await confirm_dialog.wait_for(state="visible", timeout=5000)
+            await (
+                confirm_dialog.locator("button")
+                .filter(visible=True)
+                .last.click(timeout=5000)
+            )
+        except Exception:
+            logger.debug("Delete confirmation click failed", exc_info=True)
+            await self._page.keyboard.press("Escape")
+            await self._dismiss_scheduled_posts_list()
+            return self._scheduled_action_result(
+                self._page.url,
+                "delete_unconfirmed",
+                "LinkedIn's delete confirmation could not be completed.",
+                entry_preview=entry_preview,
+            )
+        await asyncio.sleep(1.5)
+
+        # The list modal stays open; the entry's absence from it is the
+        # evidence of deletion, checked the same way resolution matched it.
+        remaining = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
+        needle = " ".join(match_text.split()).casefold()
+        still_there = any(
+            needle in " ".join(entry.split()).casefold() for entry in remaining
+        )
+        url = self._page.url
+        await self._dismiss_scheduled_posts_list()
+        if still_there:
+            return self._scheduled_action_result(
+                url,
+                "delete_unconfirmed",
+                "The entry is still listed after the delete confirmation.",
+                entry_preview=entry_preview,
+            )
+        return self._scheduled_action_result(
+            url,
+            "deleted",
+            "Scheduled post deleted.",
+            done=True,
+            entry_preview=entry_preview,
+        )
+
     async def schedule_post(
         self,
         text: str,
