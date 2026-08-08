@@ -110,6 +110,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   evidence here: its `title` key dates from patchright 1.58.0 and omits the
   `Google` the binary prints. See `_COMPARABLE_PRODUCTS` for the measurements.
 
+## Extension Bundle Rules
+
+- **An optional `user_config` field needs a `default`.** A host substitutes
+  `${user_config.NAME}` from the manifest's defaults plus the answers the user
+  gave; a field in neither is not in that map, so the placeholder is handed to
+  the server verbatim as if it were a setting. Measured in Claude Desktop's own
+  substitution routine. `"default": ""` is enough: it substitutes to nothing,
+  and the loader reads an empty variable as unset. `required: true` is the only
+  other safe shape, because a host skips the whole MCP config while a required
+  field is empty. `tests/test_manifest.py` holds this line; `mcpb validate`
+  does not, and cannot — the schema knows nothing about substitution.
+- **A placeholder that does reach the process is not a value.** `_env()` in
+  `config/loaders.py` drops it. Both directions matter and only one is loud:
+  `PROXY_SERVER` fails validation and stops the server, while
+  `PROXY_USERNAME` is offered to the proxy as a credential and comes back as a
+  timeout that reads like an expired session.
+
 ## Tool Return Format
 
 All scraping tools return: `{url, sections: {name: raw_text}}`.
