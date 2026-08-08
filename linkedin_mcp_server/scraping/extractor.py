@@ -4575,6 +4575,19 @@ class LinkedInExtractor:
             logger.debug("Could not read scheduled posts modal", exc_info=True)
         url = self._page.url
         await self._dismiss_scheduled_posts_list()
+        if not text.strip():
+            # An empty read is a failed read, never an empty schedule: the
+            # modal always carries its own heading, and a schedule with
+            # nothing queued still says so in text. Returning a section-less
+            # result here made the two indistinguishable, and a caller acting
+            # on "nothing scheduled" double-posts.
+            return {
+                "url": url,
+                "status": "list_read_failed",
+                "message": "The scheduled posts view opened but its content "
+                "could not be read. Retry rather than assuming an empty "
+                "schedule.",
+            }
         return self._single_section_result(url, "scheduled_posts", text)
 
     async def schedule_post(

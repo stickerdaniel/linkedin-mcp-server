@@ -5994,6 +5994,34 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         assert excinfo.value.__cause__ is None
 
 
+class TestGetScheduledPostsRead:
+    async def test_empty_read_reports_failure_not_empty_schedule(self):
+        """A failed modal read must not masquerade as an empty schedule —
+        the modal always carries its own heading text, so emptiness is
+        evidence of a broken read, and a caller told "nothing scheduled"
+        double-posts."""
+        from unittest.mock import patch
+
+        page = MagicMock()
+        page.url = "https://www.linkedin.com/feed/?shareActive=true"
+        page.locator.return_value.filter.return_value.first.inner_text = AsyncMock(
+            side_effect=Exception("element detached")
+        )
+        extractor = LinkedInExtractor(page)
+        with (
+            patch.object(
+                extractor,
+                "_open_scheduled_posts_list",
+                AsyncMock(return_value=None),
+            ),
+            patch.object(extractor, "_dismiss_scheduled_posts_list", AsyncMock()),
+        ):
+            result = await extractor.get_scheduled_posts()
+
+        assert result["status"] == "list_read_failed"
+        assert "sections" not in result
+
+
 class TestScheduleFormatHelpers:
     """The schedule dialog's prefill is the format example the helpers copy."""
 
