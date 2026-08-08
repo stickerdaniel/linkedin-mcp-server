@@ -191,17 +191,19 @@ class BrowserDowngradeError(LinkedInMCPError):
 
 
 class VisualCPPRuntimeUnavailableError(LinkedInMCPError):
-    """greenlet's C extension needs a Visual C++ runtime this machine lacks.
+    """greenlet's C extension needs a Visual C++ runtime the loader will not give it.
 
     Its own class because the failure is neither ours nor recoverable from
     inside the process. Nothing here can install a system DLL, and no other
     configuration changes the answer, so the only useful thing the server can do
-    is say which one is missing and where it comes from.
+    is name the DLL, say where it comes from, and quote what the loader said.
 
-    The name is an assertion, so it is only raised once the loader has been
-    asked for ``MSVCP140.dll`` and could not produce it. A DLL failure alone
-    does not justify it: CPython reports every failed load with the same words,
-    and a corrupt or architecture-mismatched extension reaches that path too.
+    Unavailable rather than missing, because that is the whole of what is
+    established: the loader was asked for ``MSVCP140.dll`` and did not produce
+    it. Absent, wrong-architecture, damaged and unable to load a dependency of
+    its own all arrive as the same ``OSError``. A DLL failure alone would not
+    even justify this much, since CPython reports every failed load with the
+    same words.
 
     Raised while importing the package, which is the only moment early enough:
     patchright pulls greenlet in on the way to ``patchright.async_api``, long

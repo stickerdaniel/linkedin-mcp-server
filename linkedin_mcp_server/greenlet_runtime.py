@@ -98,9 +98,12 @@ _DLL_LOAD_FAILED = "DLL load failed"
 #: what actually decides.
 _RUNTIME_DLL = "msvcp140.dll"
 
-#: The first release built without ``GREENLET_STATIC_RUNTIME``. Everything below
-#: it carries its own C++ runtime and cannot fail this way.
-_FIRST_DYNAMIC_BUILD = Version("3.3.1")
+#: The first version that could have been built without
+#: ``GREENLET_STATIC_RUNTIME``. The commit that dropped the flag carried
+#: ``3.3.1.dev0``, so the boundary sits there and not at ``3.3.1``: PEP 440 puts
+#: every ``.dev`` and ``rc`` of a release below it, and an install from that
+#: range is dynamically linked while comparing as older.
+_FIRST_POSSIBLY_DYNAMIC_BUILD = Version("3.3.1.dev0")
 
 
 def _the_runtime_cannot_be_loaded() -> bool:
@@ -122,18 +125,26 @@ def _the_runtime_cannot_be_loaded() -> bool:
     return False
 
 
-def _greenlet_links_the_runtime() -> bool:
-    """Whether the installed greenlet is one of the builds that needs the DLL.
+def _greenlet_may_link_the_runtime() -> bool:
+    """Whether the installed greenlet is *not* one of the known static builds.
 
-    An unreadable or unparseable version answers yes. Refusing to explain on the
-    strength of not knowing would withhold the message exactly where the install
-    is already damaged, and the message quotes the loader either way.
+    Phrased as an exclusion because that is all the evidence supports. What was
+    measured is that 3.2.4 and 3.3.0 carry their own C++ runtime, so those are
+    ruled out and everything else is left in. It is not a claim that every later
+    version links dynamically: upstream #526 restores the static build, and a
+    release carrying that fix would still pass this check. The other two
+    conditions and the quoted loader text are what keep that from becoming a
+    confident wrong answer.
+
+    An unreadable or unparseable version is left in as well. Refusing to explain
+    on the strength of not knowing would withhold the message exactly where the
+    install is already damaged.
     """
     installed = _installed_greenlet()
     if installed == _UNKNOWN:
         return True
     try:
-        return Version(installed) >= _FIRST_DYNAMIC_BUILD
+        return Version(installed) >= _FIRST_POSSIBLY_DYNAMIC_BUILD
     except InvalidVersion:
         return True
 
@@ -165,8 +176,8 @@ Installed greenlet: {_installed_greenlet()}
 greenlet 3.3.1 through 3.5.4 link the Visual C++ runtime dynamically, so
 _greenlet.pyd needs MSVCP140.dll. It comes with the
 Microsoft Visual C++ Redistributable. Installing it is the fix when the machine
-has none; if it is already installed, the copy the loader reaches is the wrong
-architecture or is damaged, and the line above is what it said.
+has none. If it is already installed, then the copy the loader reaches will not
+load for some other reason, and the line above is what it said.
 
 To fix this:
   Install the redistributable, then start the server again
@@ -186,8 +197,9 @@ def explain_a_missing_runtime() -> None:
     Does nothing off Windows, where the dynamic link is not a problem, and
     nothing when greenlet imports normally. Three things have to hold before the
     error is translated: the loader reported a failed load, the installed
-    greenlet is one of the builds that needs the runtime, and the loader cannot
-    produce that runtime when asked. Anything else is re-raised as it came.
+    greenlet is not one of the builds known to link the runtime statically, and
+    the loader cannot produce that runtime when asked. Anything else is
+    re-raised as it came.
     """
     if sys.platform != "win32":
         return
@@ -197,7 +209,7 @@ def explain_a_missing_runtime() -> None:
     except ImportError as exc:
         if _DLL_LOAD_FAILED not in str(exc):
             raise
-        if not _greenlet_links_the_runtime():
+        if not _greenlet_may_link_the_runtime():
             raise
         if not _the_runtime_cannot_be_loaded():
             raise

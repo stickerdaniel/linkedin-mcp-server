@@ -178,13 +178,14 @@ class TestOnWindows:
 
         assert explain_a_missing_runtime() is None
 
+    @pytest.mark.parametrize("installed", ["3.2.4", "3.3.0", "3.3.0.post1"])
     def test_a_statically_linked_greenlet_is_left_alone(
-        self, monkeypatch, greenlet_fails
+        self, monkeypatch, greenlet_fails, installed
     ):
         # 3.3.0 is the stopgap this very message recommends. It carries its own
         # C++ runtime, so a DLL failure there is never about the redistributable
         # and saying so would send that user after the wrong thing.
-        monkeypatch.setattr(greenlet_runtime, "version", lambda _name: "3.3.0")
+        monkeypatch.setattr(greenlet_runtime, "version", lambda _name: installed)
         greenlet_fails(ImportError(_REAL_MESSAGE))
 
         with pytest.raises(ImportError) as caught:
@@ -192,8 +193,22 @@ class TestOnWindows:
 
         assert not isinstance(caught.value, VisualCPPRuntimeUnavailableError)
 
-    @pytest.mark.parametrize("installed", ["3.3.1", "3.5.4", "4.0.0"])
-    def test_a_dynamically_linked_greenlet_is_explained(
+    @pytest.mark.parametrize(
+        "installed",
+        [
+            # The commit that dropped GREENLET_STATIC_RUNTIME carried this
+            # version, and PEP 440 sorts it below 3.3.1, so a boundary written
+            # as >= 3.3.1 would let the very first affected build through.
+            "3.3.1.dev0",
+            "3.3.1rc1",
+            "3.3.1",
+            "3.5.4",
+            # Not a claim that this links dynamically. The check excludes the
+            # builds measured to be static and leaves everything else in.
+            "4.0.0",
+        ],
+    )
+    def test_a_greenlet_that_is_not_known_to_be_static_is_explained(
         self, monkeypatch, greenlet_fails, installed
     ):
         monkeypatch.setattr(greenlet_runtime, "version", lambda _name: installed)
@@ -228,11 +243,19 @@ class TestTheProbeItself:
     def test_a_library_that_is_there_reads_as_loadable(self, monkeypatch):
         # Whatever this host can actually load, so the False branch is exercised
         # on every platform rather than only where msvcp140.dll exists.
-        present = "kernel32.dll" if sys.platform == "win32" else find_library("c")
-        assert present, "no reference library to load on this platform"
-        monkeypatch.setattr(greenlet_runtime, "_RUNTIME_DLL", present)
-
-        assert greenlet_runtime._the_runtime_cannot_be_loaded() is False
+        # ``find_library("c")`` answers None on musl, so it cannot be the only
+        # candidate: on Alpine an assert would turn a covered branch into a
+        # broken test.
+        candidates = (
+            ["kernel32.dll"]
+            if sys.platform == "win32"
+            else [find_library("c"), "libc.so.6", "libc.musl-x86_64.so.1"]
+        )
+        for present in filter(None, candidates):
+            monkeypatch.setattr(greenlet_runtime, "_RUNTIME_DLL", present)
+            if greenlet_runtime._the_runtime_cannot_be_loaded() is False:
+                return
+        pytest.skip("no reference library this platform will load")
 
 
 class TestElsewhere:
