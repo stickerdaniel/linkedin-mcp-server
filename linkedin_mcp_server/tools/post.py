@@ -320,6 +320,10 @@ def register_post_tools(
             own rendering of the (proposed) scheduled moment and body.
         """
         try:
+            if not match_text.strip():
+                raise ToolError(
+                    "match_text is empty; pass a snippet of the post's body text."
+                )
             if new_text is None and new_date is None and new_time is None:
                 raise ToolError(
                     "Nothing to change: pass new_text, new_date and/or new_time."

@@ -22,6 +22,7 @@ from linkedin_mcp_server.scraping.extractor import (
     _build_feed_references,
     _format_schedule_date,
     _format_schedule_time,
+    _match_scheduled_entries,
     _truncate_linkedin_noise,
     strip_conversation_chrome,
     strip_linkedin_noise,
@@ -6022,41 +6023,77 @@ class TestGetScheduledPostsRead:
         assert "sections" not in result
 
 
-class TestResolveScheduledEntry:
-    """Snippet resolution: unique-match by default, explicit choice otherwise."""
+class TestMatchScheduledEntries:
+    """Snippet matching: unique-match by default, explicit choice otherwise."""
 
-    def _extractor(self, entries):
-        page = MagicMock()
-        page.evaluate = AsyncMock(return_value=entries)
-        return LinkedInExtractor(page)
+    def test_unique_match_resolves_without_occurrence(self):
+        match = _match_scheduled_entries(
+            ["about x", "about y", "about z"], "about y", None
+        )
+        assert not isinstance(match, tuple)
+        assert (match.index, match.match_count) == (1, 1)
 
-    async def test_unique_match_resolves_without_occurrence(self):
-        extractor = self._extractor(["about x", "about y", "about z"])
-        assert await extractor._resolve_scheduled_entry("about y", None) == 1
-
-    async def test_ambiguous_match_errors_without_occurrence(self):
+    def test_ambiguous_match_errors_without_occurrence(self):
         # A defaulted first-pick could edit the wrong post while reporting
         # success; several matches without an explicit choice must error.
-        extractor = self._extractor(["about x 1", "about x 2"])
-        result = await extractor._resolve_scheduled_entry("about x", None)
+        result = _match_scheduled_entries(["about x 1", "about x 2"], "about x", None)
         assert isinstance(result, tuple)
         assert result[0] == "entry_ambiguous"
 
-    async def test_explicit_occurrence_chooses_among_duplicates(self):
-        extractor = self._extractor(["about x 1", "other", "about x 2"])
-        assert await extractor._resolve_scheduled_entry("about x", 1) == 2
+    def test_explicit_occurrence_chooses_among_duplicates(self):
+        match = _match_scheduled_entries(
+            ["about x 1", "other", "about x 2"], "about x", 1
+        )
+        assert not isinstance(match, tuple)
+        assert (match.index, match.match_count) == (2, 2)
 
-    async def test_occurrence_out_of_range_errors(self):
-        extractor = self._extractor(["about x 1"])
-        result = await extractor._resolve_scheduled_entry("about x", 3)
+    def test_occurrence_out_of_range_errors(self):
+        result = _match_scheduled_entries(["about x 1"], "about x", 3)
         assert isinstance(result, tuple)
         assert result[0] == "entry_not_found"
 
-    async def test_no_match_errors(self):
-        extractor = self._extractor(["something else"])
-        result = await extractor._resolve_scheduled_entry("absent", None)
+    def test_no_match_errors(self):
+        result = _match_scheduled_entries(["something else"], "absent", None)
         assert isinstance(result, tuple)
         assert result[0] == "entry_not_found"
+
+    def test_blank_snippet_refused(self):
+        # Normalized to an empty needle, a blank snippet is contained in every
+        # entry; with one queued post it would "uniquely" match a post the
+        # caller never named — and delete flows are not recoverable.
+        for blank in ("", "   ", "\n\t"):
+            result = _match_scheduled_entries(["only post"], blank, None)
+            assert isinstance(result, tuple)
+            assert result[0] == "entry_not_found"
+
+
+class TestOpenScheduledEntryAction:
+    async def test_entry_moved_between_resolution_and_click(self):
+        """The click is positional against a live queue: when the pre-click
+        snapshot no longer shows the resolved text at the resolved index,
+        the action must refuse rather than land on whichever post now
+        occupies the position."""
+        from unittest.mock import patch
+
+        page = MagicMock()
+        page.evaluate = AsyncMock(
+            side_effect=[["post a", "post b"], ["post b", "post a"]]
+        )
+        extractor = LinkedInExtractor(page)
+        with (
+            patch.object(
+                extractor,
+                "_open_scheduled_posts_list",
+                AsyncMock(return_value=None),
+            ),
+            patch.object(extractor, "_dismiss_scheduled_posts_list", AsyncMock()),
+        ):
+            result = await extractor._open_scheduled_entry_action(
+                "post a", None, "button.irrelevant"
+            )
+
+        assert isinstance(result, tuple)
+        assert result[0] == "entry_moved"
 
 
 class TestScheduleFormatHelpers:

@@ -274,6 +274,76 @@ _SCHEDULED_ENTRY_MAP_JS = """() => {
 }"""
 
 
+@dataclass(frozen=True)
+class _ScheduledEntryMatch:
+    """A resolved scheduled-list entry: its index and how many entries matched."""
+
+    index: int
+    match_count: int
+
+
+@dataclass(frozen=True)
+class _OpenedScheduledEntry:
+    """A scheduled-list entry whose menu action was successfully opened."""
+
+    entry_text: str
+    match_count: int
+
+
+def _match_scheduled_entries(
+    entries: list[str], match_text: str, occurrence: int | None
+) -> _ScheduledEntryMatch | tuple[str, str]:
+    """Match a body snippet against one snapshot of the scheduled list.
+
+    Pure so a single snapshot can serve matching, preview, and later
+    verification — two separately-taken snapshots can disagree about a live
+    queue. Returns the match, or ``(status, message)``.
+
+    A blank snippet is refused outright: normalized to an empty needle it
+    would be contained in *every* entry, and with a single queued post that
+    "unique" match would act on a post the caller never named.
+
+    ``occurrence=None`` demands a *unique* match: several matching entries
+    are then an error, never a silent first pick — a defaulted zero used to
+    select the first match, and a confirmed edit could change the wrong post
+    while reporting success. Passing an integer states the caller has seen
+    the list and is choosing among known duplicates.
+    """
+    needle = " ".join(match_text.split()).casefold()
+    if not needle:
+        return (
+            "entry_not_found",
+            "match_text is empty; pass a snippet of the post's body text.",
+        )
+    matches = [
+        i
+        for i, entry in enumerate(entries)
+        if needle in " ".join(entry.split()).casefold()
+    ]
+    if not matches:
+        return (
+            "entry_not_found",
+            f"No scheduled post contains {match_text!r} "
+            f"({len(entries)} entries in the list).",
+        )
+    if occurrence is None:
+        if len(matches) > 1:
+            return (
+                "entry_ambiguous",
+                f"{len(matches)} scheduled posts contain {match_text!r}. "
+                "Pass a longer snippet, or an occurrence between 0 and "
+                f"{len(matches) - 1} to choose among them.",
+            )
+        occurrence = 0
+    if occurrence >= len(matches):
+        return (
+            "entry_not_found",
+            f"Only {len(matches)} scheduled post(s) contain "
+            f"{match_text!r}; occurrence={occurrence} is out of range.",
+        )
+    return _ScheduledEntryMatch(index=matches[occurrence], match_count=len(matches))
+
+
 def _resolve_date_order(
     current_value: str, placeholder: str, today: datetime.date | None
 ) -> tuple[str, str, str] | None:
@@ -4698,75 +4768,46 @@ class LinkedInExtractor:
             result["composer_text"] = composer_text
         return result
 
-    async def _resolve_scheduled_entry(
-        self, match_text: str, occurrence: int | None
-    ) -> int | tuple[str, str]:
-        """Resolve a body snippet to an overflow-button index in the open list.
-
-        Resolution happens against the live list at action time rather than
-        against a remembered index: the queue shifts whenever a scheduled post
-        publishes, so a position captured earlier can name a different post by
-        the time it is used. Returns the index, or ``(status, message)``.
-
-        ``occurrence=None`` demands a *unique* match: several matching entries
-        are then an error, never a silent first pick — a defaulted zero used
-        to select the first match, and a confirmed edit could change the wrong
-        post while reporting success. Passing an integer states the caller has
-        seen the list and is choosing among known duplicates.
-        """
-        entries: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
-        needle = " ".join(match_text.split()).casefold()
-        matches = [
-            i
-            for i, entry in enumerate(entries)
-            if needle in " ".join(entry.split()).casefold()
-        ]
-        if not matches:
-            return (
-                "entry_not_found",
-                f"No scheduled post contains {match_text!r} "
-                f"({len(entries)} entries in the list).",
-            )
-        if occurrence is None:
-            if len(matches) > 1:
-                return (
-                    "entry_ambiguous",
-                    f"{len(matches)} scheduled posts contain {match_text!r}. "
-                    "Pass a longer snippet, or an occurrence between 0 and "
-                    f"{len(matches) - 1} to choose among them.",
-                )
-            occurrence = 0
-        if occurrence >= len(matches):
-            return (
-                "entry_not_found",
-                f"Only {len(matches)} scheduled post(s) contain "
-                f"{match_text!r}; occurrence={occurrence} is out of range.",
-            )
-        return matches[occurrence]
-
     async def _open_scheduled_entry_action(
         self, match_text: str, occurrence: int | None, action_selector: str
-    ) -> tuple[str, str] | str:
+    ) -> "_OpenedScheduledEntry | tuple[str, str]":
         """Open the list, resolve the entry, and click one of its menu actions.
 
-        Returns the matched entry's text on success, or ``(status, message)``
-        with the list dismissed on failure.
+        Resolution happens against the live list at action time rather than
+        against a remembered index — the queue shifts whenever a scheduled
+        post publishes — and from a *single* snapshot: matching and the entry
+        text come from one mapping. Because the click itself is positional, a
+        second snapshot immediately before it must still show the same text at
+        the same index; otherwise the action is refused as ``entry_moved``
+        rather than landing on whichever post now occupies the position.
+
+        Returns the opened entry on success, or ``(status, message)`` with the
+        list dismissed on failure.
         """
         failure = await self._open_scheduled_posts_list()
         if failure is not None:
             return failure
 
-        resolved = await self._resolve_scheduled_entry(match_text, occurrence)
-        if isinstance(resolved, tuple):
+        entries: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
+        resolved = _match_scheduled_entries(entries, match_text, occurrence)
+        if not isinstance(resolved, _ScheduledEntryMatch):
             await self._dismiss_scheduled_posts_list()
             return resolved
-        entries: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
-        entry_text = entries[resolved] if resolved < len(entries) else ""
+        entry_text = entries[resolved.index]
+
+        recheck: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
+        if resolved.index >= len(recheck) or recheck[resolved.index] != entry_text:
+            await self._dismiss_scheduled_posts_list()
+            return (
+                "entry_moved",
+                "The scheduled list changed while the entry was being "
+                "resolved; nothing was touched. Retry.",
+            )
 
         try:
             await (
                 self._page.locator(_SCHEDULED_ENTRY_OVERFLOW_SELECTOR)
-                .nth(resolved)
+                .nth(resolved.index)
                 .click(timeout=5000)
             )
             action = self._page.locator(action_selector).filter(visible=True).first
@@ -4778,7 +4819,9 @@ class LinkedInExtractor:
                 "menu_unavailable",
                 "The scheduled post's menu did not expose the expected action.",
             )
-        return entry_text
+        return _OpenedScheduledEntry(
+            entry_text=entry_text, match_count=resolved.match_count
+        )
 
     async def _abandon_edit_surface(self) -> None:
         """Leave an edit composer without saving, locale-independently.
@@ -4820,9 +4863,9 @@ class LinkedInExtractor:
         opened = await self._open_scheduled_entry_action(
             match_text, occurrence, _SCHEDULED_MENU_EDIT_SELECTOR
         )
-        if isinstance(opened, tuple):
+        if not isinstance(opened, _OpenedScheduledEntry):
             return self._scheduled_action_result(self._page.url, *opened)
-        entry_preview = opened[:200]
+        entry_preview = opened.entry_text[:200]
 
         editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
         try:
