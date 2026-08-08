@@ -55,6 +55,9 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) | working |
+| `schedule_post` | Schedule a feed post via LinkedIn's native Schedule-for-later flow (requires confirmation; publishes even when this server is offline) | working |
+| `get_scheduled_posts` | List the authenticated user's scheduled posts (scheduled moment + body preview per entry) | working |
+| `edit_scheduled_post` | Edit a scheduled post's body and/or scheduled moment in place, selected by a body-text snippet (requires confirmation) | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 <br/>
