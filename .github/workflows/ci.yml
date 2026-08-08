@@ -119,4 +119,38 @@ jobs:
       - name: Run platform behaviour tests
         run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py tests/test_daemon_lock.py tests/test_greenlet_runtime.py
 
+      # The identity gate belongs here as much as on Ubuntu, and for the same
+      # reason this job exists at all: the mechanism it guards is a different
+      # one per platform. `hidden_target_is_supported()` is macOS-only, so the
+      # hidden target -- the whole reason the default mode can run without
+      # announcing itself as headless -- is never launched by the Ubuntu job.
+      # A regression in it would be invisible everywhere CI looks.
+      #
+      # macOS only. Windows falls back to Chromium's headless mode like Linux
+      # does, so the Ubuntu job already covers that shape, and this job would
+      # pay a second browser download for a third copy of the same answer.
+      - name: Resolve the patchright version
+        if: runner.os == 'macOS'
+        id: patchright
+        run: |
+          version=$(uv run python -c 'from importlib.metadata import version; print(version("patchright"))')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the browser
+        if: runner.os == 'macOS'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.patchright.outputs.version }}
+
+      # No `--with-deps` here: playwright installs system dependencies on
+      # Ubuntu and Windows only, and macOS needs none.
+      - name: Install the browser
+        if: runner.os == 'macOS'
+        run: uv run patchright install chromium --no-shell
+
+      - name: Run the identity gate
+        if: runner.os == 'macOS'
+        run: uv run pytest tests/test_browser_identity.py
+
       - run: uv cache prune --ci

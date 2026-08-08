@@ -90,24 +90,42 @@ async def _describe(tmp_path: Path, *, headless: bool) -> dict:
     ``BrowserConfig()`` rather than ``get_config()``: the global parses
     ``sys.argv`` and aborts under pytest, and the defaults are what the gate is
     about anyway.
+
+    **Only the launch is allowed to turn into a skip.** A browser that cannot
+    start is a missing dependency; a browser that starts and then fails to
+    answer is the regression this file exists to catch, and routing both
+    through the same handler would let the second hide behind the first
+    wherever a skip is still permitted.
     """
     launch_options, viewport = build_launch_options(BrowserConfig())
     profile = tmp_path / f"identity-{'headless' if headless else 'headed'}"
+    manager = BrowserManager(
+        user_data_dir=profile,
+        headless=headless,
+        viewport=viewport,
+        **launch_options,
+    )
     try:
-        manager = BrowserManager(
-            user_data_dir=profile,
-            headless=headless,
-            viewport=viewport,
-            **launch_options,
-        )
-        async with manager as browser:
+        try:
+            await manager.start()
+        except Exception as exc:  # noqa: BLE001 - the reason is the payload
+            _unavailable(f"could not start a browser ({type(exc).__name__}: {exc})")
+            raise  # unreachable; _unavailable always raises
+
+        try:
             with IdentityServer() as server:
-                described = await describe_browser(browser.page, server.url)
-        described["windowless"] = manager._windowless
+                described = await describe_browser(manager.page, server.url)
+            # Read before the close, because ``_no_window_available`` is set
+            # during the launch and nothing after it changes the answer.
+            described["windowless"] = manager._windowless
+        finally:
+            described_close = await manager.close()
+
+        assert described_close, (
+            "the browser did not confirm it had exited, so Chromium may still "
+            "be holding this profile while the directory is removed"
+        )
         return described
-    except Exception as exc:  # noqa: BLE001 - the reason is the payload
-        _unavailable(f"could not start a browser ({type(exc).__name__}: {exc})")
-        raise  # unreachable; _unavailable always raises
     finally:
         shutil.rmtree(profile, ignore_errors=True)
 
@@ -144,17 +162,20 @@ def _realms(described: dict) -> dict[str, dict]:
         "page": described["page"],
         "dedicated worker": described["dedicated"],
         "service worker": described["serviceWorker"],
+        "cross-origin iframe": described["iframe"],
     }
 
 
 class TestEveryRealmTellsTheSameStory:
     """A contradiction between realms is the cheapest thing for a site to find.
 
-    The user agent is readable from a page, from a dedicated worker and from a
-    service worker, and each one also sends it as a request header. That is six
-    places one value has to agree with itself. An override that reaches only
-    some of them, which is what every user-agent option in this space does, is
-    visible to anyone who looks twice.
+    The user agent is readable from a page, from a dedicated worker, from a
+    service worker and from a frame on another origin, and each one also sends
+    it as a request header. That is eight places one value has to agree with
+    itself. An override that reaches only some of them, which is what every
+    user-agent option in this space does, is visible to anyone who looks twice:
+    ``user_agent=`` never reaches a service worker at all, and the frame is the
+    other surface it routinely misses.
     """
 
     async def test_all_three_realms_report_one_user_agent(self, default_mode):
@@ -182,13 +203,20 @@ class TestNothingAnnouncesAutomation:
     async def test_the_default_launch_uses_the_hidden_target_where_it_can(
         self, default_mode
     ):
-        """Not just self-consistent: actually windowless where that is possible.
+        """The hidden target was used, and not quietly given up on.
 
-        The consistency check below would pass a browser that silently gave up
-        on the hidden target and fell back to real headless, because a fallback
-        is consistent with itself. That fallback is exactly the regression worth
-        catching on the platform most people run, so it gets its own assertion
-        against what the code claims the platform can do.
+        ``_windowless`` is not merely the platform predicate restated. Its
+        third term is ``not self._no_window_available``, which the launch sets
+        when a headed browser is refused and the fallback to Chromium's real
+        headless mode runs instead. A fallback is consistent with itself, so
+        every other assertion here would pass it; this is the one that does
+        not.
+
+        What it does *not* prove is that no window is on screen. That takes a
+        window-server query, and the two ways the page could be the wrong one
+        -- a hidden target identified by position rather than by its nonce, or
+        a startup page that is never closed -- are covered directly in
+        ``tests/test_hidden_target.py``.
         """
         from linkedin_mcp_server.hidden_target import hidden_target_is_supported
 
@@ -211,10 +239,20 @@ class TestNothingAnnouncesAutomation:
         )
 
     async def test_webdriver_is_false_and_unremarkable(self, default_mode):
+        """`false` is not enough on its own: how it got there is also readable.
+
+        A native ``Navigator.prototype.webdriver`` is an accessor with a getter,
+        no setter, and configurable. Redefining it to return ``false`` is the
+        usual way to hide automation, and the cheapest tell it leaves is a
+        descriptor that is no longer configurable. The value would match; the
+        shape would not.
+        """
         assert default_mode["page"]["webdriver"] is False
         descriptor = default_mode["webdriverDescriptor"]
         assert descriptor is not None
         assert descriptor["get"] == "function", descriptor
+        assert descriptor["set"] == "undefined", descriptor
+        assert descriptor["configurable"] is True, descriptor
 
     async def test_no_automation_globals_in_the_pages_own_realm(self, default_mode):
         """`__pwInitScripts`, `$cdc_*` and friends. Read from the page's own

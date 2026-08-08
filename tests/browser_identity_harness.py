@@ -15,6 +15,12 @@ what a website sees, so measuring through it would measure the wrong realm.
 context by definition, so service workers and ``navigator.userAgentData`` are
 available without a certificate. A self-signed certificate plus
 ``ignore_https_errors`` would perturb the very thing being measured.
+
+**There are two servers, because one of the four surfaces is another origin.**
+A port is part of an origin, so a second loopback listener is genuinely
+cross-origin to the first, with no certificate and no hosts entry. The iframe
+matters on its own: a user-agent override reaches the top document and misses
+the frame, which is the same failure as the one it misses in a service worker.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 #: Asked for on every response, so the *next* request from the same origin
 #: carries the high-entropy client hints. They are absent from the first
@@ -65,10 +72,24 @@ _PAGE = b"""<!doctype html>
     (registration.active || navigator.serviceWorker.controller).postMessage('describe');
   });
 
+  // Another origin, because a port is part of one. The frame reports through
+  // postMessage; nothing here can read across the boundary, which is the point.
+  const frameOrigin = new URLSearchParams(location.search).get('frame');
+  const iframe = await new Promise((resolve, reject) => {
+    addEventListener('message', e => {
+      if (e.data && e.data.realm === 'iframe') resolve(e.data);
+    });
+    setTimeout(() => reject(new Error('cross-origin iframe timed out')), 15000);
+    const el = document.createElement('iframe');
+    el.src = frameOrigin + 'frame';
+    document.body.appendChild(el);
+  });
+
   const result = {
     page: {...(await jsChannel()), headers: await echo()},
     dedicated,
     serviceWorker,
+    iframe,
     // Read here rather than in the assertions: outerWidth is a property of the
     // window the page is in, and there is no other realm that can see it.
     geometry: {
@@ -102,14 +123,29 @@ _WORKER = b"""
 _SERVICE_WORKER = b"""
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
-self.addEventListener('message', async e => {
+// waitUntil, not a bare async listener: an EventTarget ignores what a listener
+// returns, so without it the browser is free to terminate the worker at the
+// first await. Under load that is a real answer that never arrives, and the
+// page then waits out its own timeout.
+self.addEventListener('message', e => e.waitUntil((async () => {
   const headers = await (await fetch('/echo', {cache: 'no-store'})).json();
   e.source.postMessage({realm: 'serviceWorker', ua: navigator.userAgent, headers});
-});
+})()));
+"""
+
+_FRAME = b"""<!doctype html>
+<title>frame</title>
+<script>
+(async () => {
+  const headers = await (await fetch('/echo', {cache: 'no-store'})).json();
+  parent.postMessage({realm: 'iframe', ua: navigator.userAgent, headers}, '*');
+})();
+</script>
 """
 
 _BODIES = {
     "/": (_PAGE, "text/html; charset=utf-8"),
+    "/frame": (_FRAME, "text/html; charset=utf-8"),
     "/worker.js": (_WORKER, "text/javascript"),
     "/sw.js": (_SERVICE_WORKER, "text/javascript"),
 }
@@ -119,11 +155,14 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
-        if self.path.startswith("/echo"):
+        # The query carries the other origin, so the path has to be taken apart
+        # rather than matched whole: `/?frame=http%3A%2F%2F...` is still `/`.
+        path = urlsplit(self.path).path
+        if path == "/echo":
             body = json.dumps({k.lower(): v for k, v in self.headers.items()}).encode()
             ctype = "application/json"
         else:
-            body, ctype = _BODIES.get(self.path, (b"not found", "text/plain"))
+            body, ctype = _BODIES.get(path, (b"not found", "text/plain"))
         self.send_response(200 if body != b"not found" else 404)
         self.send_header("Content-Type", ctype)
         self.send_header("Accept-CH", _ACCEPT_CH)
@@ -140,24 +179,44 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class IdentityServer:
-    """Serves the identity page on a loopback port picked by the OS."""
+    """Serves the identity page on two loopback ports picked by the OS.
+
+    Two, because the fourth surface is a cross-origin frame and a port is part
+    of an origin. Both listeners serve the same handler; which one is "the
+    other origin" is decided only by which URL the page is given.
+    """
 
     def __init__(self) -> None:
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._servers = [
+            ThreadingHTTPServer(("127.0.0.1", 0), _Handler) for _ in range(2)
+        ]
+        self._threads = [
+            threading.Thread(target=server.serve_forever, daemon=True)
+            for server in self._servers
+        ]
 
     def __enter__(self) -> "IdentityServer":
-        self._thread.start()
+        for thread in self._threads:
+            thread.start()
         return self
 
     def __exit__(self, *exc: object) -> None:
-        self._server.shutdown()
-        self._server.server_close()
+        for server in self._servers:
+            server.shutdown()
+            server.server_close()
+
+    def _origin(self, index: int) -> str:
+        host, port = self._servers[index].server_address[:2]
+        return f"http://{host}:{port}/"
 
     @property
     def url(self) -> str:
-        host, port = self._server.server_address[:2]
-        return f"http://{host}:{port}/"
+        """The page, told where to find the other origin.
+
+        Passed in the query string rather than hardcoded, because the port is
+        the OS's choice and the page has no other way to learn it.
+        """
+        return f"{self._origin(0)}?frame={quote(self._origin(1), safe='')}"
 
 
 async def describe_browser(page: Any, url: str, timeout_ms: int = 30_000) -> dict:
