@@ -1396,7 +1396,7 @@ class TestPostTools:
             new_day=26,
             new_hour=16,
             new_minute=30,
-            occurrence=0,
+            occurrence=None,
             confirm_edit=True,
         )
 

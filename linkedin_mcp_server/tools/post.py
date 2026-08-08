@@ -287,7 +287,7 @@ def register_post_tools(
         new_text: str | None = None,
         new_date: str | None = None,
         new_time: str | None = None,
-        occurrence: Annotated[int, Field(ge=0)] = 0,
+        occurrence: Annotated[int, Field(ge=0)] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -295,9 +295,11 @@ def register_post_tools(
 
         The post to edit is identified by match_text, a snippet of its current
         body, resolved against the live scheduled-posts list at action time
-        (get_scheduled_posts shows the entries to pick a snippet from). The
-        snippet must match exactly one entry; when several entries share the
-        text, occurrence selects among them in list order. This is a write
+        (get_scheduled_posts shows the entries to pick a snippet from). With
+        occurrence omitted the snippet must match exactly one entry — several
+        matches are an error, never a silent first pick; pass occurrence only
+        after seeing the list, to choose among known duplicates in list
+        order. This is a write
         operation when confirm_edit is True; with False it applies the changes
         in the composer as a dry run, returns LinkedIn's rendering of the
         result, and abandons them unsaved.
@@ -310,6 +312,7 @@ def register_post_tools(
             new_date: New date as YYYY-MM-DD. Omit to keep the current date.
             new_time: New 24-hour time as HH:MM. Omit to keep the current time.
             occurrence: 0-based selector among entries matching match_text.
+                Omit to require a unique match.
 
         Returns:
             Dict with url, status, message, done (bool), entry_preview, and —

@@ -4699,7 +4699,7 @@ class LinkedInExtractor:
         return result
 
     async def _resolve_scheduled_entry(
-        self, match_text: str, occurrence: int
+        self, match_text: str, occurrence: int | None
     ) -> int | tuple[str, str]:
         """Resolve a body snippet to an overflow-button index in the open list.
 
@@ -4707,6 +4707,12 @@ class LinkedInExtractor:
         against a remembered index: the queue shifts whenever a scheduled post
         publishes, so a position captured earlier can name a different post by
         the time it is used. Returns the index, or ``(status, message)``.
+
+        ``occurrence=None`` demands a *unique* match: several matching entries
+        are then an error, never a silent first pick — a defaulted zero used
+        to select the first match, and a confirmed edit could change the wrong
+        post while reporting success. Passing an integer states the caller has
+        seen the list and is choosing among known duplicates.
         """
         entries: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
         needle = " ".join(match_text.split()).casefold()
@@ -4721,14 +4727,15 @@ class LinkedInExtractor:
                 f"No scheduled post contains {match_text!r} "
                 f"({len(entries)} entries in the list).",
             )
-        if len(matches) > 1 and occurrence >= len(matches):
-            return (
-                "entry_ambiguous",
-                f"{len(matches)} scheduled posts contain {match_text!r} and "
-                f"occurrence={occurrence} is out of range; pass a longer "
-                "snippet or an occurrence between 0 and "
-                f"{len(matches) - 1}.",
-            )
+        if occurrence is None:
+            if len(matches) > 1:
+                return (
+                    "entry_ambiguous",
+                    f"{len(matches)} scheduled posts contain {match_text!r}. "
+                    "Pass a longer snippet, or an occurrence between 0 and "
+                    f"{len(matches) - 1} to choose among them.",
+                )
+            occurrence = 0
         if occurrence >= len(matches):
             return (
                 "entry_not_found",
@@ -4738,7 +4745,7 @@ class LinkedInExtractor:
         return matches[occurrence]
 
     async def _open_scheduled_entry_action(
-        self, match_text: str, occurrence: int, action_selector: str
+        self, match_text: str, occurrence: int | None, action_selector: str
     ) -> tuple[str, str] | str:
         """Open the list, resolve the entry, and click one of its menu actions.
 
@@ -4799,7 +4806,7 @@ class LinkedInExtractor:
         new_day: int | None = None,
         new_hour: int | None = None,
         new_minute: int | None = None,
-        occurrence: int = 0,
+        occurrence: int | None = None,
         confirm_edit: bool,
     ) -> dict[str, Any]:
         """Edit a scheduled post's body and/or scheduled moment in place.

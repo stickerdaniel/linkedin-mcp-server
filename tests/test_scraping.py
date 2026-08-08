@@ -6022,6 +6022,43 @@ class TestGetScheduledPostsRead:
         assert "sections" not in result
 
 
+class TestResolveScheduledEntry:
+    """Snippet resolution: unique-match by default, explicit choice otherwise."""
+
+    def _extractor(self, entries):
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value=entries)
+        return LinkedInExtractor(page)
+
+    async def test_unique_match_resolves_without_occurrence(self):
+        extractor = self._extractor(["about x", "about y", "about z"])
+        assert await extractor._resolve_scheduled_entry("about y", None) == 1
+
+    async def test_ambiguous_match_errors_without_occurrence(self):
+        # A defaulted first-pick could edit the wrong post while reporting
+        # success; several matches without an explicit choice must error.
+        extractor = self._extractor(["about x 1", "about x 2"])
+        result = await extractor._resolve_scheduled_entry("about x", None)
+        assert isinstance(result, tuple)
+        assert result[0] == "entry_ambiguous"
+
+    async def test_explicit_occurrence_chooses_among_duplicates(self):
+        extractor = self._extractor(["about x 1", "other", "about x 2"])
+        assert await extractor._resolve_scheduled_entry("about x", 1) == 2
+
+    async def test_occurrence_out_of_range_errors(self):
+        extractor = self._extractor(["about x 1"])
+        result = await extractor._resolve_scheduled_entry("about x", 3)
+        assert isinstance(result, tuple)
+        assert result[0] == "entry_not_found"
+
+    async def test_no_match_errors(self):
+        extractor = self._extractor(["something else"])
+        result = await extractor._resolve_scheduled_entry("absent", None)
+        assert isinstance(result, tuple)
+        assert result[0] == "entry_not_found"
+
+
 class TestScheduleFormatHelpers:
     """The schedule dialog's prefill is the format example the helpers copy."""
 
