@@ -24,6 +24,13 @@ Architecture:
 
 from importlib.metadata import PackageNotFoundError, version
 
+from linkedin_mcp_server.greenlet_runtime import explain_a_missing_runtime
+
+# Before anything reaches patchright, where the failure would otherwise surface
+# as a bare DLL error with nothing pointing at its cause. Both entry paths, the
+# console script and ``python -m``, import this module first.
+explain_a_missing_runtime()
+
 try:
     __version__ = version("mcp-server-linkedin")
 except PackageNotFoundError:

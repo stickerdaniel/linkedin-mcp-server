@@ -190,6 +190,20 @@ class BrowserDowngradeError(LinkedInMCPError):
         )
 
 
+class VisualCPPRuntimeMissingError(LinkedInMCPError):
+    """greenlet's C extension needs a Visual C++ runtime this machine lacks.
+
+    Its own class because the failure is neither ours nor recoverable from
+    inside the process. Nothing here can install a system DLL, and no other
+    configuration changes the answer, so the only useful thing the server can do
+    is say which one is missing and where it comes from.
+
+    Raised while importing the package, which is the only moment early enough:
+    patchright pulls greenlet in on the way to ``patchright.async_api``, long
+    before any entry point runs. See ``greenlet_runtime``.
+    """
+
+
 class CookieDecryptionError(LinkedInMCPError):
     """A browser cookie could not be decrypted."""
 
