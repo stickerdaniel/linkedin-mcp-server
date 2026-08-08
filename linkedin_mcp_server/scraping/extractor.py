@@ -4542,7 +4542,25 @@ class LinkedInExtractor:
                 "list_unavailable",
                 "LinkedIn did not open the scheduled posts view.",
             )
-        await asyncio.sleep(1.0)  # let the list hydrate
+        # Hydration is not bounded, so a fixed delay is not either: the modal
+        # renders its heading before its entries, and a read taken in between
+        # looks exactly like an empty queue. Settled means two consecutive
+        # identical non-empty samples of the modal's own text; the deadline
+        # keeps a modal that never settles from hanging the tool.
+        previous = ""
+        for _ in range(16):
+            await asyncio.sleep(0.5)
+            try:
+                sample = await (
+                    self._page.locator(_DIALOG_SELECTOR)
+                    .filter(visible=True)
+                    .first.inner_text()
+                )
+            except Exception:
+                sample = ""
+            if sample.strip() and sample == previous:
+                break
+            previous = sample
         return None
 
     async def _dismiss_scheduled_posts_list(self) -> None:
