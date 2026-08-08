@@ -162,6 +162,31 @@ class TestOnWindows:
 
         assert "greenlet<=3.3.0" in str(caught.value)
 
+    def test_the_loader_has_to_be_the_one_talking(self, greenlet_fails):
+        # A prefix, not a substring anywhere in the text. A wrapper mentioning
+        # those words in a diagnostic of its own is not the loader.
+        greenlet_fails(
+            ImportError("wrapper failure mentions DLL load failed in its notes")
+        )
+
+        with pytest.raises(ImportError) as caught:
+            explain_a_missing_runtime()
+
+        assert not isinstance(caught.value, VisualCPPRuntimeUnavailableError)
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "DLL load failed while importing _greenlet: nope",
+            "DLL load failed with error code 126 while importing _greenlet",
+        ],
+    )
+    def test_both_shapes_cpython_writes_are_recognised(self, greenlet_fails, shape):
+        greenlet_fails(ImportError(shape))
+
+        with pytest.raises(VisualCPPRuntimeUnavailableError):
+            explain_a_missing_runtime()
+
     def test_a_missing_greenlet_is_not_given_the_wrong_advice(self, greenlet_fails):
         # An uninstalled greenlet is a different problem with a different fix,
         # and a redistributable would not touch it.
@@ -178,44 +203,23 @@ class TestOnWindows:
 
         assert explain_a_missing_runtime() is None
 
-    @pytest.mark.parametrize("installed", ["3.2.4", "3.3.0", "3.3.0.post1"])
-    def test_a_statically_linked_greenlet_is_left_alone(
+    @pytest.mark.parametrize("installed", ["3.2.4", "3.3.0", "3.2.5", "3.5.4"])
+    def test_no_version_decides_whether_to_explain(
         self, monkeypatch, greenlet_fails, installed
     ):
-        # 3.3.0 is the stopgap this very message recommends. It carries its own
-        # C++ runtime, so a DLL failure there is never about the redistributable
-        # and saying so would send that user after the wrong thing.
+        # Linking belongs to the built artifact, not the number. 3.2.5 publishes
+        # no Windows wheel at all, so an install of it is built from the sdist
+        # and is dynamic unless whoever built it set GREENLET_STATIC_RUNTIME. A
+        # predicate on the version withholds the explanation from exactly that
+        # person, which is the expensive direction to be wrong in.
         monkeypatch.setattr(greenlet_runtime, "version", lambda _name: installed)
         greenlet_fails(ImportError(_REAL_MESSAGE))
 
-        with pytest.raises(ImportError) as caught:
+        with pytest.raises(VisualCPPRuntimeUnavailableError) as caught:
             explain_a_missing_runtime()
 
-        assert not isinstance(caught.value, VisualCPPRuntimeUnavailableError)
-
-    @pytest.mark.parametrize(
-        "installed",
-        [
-            # The commit that dropped GREENLET_STATIC_RUNTIME carried this
-            # version, and PEP 440 sorts it below 3.3.1, so a boundary written
-            # as >= 3.3.1 would let the very first affected build through.
-            "3.3.1.dev0",
-            "3.3.1rc1",
-            "3.3.1",
-            "3.5.4",
-            # Not a claim that this links dynamically. The check excludes the
-            # builds measured to be static and leaves everything else in.
-            "4.0.0",
-        ],
-    )
-    def test_a_greenlet_that_is_not_known_to_be_static_is_explained(
-        self, monkeypatch, greenlet_fails, installed
-    ):
-        monkeypatch.setattr(greenlet_runtime, "version", lambda _name: installed)
-        greenlet_fails(ImportError(_REAL_MESSAGE))
-
-        with pytest.raises(VisualCPPRuntimeUnavailableError):
-            explain_a_missing_runtime()
+        # Said in the message instead, where the reader can weigh it.
+        assert "3.3.0 or older" in str(caught.value)
 
     @pytest.mark.parametrize("installed", ["unknown", "not-a-version"])
     def test_an_unusable_version_still_gets_the_message(
