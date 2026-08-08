@@ -1,17 +1,4 @@
-"""What a Windows machine without the Visual C++ runtime is told.
-
-greenlet's published Windows wheels link that runtime dynamically from 3.3.1 on,
-so on a machine without the redistributable the extension fails to load and the
-server stops with
-``DLL load failed while importing _greenlet`` and nothing naming the cause.
-patchright imports greenlet even on the async-only path this server uses, so the
-failure arrives before any of our code runs and there is nothing to catch it
-later.
-
-These tests run everywhere, including on the platform that cannot reproduce the
-condition, which is the point: the failure belongs to Windows and the reasoning
-about it should not need one.
-"""
+"""What a Windows machine whose loader cannot produce MSVCP140.dll is told."""
 
 import subprocess
 import sys
@@ -27,9 +14,19 @@ from linkedin_mcp_server import greenlet_runtime
 from linkedin_mcp_server.exceptions import VisualCPPRuntimeUnavailableError
 from linkedin_mcp_server.greenlet_runtime import explain_a_missing_runtime
 
+
 #: What CPython raises when a ``.pyd`` cannot find a DLL it imports. The prefix
 #: is formatted by ``dynload_win.c`` and is English on every install; only the
 #: operating-system text after the colon is localised.
+def _unwrapped(value: object) -> str:
+    """One line and lowercased, so an assertion survives a rewrap or a recase.
+
+    Neither changes what the message tells anyone, and Windows itself does not
+    distinguish ``MSVCP140.dll`` from ``msvcp140.dll``.
+    """
+    return " ".join(str(value).split()).lower()
+
+
 _REAL_MESSAGE = (
     "DLL load failed while importing _greenlet: "
     "The specified module could not be found."
@@ -80,9 +77,9 @@ class TestOnWindows:
         with pytest.raises(VisualCPPRuntimeUnavailableError) as caught:
             explain_a_missing_runtime()
 
-        message = str(caught.value)
-        assert "MSVCP140.dll" in message
-        assert "Microsoft Visual C++ Redistributable" in message
+        message = _unwrapped(caught.value)
+        assert "msvcp140.dll" in message
+        assert "microsoft visual c++ redistributable" in message
         assert "latest-supported-vc-redist" in message
 
     def test_the_loader_is_quoted(self, greenlet_fails):
@@ -98,10 +95,8 @@ class TestOnWindows:
     ):
         # ``DLL load failed`` is what CPython writes for every LoadLibraryExW
         # that fails, so a corrupt or architecture-mismatched .pyd reaches here
-        # too. Claiming a missing redistributable when the loader can produce it
-        # would send that user after the wrong thing, and it would be worst on
-        # the 3.3.0 stopgap this very message suggests, which links the runtime
-        # statically and needs none of it.
+        # too, and claiming a missing redistributable when the loader can
+        # produce one would send that user after the wrong thing.
         monkeypatch.setattr(
             greenlet_runtime, "_the_runtime_cannot_be_loaded", lambda: False
         )
@@ -219,25 +214,34 @@ class TestOnWindows:
         with pytest.raises(VisualCPPRuntimeUnavailableError):
             explain_a_missing_runtime()
 
-    def test_the_diagnosis_reads_the_same_at_every_version(self, monkeypatch):
+    @pytest.mark.parametrize("other", ["3.2.5", "3.3.0", "unknown"])
+    def test_the_diagnosis_reads_the_same_at_every_version(self, monkeypatch, other):
         # The predicate was taken out of the control flow because a version
         # cannot say how an artifact was linked. Saying it in prose instead
         # would put the same wrong claim in front of the reader: telling a
-        # 3.2.5 user that "its wheel" carries the runtime describes a wheel
-        # that was never published. Only the reported version may differ.
-        def message_for(installed: str) -> str:
+        # 3.2.5 user that "its wheel" carries the runtime describes a wheel that
+        # was never published. Only the reported version may differ, so the
+        # version is masked rather than the line dropped, and a clause smuggled
+        # in beside it still fails this.
+        def masked(installed: str) -> str:
             monkeypatch.setattr(greenlet_runtime, "version", lambda _name: installed)
             body = greenlet_runtime._explain("DLL load failed while importing x: y")
-            return "\n".join(
-                line
-                for line in body.splitlines()
-                if not line.startswith("Installed greenlet:")
+            return " ".join(
+                body.replace(
+                    f"Installed greenlet: {installed}", "Installed greenlet: <version>"
+                ).split()
             )
 
-        assert message_for("3.2.5") == message_for("3.5.4")
-        # And it says what was actually measured, plus the case that is neither.
-        assert "published Windows wheels" in message_for("3.5.4")
-        assert "built from source" in message_for("3.5.4")
+        assert masked(other) == masked("3.5.4")
+
+    def test_the_remedy_comes_before_the_history(self):
+        # Clients truncate and collapse a server's output. Someone who reads
+        # only the first lines has to reach the thing to install.
+        body = greenlet_runtime._explain("DLL load failed while importing x: y")
+
+        assert body.index("To fix this") < body.index("The loader reported")
+        assert "latest-supported-vc-redist" in _unwrapped(body)
+        assert "published wheels up to greenlet 3.3.0" in _unwrapped(body)
 
     @pytest.mark.parametrize("installed", ["unknown", "not-a-version"])
     def test_an_unusable_version_still_gets_the_message(
@@ -378,7 +382,7 @@ class TestBothEntryPaths:
 
         assert finished.returncode != 0
         assert "VisualCPPRuntimeUnavailableError" in finished.stderr
-        assert "MSVCP140.dll" in finished.stderr
+        assert "msvcp140.dll" in finished.stderr.lower()
         # The loader's own words survive, which is the only machine-specific
         # detail and the only way to tell this cause from another DLL failure.
         assert "DLL load failed while importing _greenlet" in finished.stderr
