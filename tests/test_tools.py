@@ -1354,7 +1354,7 @@ class TestPostTools:
 
         tool_fn = await get_tool_fn(mcp, "schedule_post")
         mock_extractor = _make_mock_extractor({})
-        with pytest.raises(ToolError, match="not in the future"):
+        with pytest.raises(ToolError, match="already past in every timezone"):
             await tool_fn(
                 "Hello",
                 "2020-01-01",
@@ -1364,6 +1364,40 @@ class TestPostTools:
                 extractor=mock_extractor,
             )
         mock_extractor.schedule_post.assert_not_awaited()
+
+    async def test_schedule_post_defers_near_past_to_linkedin(self, mock_context):
+        """A moment shortly behind the server clock may still be future in the
+        profile's timezone, so the tool must pass it through and let LinkedIn
+        judge it rather than rejecting on the server's own wall clock."""
+        import datetime as _dt
+
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "schedule_rejected",
+            "message": "LinkedIn did not accept the scheduled date and time.",
+            "scheduled": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "schedule_post")
+        near_past = _dt.datetime.now(_dt.timezone.utc).replace(
+            tzinfo=None
+        ) - _dt.timedelta(hours=1)
+        result = await tool_fn(
+            "Hello",
+            near_past.strftime("%Y-%m-%d"),
+            near_past.strftime("%H:%M"),
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+        assert result["status"] == "schedule_rejected"
+        mock_extractor.schedule_post.assert_awaited_once()
 
 
 class TestToolTimeouts:

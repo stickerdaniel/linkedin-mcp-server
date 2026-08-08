@@ -169,10 +169,18 @@ def register_post_tools(
                     f"Invalid schedule_date/schedule_time: {e}. "
                     "Use YYYY-MM-DD and 24-hour HH:MM."
                 ) from e
-            if when <= datetime.datetime.now():
+            # LinkedIn interprets the moment in the *profile's* timezone,
+            # which this server cannot know, so the server clock only bounds
+            # the check: a wall time is already past in every timezone once it
+            # trails UTC by more than the westernmost offset (UTC-12). Only
+            # that much is rejected here; anything nearer is LinkedIn's call,
+            # and the composer flow reports schedule_rejected when LinkedIn
+            # refuses the values.
+            now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            if when <= now_utc - datetime.timedelta(hours=12):
                 raise ToolError(
-                    f"The scheduled moment {when:%Y-%m-%d %H:%M} is not in the "
-                    "future (server clock). Pick a later time."
+                    f"The scheduled moment {when:%Y-%m-%d %H:%M} is already "
+                    "past in every timezone. Pick a later time."
                 )
 
             extractor = extractor or await get_ready_extractor(
