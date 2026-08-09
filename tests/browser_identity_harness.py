@@ -43,6 +43,7 @@ _PAGE = b"""<!doctype html>
 <script>
 // Deliberately not page.evaluate(): that runs in an isolated world. This is
 // the realm a website actually gets.
+const REALM_BUDGET_MS = __REALM_BUDGET_MS__;
 const describeAccessor = (name) => {
   const d = Object.getOwnPropertyDescriptor(Navigator.prototype, name);
   if (!d) return null;
@@ -71,33 +72,45 @@ const describeAccessor = (name) => {
     webdriver: navigator.webdriver,
   });
 
-  const worker = new Worker('/worker.js');
-  const dedicated = await new Promise((resolve, reject) => {
-    worker.onmessage = e => resolve(e.data);
-    worker.onerror = e => reject(new Error('worker: ' + e.message));
-    setTimeout(() => reject(new Error('worker timed out')), 15000);
-  });
+  const askTheWorker = () => {
+    const worker = new Worker('/worker.js');
+    return new Promise((resolve, reject) => {
+      worker.onmessage = e => resolve(e.data);
+      worker.onerror = e => reject(new Error('worker: ' + e.message));
+      setTimeout(() => reject(new Error('worker timed out')), REALM_BUDGET_MS);
+    });
+  };
 
-  const registration = await navigator.serviceWorker.register('/sw.js');
-  await navigator.serviceWorker.ready;
-  const serviceWorker = await new Promise((resolve, reject) => {
-    navigator.serviceWorker.addEventListener('message', e => resolve(e.data));
-    setTimeout(() => reject(new Error('service worker timed out')), 15000);
-    (registration.active || navigator.serviceWorker.controller).postMessage('describe');
-  });
+  const askTheServiceWorker = async () => {
+    const registration = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    return new Promise((resolve, reject) => {
+      navigator.serviceWorker.addEventListener('message', e => resolve(e.data));
+      setTimeout(() => reject(new Error('service worker timed out')), REALM_BUDGET_MS);
+      (registration.active || navigator.serviceWorker.controller).postMessage('describe');
+    });
+  };
 
   // Another origin, because a port is part of one. The frame reports through
   // postMessage; nothing here can read across the boundary, which is the point.
-  const frameOrigin = new URLSearchParams(location.search).get('frame');
-  const iframe = await new Promise((resolve, reject) => {
+  const askTheFrame = () => new Promise((resolve, reject) => {
     addEventListener('message', e => {
       if (e.data && e.data.realm === 'iframe') resolve(e.data);
     });
-    setTimeout(() => reject(new Error('cross-origin iframe timed out')), 15000);
+    setTimeout(() => reject(new Error('cross-origin iframe timed out')), REALM_BUDGET_MS);
     const el = document.createElement('iframe');
-    el.src = frameOrigin + 'frame';
+    el.src = new URLSearchParams(location.search).get('frame') + 'frame';
     document.body.appendChild(el);
   });
+
+  // Concurrently, and that is a correctness point rather than a speed one.
+  // Awaited one after another, three budgets of REALM_BUDGET_MS could add up
+  // past the host's own timeout, so a slow-but-working browser would be
+  // reported as a broken one. Started together, the whole page costs one
+  // budget and the host's bound stays comfortably above it.
+  const [dedicated, serviceWorker, iframe] = await Promise.all([
+    askTheWorker(), askTheServiceWorker(), askTheFrame(),
+  ]);
 
   const result = {
     page: {...(await jsChannel()), headers: await echo()},
@@ -114,7 +127,10 @@ const describeAccessor = (name) => {
     hasChromeObject: typeof window.chrome,
     // Automation artefacts a launcher can leave in the page's own realm.
     automationGlobals: Object.getOwnPropertyNames(window)
-      .filter(n => /^(__pw|__playwright|\\$cdc_|__driver|__selenium|__webdriver)/.test(n)),
+      // `cdc_` with no dollar as well: ChromeDriver installs
+      // `cdc_adoQpoasnfa76pfcZLmcfl_Array` and friends under the bare prefix,
+      // and only the older `$cdc_` spelling was being looked for.
+      .filter(n => /^(__pw|__playwright|\\$?cdc_|__driver|__selenium|__webdriver|__fxdriver|__nightmare|_Selenium_IDE)/.test(n)),
     // The prototype accessor can be left perfectly native while an own
     // property on the instance shadows it, which reads as false and leaves
     // every descriptor attribute untouched. Measured against the bundled
@@ -137,7 +153,8 @@ const describeAccessor = (name) => {
 _WORKER = b"""
 (async () => {
   const headers = await (await fetch('/echo', {cache: 'no-store'})).json();
-  postMessage({realm: 'dedicated', ua: navigator.userAgent, headers});
+  postMessage({realm: 'dedicated', ua: navigator.userAgent,
+    webdriver: navigator.webdriver, headers});
 })();
 """
 
@@ -150,7 +167,8 @@ self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 // page then waits out its own timeout.
 self.addEventListener('message', e => e.waitUntil((async () => {
   const headers = await (await fetch('/echo', {cache: 'no-store'})).json();
-  e.source.postMessage({realm: 'serviceWorker', ua: navigator.userAgent, headers});
+  e.source.postMessage({realm: 'serviceWorker', ua: navigator.userAgent,
+    webdriver: navigator.webdriver, headers});
 })()));
 """
 
@@ -159,10 +177,22 @@ _FRAME = b"""<!doctype html>
 <script>
 (async () => {
   const headers = await (await fetch('/echo', {cache: 'no-store'})).json();
-  parent.postMessage({realm: 'iframe', ua: navigator.userAgent, headers}, '*');
+  parent.postMessage({realm: 'iframe', ua: navigator.userAgent,
+    webdriver: navigator.webdriver, headers}, '*');
 })();
 </script>
 """
+
+#: How long any one realm may take to answer, and how much longer the host
+#: waits for the whole page. The two are declared together on purpose: they
+#: used to be written out separately, and three sequential realm budgets added
+#: up past the host's bound, so a browser that was merely slow reported as a
+#: browser that was broken. The realms run concurrently now, which is what
+#: makes one budget the cost of the page rather than three.
+REALM_BUDGET_MS = 15_000
+HOST_BUDGET_MS = REALM_BUDGET_MS * 3
+
+_PAGE = _PAGE.replace(b"__REALM_BUDGET_MS__", str(REALM_BUDGET_MS).encode())
 
 _BODIES = {
     "/": (_PAGE, "text/html; charset=utf-8"),
@@ -240,7 +270,9 @@ class IdentityServer:
         return f"{self._origin(0)}?frame={quote(self._origin(1), safe='')}"
 
 
-async def describe_browser(page: Any, url: str, timeout_ms: int = 30_000) -> dict:
+async def describe_browser(
+    page: Any, url: str, timeout_ms: int = HOST_BUDGET_MS
+) -> dict:
     """Navigate *page* at the harness and return what the browser said it is."""
     await page.goto(url, wait_until="domcontentloaded")
     await page.wait_for_function(

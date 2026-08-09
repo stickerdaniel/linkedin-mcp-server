@@ -280,13 +280,19 @@ def _structured_string(value: str | None) -> str | None:
 
     Backslash escapes are undone rather than left in place, so a brand carrying
     a quote reads as the browser meant it and not as its wire spelling.
+
+    An unquoted value is not read leniently as the text it resembles. Every
+    field this parses is an ``sf-string``, so ``Sec-CH-UA-Arch: arm`` is not a
+    differently spelled ``"arm"`` but a header a conforming recipient rejects,
+    and treating the two alike would let a browser emitting invalid syntax pass
+    as one emitting valid syntax.
     """
     if value is None:
         return None
     token = value.strip()
-    if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
-        token = _unescape(token[1:-1])
-    return token or None
+    if len(token) < 2 or not token.startswith('"') or not token.endswith('"'):
+        return None
+    return _unescape(token[1:-1]) or None
 
 
 def _unescape(text: str) -> str:
@@ -312,6 +318,13 @@ def _brand_list(value: str | None) -> list[tuple[str, str | None]]:
     version of a repeated brand: a list carrying ``Chromium`` at 148 *and* at
     149 collapses to the current one, and a browser publishing two versions of
     itself at once is exactly the contradiction being looked for.
+
+    A member that is not a quoted string raises rather than being skipped. An
+    empty member and a bare token are both parse failures under RFC 8941, and
+    dropping them would turn a browser emitting invalid syntax into one that
+    looks like it emitted the valid list the comparison expects. A repeated
+    ``v`` is not an error: later parameters overwrite earlier ones, which is
+    what the specification says to do.
     """
     if not value:
         return []
@@ -320,7 +333,7 @@ def _brand_list(value: str | None) -> list[tuple[str, str | None]]:
         fields = _split_outside_quotes(item.strip(), ";")
         name = _structured_string(fields[0])
         if name is None:
-            continue
+            raise ValueError(f"not a structured-fields list member: {item!r}")
         version = None
         for parameter in fields[1:]:
             key, _, raw = parameter.partition("=")
@@ -366,6 +379,27 @@ class TestEveryRealmTellsTheSameStory:
         override that changes the string reaches only the first."""
         for name, realm in _realms(either_mode).items():
             assert realm["headers"]["user-agent"] == realm["ua"], name
+
+    async def test_the_frame_is_told_the_same_about_the_browser(self, either_mode):
+        """The low-entropy hints reach another origin, and must not change on
+        the way.
+
+        The user agent was the only thing compared across realms, so an
+        injection that touched one origin's client hints and left its user
+        agent alone passed every case here. These three are the hints Chromium
+        sends to a third party without being asked, measured identical to the
+        page's; the high-entropy ones are not compared, because measurement
+        says they do not reach a worker at all and delegation to a frame is the
+        embedder's choice rather than a property of the browser.
+        """
+        page = either_mode["page"]["headers"]
+        frame = either_mode["iframe"]["headers"]
+
+        for hint in ("sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"):
+            assert frame[hint] == page[hint], (
+                f"{hint} reads {frame.get(hint)!r} in the frame and "
+                f"{page.get(hint)!r} on the page"
+            )
 
 
 class TestNothingAnnouncesAutomation:
@@ -473,6 +507,33 @@ class TestNothingAnnouncesAutomation:
             f"the webdriver getter reads {descriptor['getSource']!r} where a "
             f"native one on this prototype reads {native['getSource']!r}"
         )
+
+    async def test_no_realm_admits_to_being_driven(self, either_mode):
+        """`navigator.webdriver` is readable in more than one place.
+
+        Only the top document was asked, so a frame on another origin could
+        report ``true`` while all twenty-seven cases passed. Measured, and the
+        reason the two kinds are separated rather than looped over uniformly:
+        ``WorkerNavigator`` has no ``webdriver`` attribute at all, so both
+        workers report undefined and a check written as "false everywhere"
+        would be satisfied by a browser that had simply dropped the property.
+        The absence arrives as a missing key, because ``JSON.stringify`` omits
+        a property whose value is undefined, which is a cleaner signal than a
+        null would be: the attribute is not there rather than empty.
+        """
+        realms = _realms(either_mode)
+        documents = ("page", "cross-origin iframe")
+
+        for name in documents:
+            assert realms[name]["webdriver"] is False, (
+                f"{name} reports webdriver={realms[name]['webdriver']!r}"
+            )
+        for name, realm in realms.items():
+            if name not in documents:
+                assert "webdriver" not in realm, (
+                    f"{name} grew a webdriver attribute reading "
+                    f"{realm['webdriver']!r}, which no WorkerNavigator has"
+                )
 
     async def test_no_automation_globals_in_the_pages_own_realm(self, either_mode):
         """`__pwInitScripts`, `$cdc_*` and friends. Read from the page's own
