@@ -41,6 +41,7 @@ from linkedin_mcp_server.scraping.link_metadata import (
 )
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from linkedin_mcp_server.core.humanize import human_pause, humanize_after_nav
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -891,6 +892,9 @@ class LinkedInExtractor:
             try:
                 await self._page.goto(url, wait_until=wait_until, timeout=30000)
                 await stabilize_navigation(f"goto {url}", logger)
+                # A little cursor entropy after each load: a frozen mouse across
+                # navigations is a cheap bot tell. Best-effort, never fatal.
+                await humanize_after_nav(self._page)
                 await record_page_trace(
                     self._page,
                     "extractor-after-goto",
@@ -1771,7 +1775,7 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+                    await human_pause(_NAV_DELAY)
 
                 url = base_url + suffix
                 try:
@@ -2440,7 +2444,7 @@ class LinkedInExtractor:
                 continue
 
             if not first_show_all:
-                await asyncio.sleep(_NAV_DELAY)
+                await human_pause(_NAV_DELAY)
             first_show_all = False
 
             try:
@@ -2923,7 +2927,7 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+                    await human_pause(_NAV_DELAY)
 
                 url = base_url + suffix
                 try:
@@ -3281,7 +3285,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await human_pause(_NAV_DELAY)
 
             url = (
                 base_url
@@ -3512,7 +3516,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await human_pause(_NAV_DELAY)
 
             url = (
                 base_url
@@ -3666,7 +3670,7 @@ class LinkedInExtractor:
 
         for page_num in range(1, max_pages + 1):
             if page_num > 1:
-                await asyncio.sleep(_NAV_DELAY)
+                await human_pause(_NAV_DELAY)
 
             url = base_url if page_num == 1 else f"{base_url}&page={page_num}"
             extracted = await self.extract_page(url, section_name="search_results")

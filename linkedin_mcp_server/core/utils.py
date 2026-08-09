@@ -6,6 +6,7 @@ import logging
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from .exceptions import RateLimitError
+from .humanize import jitter
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,9 @@ async def scroll_to_bottom(
     for i in range(max_scrolls):
         previous_height = await page.evaluate("document.body.scrollHeight")
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(pause_time)
+        # Jitter the between-scroll pause so the scroll cadence has no fixed
+        # period (a constant rhythm is a bot tell).
+        await asyncio.sleep(jitter(pause_time))
 
         new_height = await page.evaluate("document.body.scrollHeight")
         if new_height == previous_height:

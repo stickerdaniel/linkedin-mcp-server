@@ -17,8 +17,10 @@ The model mirrors what the established LinkedIn automation tools converged on:
   ages out exactly 24 hours after it happened. A midnight reset lets a job
   spend its whole budget at 23:00 and again at 00:01, which is precisely the
   burst shape that gets flagged.
-* **Working hours** (default 09:00-18:00 local, weekends off, lunch skipped),
-  because a member who views profiles at 04:00 on a Sunday is not browsing.
+* **Working hours**, opt-in via ``Schedule.business_hours()`` (09:00-18:00
+  local, weekends off, lunch skipped), because a member who views profiles at
+  04:00 on a Sunday is not browsing. The default schedule is permissive (24/7)
+  so the pacing never blocks a run the operator did not ask to restrict.
 * **Randomized** gaps and a jittered daily cap, so the traffic carries no
   fixed period and no suspiciously round daily total.
 * A **warm-up ramp**, because the pattern change matters as much as the level:
@@ -60,14 +62,28 @@ MAX_BUNCH_PAUSE = 3600.0
 
 @dataclass(frozen=True)
 class Schedule:
-    """When automated work is allowed to run, in the operator's local time."""
+    """When automated work is allowed to run, in the operator's local time.
 
-    work_start: int = 9
-    work_end: int = 18
-    lunch_start: int | None = 12
-    lunch_end: int | None = 13
+    The default is permissive (24/7): working-hours restriction is opt-in, not
+    imposed. ``business_hours()`` is the 09-18, weekdays, lunch-skipped preset
+    for callers who do want the account to look like it only browses in office
+    hours. A restrictive default surprised users by refusing to run in the
+    evening when they had never asked for a working-hours limit.
+    """
+
+    work_start: int = 0
+    work_end: int = 24
+    lunch_start: int | None = None
+    lunch_end: int | None = None
     # Monday is 0, matching datetime.weekday().
-    days_off: tuple[int, ...] = (5, 6)
+    days_off: tuple[int, ...] = ()
+
+    @classmethod
+    def business_hours(cls) -> Schedule:
+        """The opt-in 09-18, weekdays, lunch-skipped preset."""
+        return cls(
+            work_start=9, work_end=18, lunch_start=12, lunch_end=13, days_off=(5, 6)
+        )
 
     def is_open(self, now: datetime) -> bool:
         """True when `now` falls inside the working window."""
@@ -110,7 +126,13 @@ class Schedule:
         if not self.is_open(now):
             return 0.0
 
-        close = now.replace(hour=self.work_end, minute=0, second=0, microsecond=0)
+        # work_end == 24 means "midnight" (the always-open default); hour=24 is
+        # not a valid time, so express it as start-of-next-day.
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if self.work_end >= 24:
+            close = midnight + timedelta(days=1)
+        else:
+            close = now.replace(hour=self.work_end, minute=0, second=0, microsecond=0)
         remaining = (close - now).total_seconds()
 
         # Lunch still ahead today is not usable time.

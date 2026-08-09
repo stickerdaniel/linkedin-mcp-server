@@ -30,53 +30,72 @@ WED_8PM = datetime(2026, 8, 5, 20, 0)
 SAT_10AM = datetime(2026, 8, 8, 10, 0)
 
 
-class TestSchedule:
+BH = Schedule.business_hours  # the opt-in 09-18 preset
+
+
+class TestScheduleDefaultIsPermissive:
+    def test_default_is_open_any_hour_any_day(self):
+        # Working hours are opt-in: the bare default never blocks.
+        assert Schedule().is_open(WED_3AM)
+        assert Schedule().is_open(WED_NOON)
+        assert Schedule().is_open(SAT_10AM)
+        assert Schedule().is_open(WED_8PM)
+
+    def test_default_next_open_is_always_now(self):
+        assert Schedule().next_open(WED_3AM) == WED_3AM
+
+    def test_default_seconds_until_close_is_until_midnight(self):
+        # 22:00 -> next midnight is 2h.
+        assert Schedule().seconds_until_close(WED_8PM) == 4 * 3600
+
+
+class TestBusinessHours:
     def test_open_during_working_hours(self):
-        assert Schedule().is_open(WED_10AM)
+        assert BH().is_open(WED_10AM)
 
     def test_closed_overnight(self):
-        assert not Schedule().is_open(WED_3AM)
-        assert not Schedule().is_open(WED_8PM)
+        assert not BH().is_open(WED_3AM)
+        assert not BH().is_open(WED_8PM)
 
     def test_closed_at_lunch(self):
-        assert not Schedule().is_open(WED_NOON)
+        assert not BH().is_open(WED_NOON)
 
     def test_closed_at_weekend(self):
-        assert not Schedule().is_open(SAT_10AM)
+        assert not BH().is_open(SAT_10AM)
 
     def test_next_open_returns_now_when_already_open(self):
-        assert Schedule().next_open(WED_10AM) == WED_10AM
+        assert BH().next_open(WED_10AM) == WED_10AM
 
     def test_next_open_skips_to_morning(self):
-        opens = Schedule().next_open(WED_3AM)
+        opens = BH().next_open(WED_3AM)
         assert opens.hour == 9
         assert opens.date() == WED_3AM.date()
 
     def test_next_open_skips_lunch(self):
-        opens = Schedule().next_open(WED_NOON)
+        opens = BH().next_open(WED_NOON)
         assert opens.hour == 13
 
     def test_next_open_skips_the_weekend(self):
-        opens = Schedule().next_open(SAT_10AM)
+        opens = BH().next_open(SAT_10AM)
         assert opens.weekday() == 0  # Monday
         assert opens.hour == 9
 
     def test_next_open_after_close_lands_next_morning(self):
-        opens = Schedule().next_open(WED_8PM)
+        opens = BH().next_open(WED_8PM)
         assert opens.day == WED_8PM.day + 1
         assert opens.hour == 9
 
     def test_seconds_until_close_excludes_lunch_still_ahead(self):
         # 10:00 -> 18:00 is 8h, minus the 1h lunch not yet taken.
-        assert Schedule().seconds_until_close(WED_10AM) == 7 * 3600
+        assert BH().seconds_until_close(WED_10AM) == 7 * 3600
 
     def test_seconds_until_close_keeps_afternoon_whole(self):
         # 14:00 is past lunch, so nothing is deducted.
         afternoon = datetime(2026, 8, 5, 14, 0)
-        assert Schedule().seconds_until_close(afternoon) == 4 * 3600
+        assert BH().seconds_until_close(afternoon) == 4 * 3600
 
     def test_seconds_until_close_is_zero_when_shut(self):
-        assert Schedule().seconds_until_close(SAT_10AM) == 0.0
+        assert BH().seconds_until_close(SAT_10AM) == 0.0
 
     def test_a_schedule_that_never_opens_is_rejected(self):
         every_day_off = Schedule(days_off=(0, 1, 2, 3, 4, 5, 6))
@@ -171,21 +190,22 @@ class TestJitteredCap:
 
 class TestNextBunchDelay:
     def test_spreads_budget_across_the_remaining_window(self):
-        # 7 usable hours, 100 left, bunches of 5 -> 20 bunches -> ~21 min.
-        delay = next_bunch_delay(100, 5, WED_10AM, Schedule())
+        # Business-hours preset: 7 usable hours, 100 left, bunches of 5 ->
+        # 20 bunches -> ~21 min.
+        delay = next_bunch_delay(100, 5, WED_10AM, BH())
         assert MIN_BUNCH_PAUSE <= delay <= MAX_BUNCH_PAUSE
         assert 15 * 60 <= delay <= 27 * 60
 
     def test_backs_right_off_when_budget_is_gone(self):
-        assert next_bunch_delay(0, 5, WED_10AM, Schedule()) == MAX_BUNCH_PAUSE
+        assert next_bunch_delay(0, 5, WED_10AM, BH()) == MAX_BUNCH_PAUSE
 
     def test_backs_right_off_when_the_window_is_shut(self):
-        assert next_bunch_delay(50, 5, SAT_10AM, Schedule()) == MAX_BUNCH_PAUSE
+        assert next_bunch_delay(50, 5, SAT_10AM, BH()) == MAX_BUNCH_PAUSE
 
     def test_a_tiny_remaining_budget_still_respects_the_floor(self):
         # One bunch left across 7 hours would otherwise suggest a 7-hour wait;
         # the clamp keeps it bounded.
-        delay = next_bunch_delay(1, 5, WED_10AM, Schedule())
+        delay = next_bunch_delay(1, 5, WED_10AM, BH())
         assert delay <= MAX_BUNCH_PAUSE
 
 
