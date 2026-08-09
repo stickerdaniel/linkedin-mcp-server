@@ -210,36 +210,55 @@ def test_the_loader_knows_the_same_mapping(manifest: dict[str, Any]) -> None:
     )
 
 
+def _named_variable(node: ast.expr, environment_keys: Any) -> str | None:
+    """The variable name *node* stands for, if it names one at all.
+
+    Both spellings the loader could use: the constant off ``EnvironmentKeys``,
+    which is the house style, and a bare string, which is what somebody writes
+    who has not noticed the class.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Attribute) and ast.unparse(node.value) == "EnvironmentKeys":
+        value = getattr(environment_keys, node.attr, None)
+        return value if isinstance(value, str) else None
+    return None
+
+
 def test_a_mapped_variable_is_never_read_raw() -> None:
     """Knowing the mapping is worth nothing if the read goes around it.
 
     ``_MCPB_PLACEHOLDERS`` is a table, and a table can be extended while the
-    branch that reads the variable still calls ``os.environ.get``. Every test
-    above would stay green and the literal would be taken for the setting, so
-    the check is on the reading code itself.
+    branch that reads the variable still reaches into ``os.environ`` directly.
+    Every test above would stay green and the literal would be taken for the
+    setting, so the check is on the reading code itself.
+
+    Every way of asking ``os.environ`` for one name counts, since a rule that
+    only knew ``.get`` would be satisfied by a subscript.
     """
     from linkedin_mcp_server.config import loaders
 
     guarded = set(loaders._MCPB_PLACEHOLDERS)
-    source = Path(loaders.__file__).read_text(encoding="utf-8")
-    offenders = []
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call) or not node.args:
-            continue
-        function = node.func
-        if not (isinstance(function, ast.Attribute) and function.attr == "get"):
-            continue
-        if ast.unparse(function.value) != "os.environ":
-            continue
-        argument = node.args[0]
-        if not isinstance(argument, ast.Attribute):
-            continue
-        if ast.unparse(argument.value) != "EnvironmentKeys":
-            continue
-        if getattr(loaders.EnvironmentKeys, argument.attr, None) in guarded:
-            offenders.append(argument.attr)
+    keys = loaders.EnvironmentKeys
+    offenders = set()
+    for node in ast.walk(ast.parse(Path(loaders.__file__).read_text(encoding="utf-8"))):
+        named = None
+        if (
+            isinstance(node, ast.Call)
+            and node.args
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("get", "pop", "setdefault")
+            and ast.unparse(node.func.value) == "os.environ"
+        ):
+            named = _named_variable(node.args[0], keys)
+        elif (
+            isinstance(node, ast.Subscript) and ast.unparse(node.value) == "os.environ"
+        ):
+            named = _named_variable(node.slice, keys)
+        if named in guarded:
+            offenders.add(named)
     assert not offenders, (
-        f"These carry a user_config placeholder but are read with "
-        f"os.environ.get: {sorted(offenders)}. Read them through _env(), which "
-        f"is what turns an unsubstituted placeholder back into an unset value."
+        f"These carry a user_config placeholder but are read straight out of "
+        f"os.environ: {sorted(offenders)}. Read them through _env(), which is "
+        f"what turns an unsubstituted placeholder back into an unset value."
     )
