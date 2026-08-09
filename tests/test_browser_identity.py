@@ -74,6 +74,15 @@ pytestmark = [
 #: character.
 _GREASE = re.compile(r"not[\W_]?a[\W_]?brand", re.IGNORECASE)
 
+#: The NativeFunction form ECMA-262 gives ``Function.prototype.toString`` for a
+#: built-in. Written as a grammar rather than as today's exact string, because
+#: the whitespace between the tokens is the engine's choice while the tokens
+#: themselves are not. What it refuses is anything carrying a function body,
+#: which is every accessor written in JavaScript.
+_NATIVE_FUNCTION = re.compile(
+    r"function\s+(get|set)\s+\S+\s*\(\s*\)\s*\{\s*\[\s*native\s+code\s*\]\s*\}"
+)
+
 
 def _running_in_ci() -> bool:
     """Whether a missing browser is a failure rather than a reason to skip."""
@@ -429,6 +438,12 @@ class TestNothingAnnouncesAutomation:
         touch. If V8 changes how it stringifies built-ins, both change together
         and this survives; pinning the spelling is what would not.
 
+        The control is checked as well, or two accessors patched together would
+        agree with each other and say nothing. Against the NativeFunction
+        grammar from ECMA-262 rather than against today's exact spelling, so it
+        holds whatever whitespace an engine chooses while still refusing
+        anything with a function body in it.
+
         And the prototype is not the only place to look. Defining ``webdriver``
         directly on ``navigator`` shadows the accessor without touching it, so
         the value reads false while every attribute here still measures native.
@@ -443,6 +458,9 @@ class TestNothingAnnouncesAutomation:
         descriptor = either_mode["webdriverDescriptor"]
         native = either_mode["userAgentDescriptor"]
         assert descriptor is not None and native is not None
+        assert _NATIVE_FUNCTION.fullmatch(native["getSource"]), (
+            f"the control accessor is not native either: {native['getSource']!r}"
+        )
 
         flags = ("get", "set", "enumerable", "configurable")
         assert {key: descriptor[key] for key in flags} == {
