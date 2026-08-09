@@ -43,8 +43,53 @@ jobs:
 
       - run: uv sync --group dev
 
+      # The browser is keyed on the resolved patchright version, because that
+      # is what decides which Chromium revision `install` fetches. Read from
+      # the synced environment rather than from `pyproject.toml`, which names
+      # a floor and not the version in use.
+      - name: Resolve the patchright version
+        id: patchright
+        run: |
+          version=$(uv run python -c 'from importlib.metadata import version; print(version("patchright"))')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the browser
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.patchright.outputs.version }}
+
+      # `--no-shell`, the same install the server performs: the headless shell
+      # is a different product with no plugins and no `window.chrome`, and
+      # nothing here launches it. `--with-deps` runs on a cache hit too, since
+      # the cache holds the browser and not the apt packages it links against;
+      # it also brings Xvfb, which is in playwright's `tools` dependency group.
+      - name: Install the browser
+        run: uv run patchright install --with-deps chromium --no-shell
+
+      # A headed browser needs a display. The default mode does not on Linux,
+      # where the hidden target is unsupported and Chromium's own headless mode
+      # runs instead, but the identity gate launches headed as well and that is
+      # the mode where the headless token has to be absent.
+      - name: Start a display
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          for _ in $(seq 1 100); do
+            if [ -S /tmp/.X11-unix/X99 ]; then exit 0; fi
+            sleep 0.1
+          done
+          echo "Xvfb never created /tmp/.X11-unix/X99:" >&2
+          cat /tmp/xvfb.log >&2
+          exit 1
+
+      # `--dist loadgroup` keeps the identity tests on one worker. They share
+      # two cached browser launches, and under plain `load` every worker that
+      # received one of them would pay for its own pair. Tests carrying no
+      # group mark are distributed exactly as before.
       - name: Run tests
-        run: uv run pytest --cov --cov-report=term-missing -n auto -v -s
+        env:
+          DISPLAY: ":99"
+        run: uv run pytest --cov --cov-report=term-missing -n auto --dist loadgroup -v -s
 
       - run: uv cache prune --ci
 
@@ -61,7 +106,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - os: macos-latest
+            browsers: ~/Library/Caches/ms-playwright
+          - os: windows-latest
+            browsers: ~\AppData\Local\ms-playwright
+          # Here for the browser rather than for the operating system.
+          # Patchright ships Chrome for Testing everywhere except Linux arm64,
+          # which gets Playwright's own Chromium build, and the release
+          # publishes an arm64 image. Without this leg an identity regression
+          # in that build reaches the container with both other jobs green.
+          - os: ubuntu-24.04-arm
+            browsers: ~/.cache/ms-playwright
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -73,5 +129,68 @@ jobs:
 
       - name: Run platform behaviour tests
         run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py tests/test_daemon_lock.py tests/test_greenlet_runtime.py
+
+      # The identity gate runs on every leg, because every leg's browser is a
+      # different one from the Ubuntu job's. macOS is the only platform with a
+      # hidden target, which is the whole reason the default mode can run
+      # without announcing itself as headless. Linux arm64 is the only platform
+      # whose bundle is Playwright's own Chromium rather than Chrome for
+      # Testing. Windows has its own binary, its own window manager and its own
+      # DPI handling, and the gate measures a headed window against the screen
+      # it stands on -- which is exactly where those differ. An earlier version
+      # of this file left Windows out on the grounds that it falls back to
+      # headless mode like Linux does; that is true of one case in that file
+      # and says nothing about the rest of them.
+      #
+      # None of these three legs blocks a merge. Branch protection on `main`
+      # requires `lint-and-check` and `test` only, which is how this job has
+      # always stood, so a red leg here is visible on the pull request and does
+      # not stop anyone. The Linux x64 half of the gate is inside `test` and
+      # does block. Adding these names to the required list is a repository
+      # setting rather than anything this file can do.
+      #
+      # `shell: bash` because one of the legs is Windows, where the default is
+      # PowerShell and none of the syntax below means anything.
+      - name: Resolve the patchright version
+        id: patchright
+        shell: bash
+        run: |
+          version=$(uv run python -c 'from importlib.metadata import version; print(version("patchright"))')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the browser
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.browsers }}
+          key: ms-playwright-${{ matrix.os }}-${{ steps.patchright.outputs.version }}
+
+      # `--with-deps` on Linux only. It is the platform where a missing
+      # system library stops Chromium starting at all, and the runner image
+      # makes no promise about them. macOS needs none, and on Windows the
+      # switch installs a Media Pack through a script that wants privileges
+      # this job has no reason to take.
+      - name: Install the browser
+        run: uv run patchright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium --no-shell
+
+      # Same reason as the Ubuntu job: the headed half of the gate needs
+      # somewhere to put a window, and the default half does not.
+      - name: Start a display
+        if: runner.os == 'Linux'
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          for _ in $(seq 1 100); do
+            if [ -S /tmp/.X11-unix/X99 ]; then exit 0; fi
+            sleep 0.1
+          done
+          echo "Xvfb never created /tmp/.X11-unix/X99:" >&2
+          cat /tmp/xvfb.log >&2
+          exit 1
+
+      - name: Run the identity gate
+        env:
+          # Only where one was started. macOS ignores it, but naming a display
+          # that does not exist is the kind of thing someone later debugs.
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+        run: uv run pytest tests/test_browser_identity.py
 
       - run: uv cache prune --ci

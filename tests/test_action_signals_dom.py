@@ -5,8 +5,11 @@ The unit suite mocks ``page.evaluate``, so the JS in ``_ACTION_SIGNALS_JS``
 and ``_CLICK_INCOMING_ACCEPT_JS`` never executes there. These tests run the
 real JS against synthetic HTML in headless chromium. Fixtures use German
 labels throughout: the fingerprint must classify without reading any label
-text. Skipped automatically when chromium is not installed (CI installs no
-browser; run locally after ``uv run patchright install chromium``).
+text. Skipped automatically when chromium is not installed; run locally after
+``uv run patchright install chromium --no-shell``. CI installs it, so these
+run there, but a skip is still the right answer for a missing browser here:
+this file checks extraction JS rather than the browser, and
+``test_browser_identity.py`` is the one that has to fail instead.
 
 Fixture structure mirrors the live DOM dumps of two incoming-request
 profiles (2026-06-11): three buttons sharing one parent, Accept and Ignore
@@ -160,10 +163,16 @@ async def dom_page():
     Only launch/setup is guarded by the skip — the ``yield`` is outside it
     so an assertion failure or JS error in a test body is never swallowed
     into a skip.
+
+    ``channel="chromium"`` names the browser this project installs. Without
+    it Playwright picks the *binary* from the ``headless`` flag alone and
+    asks for ``chromium-headless-shell``, which nothing here installs since
+    the setup moved to ``--no-shell``: the launch would fail and every case
+    in this file would skip itself, silently, wherever the real browser is.
     """
     async with async_playwright() as p:
         try:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(channel="chromium", headless=True)
             page = await browser.new_page()
         except Exception as exc:  # browser binary missing
             pytest.skip(f"chromium unavailable: {exc}")
