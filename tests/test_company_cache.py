@@ -292,3 +292,78 @@ class TestParseSearchResults:
 
     def test_empty(self):
         assert parse_search_results([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Regression tests against REAL LinkedIn innerText, captured live from the
+# signed-in MCP on 2026-08-09 (Microsoft, Gearset, a not-found page, and empty
+# jobs tabs). These are the layouts the synthetic tests could not anticipate --
+# the follower/associated-members counts that sit above the size band, the
+# "page isn't available" body, and a jobs tab with no openings. Trimmed to the
+# firmographic-bearing lines; the structure (labels, ordering, decoy counts) is
+# verbatim. If LinkedIn changes its markup, these break first.
+# ---------------------------------------------------------------------------
+_MS_ABOUT_LIVE = (
+    "Microsoft \n"
+    "Software Development Redmond, Washington 29M followers 10K+ employees\n"
+    "Ranked on LinkedIn Top Companies\n"
+    "Overview\n"
+    "Microsoft operates in 190 countries and is made up of approximately "
+    "228,000 passionate employees worldwide.\n"
+    "Website\nhttps://news.microsoft.com/\nVerified page \n"
+    "Industry\nSoftware Development\n"
+    "Company size\n10,001+ employees\n"
+    "233,215 associated members \n"
+    "Headquarters\nRedmond, Washington\n"
+    "Specialties\nBusiness Software, Developer Tools"
+)
+_GEARSET_ABOUT_LIVE = (
+    "Gearset \n"
+    "Software Development DevOps Software Cambridge 15K followers 201-500 employees\n"
+    "Website\nhttp://www.gearset.com/\n"
+    "Industry\nSoftware Development\n"
+    "Company size\n201-500 employees\n"
+    "370 associated members \n"
+    "Founded\n2015"
+)
+_NOT_FOUND_LIVE = (
+    "This LinkedIn Page isn't available\n"
+    "The page you're searching for no longer exists."
+)
+_EMPTY_JOBS_LIVE = (
+    "Interested in working with us in the future?\n"
+    "Members who share that they're interested in a company may be 2x as likely "
+    "to get a message from a recruiter than those who don't. Learn more\n"
+    "There are no jobs right now.\n"
+    "Create a job alert and we'll let you know when relevant jobs are posted."
+)
+
+
+class TestParseRealLinkedInPages:
+    def test_real_about_ignores_follower_and_associated_counts(self):
+        """The follower count and 'N associated members' both precede/follow
+        the size band on the real page; only the band must be taken."""
+        ms = parse_about(_MS_ABOUT_LIVE)
+        assert ms["industry"] == "Software Development"
+        assert ms["headquarters"] == "Redmond, Washington"
+        assert ms["website"] == "https://news.microsoft.com/"
+        # NOT "29M", "10K+", or "233,215 associated members".
+        assert ms["employee_count"] == "10,001+ employees"
+
+    def test_real_partner_about(self):
+        g = parse_about(_GEARSET_ABOUT_LIVE)
+        assert g["industry"] == "Software Development"
+        assert g["employee_count"] == "201-500 employees"  # not 15K, not 370
+        assert g["founded"] == "2015"
+
+    def test_real_not_found_page_yields_nothing(self):
+        # A deleted/renamed company page must not fabricate any field.
+        assert parse_about(_NOT_FOUND_LIVE) == {}
+        assert parse_jobs(_NOT_FOUND_LIVE) == (None, [])
+
+    def test_real_empty_jobs_tab_reports_no_openings(self):
+        # Zero real jobs -> count None, and the footer's 'recruiter' line does
+        # not leak in as a fabricated role.
+        out = parse_jobs(_EMPTY_JOBS_LIVE)
+        assert out.count is None
+        assert out.sample == []

@@ -132,6 +132,43 @@ class TestEnrichCompanies:
         assert out["fetched"] == 1
         assert extractor.search_companies.await_count == 1
 
+    async def test_a_free_hit_does_not_consume_a_search_slot(
+        self, mcp, wired, mock_context, monkeypatch
+    ):
+        """bunch_searches bounds searches run, not names looked at: a name
+        resolved for free (in passing) must not use up a slot that a later
+        unresolved name needs."""
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company_enrichment.step_delay", lambda **k: 0
+        )
+        _, _ = wired
+
+        # Searching "a" reveals a+b (b becomes a free hit); "c" is its own page.
+        def per_name(name):
+            slugs = {"a": ["a", "b"], "c": ["c"]}.get(name.lower(), [name.lower()])
+            refs = [
+                {"url": f"https://www.linkedin.com/company/{s}", "text": s}
+                for s in slugs
+            ]
+            return {
+                "sections": {"search_results": "x"},
+                "references": {"search_results": refs},
+            }
+
+        extractor = MagicMock()
+        extractor.search_companies = AsyncMock(side_effect=lambda n: per_name(n))
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        # bunch_searches=2. Old bug: a(search)+b(free) exhausts 2 slots, c
+        # never tried. Fixed: b is free, so c still gets its search.
+        out = await fn(
+            ["a", "b", "c"], mock_context, bunch_searches=2, extractor=extractor
+        )
+
+        assert out["fetched"] == 2  # a and c searched; b free
+        assert extractor.search_companies.await_count == 2
+        assert set(out["results"]) == {"a", "b", "c"}  # all three resolved
+
     async def test_stops_when_shared_budget_is_spent(self, mcp, wired, mock_context):
         cache, jobs = wired
         now = datetime.now().astimezone()

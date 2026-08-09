@@ -1,14 +1,26 @@
-"""Best-effort structured extraction from company page/search innerText.
+"""Structured extraction of company firmographics from LinkedIn innerText.
 
-The rest of this codebase returns raw section text and lets the caller parse
-it, precisely because LinkedIn's markup is a moving target. These parsers do
-not replace that -- the raw text is always kept alongside -- they exist so the
-cache can hold typed fields (industry, headcount band, open-roles count) that
-survive without an LLM in the loop.
+These parsers turn a company About / Jobs / search page's text into typed
+fields (industry, headcount band, open-roles count) for the cache. They are the
+primary product, not a hope: they are pinned by regression tests against real
+pages captured live from LinkedIn (see ``TestParseRealLinkedInPages`` in
+tests/test_company_cache.py -- Microsoft, Gearset, a deleted page, an empty
+jobs tab), including the decoys those real pages carry (a follower count and an
+"N associated members" line sitting right next to the size band).
 
-Everything here is a pure function over text: no browser, no network, no clock.
-Each is deliberately conservative -- it would rather return "" than guess,
-because a wrong industry cached for 90 days is worse than a blank one.
+Two principles keep them trustworthy over LinkedIn's shifting markup:
+
+* **Conservative:** a parser returns "" / None rather than guess. A wrong
+  industry cached for 90 days is worse than a blank one, and a fabricated
+  open-roles count is worse still -- so ``count`` comes only from LinkedIn's own
+  heading, never from how many role-ish lines were scraped.
+* **Anchored, not greedy:** size is read as a real band next to the "Company
+  size" label, never the first "N employees" anywhere (which is a follower
+  count on real pages).
+
+Every function is pure over text: no browser, no network, no clock. A deep
+fetch also keeps the raw section text on the record for transparency, but the
+typed fields above are what the tools serve.
 """
 
 from __future__ import annotations
@@ -111,10 +123,10 @@ def parse_jobs(text: str) -> ParsedJobs:
     ``count`` is read *only* from LinkedIn's own "N open jobs" heading, which is
     authoritative; with no heading it stays ``None``. It is never derived from
     how many role-ish lines were scraped -- a company with zero openings still
-    renders the nav/footer, and counting those would invent a positive hiring
-    signal, the exact thing this module must not do. ``sample`` is a best-effort
-    handful of titles for the buying-signal read; the raw Jobs text is cached
-    alongside as the source of truth.
+    renders the nav/footer (verified against real empty jobs tabs), and counting
+    those would invent a positive hiring signal, the exact thing this module
+    must not do. ``sample`` is a best-effort handful of titles for the
+    buying-signal read.
     """
     if not text:
         return ParsedJobs(None, [])

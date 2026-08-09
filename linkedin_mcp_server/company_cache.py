@@ -108,9 +108,9 @@ class CompanyRecord:
     open_roles_sample: list[str] = field(default_factory=list)
     jobs_fetched_at: str = ""
 
-    # Raw section text, kept as the fallback the LLM can re-parse -- mirrors
-    # the rest of this codebase, which returns innerText and lets the caller
-    # extract rather than trusting a brittle parser.
+    # Raw section text from a deep fetch, kept for transparency and debugging
+    # (so a cached record can be audited against what LinkedIn actually showed).
+    # The typed fields above are the product; this is not a parse fallback.
     raw_about: str = ""
     raw_jobs: str = ""
 

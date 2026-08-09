@@ -187,22 +187,32 @@ def register_company_enrichment_tools(
         )
         rng = random.Random()
         deadline = asyncio.get_running_loop().time() + tool_timeout * DEADLINE_FRACTION
-        planned = min(bunch_searches, remaining, len(to_fetch))
         spent = 0
         stopped = "bunch_complete"
 
-        for i in range(planned):
+        # `bunch_searches` bounds the number of *searches actually run*, not the
+        # number of names looked at: a name resolved for free from the cache (or
+        # in passing by an earlier search this call) must not burn a search
+        # slot. So iterate the whole to_fetch list and stop once `spent` reaches
+        # the bunch limit, the deadline nears, or the budget can't afford one
+        # more search.
+        for name in to_fetch:
+            if spent >= bunch_searches:
+                break
             if asyncio.get_running_loop().time() >= deadline:
                 stopped = "tool_deadline"
                 break
-            name = to_fetch[i]
 
             # A prior search this call may already have resolved this name in
-            # passing (its URL got cached); skip the redundant fetch.
+            # passing (its URL got cached); serve it free, no search spent.
             rec = cache.get(name)
             if not refresh and _resolved(rec):
                 served[name] = _firmographics_view(rec, "cache")
                 continue
+
+            if budget.remaining_today(now) <= 0:
+                stopped = "daily_budget_spent"
+                break
 
             try:
                 result = await extractor.search_companies(name)
@@ -233,14 +243,17 @@ def register_company_enrichment_tools(
             hits = parse_search_results(refs)
 
             # Cache every company the results page revealed, so overlapping
-            # names later in the list become free hits.
+            # names later in the list become free hits. Store only the URL --
+            # NOT the results-page text: that blob is the whole page (all ~10
+            # companies), not this company's About, so persisting a copy on
+            # every record would bloat the cache and mislead. The page text is
+            # still returned at call level below for the LLM to read.
             for hit in hits:
                 cache.record_firmographics(
                     hit["name"],
                     now,
                     source="search",
                     linkedin_url=hit["url"],
-                    raw_about=text,
                 )
             # Attribute a hit to the requested name only when it actually
             # matches: cache.get(name) normalises both sides and hits iff one
@@ -261,11 +274,11 @@ def register_company_enrichment_tools(
 
             now = datetime.now().astimezone()
             await ctx.report_progress(
-                progress=i + 1,
-                total=planned,
+                progress=spent,
+                total=bunch_searches,
                 message=f"{spent} searched, {len(served)} known",
             )
-            if i < planned - 1:
+            if spent < bunch_searches:
                 await asyncio.sleep(step_delay(rng=rng))
 
         now = datetime.now().astimezone()
