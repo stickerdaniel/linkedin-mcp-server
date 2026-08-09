@@ -294,15 +294,19 @@ def _unescape(text: str) -> str:
     return "".join(out)
 
 
-def _brand_list(value: str | None) -> dict[str, str | None]:
-    """A ``"brand";v="version"`` list as a mapping, or empty if there is none.
+def _brand_list(value: str | None) -> list[tuple[str, str | None]]:
+    """A ``"brand";v="version"`` list as sorted pairs, empty if there is none.
 
-    Order is not preserved, deliberately: the list is shuffled on purpose and
-    reading it positionally is the mistake it exists to prevent.
+    Sorted rather than left in order, because the list is shuffled on purpose
+    and reading it positionally is the mistake it exists to prevent. Pairs
+    rather than a mapping, because a mapping silently keeps only the last
+    version of a repeated brand: a list carrying ``Chromium`` at 148 *and* at
+    149 collapses to the current one, and a browser publishing two versions of
+    itself at once is exactly the contradiction being looked for.
     """
     if not value:
-        return {}
-    listed: dict[str, str | None] = {}
+        return []
+    listed: list[tuple[str, str | None]] = []
     for item in _split_outside_quotes(value, ","):
         fields = _split_outside_quotes(item.strip(), ";")
         name = _structured_string(fields[0])
@@ -313,8 +317,13 @@ def _brand_list(value: str | None) -> dict[str, str | None]:
             key, _, raw = parameter.partition("=")
             if key.strip() == "v":
                 version = _structured_string(raw)
-        listed[name] = version
-    return listed
+        listed.append((name, version))
+    return sorted(listed)
+
+
+def _js_brand_list(entries: list[dict]) -> list[tuple[str, str | None]]:
+    """The JavaScript side of the same list, in the same shape."""
+    return sorted((entry["brand"], entry["version"]) for entry in entries)
 
 
 def _realms(described: dict) -> dict[str, dict]:
@@ -408,26 +417,44 @@ class TestNothingAnnouncesAutomation:
         leaves every attribute the caller did not name exactly as it was, so
         the shape still matches. Measured, against exactly that mutation.
 
-        The getter's source does give it away. A native accessor stringifies to
-        ``[native code]``; anything written in JavaScript stringifies to itself.
+        The getter's source does give it away, but only if the whole of it is
+        read. Looking for ``[native code]`` as a substring is not enough:
+        ``function webdriver() { /* [native code] */ return false; }`` contains
+        it and passes, measured in Chrome 151. What a native accessor produces
+        is the NativeFunction form ECMA-262 specifies, and nothing written in
+        JavaScript can be spelled that way.
+
+        Held against ``userAgent`` rather than a literal, because that is a
+        native accessor on the same prototype that nothing has a reason to
+        touch. If V8 changes how it stringifies built-ins, both change together
+        and this survives; pinning the spelling is what would not.
 
         And the prototype is not the only place to look. Defining ``webdriver``
         directly on ``navigator`` shadows the accessor without touching it, so
-        the value reads false while every attribute above still measures
-        native. Measured in the bundled browser, which is why the instance is
-        asked about separately: a real browser has no own property there.
+        the value reads false while every attribute here still measures native.
+        Measured in the bundled browser: a real browser has no own property.
         """
         assert either_mode["page"]["webdriver"] is False
         assert either_mode["ownWebdriver"] is False, (
             "navigator carries its own webdriver property, which shadows the "
             "prototype accessor and leaves it looking untouched"
         )
+
         descriptor = either_mode["webdriverDescriptor"]
-        assert descriptor is not None
-        assert descriptor["get"] == "function", descriptor
-        assert descriptor["set"] == "undefined", descriptor
-        assert descriptor["configurable"] is True, descriptor
-        assert "[native code]" in descriptor["getSource"], descriptor
+        native = either_mode["userAgentDescriptor"]
+        assert descriptor is not None and native is not None
+
+        flags = ("get", "set", "enumerable", "configurable")
+        assert {key: descriptor[key] for key in flags} == {
+            key: native[key] for key in flags
+        }, f"webdriver {descriptor} against the native userAgent {native}"
+
+        assert descriptor["getSource"] == native["getSource"].replace(
+            "userAgent", "webdriver"
+        ), (
+            f"the webdriver getter reads {descriptor['getSource']!r} where a "
+            f"native one on this prototype reads {native['getSource']!r}"
+        )
 
     async def test_no_automation_globals_in_the_pages_own_realm(self, either_mode):
         """`__pwInitScripts`, `$cdc_*` and friends. Read from the page's own
@@ -483,15 +510,15 @@ class TestTheHintsAgreeWithTheUserAgent:
         page = either_mode["page"]
         ua_major = re.search(r"Chrome/(\d+)", page["ua"])
         assert ua_major, page["ua"]
-        real = {
-            entry["brand"]: entry["version"]
-            for entry in page["highEntropy"]["fullVersionList"]
-            if not _GREASE.search(entry["brand"])
-        }
+        real = [
+            pair
+            for pair in _js_brand_list(page["highEntropy"]["fullVersionList"])
+            if not _GREASE.search(pair[0])
+        ]
 
         assert real, page["highEntropy"]["fullVersionList"]
         assert all(
-            version.split(".")[0] == ua_major.group(1) for version in real.values()
+            (version or "").split(".")[0] == ua_major.group(1) for _, version in real
         ), f"user agent says {ua_major.group(1)}, full versions say {real}"
 
     async def test_the_header_channel_carries_them_too(self, either_mode):
@@ -526,9 +553,7 @@ class TestTheHintsAgreeWithTheUserAgent:
         # comparison sees that.
         sent_brands = _brand_list(headers.get("sec-ch-ua-full-version-list"))
         assert sent_brands, headers.get("sec-ch-ua-full-version-list")
-        assert sent_brands == {
-            b["brand"]: b["version"] for b in hints["fullVersionList"]
-        }, (
+        assert sent_brands == _js_brand_list(hints["fullVersionList"]), (
             f"sec-ch-ua-full-version-list says {sent_brands} and "
             f"getHighEntropyValues says {hints['fullVersionList']}"
         )
@@ -547,35 +572,17 @@ class TestTheHintsAgreeWithTheUserAgent:
         """
         listed = _brand_list(either_mode["page"]["headers"].get("sec-ch-ua"))
 
-        assert listed == {
-            brand["brand"]: brand["version"] for brand in either_mode["page"]["brands"]
-        }, (
+        assert listed == _js_brand_list(either_mode["page"]["brands"]), (
             f"sec-ch-ua says {listed} and navigator.userAgentData says "
             f"{either_mode['page']['brands']}"
         )
 
-    async def test_the_header_brand_major_matches_too(self, either_mode):
-        """The same relation on the wire, and the same reason for ``all``.
-
-        Parsed rather than substring-matched, so a major appearing anywhere in
-        the item, including inside a brand name, cannot stand in for the
-        version.
-        """
-        headers = either_mode["page"]["headers"]
-        ua_major = re.search(r"Chrome/(\d+)", either_mode["page"]["ua"])
-        assert ua_major
-
-        listed = _brand_list(headers.get("sec-ch-ua"))
-        reals = {
-            brand: version
-            for brand, version in listed.items()
-            if not _GREASE.search(brand)
-        }
-        assert reals, headers.get("sec-ch-ua")
-        assert all(
-            (version or "").split(".")[0] == ua_major.group(1)
-            for version in reals.values()
-        ), f"user agent says {ua_major.group(1)}, sec-ch-ua says {reals}"
+    # There is no separate case checking the wire brand major against the user
+    # agent. It was here and it caught nothing once the two lists above had to
+    # be equal: the header list equals the JavaScript one, and the JavaScript
+    # one has to match the user agent, so the wire relation follows and a case
+    # asserting it can only fail alongside one of those two. This file's rule
+    # is that an assertion which catches nothing is not kept for the look of it.
 
 
 class TestTheWindowFitsTheScreenItStandsOn:

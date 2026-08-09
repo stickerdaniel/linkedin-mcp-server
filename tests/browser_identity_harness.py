@@ -43,6 +43,20 @@ _PAGE = b"""<!doctype html>
 <script>
 // Deliberately not page.evaluate(): that runs in an isolated world. This is
 // the realm a website actually gets.
+const describeAccessor = (name) => {
+  const d = Object.getOwnPropertyDescriptor(Navigator.prototype, name);
+  if (!d) return null;
+  return {
+    get: typeof d.get, set: typeof d.set,
+    enumerable: d.enumerable, configurable: d.configurable,
+    // The source, because that is what separates a native accessor from one
+    // somebody redefined. The descriptor alone does not: redefining an
+    // existing configurable property leaves every attribute the caller did
+    // not name exactly as it was.
+    getSource: d.get ? String(d.get) : null,
+  };
+};
+
 (async () => {
   const echo = async () => (await fetch('/echo', {cache: 'no-store'})).json();
   const jsChannel = async () => ({
@@ -106,17 +120,12 @@ _PAGE = b"""<!doctype html>
     // every descriptor attribute untouched. Measured against the bundled
     // browser: the prototype still stringifies to [native code].
     ownWebdriver: Object.hasOwn(navigator, 'webdriver'),
-    webdriverDescriptor: (() => {
-      const d = Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver');
-      // The getter's own source, because that is what distinguishes a native
-      // accessor from one somebody redefined. The descriptor alone does not:
-      // redefining an existing configurable property leaves every attribute
-      // the caller did not name exactly as it was.
-      return d ? {
-        get: typeof d.get, set: typeof d.set, configurable: d.configurable,
-        getSource: d.get ? String(d.get) : null,
-      } : null;
-    })(),
+    // Both accessors, so the test can hold one against the other instead of
+    // against a remembered spelling. userAgent is the control: it is a native
+    // accessor on the same prototype that nothing has any reason to touch, so
+    // whatever shape V8 gives it is the shape webdriver must have too.
+    webdriverDescriptor: describeAccessor('webdriver'),
+    userAgentDescriptor: describeAccessor('userAgent'),
   };
   document.getElementById('out').textContent = JSON.stringify(result);
 })().catch(err => {
