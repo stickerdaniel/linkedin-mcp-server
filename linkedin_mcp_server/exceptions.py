@@ -191,7 +191,7 @@ class BrowserDowngradeError(LinkedInMCPError):
 
 
 class VisualCPPRuntimeUnavailableError(LinkedInMCPError):
-    """The loader would not produce the C++ runtime greenlet's extension needs.
+    """greenlet's extension would not load, and neither would the C++ runtime.
 
     Unavailable rather than missing: absent, wrong-architecture and damaged all
     arrive as the same ``OSError``, so which one it is stays unknown and the

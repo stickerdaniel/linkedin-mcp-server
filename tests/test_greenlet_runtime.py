@@ -15,9 +15,6 @@ from linkedin_mcp_server.exceptions import VisualCPPRuntimeUnavailableError
 from linkedin_mcp_server.greenlet_runtime import explain_a_missing_runtime
 
 
-#: What CPython raises when a ``.pyd`` cannot find a DLL it imports. The prefix
-#: is formatted by ``dynload_win.c`` and is English on every install; only the
-#: operating-system text after the colon is localised.
 def _unwrapped(value: object) -> str:
     """One line and lowercased, so an assertion survives a rewrap or a recase.
 
@@ -27,6 +24,9 @@ def _unwrapped(value: object) -> str:
     return " ".join(str(value).split()).lower()
 
 
+#: What CPython raises when a ``.pyd`` cannot find a DLL it imports. The prefix
+#: is formatted by ``dynload_win.c`` and is English on every install; only the
+#: operating-system text after the colon is localised.
 _REAL_MESSAGE = (
     "DLL load failed while importing _greenlet: "
     "The specified module could not be found."
@@ -142,8 +142,10 @@ class TestOnWindows:
         with pytest.raises(VisualCPPRuntimeUnavailableError) as caught:
             explain_a_missing_runtime()
 
-        # Chained, not swallowed: whoever reads the traceback still sees which
-        # DLL the loader named, which is the only machine-specific detail here.
+        # Chained, not swallowed: whoever reads the traceback still sees the
+        # loader's own words, which are the only machine-specific detail here.
+        # They name the extension being imported and never the dependency that
+        # could not be found, which is why the second probe exists at all.
         assert caught.value.__cause__ is original
 
     def test_a_stopgap_is_offered_for_a_machine_nobody_administers(
@@ -239,7 +241,9 @@ class TestOnWindows:
         # only the first lines has to reach the thing to install.
         body = greenlet_runtime._explain("DLL load failed while importing x: y")
 
-        assert body.index("To fix this") < body.index("The loader reported")
+        # Not merely before the evidence: history prepended above it would keep
+        # that true while pushing the instruction out of a truncated view.
+        assert body.splitlines().index("To fix this:") < 4
         assert "latest-supported-vc-redist" in _unwrapped(body)
         assert "published wheels up to greenlet 3.3.0" in _unwrapped(body)
 

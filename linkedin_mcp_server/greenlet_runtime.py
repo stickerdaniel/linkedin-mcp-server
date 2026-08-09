@@ -3,7 +3,7 @@
 greenlet is not ours and we never call it. patchright imports it unconditionally
 from ``_impl/_connection.py``, on the async-only path too, so its C extension is
 loaded in every run this server makes and a failure there stops the server
-before any of our code executes.
+before its entry point runs.
 
 Some of its Windows wheels need a DLL the machine may not have. greenlet built
 them on Appveyor with ``GREENLET_STATIC_RUNTIME=1``, which ``setup.py`` turns
@@ -119,14 +119,14 @@ To fix this:
 Without administrator rights this usually works instead. The published wheels up
 to greenlet 3.3.0 carry the runtime inside the extension, and they are x86-64
 only:
-  uvx --with "greenlet<=3.3.0" mcp-server-linkedin
+  uvx --with "greenlet<=3.3.0" mcp-server-linkedin@latest
 
 The loader reported:
   {loader_said}
 Installed greenlet: {_installed_greenlet()}
 
 If the redistributable is already installed, the copy the loader reaches will
-not load for some other reason, and the line above is what it said.
+not load for some other reason, and the loader line above is what it said.
 Background: https://github.com/python-greenlet/greenlet/issues/525"""
 
 
