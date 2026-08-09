@@ -162,6 +162,10 @@ class EnvironmentKeys:
 # Spelling the mapping out costs a line each and cannot do that.
 # ``tests/test_manifest.py`` checks this table against the manifest itself, so
 # the two cannot drift.
+#
+# One collision survives and is not fixable here: a password whose value is
+# its own variable's literal. Substituted and unsubstituted are then the same
+# string, and nothing downstream can tell them apart.
 _MCPB_PLACEHOLDERS = {
     EnvironmentKeys.PROXY_SERVER: "${user_config.proxy_server}",
     EnvironmentKeys.PROXY_USERNAME: "${user_config.proxy_username}",
