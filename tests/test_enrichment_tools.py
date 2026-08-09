@@ -29,9 +29,7 @@ from test_tools import get_tool_fn
 
 # Always open: no weekend, no lunch, so bunch tests never depend on the wall
 # clock (a default 9-18 schedule with a noon lunch made these flaky).
-OPEN_ALL = Schedule(
-    work_start=0, work_end=23, days_off=(), lunch_start=None, lunch_end=None
-)
+OPEN_ALL = Schedule(work_start=0, work_end=24, days_off=())
 
 WED_10AM = datetime(2026, 8, 5, 10, 0)
 

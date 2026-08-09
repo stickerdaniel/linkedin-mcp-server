@@ -40,6 +40,34 @@ async def human_pause(base: float, spread: float = 0.5) -> None:
     await asyncio.sleep(jitter(base, spread))
 
 
+async def human_type(page: Any, text: str, *, typo_rate: float = 0.06) -> None:
+    """Type ``text`` the way a person does: jittered per-key timing, an
+    occasional longer "thinking" pause, and now and then a wrong keystroke that
+    is immediately backspaced and corrected.
+
+    The net typed result is exactly ``text`` -- a typo is always a wrong char
+    followed by one Backspace and the right char, so nothing is left behind.
+    A uniform per-key delay (the old fixed 15ms) is itself a tell; this removes
+    it. Used on the message composer, the one place the scraper types.
+    """
+    kb = page.keyboard
+    for ch in text:
+        # Occasionally slip: type an adjacent-ish wrong letter, pause, undo it.
+        if ch.isalpha() and _rng.random() < typo_rate:
+            wrong = _rng.choice("asdfghjklqwertyuiop")
+            await kb.type(wrong)
+            await asyncio.sleep(_rng.uniform(0.09, 0.28))
+            await kb.press("Backspace")
+            await asyncio.sleep(_rng.uniform(0.05, 0.16))
+
+        await kb.type(ch)
+        delay = _rng.uniform(0.04, 0.17)
+        # Now and then, pause as if thinking or reading back.
+        if _rng.random() < 0.07:
+            delay += _rng.uniform(0.3, 0.9)
+        await asyncio.sleep(delay)
+
+
 async def humanize_after_nav(page: Any) -> None:
     """Move the cursor along a few short randomized hops after a page load.
 

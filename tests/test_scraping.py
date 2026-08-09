@@ -5672,6 +5672,20 @@ class TestResolveMessageComposeBox:
 class TestSendMessageComposerInteraction:
     """Tests for the page.evaluate + keyboard.type send path (patchright workaround)."""
 
+    @pytest.fixture(autouse=True)
+    def _humanize_deterministic(self, monkeypatch):
+        # The composer now types via human_type (jittered, occasional typo).
+        # For these tests make it deterministic and instant: no real sleeps and
+        # no typos, so keyboard.type is called once per character with no
+        # Backspace corrections.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.humanize.asyncio.sleep",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.humanize._rng.random", lambda: 1.0
+        )
+
     def _patch_send_message_to_compose(self, extractor, mock_page):
         """Return a context manager that patches send_message up to the compose step."""
         return (
@@ -5760,8 +5774,10 @@ class TestSendMessageComposerInteraction:
 
         assert result["status"] == "sent"
         assert result["sent"] is True
-        # Verify keyboard.type was used (not press_sequentially)
-        mock_keyboard.type.assert_awaited_once_with("Hello!", delay=15)
+        # keyboard.type is used (not press_sequentially), now one call per
+        # character via human_type; the concatenation is the message.
+        typed = "".join(c.args[0] for c in mock_keyboard.type.await_args_list)
+        assert typed == "Hello!"
 
     async def test_compose_interact_failed_when_focus_fails(self, mock_page):
         """send_message returns compose_interact_failed when JS focus fails."""

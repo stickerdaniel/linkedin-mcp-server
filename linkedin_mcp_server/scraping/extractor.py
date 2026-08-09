@@ -41,7 +41,11 @@ from linkedin_mcp_server.scraping.link_metadata import (
 )
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
-from linkedin_mcp_server.core.humanize import human_pause, humanize_after_nav
+from linkedin_mcp_server.core.humanize import (
+    human_pause,
+    human_type,
+    humanize_after_nav,
+)
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -4284,7 +4288,9 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         await asyncio.sleep(0.1)
-        await self._page.keyboard.type(message, delay=15)
+        # Human-like typing: jittered per-key timing with occasional
+        # typo-then-backspace, instead of a uniform 15ms cadence.
+        await human_type(self._page, message)
         await asyncio.sleep(0.3)
 
         # patchright actionability also blocks send_button.click(). Use JS click

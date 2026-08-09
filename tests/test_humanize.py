@@ -8,7 +8,37 @@ mouse helper never raises.
 from unittest.mock import AsyncMock, MagicMock
 
 
-from linkedin_mcp_server.core.humanize import human_pause, humanize_after_nav, jitter
+from linkedin_mcp_server.core.humanize import (
+    human_pause,
+    human_type,
+    humanize_after_nav,
+    jitter,
+)
+
+
+async def test_human_type_produces_exactly_the_text_correcting_typos(monkeypatch):
+    """Even with typos injected, the net typed result must equal the input:
+    a typo is always wrong-char + Backspace + right-char, nothing left behind."""
+    monkeypatch.setattr("linkedin_mcp_server.core.humanize.asyncio.sleep", AsyncMock())
+    # Force a typo on every alpha char to exercise the correction path hard.
+    monkeypatch.setattr("linkedin_mcp_server.core.humanize._rng.random", lambda: 0.0)
+
+    buf: list[str] = []
+
+    async def type_(s):
+        buf.append(s)
+
+    async def press(key):
+        if key == "Backspace":
+            buf.pop()
+
+    page = MagicMock()
+    page.keyboard = MagicMock()
+    page.keyboard.type = AsyncMock(side_effect=type_)
+    page.keyboard.press = AsyncMock(side_effect=press)
+
+    await human_type(page, "Hi there", typo_rate=1.0)
+    assert "".join(buf) == "Hi there"
 
 
 class TestJitter:
@@ -41,9 +71,7 @@ async def test_human_pause_sleeps_a_jittered_amount(monkeypatch):
 
 
 async def test_humanize_after_nav_moves_the_mouse_and_never_raises(monkeypatch):
-    monkeypatch.setattr(
-        "linkedin_mcp_server.core.humanize.asyncio.sleep", AsyncMock()
-    )
+    monkeypatch.setattr("linkedin_mcp_server.core.humanize.asyncio.sleep", AsyncMock())
     page = MagicMock()
     page.viewport_size = {"width": 1200, "height": 800}
     page.mouse = MagicMock()
@@ -68,9 +96,7 @@ async def test_humanize_after_nav_swallows_mouse_errors():
 
 
 async def test_humanize_after_nav_tolerates_missing_viewport(monkeypatch):
-    monkeypatch.setattr(
-        "linkedin_mcp_server.core.humanize.asyncio.sleep", AsyncMock()
-    )
+    monkeypatch.setattr("linkedin_mcp_server.core.humanize.asyncio.sleep", AsyncMock())
     page = MagicMock()
     page.viewport_size = None
     page.mouse = MagicMock()
