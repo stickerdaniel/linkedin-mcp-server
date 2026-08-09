@@ -607,6 +607,25 @@ def strip_linkedin_noise(text: str) -> str:
     return _filter_linkedin_noise_lines(cleaned)
 
 
+def clean_main_content(raw: str) -> str:
+    """Return the cleaned innerText of a ``<main>`` extraction, or the rate-limit
+    sentinel when the page only carried LinkedIn chrome.
+
+    Mirrors the chrome-only check used by ``extract_page`` / ``extract_feed``:
+    a page whose raw text is entirely chrome (footer/sidebar) reads as a soft
+    rate limit, and callers must surface that rather than report an empty
+    section the client would read as "nothing to see". Keeps the *guess* on
+    ``_RATE_LIMITED_MSG`` visible instead of burying it in an empty section.
+    """
+    if not raw:
+        return ""
+    truncated = _truncate_linkedin_noise(raw)
+    if not truncated and raw.strip():
+        logger.warning("Section returned only LinkedIn chrome (likely rate-limited)")
+        return _RATE_LIMITED_MSG
+    return _filter_linkedin_noise_lines(truncated)
+
+
 def _filter_linkedin_noise_lines(text: str) -> str:
     """Remove known media/control noise lines from already-truncated content."""
     filtered_lines = [
@@ -3824,19 +3843,22 @@ class LinkedInExtractor:
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
-        cleaned = strip_linkedin_noise(raw) if raw else ""
+        cleaned = clean_main_content(raw)
         references: list[Reference] = (
             build_references(raw_result["references"], "notifications")
-            if cleaned
+            if cleaned and cleaned != _RATE_LIMITED_MSG
             else []
         )
 
-        return self._single_section_result(
+        result = self._single_section_result(
             url,
             "notifications",
-            cleaned,
+            cleaned if cleaned != _RATE_LIMITED_MSG else "",
             references=references,
         )
+        if cleaned == _RATE_LIMITED_MSG:
+            result["section_errors"] = {"notifications": rate_limited_section_error()}
+        return result
 
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
@@ -3853,9 +3875,11 @@ class LinkedInExtractor:
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
-        cleaned = strip_linkedin_noise(raw) if raw else ""
+        cleaned = clean_main_content(raw)
         references: list[Reference] = (
-            build_references(raw_result["references"], "inbox") if cleaned else []
+            build_references(raw_result["references"], "inbox")
+            if cleaned and cleaned != _RATE_LIMITED_MSG
+            else []
         )
 
         # LinkedIn's conversation sidebar uses JS click handlers instead of
@@ -3867,12 +3891,15 @@ class LinkedInExtractor:
         if conversation_refs:
             references = dedupe_references(conversation_refs + references)
 
-        return self._single_section_result(
+        result = self._single_section_result(
             url,
             "inbox",
-            cleaned,
+            cleaned if cleaned != _RATE_LIMITED_MSG else "",
             references=references,
         )
+        if cleaned == _RATE_LIMITED_MSG:
+            result["section_errors"] = {"inbox": rate_limited_section_error()}
+        return result
 
     async def _extract_conversation_thread_refs(
         self, limit: int | None, context: str, *, name_filter: str | None = None

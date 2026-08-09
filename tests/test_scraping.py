@@ -4620,7 +4620,7 @@ class TestGetInbox:
                 },
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                "linkedin_mcp_server.scraping.extractor.clean_main_content",
                 return_value="Conversation A\nConversation B",
             ),
             patch(
@@ -4664,7 +4664,7 @@ class TestGetInbox:
                 return_value={"text": "", "references": []},
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                "linkedin_mcp_server.scraping.extractor.clean_main_content",
                 return_value="",
             ),
             patch.object(
@@ -4719,7 +4719,7 @@ class TestGetInbox:
                 },
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                "linkedin_mcp_server.scraping.extractor.clean_main_content",
                 return_value="Tony Chan\nPaul Jasper",
             ),
             patch(
@@ -4741,6 +4741,50 @@ class TestGetInbox:
         assert refs[0]["kind"] == "conversation"
         assert refs[0]["url"] == "/messaging/thread/2-abc123/"
         assert refs[0]["text"] == "Tony Chan"
+
+    async def test_rate_limited_inbox_surfaces_section_error(self, mock_page):
+        """A chrome-only (soft rate-limited) inbox page reports an error."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "Some chrome", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.clean_main_content",
+                return_value=_RATE_LIMITED_MSG,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            result = await extractor.get_inbox(limit=5)
+
+        assert result["sections"] == {}
+        assert "inbox" in result["section_errors"]
+        assert result["section_errors"]["inbox"]["error_type"] == "rate_limit"
 
 
 class TestGetNotifications:
@@ -4771,7 +4815,7 @@ class TestGetNotifications:
                 },
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                "linkedin_mcp_server.scraping.extractor.clean_main_content",
                 return_value="Jane Doe replied to your comment\nJohn Smith liked your post",
             ),
             patch(
@@ -4785,6 +4829,44 @@ class TestGetNotifications:
         assert "notifications" in result["sections"]
         assert "Jane Doe replied to your comment" in result["sections"]["notifications"]
         assert result["url"] == "https://www.linkedin.com/notifications/"
+
+    async def test_rate_limited_notifications_surface_section_error(self, mock_page):
+        """A chrome-only (soft rate-limited) notifications page reports an error."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "Some chrome", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.clean_main_content",
+                return_value=_RATE_LIMITED_MSG,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+        ):
+            result = await extractor.get_notifications(limit=5)
+
+        assert result["sections"] == {}
+        assert "notifications" in result["section_errors"]
+        assert result["section_errors"]["notifications"]["error_type"] == "rate_limit"
 
     async def test_empty_notifications(self, mock_page):
         """get_notifications returns empty sections when page has no content."""
@@ -4810,7 +4892,7 @@ class TestGetNotifications:
                 return_value={"text": "", "references": []},
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                "linkedin_mcp_server.scraping.extractor.clean_main_content",
                 return_value="",
             ),
         ):
@@ -4853,7 +4935,7 @@ class TestGetNotifications:
                 },
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                "linkedin_mcp_server.scraping.extractor.clean_main_content",
                 return_value="Jane Doe replied to your comment",
             ),
             patch(
@@ -4892,7 +4974,7 @@ class TestGetNotifications:
                 return_value={"text": "Some notification", "references": []},
             ),
             patch(
-                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                "linkedin_mcp_server.scraping.extractor.clean_main_content",
                 return_value="Some notification",
             ),
             patch(
