@@ -434,7 +434,6 @@ def main() -> None:
         # loader and the process died. Under a stdio host that stack is all the
         # user sees behind "Server disconnected", with the setting at fault on
         # its last line and everything above it looking like a crash.
-        #
         _exit_on_a_bad_setting(e)
 
     # Configure logging
