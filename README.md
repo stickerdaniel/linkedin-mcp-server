@@ -58,6 +58,9 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `start_enrichment_job` | Queue a resumable bulk profile-enrichment job from a list of usernames or profile URLs | working |
 | `run_enrichment_bunch` | Visit the next few profiles in a job, paced with randomized delays, a rolling 24h action budget and working hours; returns when to call it again | working |
 | `get_enrichment_status` | Progress and collected results for an enrichment job, or list all jobs | working |
+| `enrich_companies` | Firmographics for a list of companies, cache-first and paced; one company-search reveals ~10 companies at once, all cached (90-day TTL) | working |
+| `enrich_company_deep` | Deep firmographics plus live open roles for one company (About + Jobs tabs); cache-first, open roles on a shorter 14-day TTL | working |
+| `get_company_cache` | Read a cached company record (with per-half freshness), or list everything cached | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 <br/>
