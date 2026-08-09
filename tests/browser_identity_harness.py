@@ -37,13 +37,11 @@ from urllib.parse import quote, urlsplit
 #: rather than reading the headers of its own document.
 _ACCEPT_CH = "Sec-CH-UA-Arch, Sec-CH-UA-Bitness, Sec-CH-UA-Full-Version-List"
 
-_PAGE = b"""<!doctype html>
-<title>identity</title>
-<body><pre id="out"></pre>
-<script>
-// Deliberately not page.evaluate(): that runs in an isolated world. This is
-// the realm a website actually gets.
-const REALM_BUDGET_MS = __REALM_BUDGET_MS__;
+#: Shared by the page and by the cross-origin frame, so the two document
+#: realms are described the same way rather than one being asked less than
+#: the other. A frame is a realm of its own: a patch applied only there is
+#: invisible to everything the top document can read.
+_ACCESSORS_JS = b"""
 const describeAccessor = (name) => {
   const d = Object.getOwnPropertyDescriptor(Navigator.prototype, name);
   if (!d) return null;
@@ -63,6 +61,26 @@ const describeAccessor = (name) => {
   };
 };
 
+const describeAccessors = () => ({
+  ownWebdriver: Object.hasOwn(navigator, 'webdriver'),
+  // The reader itself, because everything else trusts it. A patched
+  // Function.prototype.toString could otherwise say whatever it liked about
+  // every accessor at once.
+  toStringSource: Function.prototype.toString.call(Function.prototype.toString),
+  webdriverDescriptor: describeAccessor('webdriver'),
+  userAgentDescriptor: describeAccessor('userAgent'),
+});
+"""
+
+_PAGE = b"""<!doctype html>
+<title>identity</title>
+<body><pre id="out"></pre>
+<script>
+// Deliberately not page.evaluate(): that runs in an isolated world. This is
+// the realm a website actually gets.
+const REALM_BUDGET_MS = __REALM_BUDGET_MS__;
+__ACCESSORS_JS__
+
 (async () => {
   const echo = async () => (await fetch('/echo', {cache: 'no-store'})).json();
   const jsChannel = async () => ({
@@ -78,6 +96,7 @@ const describeAccessor = (name) => {
     mobile: navigator.userAgentData ? navigator.userAgentData.mobile : null,
     hasWebdriver: 'webdriver' in navigator,
     webdriver: navigator.webdriver,
+    accessors: describeAccessors(),
   });
 
   const askTheWorker = () => {
@@ -139,21 +158,6 @@ const describeAccessor = (name) => {
       // `cdc_adoQpoasnfa76pfcZLmcfl_Array` and friends under the bare prefix,
       // and only the older `$cdc_` spelling was being looked for.
       .filter(n => /^(__pw|__playwright|\\$?cdc_|__driver|__selenium|__webdriver|__fxdriver|__nightmare|_Selenium_IDE|domAutomation)/.test(n)),
-    // The prototype accessor can be left perfectly native while an own
-    // property on the instance shadows it, which reads as false and leaves
-    // every descriptor attribute untouched. Measured against the bundled
-    // browser: the prototype still stringifies to [native code].
-    ownWebdriver: Object.hasOwn(navigator, 'webdriver'),
-    // Both accessors, so the test can hold one against the other instead of
-    // against a remembered spelling. userAgent is the control: it is a native
-    // accessor on the same prototype that nothing has any reason to touch, so
-    // whatever shape V8 gives it is the shape webdriver must have too.
-    // The reader itself, because everything above trusts it. A patched
-    // Function.prototype.toString could return whatever it liked about every
-    // accessor at once, and asking it to describe itself is where that stops.
-    toStringSource: Function.prototype.toString.call(Function.prototype.toString),
-    webdriverDescriptor: describeAccessor('webdriver'),
-    userAgentDescriptor: describeAccessor('userAgent'),
   };
   document.getElementById('out').textContent = JSON.stringify(result);
 })().catch(err => {
@@ -189,11 +193,13 @@ self.addEventListener('message', e => e.waitUntil((async () => {
 _FRAME = b"""<!doctype html>
 <title>frame</title>
 <script>
+__ACCESSORS_JS__
 (async () => {
   const headers = await (await fetch('/echo', {cache: 'no-store'})).json();
   parent.postMessage({realm: 'iframe', ua: navigator.userAgent,
     hasWebdriver: 'webdriver' in navigator,
-    webdriver: navigator.webdriver, headers}, '*');
+    webdriver: navigator.webdriver,
+    accessors: describeAccessors(), headers}, '*');
 })();
 </script>
 """
@@ -208,6 +214,8 @@ REALM_BUDGET_MS = 15_000
 HOST_BUDGET_MS = REALM_BUDGET_MS * 3
 
 _PAGE = _PAGE.replace(b"__REALM_BUDGET_MS__", str(REALM_BUDGET_MS).encode())
+_PAGE = _PAGE.replace(b"__ACCESSORS_JS__", _ACCESSORS_JS)
+_FRAME = _FRAME.replace(b"__ACCESSORS_JS__", _ACCESSORS_JS)
 
 _BODIES = {
     "/": (_PAGE, "text/html; charset=utf-8"),

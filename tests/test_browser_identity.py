@@ -105,7 +105,14 @@ _NATIVE_FUNCTION = re.compile(
 #: The ones among them that no mobile device runs. Kept beside the table
 #: rather than derived from it, because "not mobile" is a claim about the
 #: platform and not about whether its user-agent token is known.
-_DESKTOP_PLATFORMS = frozenset({"macOS", "Windows", "Linux", "Chrome OS"})
+_DESKTOP_PLATFORMS = frozenset(
+    {"macOS", "Windows", "Linux", "Chrome OS", "Chromium OS"}
+)
+
+#: The realms with a ``Navigator`` rather than a ``WorkerNavigator``. Both are
+#: documents and both are asked the same questions; a frame is a realm of its
+#: own, and a patch applied only there is invisible from the top.
+_DOCUMENT_REALMS = ("page", "cross-origin iframe")
 
 _PLATFORM_TOKENS = {
     "macOS": "Macintosh",
@@ -210,12 +217,13 @@ def _mode_results() -> dict:
 async def _for_mode(tmp_path_factory, cache: dict, headless: bool) -> dict:
     """The cached description of one launch, successful or not.
 
-    The failure is cached too, which is not symmetry for its own sake. Thirteen
-    cases read the default launch and twelve read the headed one, so a mode
-    that fails would otherwise be attempted once per case: a browser that will
-    not start costs a timeout each time, and a run whose real answer is "this
-    browser is broken" spends a quarter of an hour finding that out twelve more
-    times.
+    The failure is cached too, which is not symmetry for its own sake. Most of
+    the cases in this file read one launch or the other, so a mode that fails
+    would otherwise be attempted once per case: a browser that will not start
+    costs a timeout each time, and a run whose real answer is "this browser is
+    broken" would spend a quarter of an hour finding that out again and again.
+    Measured against a launch made to fail every time: one attempt with this,
+    twelve without.
 
     ``BaseException`` because the outcomes worth remembering are the ones
     pytest raises: ``pytest.fail`` and ``pytest.skip`` both raise from
@@ -645,34 +653,42 @@ class TestNothingAnnouncesAutomation:
         Proving the runtime unmodified is a different exercise from proving it
         consistent, and it wants a different tool.
         """
-        assert either_mode["page"]["webdriver"] is False
-        assert either_mode["ownWebdriver"] is False, (
-            "navigator carries its own webdriver property, which shadows the "
-            "prototype accessor and leaves it looking untouched"
-        )
+        realms = _realms(either_mode)
+        for name in _DOCUMENT_REALMS:
+            realm = realms[name]
+            accessors = realm["accessors"]
 
-        descriptor = either_mode["webdriverDescriptor"]
-        native = either_mode["userAgentDescriptor"]
-        assert descriptor is not None and native is not None
-        assert _NATIVE_FUNCTION.fullmatch(either_mode["toStringSource"]), (
-            "Function.prototype.toString is not itself native, so nothing it "
-            f"says about any other function counts: {either_mode['toStringSource']!r}"
-        )
-        assert _NATIVE_FUNCTION.fullmatch(native["getSource"]), (
-            f"the control accessor is not native either: {native['getSource']!r}"
-        )
+            assert realm["webdriver"] is False, f"{name}: {realm['webdriver']!r}"
+            assert accessors["ownWebdriver"] is False, (
+                f"{name}: navigator carries its own webdriver property, which "
+                f"shadows the prototype accessor and leaves it looking untouched"
+            )
 
-        flags = ("get", "set", "enumerable", "configurable")
-        assert {key: descriptor[key] for key in flags} == {
-            key: native[key] for key in flags
-        }, f"webdriver {descriptor} against the native userAgent {native}"
+            descriptor = accessors["webdriverDescriptor"]
+            native = accessors["userAgentDescriptor"]
+            assert descriptor is not None and native is not None, name
+            assert _NATIVE_FUNCTION.fullmatch(accessors["toStringSource"]), (
+                f"{name}: Function.prototype.toString is not itself native, so "
+                f"nothing it says about any other function counts: "
+                f"{accessors['toStringSource']!r}"
+            )
+            assert _NATIVE_FUNCTION.fullmatch(native["getSource"]), (
+                f"{name}: the control accessor is not native either: "
+                f"{native['getSource']!r}"
+            )
 
-        assert descriptor["getSource"] == native["getSource"].replace(
-            "userAgent", "webdriver"
-        ), (
-            f"the webdriver getter reads {descriptor['getSource']!r} where a "
-            f"native one on this prototype reads {native['getSource']!r}"
-        )
+            flags = ("get", "set", "enumerable", "configurable")
+            assert {key: descriptor[key] for key in flags} == {
+                key: native[key] for key in flags
+            }, f"{name}: webdriver {descriptor} against userAgent {native}"
+
+            assert descriptor["getSource"] == native["getSource"].replace(
+                "userAgent", "webdriver"
+            ), (
+                f"{name}: the webdriver getter reads "
+                f"{descriptor['getSource']!r} where a native one on this "
+                f"prototype reads {native['getSource']!r}"
+            )
 
     async def test_no_realm_admits_to_being_driven(self, either_mode):
         """`navigator.webdriver` is readable in more than one place.
@@ -691,10 +707,9 @@ class TestNothingAnnouncesAutomation:
         sees the difference.
         """
         realms = _realms(either_mode)
-        documents = ("page", "cross-origin iframe")
 
         for name, realm in realms.items():
-            if name in documents:
+            if name in _DOCUMENT_REALMS:
                 assert realm["hasWebdriver"] is True, f"{name} has no webdriver"
                 assert realm["webdriver"] is False, (
                     f"{name} reports webdriver={realm['webdriver']!r}"

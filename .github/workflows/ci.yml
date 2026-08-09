@@ -139,8 +139,8 @@ jobs:
       # DPI handling, and the gate measures a headed window against the screen
       # it stands on -- which is exactly where those differ. An earlier version
       # of this file left Windows out on the grounds that it falls back to
-      # headless mode like Linux does; that is true of one of the thirty-one
-      # cases and says nothing about the other thirty.
+      # headless mode like Linux does; that is true of one case in that file
+      # and says nothing about the rest of them.
       #
       # None of these three legs blocks a merge. Branch protection on `main`
       # requires `lint-and-check` and `test` only, which is how this job has
