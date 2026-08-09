@@ -46,12 +46,20 @@ async def human_pause(base: float, spread: float = 0.5) -> None:
 _NATURAL_SECONDS_PER_CHAR = 0.16
 
 
+# Fraction of the budget spent on deliberate sleeps. The remainder is headroom
+# for time the budget does not cover: the browser keyboard round-trips (one per
+# key), any composer setup already spent before typing starts, and the Send
+# click after. Keeps the *whole* messaging operation under budget, not just the
+# sleeps.
+_TYPING_SLEEP_FRACTION = 0.8
+
+
 async def human_type(
     page: Any,
     text: str,
     *,
     typo_rate: float = 0.06,
-    budget_seconds: float = 60.0,
+    budget_seconds: float = 30.0,
 ) -> None:
     """Type ``text`` the way a person does: jittered per-key timing, an
     occasional longer "thinking" pause, and now and then a wrong keystroke that
@@ -69,10 +77,16 @@ async def human_type(
     a person types a long message faster per key anyway -- so timing stays
     jittered and human but total time is bounded for any length. Short messages
     (the common case) are under budget and type at full natural cadence.
+
+    Only a fraction of the budget is spent sleeping; the rest is headroom for
+    the browser keyboard round-trips and composer setup the budget cannot see.
+    The default (30s) sits well under typical tool timeouts; set it lower than
+    the caller's timeout if that timeout is unusually short.
     """
     kb = page.keyboard
+    sleep_budget = budget_seconds * _TYPING_SLEEP_FRACTION
     est = len(text) * _NATURAL_SECONDS_PER_CHAR
-    scale = min(1.0, budget_seconds / est) if est > budget_seconds else 1.0
+    scale = min(1.0, sleep_budget / est) if est > sleep_budget else 1.0
     for ch in text:
         # Occasionally slip: type an adjacent-ish wrong letter, pause, undo it.
         if ch.isalpha() and _rng.random() < typo_rate:
