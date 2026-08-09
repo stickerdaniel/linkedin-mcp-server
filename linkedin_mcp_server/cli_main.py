@@ -428,12 +428,11 @@ def main() -> None:
     try:
         config = get_config()
     except ConfigurationError as e:
-        # Every other failure in this file reaches a handler that says what
-        # happened. A bad setting did not: it left the loader as an exception
-        # nothing caught, so Python printed the whole stack down through the
-        # loader and the process died. Under a stdio host that stack is all the
-        # user sees behind "Server disconnected", with the setting at fault on
-        # its last line and everything above it looking like a crash.
+        # A bad setting used to leave the loader as an exception nothing
+        # caught, so Python printed the whole stack down through the loader and
+        # the process died. Under a stdio host that stack is all the user sees
+        # behind "Server disconnected", with the setting at fault on its last
+        # line and everything above it looking like a crash.
         _exit_on_a_bad_setting(e)
 
     # Configure logging

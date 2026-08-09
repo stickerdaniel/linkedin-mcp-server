@@ -372,20 +372,21 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # the CLI flag, PROXY_SERVER may carry the credentials a provider hands out:
     # the environment is not world-readable the way a process argument list is.
     #
-    # Read through _env(), which drops an MCPB placeholder an older bundle left
-    # behind. That is a fail-open path and it says so: a host that fails to
-    # substitute a field the user *did* fill in skips the proxy, and the browser
-    # then goes out on the real address. So the variables are named in the log
-    # once. They hold placeholders, so naming them leaks nothing.
+    # Read through _env(), which drops a placeholder the host left behind.
+    # That is a fail-open path and it says so: a host that fails to substitute
+    # a field the user *did* fill in skips the proxy, and the browser then goes
+    # out on the real address. So the variables are named in the log once. They
+    # hold placeholders, so naming them leaks nothing.
     if unsubstituted := [
         key
         for key, literal in _MCPB_PLACEHOLDERS.items()
         if os.environ.get(key) == literal
     ]:
         logger.warning(
-            "Ignoring %s: the value is an unsubstituted MCPB placeholder, not a "
-            "setting. Reinstall the extension bundle to clear it. No proxy is "
-            "configured from these.",
+            "Ignoring %s: the value is an unsubstituted MCPB placeholder, not "
+            "a setting, so no proxy is configured from these. Update the "
+            "extension bundle, and clear the variable from any environment "
+            "override set by hand.",
             ", ".join(unsubstituted),
         )
 
