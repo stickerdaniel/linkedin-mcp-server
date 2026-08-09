@@ -55,10 +55,51 @@ def test_viewport_comes_from_configuration():
     assert viewport == {"width": 1920, "height": 1080}
 
 
-def test_no_proxy_switches_without_a_proxy():
+def test_no_proxy_switches_without_a_proxy(monkeypatch):
     """The WebRTC switches change an observable capability, so they are
     conditional on there being something to contain."""
+    monkeypatch.setattr(
+        "linkedin_mcp_server.browser_launch.get_runtime_id",
+        lambda: "macos-arm64-host",
+    )
+
     options, _ = build_launch_options(BrowserConfig())
 
     assert "args" not in options
     assert "proxy" not in options
+
+
+def test_container_launch_enables_the_measured_mesa_path(monkeypatch):
+    """Xvfb exposes Mesa but WebGL stays disabled until these are present.
+
+    Measured, not inferred: on amd64 and arm64 every one of ten cold launches
+    produced WebGL1 and WebGL2 through llvmpipe with the switches, and none
+    without them. Pin both so a cleanup cannot silently put the image back in
+    the no-context state.
+    """
+    monkeypatch.setattr(
+        "linkedin_mcp_server.browser_launch.get_runtime_id",
+        lambda: "docker-arm64-container",
+    )
+
+    options, _ = build_launch_options(BrowserConfig())
+
+    assert options["args"] == ["--enable-webgl", "--ignore-gpu-blocklist"]
+
+
+def test_container_webgl_and_proxy_containment_share_one_argument_list(monkeypatch):
+    """One feature must not overwrite the other's switches."""
+    monkeypatch.setattr(
+        "linkedin_mcp_server.browser_launch.get_runtime_id",
+        lambda: "docker-amd64-container",
+    )
+    browser = BrowserConfig(proxy_server="http://proxy.example:8080")
+
+    options, _ = build_launch_options(browser)
+
+    assert options["args"] == [
+        "--enable-webgl",
+        "--ignore-gpu-blocklist",
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    ]

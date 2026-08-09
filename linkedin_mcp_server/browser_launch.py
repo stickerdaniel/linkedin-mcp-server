@@ -10,6 +10,8 @@ since the moment it existed.
 import logging
 from typing import TYPE_CHECKING, Any
 
+from linkedin_mcp_server.session_state import get_runtime_id
+
 if TYPE_CHECKING:
     from linkedin_mcp_server.config.schema import BrowserConfig
 
@@ -42,6 +44,20 @@ _WEBRTC_STAYS_ON_THE_PROXY = (
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
 )
+
+#: Headed Chromium under the image's Xvfb display starts with WebGL disabled,
+#: despite Mesa's software rasteriser being present. Measured on both published
+#: architectures: every one of ten cold launches per architecture produced no
+#: WebGL1 or WebGL2 context without these two switches, and 10/10 of each with
+#: them. The unmasked renderer was byte-identical across all twenty:
+#: ``ANGLE (Mesa/X.org, llvmpipe (LLVM 15.0.6 128 bits), OpenGL 4.5)``.
+#:
+#: These do not select a renderer; Mesa/llvmpipe is what the image provides.
+#: Every explicit selector tried instead (ANGLE GL, EGL, desktop GL, Vulkan)
+#: produced no context. SwiftShader worked, and stays excluded: Patchright
+#: strips its unsafe fallback deliberately because that renderer string is an
+#: automation signal in its own right.
+_DOCKER_WEBGL = ("--enable-webgl", "--ignore-gpu-blocklist")
 
 
 def build_launch_options(
@@ -86,13 +102,24 @@ def build_launch_options(
         # binary, and is dealt with separately.
         launch_options["channel"] = "chromium"
 
+    args: list[str] = []
+    if get_runtime_id().endswith("-container"):
+        # Image-only. A desktop browser gets a hardware renderer on its own;
+        # forcing these there would change an identity that was already
+        # coherent. Under Xvfb, measured, they are what lets the existing Mesa
+        # llvmpipe path create WebGL1 and WebGL2 contexts at all.
+        args.extend(_DOCKER_WEBGL)
+
     proxy = browser.proxy_settings()
     if proxy:
         launch_options["proxy"] = proxy
         # Only where a proxy exists: with a direct connection there is no
         # bypass to prevent, and the switches would disable a working browser
         # capability for nothing.
-        launch_options["args"] = list(_WEBRTC_STAYS_ON_THE_PROXY)
+        args.extend(_WEBRTC_STAYS_ON_THE_PROXY)
+
+    if args:
+        launch_options["args"] = args
 
     return launch_options, viewport
 
