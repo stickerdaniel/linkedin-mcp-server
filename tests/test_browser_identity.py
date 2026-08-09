@@ -72,6 +72,21 @@ pytestmark = [
 #: neither, quietly promoting the GREASE entry to a real brand. ``[\W_]`` covers
 #: the whole set, since ``_`` is the one separator that is also a word
 #: character.
+#:
+#: This is the one place the file names a value rather than a relation, and it
+#: is a considered trade rather than an oversight. The specification does not
+#: require the words: a future Chromium could send ``Fake?Browser`` instead,
+#: and the brand-major cases would go red on a coherent browser. What that buys
+#: is ``all`` in place of ``any``. Without a way to name the fake entry, the
+#: strongest available rule is "at least one brand agrees with the user agent",
+#: and that passes a list carrying ``Chromium`` at 149 beside ``Google Chrome``
+#: at 150 -- a browser contradicting itself in public, which is precisely what
+#: is being looked for. Identifying it structurally instead would have to
+#: assume how many fake entries there are, and the specification does not fix
+#: that either. So: a rename costs one red that names the brands it saw and is
+#: repaired by editing this line, and the alternative costs a real
+#: contradiction going unseen. If the wording ever does move, that is the
+#: failure to expect and this comment is the answer to it.
 _GREASE = re.compile(r"not[\W_]?a[\W_]?brand", re.IGNORECASE)
 
 #: The NativeFunction form ECMA-262 gives ``Function.prototype.toString`` for a
