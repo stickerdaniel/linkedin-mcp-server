@@ -424,9 +424,9 @@ def main() -> None:
         # user sees behind "Server disconnected", with the setting at fault on
         # its last line and everything above it looking like a crash.
         #
-        # Printed rather than logged, because logging is configured from the
-        # configuration that just failed to load. stderr for the same reason it
-        # carries every other diagnostic here: stdout belongs to the protocol.
+        # Printed, because logging is configured from the configuration that
+        # just failed to load. To stderr for the same reason it carries every
+        # other diagnostic here: stdout belongs to the protocol.
         print(f"❌ Configuration error: {e}", file=sys.stderr)
         sys.exit(1)
 

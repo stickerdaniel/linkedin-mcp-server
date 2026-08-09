@@ -120,7 +120,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   and the loader reads an empty variable as unset. `required: true` is the only
   other safe shape, because a host skips the whole MCP config while a required
   field is empty. `tests/test_manifest.py` holds this line; `mcpb validate`
-  does not, and cannot — the schema knows nothing about substitution.
+  does not, and cannot: the schema knows nothing about substitution.
 - **A placeholder that does reach the process is not a value.** `_env()` in
   `config/loaders.py` drops it. Both directions matter and only one is loud:
   `PROXY_SERVER` fails validation and stops the server, while

@@ -36,10 +36,10 @@ def manifest() -> dict[str, Any]:
 def _referenced_keys(node: Any) -> set[str]:
     """Every ``user_config`` key named anywhere below *node*.
 
-    Walks rather than reading ``env`` directly, because a placeholder is just as
-    valid inside ``args`` or a ``platform_overrides`` block, and a rule that
-    only covers where the placeholders happen to sit today is a rule that stops
-    holding the first time one moves.
+    A full walk, because a placeholder is just as valid inside ``args`` or a
+    ``platform_overrides`` block as it is in ``env``. A rule that only covers
+    where the placeholders happen to sit today stops holding the first time one
+    moves.
     """
     if isinstance(node, str):
         return set(_PLACEHOLDER.findall(node))
@@ -65,7 +65,7 @@ def test_every_optional_referenced_key_has_a_default(manifest: dict[str, Any]) -
 
     ``required`` is the other way to be safe: a host skips the whole MCP config
     while a required field is empty, so no placeholder is ever handed over. An
-    optional field has no such protection and needs a ``default`` — an empty
+    optional field has no such protection and needs a ``default``. An empty
     string is enough, since it substitutes to nothing and the loader reads that
     as unset.
     """
@@ -92,4 +92,27 @@ def test_every_declared_key_is_referenced(manifest: dict[str, Any]) -> None:
     assert declared <= referenced, (
         f"user_config declares keys that mcp_config never uses: "
         f"{sorted(declared - referenced)}."
+    )
+
+
+def test_the_loader_knows_the_same_mapping(manifest: dict[str, Any]) -> None:
+    """``_MCPB_PLACEHOLDERS`` has to say what the manifest says.
+
+    The loader drops a leftover placeholder by comparing against the exact
+    string, which is what stops it from also eating a password that happens to
+    read like one. Exactness is only worth anything while the two agree, and
+    they are edited in different files.
+    """
+    from linkedin_mcp_server.config.loaders import _MCPB_PLACEHOLDERS
+
+    from_manifest = {
+        variable: value
+        for variable, value in manifest["server"]["mcp_config"]["env"].items()
+        if _PLACEHOLDER.fullmatch(value)
+    }
+    assert _MCPB_PLACEHOLDERS == from_manifest, (
+        "config/loaders.py and manifest.json disagree about which environment "
+        "variables carry user_config placeholders, or about their exact text. "
+        "A variable the loader does not know keeps its literal; a string that "
+        "does not match is compared against nothing."
     )

@@ -1202,14 +1202,30 @@ class TestProxyMcpbPlaceholders:
             assert key in message
 
     def test_a_real_setting_that_merely_resembles_one_is_kept(self, monkeypatch):
-        # The match is anchored, so only a bare placeholder counts. Anything
-        # else stays a value and reaches validation, which can explain it.
+        # Anything that is not the exact literal stays a value and reaches
+        # validation, which can explain it.
         monkeypatch.setenv("PROXY_SERVER", "http://user-config.example:7000")
         from linkedin_mcp_server.config.loaders import load_from_env
 
         config = load_from_env(AppConfig())
         config.validate()
         assert config.browser.proxy_server == "http://user-config.example:7000"
+
+    def test_a_password_shaped_like_another_placeholder_survives(self, monkeypatch):
+        # Why the comparison is against one exact string per variable and not
+        # against the shape of a placeholder. "${user_config.token}" is a legal
+        # password, and a host that never wrote it cannot be the reason it is
+        # there. Dropping it would leave the browser authenticating with
+        # nothing against a proxy that requires it.
+        secret = "${user_config.token}"
+        monkeypatch.setenv("PROXY_SERVER", "http://gate.example:7000")
+        monkeypatch.setenv("PROXY_USERNAME", "envuser")
+        monkeypatch.setenv("PROXY_PASSWORD", secret)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        config = load_from_env(AppConfig())
+        config.validate()
+        assert config.browser.proxy_password == secret
 
     def test_a_password_keeps_its_surrounding_whitespace(self, monkeypatch):
         # Guards the decision not to strip: trimming a password would be a

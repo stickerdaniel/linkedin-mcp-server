@@ -8,7 +8,6 @@ import argparse
 import logging
 import math
 import os
-import re
 import sys
 from typing import Literal, cast
 from urllib.parse import unquote, urlsplit
@@ -30,47 +29,6 @@ FALSY_VALUES = ("0", "false", "no", "off")
 def _normalize_env(value: str) -> str:
     """Normalize environment variable values for tolerant parsing."""
     return value.strip().lower()
-
-
-# An MCPB host substitutes ``${user_config.NAME}`` in the extension's
-# ``mcp_config`` from the values the user entered, plus whatever ``default`` the
-# manifest declares. A field with neither is not in that table at all, so the
-# placeholder is handed to the process verbatim. Measured against Claude
-# Desktop's own substitution routine, which builds its replacement map from
-# ``default`` first and the user's answers second, then leaves every unknown
-# ``${...}`` untouched.
-_MCPB_PLACEHOLDER = re.compile(r"^\$\{user_config\.[^}]*\}$")
-
-
-def _env(key: str) -> str | None:
-    """Read an environment variable, treating an MCPB placeholder as unset.
-
-    The ``default`` entries in ``manifest.json`` are what keep the placeholders
-    out of the environment in the first place, and a manifest test holds that
-    line. This is the second half, for hosts that resolve ``user_config``
-    differently and for the bundles already installed with the broken manifest.
-
-    Both failure modes are worth refusing. A literal in ``PROXY_SERVER`` aborts
-    startup, which is loud. A literal in ``PROXY_USERNAME`` is not: the browser
-    offers ``${user_config.proxy_username}`` to the proxy as a credential, and
-    an authentication that fails that way surfaces as a timeout or an expired
-    session, never as a configuration problem.
-
-    Deliberately no ``strip()``: a proxy password may legitimately begin or end
-    with a space, and silently trimming it would be a wrong password nobody can
-    see.
-    """
-    value = os.environ.get(key)
-    if not value or _MCPB_PLACEHOLDER.fullmatch(value):
-        return None
-    return value
-
-
-def _mcpb_placeholder_keys(*keys: str) -> list[str]:
-    """The names among *keys* that hold an unsubstituted MCPB placeholder."""
-    return [
-        key for key in keys if _MCPB_PLACEHOLDER.fullmatch(os.environ.get(key) or "")
-    ]
 
 
 def positive_int(value: str) -> int:
@@ -187,6 +145,53 @@ class EnvironmentKeys:
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
     DAEMON_ENABLED = "DAEMON_ENABLED"
+
+
+# What ``manifest.json`` fills from ``user_config``, and the exact string each
+# mapping leaves behind when the host does not substitute it.
+#
+# An MCPB host builds its replacement map from the manifest's ``default`` values
+# overlaid with the answers the user gave, then rewrites only the ``${...}``
+# occurrences it has a key for. A field with neither a default nor an answer is
+# absent from that map, so its placeholder is handed to the process verbatim.
+# Measured against Claude Desktop's own substitution routine.
+#
+# One exact string per variable, not a pattern for the shape. A pattern would
+# also swallow a password that happens to read ``${user_config.token}``, which
+# is a legal password and would leave the browser authenticating with nothing.
+# Spelling the mapping out costs a line each and cannot do that.
+# ``tests/test_manifest.py`` checks this table against the manifest itself, so
+# the two cannot drift.
+_MCPB_PLACEHOLDERS = {
+    EnvironmentKeys.PROXY_SERVER: "${user_config.proxy_server}",
+    EnvironmentKeys.PROXY_USERNAME: "${user_config.proxy_username}",
+    EnvironmentKeys.PROXY_PASSWORD: "${user_config.proxy_password}",
+    EnvironmentKeys.PROXY_BYPASS: "${user_config.proxy_bypass}",
+}
+
+
+def _env(key: str) -> str | None:
+    """Read an environment variable, treating an MCPB placeholder as unset.
+
+    The ``default`` entries in ``manifest.json`` are what keep the placeholders
+    out of the environment in the first place, and a manifest test holds that
+    line. This is the second half, for hosts that resolve ``user_config``
+    differently and for the bundles already installed with the broken manifest.
+
+    Both failure modes are worth refusing. A literal in ``PROXY_SERVER`` aborts
+    startup, which is loud. A literal in ``PROXY_USERNAME`` is not: the browser
+    offers ``${user_config.proxy_username}`` to the proxy as a credential, and
+    an authentication that fails that way surfaces as a timeout or an expired
+    session, never as a configuration problem.
+
+    Deliberately no ``strip()``: a proxy password may legitimately begin or end
+    with a space, and silently trimming it would be a wrong password nobody can
+    see.
+    """
+    value = os.environ.get(key)
+    if not value or value == _MCPB_PLACEHOLDERS.get(key):
+        return None
+    return value
 
 
 def is_interactive_environment() -> bool:
@@ -360,20 +365,15 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # the environment is not world-readable the way a process argument list is.
     #
     # Read through _env(), which drops an MCPB placeholder an older bundle left
-    # behind. Said once and by name rather than in silence: if a host ever fails
-    # to substitute a field the user *did* fill in, the proxy is skipped and the
-    # browser goes out on the real address, and that is the direction worth a
-    # line in the log. The values are placeholders, so naming them leaks nothing.
-    #
-    # These four and no others, because these are the only variables
-    # `manifest.json` fills from `user_config`. `tests/test_manifest.py` keeps
-    # that true, and a fifth would have to be added here as well as there.
-    if unsubstituted := _mcpb_placeholder_keys(
-        EnvironmentKeys.PROXY_SERVER,
-        EnvironmentKeys.PROXY_USERNAME,
-        EnvironmentKeys.PROXY_PASSWORD,
-        EnvironmentKeys.PROXY_BYPASS,
-    ):
+    # behind. That is a fail-open path and it says so: a host that fails to
+    # substitute a field the user *did* fill in skips the proxy, and the browser
+    # then goes out on the real address. So the variables are named in the log
+    # once. They hold placeholders, so naming them leaks nothing.
+    if unsubstituted := [
+        key
+        for key, literal in _MCPB_PLACEHOLDERS.items()
+        if os.environ.get(key) == literal
+    ]:
         logger.warning(
             "Ignoring %s: the value is an unsubstituted MCPB placeholder, not a "
             "setting. Reinstall the extension bundle to clear it. No proxy is "
