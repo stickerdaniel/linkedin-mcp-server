@@ -37,6 +37,27 @@ logger = logging.getLogger(__name__)
 DEFAULT_FIRMOGRAPHICS_TTL = timedelta(days=90)
 DEFAULT_JOBS_TTL = timedelta(days=14)
 
+
+def ttl_from_days(raw: str | None, default: timedelta) -> timedelta:
+    """Parse a TTL given in days, falling back to ``default`` on anything odd.
+
+    A misconfigured env var must not make the cache unusable, and a
+    non-positive TTL would mean "always stale" (every lookup re-fetches),
+    which defeats the cache -- so both are rejected in favour of the default.
+    """
+    if raw is None or not raw.strip():
+        return default
+    try:
+        days = float(raw)
+    except ValueError:
+        logger.warning("Ignoring non-numeric cache TTL %r; using %s", raw, default)
+        return default
+    if days <= 0:
+        logger.warning("Ignoring non-positive cache TTL %r; using %s", raw, default)
+        return default
+    return timedelta(days=days)
+
+
 _LEGAL_SUFFIX = re.compile(
     r"\b(inc|llc|ltd|limited|gmbh|bv|b\.v|nv|plc|sa|s\.a|ag|co|corp|"
     r"corporation|company|group|holdings?|international|global|"

@@ -11,6 +11,7 @@ from linkedin_mcp_server.company_cache import (
     CompanyCache,
     CompanyRecord,
     normalize_company_name,
+    ttl_from_days,
 )
 from linkedin_mcp_server.scraping.company_parse import (
     parse_about,
@@ -67,6 +68,37 @@ class TestRecordFreshness:
     def test_corrupt_stamp_is_not_fresh(self):
         rec = CompanyRecord(key="x", firmographics_fetched_at="not-a-date")
         assert not rec.firmographics_fresh(NOW, timedelta(days=90))
+
+
+class TestTTLFromDays:
+    default = timedelta(days=90)
+
+    def test_parses_days(self):
+        assert ttl_from_days("30", self.default) == timedelta(days=30)
+
+    def test_accepts_fractional_days(self):
+        assert ttl_from_days("0.5", self.default) == timedelta(hours=12)
+
+    def test_unset_falls_back(self):
+        assert ttl_from_days(None, self.default) == self.default
+        assert ttl_from_days("   ", self.default) == self.default
+
+    def test_non_numeric_falls_back(self):
+        assert ttl_from_days("forever", self.default) == self.default
+
+    def test_non_positive_falls_back_not_always_stale(self):
+        # 0 or negative would mean every lookup re-fetches -- the cache off.
+        assert ttl_from_days("0", self.default) == self.default
+        assert ttl_from_days("-5", self.default) == self.default
+
+    def test_configured_ttl_flows_through_the_cache(self, tmp_path):
+        cache = CompanyCache(
+            tmp_path, firmographics_ttl=ttl_from_days("7", self.default)
+        )
+        now = datetime(2026, 8, 9, 10, 0)
+        cache.record_firmographics("Acme", now, source="search", industry="Retail")
+        assert not cache.needs_firmographics("Acme", now + timedelta(days=6))
+        assert cache.needs_firmographics("Acme", now + timedelta(days=8))
 
 
 class TestCache:

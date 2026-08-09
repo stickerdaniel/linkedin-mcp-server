@@ -31,7 +31,15 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from linkedin_mcp_server.company_cache import CompanyCache
+import os
+
+from linkedin_mcp_server.company_cache import (
+    DEFAULT_FIRMOGRAPHICS_TTL,
+    DEFAULT_JOBS_TTL,
+    CompanyCache,
+    ttl_from_days,
+)
+from linkedin_mcp_server.config.loaders import EnvironmentKeys
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError, RateLimitError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
@@ -75,7 +83,19 @@ def register_company_enrichment_tools(
 ) -> None:
     """Register the cached, paced company-enrichment tools."""
 
-    cache = CompanyCache()
+    # TTLs are configurable via env; the data layer stays pure, so the env
+    # read happens here at the boundary (as with the rest of this server's
+    # config) rather than inside CompanyCache.
+    cache = CompanyCache(
+        firmographics_ttl=ttl_from_days(
+            os.environ.get(EnvironmentKeys.COMPANY_FIRMOGRAPHICS_TTL_DAYS),
+            DEFAULT_FIRMOGRAPHICS_TTL,
+        ),
+        jobs_ttl=ttl_from_days(
+            os.environ.get(EnvironmentKeys.COMPANY_JOBS_TTL_DAYS),
+            DEFAULT_JOBS_TTL,
+        ),
+    )
     jobs = JobStore()
 
     @mcp.tool(
