@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from linkedin_mcp_server.pacing import (
+    ACCOUNT_BUDGET_JOB,
     MAX_BUNCH_PAUSE,
     MIN_BUNCH_PAUSE,
     WINDOW_SECONDS,
@@ -16,6 +17,7 @@ from linkedin_mcp_server.pacing import (
     Ledger,
     Schedule,
     jittered_cap,
+    load_account_budget,
     next_bunch_delay,
     warmup_cap,
 )
@@ -214,6 +216,37 @@ class TestJobRoundTrip:
     def test_effective_cap_is_bounded_by_the_global_ceiling(self):
         job = Job(name="j", started_on=date(2020, 1, 1), daily_cap=150, warmup=False)
         assert job.effective_cap(WED_10AM) <= 150
+
+
+class TestAccountBudget:
+    def test_first_call_materialises_a_default_persisted_budget(self, tmp_path):
+        store = JobStore(tmp_path)
+        budget = load_account_budget(store, WED_10AM)
+        assert budget.name == ACCOUNT_BUDGET_JOB
+        assert store.exists(ACCOUNT_BUDGET_JOB)  # persisted, not ephemeral
+        assert budget.warmup is False  # a shared budget is not a fresh account
+
+    def test_reconfigures_cap_and_persists(self, tmp_path):
+        store = JobStore(tmp_path)
+        load_account_budget(store, WED_10AM, daily_cap=100)
+        load_account_budget(store, WED_10AM, daily_cap=40)
+        assert store.load(ACCOUNT_BUDGET_JOB).daily_cap == 40
+
+    def test_pure_read_does_not_change_config(self, tmp_path):
+        store = JobStore(tmp_path)
+        load_account_budget(store, WED_10AM, daily_cap=40, warmup=True)
+        again = load_account_budget(store, WED_10AM)  # all-None -> read
+        assert again.daily_cap == 40
+        assert again.warmup is True
+
+    def test_the_ledger_is_shared_across_loads(self, tmp_path):
+        """Two callers (person + company enrichment) draw down ONE ledger."""
+        store = JobStore(tmp_path)
+        a = load_account_budget(store, WED_10AM)
+        a.ledger.record(WED_10AM)
+        store.save(a)
+        b = load_account_budget(store, WED_10AM)
+        assert b.ledger.spent(WED_10AM) == 1
 
 
 class TestJobStore:

@@ -215,8 +215,7 @@ class CompanyCache:
         raw_about: str = "",
     ) -> CompanyRecord:
         rec = self.get_or_new(name)
-        rec.firmographics_source = source
-        rec.firmographics_fetched_at = now.isoformat()
+
         # Only overwrite a field when the new fetch actually carries it; a
         # cheap search hit must not blank out headquarters a deep fetch found.
         if industry:
@@ -231,6 +230,20 @@ class CompanyCache:
             rec.linkedin_url = linkedin_url
         if raw_about:
             rec.raw_about = raw_about
+
+        # Freshness tracks *real firmographic content*, not the mere fact of a
+        # write. A company-search pass only learns a company's URL, so it must
+        # not (a) stamp a bare stub as fresh-for-90-days -- which would make
+        # enrich_company_deep skip a company it never actually read -- nor
+        # (b) reset the timestamp/source of a record a deep fetch already
+        # populated. So stamp only when the write brings a firmographic field.
+        carries_firmographics = bool(
+            industry or employee_count or headquarters or website
+        )
+        if carries_firmographics:
+            rec.firmographics_source = source
+            rec.firmographics_fetched_at = now.isoformat()
+
         self.save(rec)
         return rec
 

@@ -325,3 +325,54 @@ class JobStore:
         if not self.root.exists():
             return []
         return sorted(p.stem for p in self.root.glob("*.json"))
+
+
+# LinkedIn counts activity per *account*, not per job -- it has no idea two
+# scrapes belong to different "jobs" of ours. So the safety budget has to be
+# one shared ledger that every LinkedIn-touching operation draws down,
+# regardless of which queue it serves. This well-known job holds that single
+# account-wide budget: its ledger, cap, warm-up and schedule. Its queue stays
+# empty; per-work queues live in their own jobs.
+ACCOUNT_BUDGET_JOB = "__account_budget__"
+
+
+def load_account_budget(
+    store: JobStore,
+    now: datetime,
+    *,
+    daily_cap: int | None = None,
+    warmup: bool | None = None,
+    schedule: Schedule | None = None,
+) -> Job:
+    """Load the one shared account budget, creating or reconfiguring it.
+
+    A non-None ``daily_cap``/``warmup``/``schedule`` updates the stored budget
+    (last writer wins) and is persisted, so a caller can set the account-wide
+    cap once and every subsystem then honours it. With all three None this is a
+    pure read (still materialising a default budget on first use).
+    """
+    if store.exists(ACCOUNT_BUDGET_JOB):
+        budget = store.load(ACCOUNT_BUDGET_JOB)
+        changed = False
+        if daily_cap is not None and daily_cap != budget.daily_cap:
+            budget.daily_cap = daily_cap
+            changed = True
+        if warmup is not None and warmup != budget.warmup:
+            budget.warmup = warmup
+            changed = True
+        if schedule is not None and schedule != budget.schedule:
+            budget.schedule = schedule
+            changed = True
+        if changed:
+            store.save(budget)
+        return budget
+
+    budget = Job(
+        name=ACCOUNT_BUDGET_JOB,
+        started_on=now.date(),
+        daily_cap=daily_cap if daily_cap is not None else DEFAULT_DAILY_ACTIONS,
+        warmup=warmup if warmup is not None else False,
+        schedule=schedule if schedule is not None else Schedule(),
+    )
+    store.save(budget)
+    return budget

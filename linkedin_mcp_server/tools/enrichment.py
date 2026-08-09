@@ -26,13 +26,15 @@ from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError, RateLimitError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
+from linkedin_mcp_server.dependencies import get_ready_extractor
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.pacing import (
+    ACCOUNT_BUDGET_JOB,
     DEFAULT_DAILY_ACTIONS,
     MAX_DAILY_ACTIONS,
     Job,
     JobStore,
+    load_account_budget,
     next_bunch_delay,
     step_delay,
 )
@@ -104,6 +106,11 @@ def register_enrichment_tools(
 
             now = datetime.now().astimezone()
 
+            # daily_cap and warmup configure the one shared account budget, not
+            # this queue -- the cap is account-wide, so several jobs cannot each
+            # spend a full allowance. Last writer wins if they disagree.
+            budget = load_account_budget(store, now, daily_cap=daily_cap, warmup=warmup)
+
             if store.exists(job_name) and not replace_existing:
                 job = store.load(job_name)
                 known = set(job.pending) | set(job.done) | set(job.failed)
@@ -112,13 +119,7 @@ def register_enrichment_tools(
                 added = len(fresh)
             else:
                 deduped = list(dict.fromkeys(cleaned))
-                job = Job(
-                    name=job_name,
-                    started_on=now.date(),
-                    pending=deduped,
-                    daily_cap=daily_cap,
-                    warmup=warmup,
-                )
+                job = Job(name=job_name, started_on=now.date(), pending=deduped)
                 added = len(deduped)
 
             store.save(job)
@@ -129,11 +130,12 @@ def register_enrichment_tools(
                 "duplicates_dropped": len(cleaned) - added,
                 "pending": len(job.pending),
                 "done": len(job.done),
-                "daily_cap_today": job.effective_cap(now),
-                "remaining_today": job.remaining_today(now),
+                "account_daily_cap_today": budget.effective_cap(now),
+                "account_remaining_today": budget.remaining_today(now),
                 "note": (
-                    "Queue saved. Call run_enrichment_bunch to process a bunch; "
-                    "it returns when to call it again."
+                    "Queue saved. daily_cap/warmup set the shared account "
+                    "budget used by all enrichment. Call run_enrichment_bunch "
+                    "to process a bunch; it returns when to call it again."
                 ),
             }
         except ToolError:
@@ -190,13 +192,15 @@ def register_enrichment_tools(
 
         now = datetime.now().astimezone()
         rng = random.Random()
+        budget = load_account_budget(store, now)
 
         # Schedule gate. Checked before the budget so a closed window reports
         # the real reason rather than "no budget".
-        if not ignore_schedule and not job.schedule.is_open(now):
-            opens = job.schedule.next_open(now)
+        if not ignore_schedule and not budget.schedule.is_open(now):
+            opens = budget.schedule.next_open(now)
             return _status(
                 job,
+                budget,
                 now,
                 stopped="outside_working_hours",
                 next_run_after=(opens - now).total_seconds(),
@@ -206,38 +210,45 @@ def register_enrichment_tools(
 
         if not job.pending:
             return _status(
-                job, now, stopped="queue_empty", next_run_after=None, gathered={}
-            )
-
-        budget = job.remaining_today(now)
-        if budget <= 0:
-            return _status(
                 job,
+                budget,
                 now,
-                stopped="daily_budget_spent",
-                next_run_after=job.ledger.next_expiry(now),
+                stopped="queue_empty",
+                next_run_after=None,
                 gathered={},
-                detail=(
-                    "The rolling 24-hour budget is spent. It refills gradually "
-                    "as individual actions age out, not all at once at midnight."
-                ),
             )
-
-        try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="run_enrichment_bunch"
-            )
-        except AuthenticationError as e:
-            try:
-                await handle_auth_error(e, ctx)
-            except Exception as relogin_exc:
-                raise_tool_error(relogin_exc, "run_enrichment_bunch")
 
         requested_sections = {
             s.strip() for s in (sections or "").split(",") if s.strip()
         }
+        # Each profile costs one page load for the main profile plus one per
+        # extra section, so the budget is measured in those units -- not in
+        # profiles. Planning in profiles (the old bug) overspent the cap by
+        # len(sections)x.
+        cost = 1 + len(requested_sections)
 
-        planned = min(bunch_size, budget, len(job.pending))
+        remaining = budget.remaining_today(now)
+        if remaining < cost:
+            return _status(
+                job,
+                budget,
+                now,
+                stopped="daily_budget_spent",
+                next_run_after=budget.ledger.next_expiry(now),
+                gathered={},
+                detail=(
+                    "The shared account budget can't afford another profile "
+                    f"({remaining} left, {cost} needed). It refills gradually "
+                    "as individual actions age out, not all at once at midnight."
+                ),
+            )
+
+        extractor = extractor or await get_ready_extractor(
+            ctx, tool_name="run_enrichment_bunch"
+        )
+
+        # Never plan more profiles than the budget can pay for at `cost` each.
+        planned = min(bunch_size, remaining // cost, len(job.pending))
         deadline = asyncio.get_running_loop().time() + tool_timeout * DEADLINE_FRACTION
 
         gathered: dict[str, Any] = {}
@@ -255,21 +266,39 @@ def register_enrichment_tools(
                 result = await extractor.scrape_person(
                     username, requested_sections, callbacks=None
                 )
-            except RateLimitError as e:
-                # Do not consume the queue entry; the profile was never read.
-                # Back off hard -- pushing through a rate limit is how a
-                # throttle becomes a restriction.
-                logger.warning("Rate limited during enrichment bunch: %s", e)
+            except (RateLimitError, AuthenticationError) as e:
+                # Neither consumes the queue entry -- the profile was never
+                # read. A rate limit means back off; an expired session means
+                # the next call re-authenticates via get_ready_extractor. Both
+                # save progress and stop rather than draining the queue into
+                # `failed` (which an auth error, a sibling of RateLimitError,
+                # would otherwise do by falling through to the generic handler).
+                is_auth = isinstance(e, AuthenticationError)
+                logger.warning(
+                    "%s during enrichment bunch: %s",
+                    "Auth expired" if is_auth else "Rate limited",
+                    e,
+                )
                 store.save(job)
+                store.save(budget)
                 return _status(
                     job,
+                    budget,
                     now,
-                    stopped="rate_limited",
-                    next_run_after=max(job.ledger.next_expiry(now), 3600.0),
+                    stopped="session_expired" if is_auth else "rate_limited",
+                    next_run_after=(
+                        60.0 if is_auth else max(budget.ledger.next_expiry(now), 3600.0)
+                    ),
                     gathered=gathered,
                     detail=(
-                        "LinkedIn signalled a rate limit. Progress is saved. "
-                        "Wait at least an hour; if it repeats, stop for the day."
+                        "LinkedIn session expired. Progress saved; the next "
+                        "call will prompt re-login."
+                        if is_auth
+                        else (
+                            "LinkedIn signalled a rate limit. Progress saved. "
+                            "Wait at least an hour; if it repeats, stop for "
+                            "the day."
+                        )
                     ),
                 )
             except Exception as e:
@@ -282,12 +311,13 @@ def register_enrichment_tools(
             job.pending.pop(0)
             job.done[username] = result
             gathered[username] = result
-            # Every page load counts, including the extra sections.
-            for _ in range(1 + len(requested_sections)):
-                job.ledger.record(now)
+            # Every page load counts against the shared budget, extras included.
+            for _ in range(cost):
+                budget.ledger.record(now)
             # Persist per profile: a kill mid-bunch costs one page view, not
-            # the whole bunch.
+            # the whole bunch. Budget and queue are saved together.
             store.save(job)
+            store.save(budget)
 
             await ctx.report_progress(
                 progress=index + 1,
@@ -300,18 +330,20 @@ def register_enrichment_tools(
                 await asyncio.sleep(step_delay(rng=rng))
 
         now = datetime.now().astimezone()
-        remaining = job.remaining_today(now)
-        if remaining <= 0:
+        remaining = budget.remaining_today(now)
+        if remaining < cost:
             stopped = "daily_budget_spent"
-            wait = job.ledger.next_expiry(now)
+            wait = budget.ledger.next_expiry(now)
         elif not job.pending:
             stopped = "queue_empty"
             wait = None
         else:
-            wait = next_bunch_delay(remaining, bunch_size, now, job.schedule, rng)
+            # More queue and more budget remain (bunch_complete or tool_deadline);
+            # tell the caller when to come back for the next bunch.
+            wait = next_bunch_delay(remaining, bunch_size, now, budget.schedule, rng)
 
         return _status(
-            job, now, stopped=stopped, next_run_after=wait, gathered=gathered
+            job, budget, now, stopped=stopped, next_run_after=wait, gathered=gathered
         )
 
     @mcp.tool(
@@ -333,11 +365,17 @@ def register_enrichment_tools(
         """
         try:
             if job_name is None:
-                return {"jobs": store.list_jobs()}
+                # Hide the internal shared-budget record; it is not a job.
+                return {
+                    "jobs": [j for j in store.list_jobs() if j != ACCOUNT_BUDGET_JOB]
+                }
 
             job = store.load(job_name)
             now = datetime.now().astimezone()
-            summary = _status(job, now, stopped=None, next_run_after=None, gathered={})
+            budget = load_account_budget(store, now)
+            summary = _status(
+                job, budget, now, stopped=None, next_run_after=None, gathered={}
+            )
             summary["results"] = job.done
             summary["failures"] = job.failed
             return summary
@@ -349,6 +387,7 @@ def register_enrichment_tools(
 
 def _status(
     job: Job,
+    budget: Job,
     now: datetime,
     *,
     stopped: str | None,
@@ -356,7 +395,11 @@ def _status(
     gathered: dict[str, Any],
     detail: str | None = None,
 ) -> dict[str, Any]:
-    """Shared progress payload."""
+    """Shared progress payload.
+
+    Queue counts come from ``job``; the budget metrics come from the shared
+    account ``budget`` -- they are two different records now.
+    """
     total = len(job.pending) + len(job.done) + len(job.failed)
     out: dict[str, Any] = {
         "job": job.name,
@@ -364,10 +407,10 @@ def _status(
         "done": len(job.done),
         "pending": len(job.pending),
         "failed": len(job.failed),
-        "spent_last_24h": job.ledger.spent(now),
-        "daily_cap_today": job.effective_cap(now),
-        "remaining_today": job.remaining_today(now),
-        "working_hours_open": job.schedule.is_open(now),
+        "account_spent_last_24h": budget.ledger.spent(now),
+        "account_daily_cap_today": budget.effective_cap(now),
+        "account_remaining_today": budget.remaining_today(now),
+        "working_hours_open": budget.schedule.is_open(now),
     }
     if stopped is not None:
         out["stopped_because"] = stopped

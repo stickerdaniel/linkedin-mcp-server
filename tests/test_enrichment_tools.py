@@ -12,8 +12,17 @@ import pytest
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
-from linkedin_mcp_server.core.exceptions import RateLimitError
-from linkedin_mcp_server.pacing import Job, JobStore, Ledger, Schedule
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    RateLimitError,
+)
+from linkedin_mcp_server.pacing import (
+    ACCOUNT_BUDGET_JOB,
+    Job,
+    JobStore,
+    Ledger,
+    Schedule,
+)
 from linkedin_mcp_server.tools.enrichment import _normalize
 
 from test_tools import get_tool_fn
@@ -27,6 +36,24 @@ OPEN_ALL = Schedule(
 WED_10AM = datetime(2026, 8, 5, 10, 0)
 
 
+def _seed_budget(store, *, cap=100, ledger=None, schedule=None, warmup=False):
+    """Seed the shared account budget the tools gate on.
+
+    The budget now owns the schedule/cap/ledger (not the per-job queue), so
+    tests configure account-wide pacing here.
+    """
+    store.save(
+        Job(
+            name=ACCOUNT_BUDGET_JOB,
+            started_on=date(2020, 1, 1),
+            warmup=warmup,
+            daily_cap=cap,
+            schedule=schedule or OPEN_ALL,
+            ledger=ledger or Ledger(),
+        )
+    )
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     """Point the tools at a temporary job directory."""
@@ -34,6 +61,9 @@ def store(tmp_path, monkeypatch):
 
     real_store = JobStore(tmp_path / "jobs")
     monkeypatch.setattr(enrichment, "JobStore", lambda *a, **k: real_store)
+    # An always-open account budget by default, so bunch tests don't depend on
+    # the wall clock; individual tests overwrite it to exercise limits.
+    _seed_budget(real_store)
     return real_store
 
 
@@ -115,15 +145,9 @@ class TestStartJob:
 
 
 class TestRunBunch:
-    async def _seed(self, mcp, store, usernames, **kw):
-        kw.setdefault("schedule", OPEN_ALL)
-        job = Job(
-            name="j",
-            started_on=kw.pop("started_on", date(2020, 1, 1)),
-            pending=list(usernames),
-            warmup=kw.pop("warmup", False),
-            **kw,
-        )
+    async def _seed(self, mcp, store, usernames):
+        """Seed just the per-job queue; pacing lives on the account budget."""
+        job = Job(name="j", started_on=date(2020, 1, 1), pending=list(usernames))
         store.save(job)
         return job
 
@@ -152,9 +176,9 @@ class TestRunBunch:
     async def test_reports_when_the_window_is_shut(
         self, mcp, store, mock_context, monkeypatch
     ):
-        # Force a schedule that is never open on the current real date by
-        # marking every weekday off except one that we then also exclude.
-        await self._seed(mcp, store, ["a"], schedule=Schedule(work_start=3, work_end=4))
+        # A budget schedule that is shut at the frozen 20:00 test instant.
+        await self._seed(mcp, store, ["a"])
+        _seed_budget(store, schedule=Schedule(work_start=3, work_end=4))
         monkeypatch.setattr(
             "linkedin_mcp_server.tools.enrichment.datetime",
             _FrozenDatetime(datetime(2026, 8, 5, 20, 0).astimezone()),
@@ -174,7 +198,8 @@ class TestRunBunch:
         monkeypatch.setattr(
             "linkedin_mcp_server.tools.enrichment.step_delay", lambda **k: 0
         )
-        await self._seed(mcp, store, ["a"], schedule=Schedule(work_start=3, work_end=4))
+        await self._seed(mcp, store, ["a"])
+        _seed_budget(store, schedule=Schedule(work_start=3, work_end=4))
         monkeypatch.setattr(
             "linkedin_mcp_server.tools.enrichment.datetime",
             _FrozenDatetime(datetime(2026, 8, 5, 20, 0).astimezone()),
@@ -189,16 +214,9 @@ class TestRunBunch:
         self, mcp, store, mock_context
     ):
         now = datetime.now().astimezone()
-        job = Job(
-            name="j",
-            started_on=date(2020, 1, 1),
-            pending=["a"],
-            warmup=False,
-            daily_cap=5,
-            schedule=OPEN_ALL,
-            ledger=Ledger(actions=[now.timestamp()] * 5),
-        )
-        store.save(job)
+        await self._seed(mcp, store, ["a"])
+        # The shared account budget is fully spent, so no queue can run.
+        _seed_budget(store, cap=5, ledger=Ledger(actions=[now.timestamp()] * 5))
 
         fn = await get_tool_fn(mcp, "run_enrichment_bunch")
         out = await fn("j", mock_context, extractor=_extractor())
@@ -211,12 +229,7 @@ class TestRunBunch:
         self, mcp, store, mock_context
     ):
         """The page was never read, so the queue entry must survive."""
-        await self._seed(
-            mcp,
-            store,
-            ["a", "b"],
-            schedule=OPEN_ALL,
-        )
+        await self._seed(mcp, store, ["a", "b"])
 
         fn = await get_tool_fn(mcp, "run_enrichment_bunch")
         out = await fn(
@@ -230,18 +243,82 @@ class TestRunBunch:
         assert store.load("j").pending == ["a", "b"]
         assert store.load("j").failed == {}
 
+    async def test_a_session_expiry_keeps_the_profile_queued(
+        self, mcp, store, mock_context
+    ):
+        """An expired session must not drain the queue into `failed`.
+
+        AuthenticationError is a sibling of RateLimitError, not a subclass, so
+        without explicit handling it would fall through to the generic handler
+        and permanently fail every unread profile in the bunch.
+        """
+        await self._seed(mcp, store, ["a", "b"])
+
+        fn = await get_tool_fn(mcp, "run_enrichment_bunch")
+        out = await fn(
+            "j",
+            mock_context,
+            extractor=_extractor(error=AuthenticationError("session expired")),
+        )
+
+        assert out["stopped_because"] == "session_expired"
+        assert store.load("j").pending == ["a", "b"]  # nothing consumed
+        assert store.load("j").failed == {}  # nothing wrongly failed
+
+    async def test_extra_sections_do_not_overshoot_the_budget(
+        self, mcp, store, mock_context, monkeypatch
+    ):
+        """Planning must be in page-loads, not profiles: a bunch of 5 with two
+        extra sections (cost 3 each) and only 4 budget must run ONE profile,
+        not five (which would spend 15)."""
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.enrichment.step_delay", lambda **k: 0
+        )
+        now = datetime.now().astimezone()
+        await self._seed(mcp, store, ["a", "b", "c", "d", "e"])
+        _seed_budget(store, cap=4)  # 4 page-loads available
+        assert now  # silence unused
+
+        fn = await get_tool_fn(mcp, "run_enrichment_bunch")
+        out = await fn(
+            "j",
+            mock_context,
+            bunch_size=5,
+            sections="experience,contact_info",  # cost = 3
+            extractor=_extractor(),
+        )
+
+        assert out["done"] == 1
+        assert out["account_spent_last_24h"] == 3  # not 15
+
+    async def test_budget_below_one_profile_cost_stops_cleanly(
+        self, mcp, store, mock_context
+    ):
+        """With less budget than a single profile costs, stop -- do not spin
+        planning zero profiles forever."""
+        now = datetime.now().astimezone()
+        await self._seed(mcp, store, ["a"])
+        _seed_budget(store, cap=5, ledger=Ledger(actions=[now.timestamp()] * 3))
+
+        fn = await get_tool_fn(mcp, "run_enrichment_bunch")
+        out = await fn(
+            "j",
+            mock_context,
+            sections="experience,contact_info",  # cost 3 > remaining 2
+            extractor=_extractor(),
+        )
+
+        assert out["stopped_because"] == "daily_budget_spent"
+        assert out["done"] == 0
+        assert store.load("j").pending == ["a"]
+
     async def test_a_scrape_failure_moves_on_without_blocking_the_queue(
         self, mcp, store, mock_context, monkeypatch
     ):
         monkeypatch.setattr(
             "linkedin_mcp_server.tools.enrichment.step_delay", lambda **k: 0
         )
-        await self._seed(
-            mcp,
-            store,
-            ["a", "b"],
-            schedule=OPEN_ALL,
-        )
+        await self._seed(mcp, store, ["a", "b"])
 
         extractor = MagicMock()
         extractor.scrape_person = AsyncMock(
@@ -263,12 +340,7 @@ class TestRunBunch:
         monkeypatch.setattr(
             "linkedin_mcp_server.tools.enrichment.step_delay", lambda **k: 0
         )
-        await self._seed(
-            mcp,
-            store,
-            ["a"],
-            schedule=OPEN_ALL,
-        )
+        await self._seed(mcp, store, ["a"])
 
         fn = await get_tool_fn(mcp, "run_enrichment_bunch")
         out = await fn(
@@ -279,15 +351,10 @@ class TestRunBunch:
         )
 
         # One main profile plus two extra section pages.
-        assert out["spent_last_24h"] == 3
+        assert out["account_spent_last_24h"] == 3
 
     async def test_empty_queue_reports_completion(self, mcp, store, mock_context):
-        await self._seed(
-            mcp,
-            store,
-            [],
-            schedule=OPEN_ALL,
-        )
+        await self._seed(mcp, store, [])
 
         fn = await get_tool_fn(mcp, "run_enrichment_bunch")
         out = await fn("j", mock_context, extractor=_extractor())

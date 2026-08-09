@@ -14,9 +14,15 @@ Two levers, both entirely within LinkedIn, no third-party data:
   the summary surfaces, not the whole network.
 
 Both are cache-first with the two TTLs in ``company_cache``: firmographics stay
-fresh for 90 days, open roles for 14. Both count their LinkedIn page loads
-against the same rolling-24h ``Ledger`` the person enrichment uses, so a day's
-company research and a day's profile research share one safety budget.
+fresh for 90 days, open roles for 14. Both draw down the single shared account
+budget (``pacing.load_account_budget``) that the person enrichment also uses,
+so a day's company research and a day's profile research cannot together exceed
+one account-safety budget -- LinkedIn counts activity per account, not per job.
+
+Note the two tiers deliver different depth: the search tier records a company's
+LinkedIn URL and the raw results text but does not itself parse industry or
+headcount (those live behind the company page). ``enrich_company_deep`` is what
+fills the typed firmographic fields.
 """
 
 from __future__ import annotations
@@ -45,9 +51,8 @@ from linkedin_mcp_server.core.exceptions import AuthenticationError, RateLimitEr
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.pacing import (
-    DEFAULT_DAILY_ACTIONS,
-    Job,
     JobStore,
+    load_account_budget,
     next_bunch_delay,
     step_delay,
 )
@@ -60,22 +65,6 @@ from linkedin_mcp_server.scraping.company_parse import (
 logger = logging.getLogger(__name__)
 
 DEADLINE_FRACTION = 0.75
-
-# The action ledger is shared with person enrichment through one well-known
-# job name, so both kinds of work draw down a single rolling-24h budget.
-BUDGET_JOB = "__action_budget__"
-
-
-def _budget_job(store: JobStore, now: datetime) -> Job:
-    """Load (or start) the shared action-budget ledger."""
-    if store.exists(BUDGET_JOB):
-        return store.load(BUDGET_JOB)
-    return Job(
-        name=BUDGET_JOB,
-        started_on=now.date(),
-        daily_cap=DEFAULT_DAILY_ACTIONS,
-        warmup=False,  # a long-lived shared budget is not a fresh account
-    )
 
 
 def register_company_enrichment_tools(
@@ -101,7 +90,7 @@ def register_company_enrichment_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Enrich Companies (search)",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={"readOnlyHint": False, "openWorldHint": True},
         tags={"company", "bulk", "search"},
         exclude_args=["extractor"],
     )
@@ -141,7 +130,18 @@ def register_company_enrichment_tools(
             raise ToolError("company_names is empty.")
 
         now = datetime.now().astimezone()
-        budget = _budget_job(jobs, now)
+        budget = load_account_budget(jobs, now)
+
+        # "Already resolved" for the search tier means we hold something worth
+        # not re-searching: the company's LinkedIn URL, or fresh firmographics
+        # from a deep fetch. (Search itself never yields firmographics, only
+        # the URL, so keying serve-from-cache on firmographics alone would
+        # re-search every resolved company forever.)
+        def _resolved(rec: Any) -> bool:
+            return rec is not None and bool(
+                rec.linkedin_url
+                or rec.firmographics_fresh(now, cache.firmographics_ttl)
+            )
 
         served: dict[str, dict] = {}
         to_fetch: list[str] = []
@@ -149,11 +149,7 @@ def register_company_enrichment_tools(
             if not name.strip():
                 continue
             rec = cache.get(name)
-            if (
-                not refresh
-                and rec is not None
-                and rec.firmographics_fresh(now, cache.firmographics_ttl)
-            ):
+            if not refresh and _resolved(rec):
                 served[name] = _firmographics_view(rec, "cache")
             else:
                 to_fetch.append(name)
@@ -201,14 +197,10 @@ def register_company_enrichment_tools(
                 break
             name = to_fetch[i]
 
-            # A prior search this call may already have cached this name in
-            # passing; skip the redundant fetch.
+            # A prior search this call may already have resolved this name in
+            # passing (its URL got cached); skip the redundant fetch.
             rec = cache.get(name)
-            if (
-                not refresh
-                and rec is not None
-                and rec.firmographics_fresh(now, cache.firmographics_ttl)
-            ):
+            if not refresh and _resolved(rec):
                 served[name] = _firmographics_view(rec, "cache")
                 continue
 
@@ -250,12 +242,22 @@ def register_company_enrichment_tools(
                     linkedin_url=hit["url"],
                     raw_about=text,
                 )
-            # The requested name is whichever hit best matches, else the first.
-            served[name] = _firmographics_view(
-                cache.get(name) or (cache.get(hits[0]["name"]) if hits else None),
-                "search",
-                fallback_raw=text,
-            )
+            # Attribute a hit to the requested name only when it actually
+            # matches: cache.get(name) normalises both sides and hits iff one
+            # of the just-cached companies shares the query's normalised key.
+            # Never fall back to hits[0] -- the top result for "Deloitte
+            # Digital" may be "Deloitte", a different company. On no match,
+            # hand back the candidates and the raw page for the LLM to judge.
+            rec = cache.get(name)
+            if rec is not None and rec.linkedin_url:
+                served[name] = _firmographics_view(rec, "search", fallback_raw=text)
+            else:
+                served[name] = {
+                    "status": "no_confident_match",
+                    "source": "search",
+                    "candidates": [h["name"] for h in hits[:10]],
+                    "raw_about": text,
+                }
 
             now = datetime.now().astimezone()
             await ctx.report_progress(
@@ -268,7 +270,7 @@ def register_company_enrichment_tools(
 
         now = datetime.now().astimezone()
         remaining = budget.remaining_today(now)
-        outstanding = sum(1 for n in to_fetch if cache.needs_firmographics(n, now))
+        outstanding = sum(1 for n in to_fetch if not _resolved(cache.get(n)))
         if remaining <= 0:
             stopped, wait = "daily_budget_spent", budget.ledger.next_expiry(now)
         elif outstanding == 0:
@@ -283,7 +285,7 @@ def register_company_enrichment_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Enrich Company (deep)",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={"readOnlyHint": False, "openWorldHint": True},
         tags={"company", "scraping"},
         exclude_args=["extractor"],
     )
@@ -327,7 +329,7 @@ def register_company_enrichment_tools(
                 **_firmographics_view(rec, "cache"),
             }
 
-        budget = _budget_job(jobs, now)
+        budget = load_account_budget(jobs, now)
         needed = int(want_firmographics) + int(want_jobs)
         if budget.remaining_today(now) < needed:
             return {

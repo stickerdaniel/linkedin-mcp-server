@@ -1289,6 +1289,12 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "start_enrichment_job",
+            "run_enrichment_bunch",
+            "get_enrichment_status",
+            "enrich_companies",
+            "enrich_company_deep",
+            "get_company_cache",
             "close_session",
         )
 
@@ -1322,6 +1328,12 @@ class TestToolTimeouts:
             "send_message",
             "get_feed",
             "search_posts",
+            "start_enrichment_job",
+            "run_enrichment_bunch",
+            "get_enrichment_status",
+            "enrich_companies",
+            "enrich_company_deep",
+            "get_company_cache",
             "close_session",
         )
 

@@ -13,7 +13,13 @@ from fastmcp import FastMCP
 
 from linkedin_mcp_server.company_cache import CompanyCache
 from linkedin_mcp_server.core.exceptions import RateLimitError
-from linkedin_mcp_server.pacing import Job, JobStore, Ledger, Schedule
+from linkedin_mcp_server.pacing import (
+    ACCOUNT_BUDGET_JOB,
+    Job,
+    JobStore,
+    Ledger,
+    Schedule,
+)
 
 from test_tools import get_tool_fn
 
@@ -36,7 +42,7 @@ def wired(tmp_path, monkeypatch):
     # A shared budget whose schedule is always open, so tests do not depend on
     # the wall clock's hour.
     budget = Job(
-        name=ce.BUDGET_JOB,
+        name=ACCOUNT_BUDGET_JOB,
         started_on=datetime(2020, 1, 1).date(),
         warmup=False,
         daily_cap=100,
@@ -128,10 +134,8 @@ class TestEnrichCompanies:
 
     async def test_stops_when_shared_budget_is_spent(self, mcp, wired, mock_context):
         cache, jobs = wired
-        import linkedin_mcp_server.tools.company_enrichment as ce
-
         now = datetime.now().astimezone()
-        budget = jobs.load(ce.BUDGET_JOB)
+        budget = jobs.load(ACCOUNT_BUDGET_JOB)
         budget.daily_cap = 3
         budget.ledger = Ledger(actions=[now.timestamp()] * 3)
         jobs.save(budget)
@@ -151,6 +155,25 @@ class TestEnrichCompanies:
 
         assert out["stopped_because"] == "rate_limited"
         assert out["next_run_after_seconds"] >= 3600
+
+    async def test_no_confident_match_does_not_serve_a_different_company(
+        self, mcp, wired, mock_context, monkeypatch
+    ):
+        """When the query normalizes differently from every hit, return the
+        candidates + raw page -- never mislabel the top hit as the answer."""
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.company_enrichment.step_delay", lambda **k: 0
+        )
+        # Query "Wonka Industries", but the page only returns unrelated firms.
+        extractor = _search_extractor(["acme-corp", "globex"])
+
+        fn = await get_tool_fn(mcp, "enrich_companies")
+        out = await fn(["Wonka Industries"], mock_context, extractor=extractor)
+
+        served = out["results"]["Wonka Industries"]
+        assert served["status"] == "no_confident_match"
+        assert "Acme-Corp" in served["candidates"]
+        assert "linkedin_url" not in served  # not attributed to a wrong company
 
     async def test_empty_input_rejected(self, mcp, mock_context):
         from fastmcp.exceptions import ToolError

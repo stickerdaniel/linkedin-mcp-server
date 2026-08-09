@@ -139,8 +139,44 @@ class TestCache:
             linkedin_url="https://x/company/acme",
         )
         rec = cache.get("Acme")
+        assert rec is not None
         assert rec.headquarters == "Cairo, Egypt"  # preserved
         assert rec.linkedin_url.endswith("/acme")  # added
+
+    def test_a_search_write_does_not_refresh_or_downgrade_a_deep_record(self, tmp_path):
+        """A bare search hit (URL only) recurring across the network must not
+        reset a deep record's 90-day clock or flip its source to 'search',
+        which would keep stale firmographics 'fresh' forever."""
+        cache = CompanyCache(tmp_path)
+        day0 = NOW
+        cache.record_firmographics(
+            "Acme",
+            day0,
+            source="company_page",
+            industry="Retail",
+            headquarters="Cairo",
+        )
+        day80 = NOW + timedelta(days=80)
+        cache.record_firmographics(
+            "Acme", day80, source="search", linkedin_url="https://x/company/acme"
+        )
+        rec = cache.get("Acme")
+        assert rec is not None
+        assert rec.firmographics_source == "company_page"  # not downgraded
+        assert rec.firmographics_fetched_at == day0.isoformat()  # not re-stamped
+        # ...so it correctly reads as stale past the 90-day TTL from day 0.
+        assert cache.needs_firmographics("Acme", NOW + timedelta(days=91))
+
+    def test_a_bare_search_hit_is_not_treated_as_having_firmographics(self, tmp_path):
+        cache = CompanyCache(tmp_path)
+        cache.record_firmographics(
+            "NewCo", NOW, source="search", linkedin_url="https://x/company/newco"
+        )
+        rec = cache.get("NewCo")
+        assert rec is not None
+        assert rec.linkedin_url  # URL recorded
+        assert not rec.has_firmographics()  # but no firmographic content
+        assert cache.needs_firmographics("NewCo", NOW)  # deep fetch still wanted
 
     def test_jobs_recorded_separately(self, tmp_path):
         cache = CompanyCache(tmp_path)
@@ -148,6 +184,7 @@ class TestCache:
             "Acme", NOW, count=12, sample=["Salesforce Admin", "RevOps Lead"]
         )
         rec = cache.get("Acme")
+        assert rec is not None
         assert rec.open_roles_count == 12
         assert rec.has_jobs()
         assert not rec.has_firmographics()
@@ -187,6 +224,20 @@ class TestParseAbout:
     def test_size_plus_band(self):
         assert parse_about("10,001+ employees")["employee_count"] == "10,001+ employees"
 
+    def test_follower_count_above_the_band_is_not_mistaken_for_size(self):
+        # Real pages show "See all N employees" (a follower count) in the top
+        # card, ABOVE the "Company size" band. The band must win.
+        text = (
+            "Acme\n5,678 employees on LinkedIn\n"
+            "Industry\nRetail\n"
+            "Company size\n1,001-5,000 employees\n"
+        )
+        assert parse_about(text)["employee_count"] == "1,001-5,000 employees"
+
+    def test_bare_employee_count_without_a_band_is_ignored(self):
+        # No range and no '+', so it's a follower count, not a size band.
+        assert "employee_count" not in parse_about("1,234 employees on LinkedIn")
+
     def test_returns_only_confident_keys(self):
         # No labels, no employee line -> nothing claimed.
         assert parse_about("Just some prose about the company.") == {}
@@ -202,10 +253,26 @@ class TestParseJobs:
         assert out.count == 47
         assert "Salesforce Administrator" in out.sample
 
-    def test_falls_back_to_seen_roles_when_no_heading(self):
+    def test_no_heading_means_no_count_never_invented(self):
+        # Without LinkedIn's own "N jobs" heading, count stays None -- it is
+        # never derived from how many role-ish lines were scraped.
         text = "Careers\nSalesforce Developer\nRevenue Operations Manager\n"
         out = parse_jobs(text)
-        assert out.count == 2
+        assert out.count is None
+        assert "Salesforce Developer" in out.sample
+
+    def test_footer_chrome_is_not_counted_as_open_roles(self):
+        # A company hiring for nothing still renders the global footer, whose
+        # items carry role-ish words. Those must not become a positive count
+        # or fabricated sample entries.
+        text = (
+            "0 open jobs\n"
+            "Sales Solutions\nMarketing Solutions\nTalent Solutions\n"
+            "Advertising\nAbout\nCareers\nHelp Center\n"
+        )
+        out = parse_jobs(text)
+        assert out.count == 0
+        assert out.sample == []
 
     def test_empty(self):
         assert parse_jobs("") == (None, [])
