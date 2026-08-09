@@ -69,6 +69,7 @@ const describeAccessor = (name) => {
       ? await navigator.userAgentData.getHighEntropyValues(
           ['architecture', 'bitness', 'fullVersionList'])
       : null,
+    hasWebdriver: 'webdriver' in navigator,
     webdriver: navigator.webdriver,
   });
 
@@ -130,7 +131,7 @@ const describeAccessor = (name) => {
       // `cdc_` with no dollar as well: ChromeDriver installs
       // `cdc_adoQpoasnfa76pfcZLmcfl_Array` and friends under the bare prefix,
       // and only the older `$cdc_` spelling was being looked for.
-      .filter(n => /^(__pw|__playwright|\\$?cdc_|__driver|__selenium|__webdriver|__fxdriver|__nightmare|_Selenium_IDE)/.test(n)),
+      .filter(n => /^(__pw|__playwright|\\$?cdc_|__driver|__selenium|__webdriver|__fxdriver|__nightmare|_Selenium_IDE|domAutomation)/.test(n)),
     // The prototype accessor can be left perfectly native while an own
     // property on the instance shadows it, which reads as false and leaves
     // every descriptor attribute untouched. Measured against the bundled
@@ -154,6 +155,7 @@ _WORKER = b"""
 (async () => {
   const headers = await (await fetch('/echo', {cache: 'no-store'})).json();
   postMessage({realm: 'dedicated', ua: navigator.userAgent,
+    hasWebdriver: 'webdriver' in navigator,
     webdriver: navigator.webdriver, headers});
 })();
 """
@@ -168,6 +170,7 @@ self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 self.addEventListener('message', e => e.waitUntil((async () => {
   const headers = await (await fetch('/echo', {cache: 'no-store'})).json();
   e.source.postMessage({realm: 'serviceWorker', ua: navigator.userAgent,
+    hasWebdriver: 'webdriver' in navigator,
     webdriver: navigator.webdriver, headers});
 })()));
 """
@@ -178,6 +181,7 @@ _FRAME = b"""<!doctype html>
 (async () => {
   const headers = await (await fetch('/echo', {cache: 'no-store'})).json();
   parent.postMessage({realm: 'iframe', ua: navigator.userAgent,
+    hasWebdriver: 'webdriver' in navigator,
     webdriver: navigator.webdriver, headers}, '*');
 })();
 </script>

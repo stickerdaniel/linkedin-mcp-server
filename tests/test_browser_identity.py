@@ -296,16 +296,28 @@ def _structured_string(value: str | None) -> str | None:
 
 
 def _unescape(text: str) -> str:
+    """Undo the two escapes RFC 8941 allows inside a string, and only those.
+
+    A backslash may precede a quote or another backslash; anything else, and a
+    backslash at the very end, is a parse failure rather than a character to
+    pass through. Accepting them would read ``"a\\rm"`` as ``arm``, so a browser
+    emitting a hint no conforming recipient would take compared equal to one
+    emitting a valid one.
+    """
     out: list[str] = []
     escaped = False
     for character in text:
         if escaped:
+            if character not in '"\\':
+                raise ValueError(f"invalid escape in a structured string: {text!r}")
             out.append(character)
             escaped = False
         elif character == "\\":
             escaped = True
         else:
             out.append(character)
+    if escaped:
+        raise ValueError(f"a structured string ends in a backslash: {text!r}")
     return "".join(out)
 
 
@@ -395,7 +407,15 @@ class TestEveryRealmTellsTheSameStory:
         page = either_mode["page"]["headers"]
         frame = either_mode["iframe"]["headers"]
 
-        for hint in ("sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"):
+        # Parsed, not compared as text. The brand list is deliberately shuffled
+        # and the specification asks for the order to move over time, so two
+        # orderings of the same pairs are the same answer; comparing the raw
+        # strings would call that a contradiction.
+        assert _brand_list(frame["sec-ch-ua"]) == _brand_list(page["sec-ch-ua"]), (
+            f"sec-ch-ua reads {frame['sec-ch-ua']!r} in the frame and "
+            f"{page['sec-ch-ua']!r} on the page"
+        )
+        for hint in ("sec-ch-ua-mobile", "sec-ch-ua-platform"):
             assert frame[hint] == page[hint], (
                 f"{hint} reads {frame.get(hint)!r} in the frame and "
                 f"{page.get(hint)!r} on the page"
@@ -517,22 +537,25 @@ class TestNothingAnnouncesAutomation:
         ``WorkerNavigator`` has no ``webdriver`` attribute at all, so both
         workers report undefined and a check written as "false everywhere"
         would be satisfied by a browser that had simply dropped the property.
-        The absence arrives as a missing key, because ``JSON.stringify`` omits
-        a property whose value is undefined, which is a cleaner signal than a
-        null would be: the attribute is not there rather than empty.
+        Each realm answers whether the attribute is *there*, rather than the
+        test reading its absence out of a missing JSON key. Those are not the
+        same question: ``JSON.stringify`` drops a key whose value is undefined,
+        so an attribute defined as undefined looks exactly like one that was
+        never defined, while a website asking ``'webdriver' in navigator``
+        sees the difference.
         """
         realms = _realms(either_mode)
         documents = ("page", "cross-origin iframe")
 
-        for name in documents:
-            assert realms[name]["webdriver"] is False, (
-                f"{name} reports webdriver={realms[name]['webdriver']!r}"
-            )
         for name, realm in realms.items():
-            if name not in documents:
-                assert "webdriver" not in realm, (
-                    f"{name} grew a webdriver attribute reading "
-                    f"{realm['webdriver']!r}, which no WorkerNavigator has"
+            if name in documents:
+                assert realm["hasWebdriver"] is True, f"{name} has no webdriver"
+                assert realm["webdriver"] is False, (
+                    f"{name} reports webdriver={realm['webdriver']!r}"
+                )
+            else:
+                assert realm["hasWebdriver"] is False, (
+                    f"{name} grew a webdriver attribute, which no WorkerNavigator has"
                 )
 
     async def test_no_automation_globals_in_the_pages_own_realm(self, either_mode):
