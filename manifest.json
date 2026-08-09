@@ -130,6 +130,7 @@
       "title": "Proxy server",
       "description": "Optional. Route the browser through a proxy, as scheme://host:port (http, https, socks4 or socks5). May also include credentials, as http://user:password@host:port. Only browser traffic is routed.",
       "required": false,
+      "default": "",
       "sensitive": true
     },
     "proxy_username": {
@@ -137,6 +138,7 @@
       "title": "Proxy username",
       "description": "Optional. Username for the proxy, if it requires one.",
       "required": false,
+      "default": "",
       "sensitive": true
     },
     "proxy_password": {
@@ -144,13 +146,15 @@
       "title": "Proxy password",
       "description": "Optional. Password for the proxy. Chromium cannot authenticate to a SOCKS proxy, so credentials require an http or https endpoint.",
       "required": false,
+      "default": "",
       "sensitive": true
     },
     "proxy_bypass": {
       "type": "string",
       "title": "Proxy bypass list",
       "description": "Optional. Comma-separated hosts to reach directly instead of through the proxy.",
-      "required": false
+      "required": false,
+      "default": ""
     }
   },
   "compatibility": {

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NoReturn
 
 import inquirer
 
@@ -19,7 +19,7 @@ from linkedin_mcp_server.exceptions import (
 )
 from linkedin_mcp_server.authentication import clear_auth_state
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.schema import AppConfig
+from linkedin_mcp_server.config.schema import AppConfig, ConfigurationError
 from linkedin_mcp_server.drivers.browser import (
     experimental_persist_derived_runtime,
     close_browser,
@@ -412,9 +412,28 @@ def get_version() -> str:
         return "unknown"
 
 
+def _exit_on_a_bad_setting(error: ConfigurationError) -> NoReturn:
+    """Report a configuration error the way a user can act on it.
+
+    Printed, because logging is configured from the configuration that may be
+    what failed. To stderr for the same reason it carries every other
+    diagnostic here: stdout belongs to the protocol.
+    """
+    print(f"❌ Configuration error: {error}", file=sys.stderr)
+    sys.exit(1)
+
+
 def main() -> None:
     """Main application entry point."""
-    config = get_config()
+    try:
+        config = get_config()
+    except ConfigurationError as e:
+        # A bad setting used to leave the loader as an exception nothing
+        # caught, so Python printed the whole stack down through the loader and
+        # the process died. Under a stdio host that stack is all the user sees
+        # behind "Server disconnected", with the setting at fault on its last
+        # line and everything above it looking like a crash.
+        _exit_on_a_bad_setting(e)
 
     # Configure logging
     configure_logging(
@@ -499,7 +518,14 @@ def main() -> None:
                 # server was a private one. Re-validating applies the HTTP
                 # rules that were skipped when the value said stdio.
                 config.server.transport = transport
-                config.validate()
+                try:
+                    config.validate()
+                except ConfigurationError as e:
+                    # Inside the runtime `try` below, whose handler calls
+                    # logger.exception. A setting that only applies to HTTP
+                    # fails here and nowhere else, and it deserves the same
+                    # answer as one caught at startup.
+                    _exit_on_a_bad_setting(e)
 
             # Get a shared owner running before building this process's server.
             # It has to come first now: whether this process drives a browser or

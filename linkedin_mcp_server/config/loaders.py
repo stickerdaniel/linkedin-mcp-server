@@ -147,6 +147,61 @@ class EnvironmentKeys:
     DAEMON_ENABLED = "DAEMON_ENABLED"
 
 
+# What ``manifest.json`` fills from ``user_config``, and the exact string each
+# mapping leaves behind when the host does not substitute it.
+#
+# An MCPB host builds its replacement map from the manifest's ``default`` values
+# overlaid with the answers the user gave, then rewrites only the ``${...}``
+# occurrences it has a key for. A field with neither a default nor an answer is
+# absent from that map, so its placeholder is handed to the process verbatim.
+# Measured against Claude Desktop's own substitution routine.
+#
+# One exact string per variable, not a pattern for the shape. A pattern would
+# also swallow a password that happens to read ``${user_config.token}``, which
+# is a legal password and would leave the browser authenticating with nothing.
+# Spelling the mapping out costs a line each and cannot do that.
+# ``tests/test_manifest.py`` checks this table against the manifest itself, so
+# the two cannot drift.
+#
+# One collision survives and is not fixable here: a password whose value is
+# its own variable's literal. Substituted and unsubstituted are then the same
+# string, and nothing downstream can tell them apart.
+_MCPB_PLACEHOLDERS = {
+    EnvironmentKeys.PROXY_SERVER: "${user_config.proxy_server}",
+    EnvironmentKeys.PROXY_USERNAME: "${user_config.proxy_username}",
+    EnvironmentKeys.PROXY_PASSWORD: "${user_config.proxy_password}",
+    EnvironmentKeys.PROXY_BYPASS: "${user_config.proxy_bypass}",
+}
+
+
+def _env(key: str) -> str | None:
+    """Read an environment variable, treating an MCPB placeholder as unset.
+
+    The ``default`` entries in ``manifest.json`` are what keep the placeholders
+    out of the environment in the first place, and a manifest test holds that
+    line. This does not reach the bundles already installed with the broken
+    manifest: a bundle carries this source and that manifest together, so
+    whatever fixes one fixes the other. What it covers is a host that resolves
+    ``user_config`` by some other rule or ignores ``default``, and a variable
+    somebody set by hand after reading one out of an extension's own settings
+    pane.
+
+    Both failure modes are worth refusing. A literal in ``PROXY_SERVER`` aborts
+    startup, which is loud. A literal in ``PROXY_USERNAME`` is not: the browser
+    offers ``${user_config.proxy_username}`` to the proxy as a credential, and
+    an authentication that fails that way surfaces as a timeout or an expired
+    session, never as a configuration problem.
+
+    Deliberately no ``strip()``: a proxy password may legitimately begin or end
+    with a space, and silently trimming it would be a wrong password nobody can
+    see.
+    """
+    value = os.environ.get(key)
+    if not value or value == _MCPB_PLACEHOLDERS.get(key):
+        return None
+    return value
+
+
 def is_interactive_environment() -> bool:
     """
     Detect if running in an interactive environment (TTY).
@@ -316,16 +371,35 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Browser proxy (validated and split in BrowserConfig.validate()). Unlike
     # the CLI flag, PROXY_SERVER may carry the credentials a provider hands out:
     # the environment is not world-readable the way a process argument list is.
-    if proxy_server_env := os.environ.get(EnvironmentKeys.PROXY_SERVER):
+    #
+    # Read through _env(), which drops a placeholder the host left behind.
+    # That is a fail-open path and it says so: a host that fails to substitute
+    # a field the user *did* fill in skips the proxy, and the browser then goes
+    # out on the real address. So the variables are named in the log once. They
+    # hold placeholders, so naming them leaks nothing.
+    if unsubstituted := [
+        key
+        for key, literal in _MCPB_PLACEHOLDERS.items()
+        if os.environ.get(key) == literal
+    ]:
+        logger.warning(
+            "Ignoring %s: the value is an unsubstituted MCPB placeholder, not "
+            "a setting, so no proxy is configured from these. Update the "
+            "extension bundle, and clear the variable from any environment "
+            "override set by hand.",
+            ", ".join(unsubstituted),
+        )
+
+    if proxy_server_env := _env(EnvironmentKeys.PROXY_SERVER):
         config.browser.proxy_server = proxy_server_env
 
-    if proxy_username_env := os.environ.get(EnvironmentKeys.PROXY_USERNAME):
+    if proxy_username_env := _env(EnvironmentKeys.PROXY_USERNAME):
         config.browser.proxy_username = proxy_username_env
 
-    if proxy_password_env := os.environ.get(EnvironmentKeys.PROXY_PASSWORD):
+    if proxy_password_env := _env(EnvironmentKeys.PROXY_PASSWORD):
         config.browser.proxy_password = proxy_password_env
 
-    if proxy_bypass_env := os.environ.get(EnvironmentKeys.PROXY_BYPASS):
+    if proxy_bypass_env := _env(EnvironmentKeys.PROXY_BYPASS):
         config.browser.proxy_bypass = proxy_bypass_env
 
     # Import a LinkedIn session from a locally logged-in browser (validated in
