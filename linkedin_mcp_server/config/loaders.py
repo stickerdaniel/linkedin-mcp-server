@@ -175,8 +175,12 @@ def _env(key: str) -> str | None:
 
     The ``default`` entries in ``manifest.json`` are what keep the placeholders
     out of the environment in the first place, and a manifest test holds that
-    line. This is the second half, for hosts that resolve ``user_config``
-    differently and for the bundles already installed with the broken manifest.
+    line. This does not reach the bundles already installed with the broken
+    manifest: a bundle carries this source and that manifest together, so
+    whatever fixes one fixes the other. What it covers is a host that resolves
+    ``user_config`` by some other rule or ignores ``default``, and a variable
+    somebody set by hand after reading one out of an extension's own settings
+    pane.
 
     Both failure modes are worth refusing. A literal in ``PROXY_SERVER`` aborts
     startup, which is loud. A literal in ``PROXY_USERNAME`` is not: the browser

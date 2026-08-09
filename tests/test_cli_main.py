@@ -1011,6 +1011,35 @@ class TestConfigurationErrorAtStartup:
         assert "proxy_server needs a host and an explicit port" in captured.err
         assert "Traceback" not in captured.err
 
+    def test_the_interactive_transport_choice_gets_the_same_answer(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A setting that only applies to HTTP passes the startup validation and
+        # fails the second one, after the user picks a transport. That call
+        # sits inside the runtime handler, which would log it as an unexpected
+        # error with its traceback.
+        config = _make_config(
+            is_interactive=True, transport="stdio", transport_explicitly_set=False
+        )
+        _patch_main_dependencies(monkeypatch, config)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.choose_transport_interactive",
+            lambda: "streamable-http",
+        )
+
+        def boom() -> None:
+            raise ConfigurationError("HTTP_PATH must start with a slash")
+
+        monkeypatch.setattr(config, "validate", boom)
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli_main.main()
+
+        assert exit_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "HTTP_PATH must start with a slash" in captured.err
+        assert "Traceback" not in captured.err
+
     def test_it_leaves_stdout_to_the_protocol(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:

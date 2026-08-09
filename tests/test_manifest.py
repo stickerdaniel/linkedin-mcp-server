@@ -116,3 +116,21 @@ def test_the_loader_knows_the_same_mapping(manifest: dict[str, Any]) -> None:
         "A variable the loader does not know keeps its literal; a string that "
         "does not match is compared against nothing."
     )
+
+
+def test_no_default_is_itself_a_placeholder(manifest: dict[str, Any]) -> None:
+    """A default that names another field only moves the problem.
+
+    The host resolves a default the same way it resolves anything else, so
+    ``"default": "${user_config.missing}"`` satisfies the rule above while
+    still handing a literal to the server.
+    """
+    offenders = sorted(
+        key
+        for key, entry in manifest.get("user_config", {}).items()
+        if isinstance(entry.get("default"), str)
+        and _PLACEHOLDER.search(entry["default"])
+    )
+    assert not offenders, (
+        f"user_config defaults that are themselves placeholders: {offenders}."
+    )
