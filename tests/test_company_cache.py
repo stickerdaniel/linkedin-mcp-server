@@ -246,12 +246,32 @@ class TestParseAbout:
         assert parse_about("") == {}
 
 
+# Real /jobs/search/?f_C= innerText (Gearset), captured live 2026-08-09. Each
+# job card repeats its title on two consecutive lines (verified companies add
+# " with verification"); the surrounding lines are company/location/date and
+# the page carries role-word chrome ("Save ... at", a "?" prompt, "N% <role>
+# level candidates" insights) that never repeats a line.
+_GEARSET_JOBSEARCH_LIVE = (
+    "Jobs in Worldwide\n"
+    "12 results\n"
+    "Set alert\n"
+    "Product Manager\n"
+    "Product Manager with verification\n"
+    "Gearset\n"
+    "Cambridge, England, United Kingdom (Remote)\n"
+    "Save Product Manager  at Gearset\n"
+    "What's the opportunity for a Product Manager at Gearset?\n"
+    "Account Executive - Mid Market\n"
+    "Account Executive - Mid Market\n"
+    "Gearset\n"
+    "11% Director level candidates\n"
+    "6% Manager level candidates\n"
+)
+
+
 class TestParseJobSearch:
     def test_reads_the_results_count(self):
-        text = "Jobs in Worldwide\n47 results\nSalesforce Administrator\n"
-        out = parse_job_search(text)
-        assert out.count == 47
-        assert "Salesforce Administrator" in out.sample
+        assert parse_job_search("Jobs in Worldwide\n47 results\n").count == 47
 
     def test_plus_capped_count_read_as_floor(self):
         assert parse_job_search("2,000+ results\n").count == 2000
@@ -263,18 +283,15 @@ class TestParseJobSearch:
         # Text with role-ish lines but no "N results" -> count stays None.
         assert parse_job_search("Some page\nSenior Manager\n").count is None
 
-    def test_job_card_ui_chrome_is_excluded_from_sample(self):
-        # These carry a role word but are UI chrome, not titles (seen live).
-        text = (
-            "12 results\n"
-            "Product Manager\n"
-            "Save Product Manager  at Gearset\n"
-            "What's the opportunity for a Product Manager at Gearset?\n"
-            "Account Executive with verification\n"
-        )
-        out = parse_job_search(text)
+    def test_titles_come_from_paired_line_structure_not_keywords(self):
+        # Real page: titles paired on consecutive lines; chrome never is.
+        out = parse_job_search(_GEARSET_JOBSEARCH_LIVE)
         assert out.count == 12
-        assert out.sample == ["Product Manager"]
+        assert out.sample == ["Product Manager", "Account Executive - Mid Market"]
+        # None of the role-word chrome leaked in.
+        assert not any(
+            "%" in s or s.lower().startswith("save ") or "?" in s for s in out.sample
+        )
 
     def test_empty(self):
         assert parse_job_search("") == (None, [])

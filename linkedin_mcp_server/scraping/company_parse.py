@@ -97,30 +97,6 @@ class ParsedJobs(NamedTuple):
     sample: list[str]
 
 
-# A line looks like an open role if it carries a role word...
-_ROLE_HINT = re.compile(
-    r"\b(engineer|developer|architect|consultant|analyst|administrator|"
-    r"specialist|designer|manager|director|executive|representative|"
-    r"account\s+executive|scientist|recruiter|controller|accountant)\b",
-    re.I,
-)
-# ...but NOT if it is LinkedIn's own chrome. The Jobs tab renders the global
-# nav/footer ("Sales Solutions", "Talent Solutions", "Marketing Solutions",
-# "Advertising", cookie/privacy links), whose items contain role-ish words but
-# are not openings. Excluding "solutions" et al. drops those without dropping a
-# genuine "Sales Manager".
-_JOBS_NOISE = re.compile(
-    r"\b(solutions|linkedin|advertising|privacy|cookie|guidelines|"
-    r"accessibility|about|careers\b|help\s+center)\b"
-    r"|see\s+all|show\s+more|·|follow|·|jobs?\s+you"
-    # Job-card UI chrome that carries a role word: the "Save <title> at <co>"
-    # button, the "What's the opportunity ...?" prompt (any question line), and
-    # the "... with verification" duplicate. Verified leaking live.
-    r"|\bsave\s+.+\bat\b|what's the opportunity|\?|with verification",
-    re.I,
-)
-
-
 _JOB_RESULTS = re.compile(r"(\d[\d,]*)\s*\+?\s*results?\b", re.I)
 _NO_JOBS = re.compile(r"no matching jobs|no results|0 results", re.I)
 
@@ -135,7 +111,7 @@ def parse_job_search(text: str) -> ParsedJobs:
     "no jobs" even for companies hiring thousands -- verified live.)
 
     ``count`` comes from the "N results" header; a "2,000+ results" cap is read
-    as its floor (2000). ``sample`` is a best-effort set of titles.
+    as its floor (2000). ``sample`` is a handful of titles.
     """
     if not text:
         return ParsedJobs(None, [])
@@ -147,20 +123,21 @@ def parse_job_search(text: str) -> ParsedJobs:
     if m:
         count = int(m.group(1).replace(",", ""))
 
+    # Titles are extracted structurally, not by keyword: every job card renders
+    # its title on two consecutive lines -- either identical, or the second
+    # suffixed " with verification" (checked live). The page's other role-word
+    # chrome (a "Save <title> at <co>" button, a "What's the opportunity...?"
+    # prompt, "11% Director level candidates" insights) never repeats a line
+    # that way, so the pairing cleanly separates real titles from noise.
+    lines = [ln.strip() for ln in text.splitlines()]
     seen: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not (3 <= len(line) <= 80):
+    for i in range(len(lines) - 1):
+        title, nxt = lines[i], lines[i + 1]
+        if not (3 <= len(title) <= 100):
             continue
-        # LinkedIn renders each title twice: once plain, once
-        # "<title> with verification". Keep the plain line, drop the dup.
-        if line.lower().endswith("with verification"):
-            continue
-        if "results" in line.lower():
-            continue
-        if _ROLE_HINT.search(line) and not _JOBS_NOISE.search(line):
-            if line not in seen:
-                seen.append(line)
+        paired = nxt == title or nxt.lower() == f"{title} with verification".lower()
+        if paired and title not in seen:
+            seen.append(title)
         if len(seen) >= 8:
             break
     return ParsedJobs(count, seen)
