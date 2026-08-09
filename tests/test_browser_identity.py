@@ -231,6 +231,35 @@ async def either_mode(request, tmp_path_factory, _mode_results) -> dict:
     return await _for_mode(tmp_path_factory, _mode_results, headless=request.param)
 
 
+def _split_outside_quotes(value: str, separator: str) -> list[str]:
+    """Split on *separator* where it is not inside a quoted string.
+
+    Not a general structured-fields parser, and it does not pretend to be one:
+    it knows that a quoted string runs to its unescaped closing quote and that
+    ``\\`` escapes the next character, which is all RFC 8941 allows inside one.
+    That is enough for the two headers read here, and it is the part that
+    matters, because a plain ``split`` on the separator would cut a brand name
+    containing it in half and fail a browser that is telling the truth.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    quoted = escaped = False
+    for character in value:
+        if escaped:
+            escaped = False
+        elif quoted and character == "\\":
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == separator and not quoted:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(character)
+    parts.append("".join(current))
+    return parts
+
+
 def _structured_string(value: str | None) -> str | None:
     """The text inside a structured-field string, or None if there is none.
 
@@ -239,32 +268,52 @@ def _structured_string(value: str | None) -> str | None:
     Python string, and ``assert headers.get(...)`` accepts it. Blank is exactly
     the failure worth catching here, since it is what a browser emits when it
     has the value in JavaScript and cannot put it on the wire.
+
+    Backslash escapes are undone rather than left in place, so a brand carrying
+    a quote reads as the browser meant it and not as its wire spelling.
     """
     if value is None:
         return None
-    return value.strip().strip('"') or None
+    token = value.strip()
+    if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
+        token = _unescape(token[1:-1])
+    return token or None
+
+
+def _unescape(text: str) -> str:
+    out: list[str] = []
+    escaped = False
+    for character in text:
+        if escaped:
+            out.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        else:
+            out.append(character)
+    return "".join(out)
 
 
 def _brand_list(value: str | None) -> dict[str, str | None]:
     """A ``"brand";v="version"`` list as a mapping, or empty if there is none.
 
-    Split on the comma at the top level and on the *last* ``;v=`` in each item.
-    Both are safe against the GREASE entry, whose separators Chromium draws
-    from a fixed set that contains ``;`` but no comma, and which cannot produce
-    the sequence ``;v=`` because what follows a separator is always ``A`` or
-    ``Brand``. Order is not preserved, deliberately: the list is shuffled on
-    purpose and reading it positionally is the mistake it exists to prevent.
+    Order is not preserved, deliberately: the list is shuffled on purpose and
+    reading it positionally is the mistake it exists to prevent.
     """
     if not value:
         return {}
     listed: dict[str, str | None] = {}
-    for part in value.split(","):
-        brand, _, version = part.strip().rpartition(";v=")
-        if not brand:  # an item with no version at all
-            brand, version = version, ""
-        name = _structured_string(brand)
-        if name is not None:
-            listed[name] = _structured_string(version)
+    for item in _split_outside_quotes(value, ","):
+        fields = _split_outside_quotes(item.strip(), ";")
+        name = _structured_string(fields[0])
+        if name is None:
+            continue
+        version = None
+        for parameter in fields[1:]:
+            key, _, raw = parameter.partition("=")
+            if key.strip() == "v":
+                version = _structured_string(raw)
+        listed[name] = version
     return listed
 
 
@@ -420,6 +469,31 @@ class TestTheHintsAgreeWithTheUserAgent:
         assert hints["bitness"], hints
         assert hints["fullVersionList"], hints
 
+    async def test_the_full_versions_name_the_running_major(self, either_mode):
+        """Non-empty is not the same as current.
+
+        The two channels are compared against each other below, so a version
+        list that has gone stale in *both* agrees with itself perfectly: user
+        agent and low-entropy brands at 149 while every full version still says
+        148 is a browser contradicting itself about its own build, and nothing
+        else here looks at it. Tying the real entries to the user agent's major
+        is what closes that, and it disposes of a GREASE-only list at the same
+        time, since after the filter there would be nothing left to check.
+        """
+        page = either_mode["page"]
+        ua_major = re.search(r"Chrome/(\d+)", page["ua"])
+        assert ua_major, page["ua"]
+        real = {
+            entry["brand"]: entry["version"]
+            for entry in page["highEntropy"]["fullVersionList"]
+            if not _GREASE.search(entry["brand"])
+        }
+
+        assert real, page["highEntropy"]["fullVersionList"]
+        assert all(
+            version.split(".")[0] == ua_major.group(1) for version in real.values()
+        ), f"user agent says {ua_major.group(1)}, full versions say {real}"
+
     async def test_the_header_channel_carries_them_too(self, either_mode):
         """A different channel from `getHighEntropyValues()`, and it only fills
         in on a request *after* the server has asked with `Accept-CH`. The page
@@ -457,6 +531,27 @@ class TestTheHintsAgreeWithTheUserAgent:
         }, (
             f"sec-ch-ua-full-version-list says {sent_brands} and "
             f"getHighEntropyValues says {hints['fullVersionList']}"
+        )
+
+    async def test_the_header_brand_list_matches_the_one_in_javascript(
+        self, either_mode
+    ):
+        """The low-entropy list is readable twice, and the two must be one list.
+
+        Both were checked against the user agent's major and never against each
+        other, which leaves the brand *names* unbound: JavaScript can say
+        ``Chromium`` while the wire says something else entirely, at the same
+        major, and every other assertion here is satisfied. That is the shape a
+        header override takes, and it is one of the two surfaces such an
+        override is known to miss.
+        """
+        listed = _brand_list(either_mode["page"]["headers"].get("sec-ch-ua"))
+
+        assert listed == {
+            brand["brand"]: brand["version"] for brand in either_mode["page"]["brands"]
+        }, (
+            f"sec-ch-ua says {listed} and navigator.userAgentData says "
+            f"{either_mode['page']['brands']}"
         )
 
     async def test_the_header_brand_major_matches_too(self, either_mode):
