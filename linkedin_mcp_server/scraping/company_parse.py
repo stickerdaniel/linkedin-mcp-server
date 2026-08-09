@@ -112,7 +112,11 @@ _ROLE_HINT = re.compile(
 _JOBS_NOISE = re.compile(
     r"\b(solutions|linkedin|advertising|privacy|cookie|guidelines|"
     r"accessibility|about|careers\b|help\s+center)\b"
-    r"|see\s+all|show\s+more|·|follow|·|jobs?\s+you",
+    r"|see\s+all|show\s+more|·|follow|·|jobs?\s+you"
+    # Job-card UI chrome that carries a role word: the "Save <title> at <co>"
+    # button, the "What's the opportunity ...?" prompt (any question line), and
+    # the "... with verification" duplicate. Verified leaking live.
+    r"|\bsave\s+.+\bat\b|what's the opportunity|\?|with verification",
     re.I,
 )
 

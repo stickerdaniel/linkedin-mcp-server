@@ -263,6 +263,19 @@ class TestParseJobSearch:
         # Text with role-ish lines but no "N results" -> count stays None.
         assert parse_job_search("Some page\nSenior Manager\n").count is None
 
+    def test_job_card_ui_chrome_is_excluded_from_sample(self):
+        # These carry a role word but are UI chrome, not titles (seen live).
+        text = (
+            "12 results\n"
+            "Product Manager\n"
+            "Save Product Manager  at Gearset\n"
+            "What's the opportunity for a Product Manager at Gearset?\n"
+            "Account Executive with verification\n"
+        )
+        out = parse_job_search(text)
+        assert out.count == 12
+        assert out.sample == ["Product Manager"]
+
     def test_empty(self):
         assert parse_job_search("") == (None, [])
 
