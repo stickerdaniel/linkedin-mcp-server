@@ -57,9 +57,8 @@ def parse_about(text: str) -> dict[str, str]:
         m = pattern.search(text)
         if m:
             val = _first_line(m.group(1))
-            # A URL-looking website may arrive without the label on some
-            # layouts; the labelled capture is preferred but we clean it either
-            # way.
+            # The website value can carry trailing text after the URL on some
+            # layouts; keep just the URL when the labelled line holds one.
             if field == "website":
                 url_m = _URL.search(val)
                 val = url_m.group(0) if url_m else val
