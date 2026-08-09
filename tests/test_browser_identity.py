@@ -102,6 +102,11 @@ _NATIVE_FUNCTION = re.compile(
 #: the ones this browser can currently report, and a platform that is not here
 #: is not judged: a new one belongs in this table after somebody looks it up,
 #: rather than failing a browser that is telling the truth about itself.
+#: The ones among them that no mobile device runs. Kept beside the table
+#: rather than derived from it, because "not mobile" is a claim about the
+#: platform and not about whether its user-agent token is known.
+_DESKTOP_PLATFORMS = frozenset({"macOS", "Windows", "Linux", "Chrome OS"})
+
 _PLATFORM_TOKENS = {
     "macOS": "Macintosh",
     "Windows": "Windows",
@@ -171,6 +176,9 @@ async def _describe(tmp_path: Path, *, headless: bool) -> dict:
             # Read before the close, because ``_no_window_available`` is set
             # during the launch and nothing after it changes the answer.
             described["windowless"] = manager._windowless
+            # Whether this machine turned out to have nowhere to put a window,
+            # which is a fact about the machine rather than about the browser.
+            described["noWindowAvailable"] = manager._no_window_available
         finally:
             # Closed by name rather than through ``async with``, so the browser
             # is torn down on the measurement's failure as well as its success.
@@ -322,10 +330,7 @@ def _structured_string(value: str | None) -> str | None:
     token = value.strip()
     if len(token) < 2 or not token.startswith('"') or not token.endswith('"'):
         return None
-    inner = _unescape(token[1:-1])
-    if '"' in inner and '\\"' not in token:
-        raise ValueError(f"an unescaped quote inside a structured string: {value!r}")
-    return inner or None
+    return _unescape(token[1:-1]) or None
 
 
 def _unescape(text: str) -> str:
@@ -347,6 +352,12 @@ def _unescape(text: str) -> str:
             escaped = False
         elif character == "\\":
             escaped = True
+        elif character == '"':
+            # Every quote inside the string has to be escaped, and this is the
+            # place that can tell: looking for an escape *somewhere* in the
+            # value, as an earlier version did, accepts one escaped quote as
+            # cover for a second unescaped one.
+            raise ValueError(f"an unescaped quote in a structured string: {text!r}")
         else:
             out.append(character)
     if escaped:
@@ -382,6 +393,8 @@ def _brand_list(value: str | None) -> list[tuple[str, str | None]]:
         version = None
         for parameter in fields[1:]:
             key, _, raw = parameter.partition("=")
+            if not key.strip():
+                raise ValueError(f"an empty parameter on a list member: {item!r}")
             if key.strip() == "v":
                 version = _structured_string(raw)
         listed.append((name, version))
@@ -482,6 +495,17 @@ class TestEveryRealmTellsTheSameStory:
             f"userAgentData.mobile is {page['mobile']!r}"
         )
 
+        # Agreeing with itself is not enough for this one either. A browser
+        # reporting macOS and a mobile form factor at the same time is saying
+        # two things no device is, and it passed while only the two channels
+        # were held against each other. Judged only for platforms known to be
+        # desktop, on the same principle as the table above.
+        if page["platform"] in _DESKTOP_PLATFORMS:
+            assert page["mobile"] is False, (
+                f"the platform is {page['platform']!r} and the browser calls "
+                f"itself mobile"
+            )
+
         token = _PLATFORM_TOKENS.get(page["platform"])
         if token is not None:
             assert token in page["ua"], (
@@ -542,6 +566,15 @@ class TestNothingAnnouncesAutomation:
         """
         from linkedin_mcp_server.hidden_target import hidden_target_is_supported
 
+        if default_mode["noWindowAvailable"]:
+            # A supported configuration, not a regression: macOS reached over
+            # SSH or run from a launch daemon has no WindowServer, the headed
+            # attempt is refused, and the fallback to real headless is the
+            # right answer. Routed through the same handler as a missing
+            # browser, so it skips on the developer's machine and still fails
+            # in CI, where every runner does have somewhere to put a window.
+            _unavailable("this machine has nowhere to put a window")
+
         assert default_mode["windowless"] == hidden_target_is_supported(), (
             "the default launch fell back to Chromium's headless mode on a "
             "platform that supports a hidden target, which puts the "
@@ -592,6 +625,25 @@ class TestNothingAnnouncesAutomation:
         directly on ``navigator`` shadows the accessor without touching it, so
         the value reads false while every attribute here still measures native.
         Measured in the bundled browser: a real browser has no own property.
+
+        **Where this stops, stated rather than papered over.** Everything above
+        is read from inside the page's realm, so a patch applied to that whole
+        realm can answer every question consistently: replace the getter, patch
+        ``Function.prototype.toString`` to describe both it and itself as
+        native, delegate for everything else, and each assertion here is
+        satisfied. Measured, and one more layer of self-description does not
+        close it, because the layer is asked the same way. Two escapes were
+        tried and neither works: the isolated world ``page.evaluate`` uses
+        shares these prototypes, so it reads the patch back unchanged; and a
+        CDP read still has to evaluate ``getOwnPropertyDescriptor`` in the
+        realm, which is as patchable as the rest.
+
+        That boundary is the realm's, not this file's. The standard here is
+        that nothing the browser says is refuted by another surface of the same
+        browser, and a uniformly patched realm is coherent -- dishonest, but
+        coherent, and invisible to the websites this exists to reason about.
+        Proving the runtime unmodified is a different exercise from proving it
+        consistent, and it wants a different tool.
         """
         assert either_mode["page"]["webdriver"] is False
         assert either_mode["ownWebdriver"] is False, (
