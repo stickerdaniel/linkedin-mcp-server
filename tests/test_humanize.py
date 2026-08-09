@@ -41,13 +41,21 @@ async def test_human_type_produces_exactly_the_text_correcting_typos(monkeypatch
     assert "".join(buf) == "Hi there"
 
 
-async def test_human_type_bounds_total_time_for_long_messages(monkeypatch):
-    """A long message must not type for minutes and overrun the tool timeout:
-    the per-key timing scales down so total time stays near the budget, while
-    still reproducing the exact text."""
+async def test_human_type_bounds_wall_clock_including_keyboard_io(monkeypatch):
+    """A long message must not overrun the tool timeout. The bound is
+    wall-clock: deliberate pauses stop once real elapsed reaches the budget,
+    and because every keystroke advances that clock, the per-key browser I/O
+    counts against the budget too -- not merely the summed sleeps. The exact
+    text is still typed to the end."""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.humanize.time.monotonic", lambda: clock["t"]
+    )
+
     slept: list[float] = []
 
     async def fake_sleep(s):
+        clock["t"] += s  # a deliberate pause advances the wall clock
         slept.append(s)
 
     monkeypatch.setattr("linkedin_mcp_server.core.humanize.asyncio.sleep", fake_sleep)
@@ -55,6 +63,7 @@ async def test_human_type_bounds_total_time_for_long_messages(monkeypatch):
     buf: list[str] = []
 
     async def type_(s):
+        clock["t"] += 0.01  # each keystroke is a browser round-trip: real time
         buf.append(s)
 
     page = MagicMock()
@@ -62,17 +71,15 @@ async def test_human_type_bounds_total_time_for_long_messages(monkeypatch):
     page.keyboard.type = AsyncMock(side_effect=type_)
     page.keyboard.press = AsyncMock()
 
-    msg = "a" * 3000  # ~480s at natural cadence
-    # typo_rate=0: this test is about the time bound; typo correctness is
-    # covered by test_human_type_produces_exactly_the_text_correcting_typos.
+    # 5000 keys of pure I/O alone is 50s here, dwarfing the sleep budget, so a
+    # bound that ignored I/O (only summed sleeps) would let this run long.
+    msg = "a" * 5000
     await human_type(page, msg, typo_rate=0.0, budget_seconds=30.0)
 
     assert "".join(buf) == msg
-    total = sum(slept)
-    # Sleeps stay within the budget (headroom is reserved for keyboard I/O),
-    # and far below the unbounded natural pace.
-    assert total <= 30.0
-    assert total < 3000 * 0.16 * 0.5
+    # Deliberate pauses cut off at the budgeted share of wall-clock time; they
+    # do not keep piling on for all 5000 characters.
+    assert sum(slept) <= 30.0 * 0.8 + 1.0
 
 
 class TestJitter:

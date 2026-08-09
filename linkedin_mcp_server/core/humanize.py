@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -40,17 +41,10 @@ async def human_pause(base: float, spread: float = 0.5) -> None:
     await asyncio.sleep(jitter(base, spread))
 
 
-# Rough natural cost per character (base key delay plus the amortized cost of
-# occasional thinking pauses and typo corrections). Used only to decide when a
-# message is long enough that natural cadence would overrun the time budget.
-_NATURAL_SECONDS_PER_CHAR = 0.16
-
-
-# Fraction of the budget spent on deliberate sleeps. The remainder is headroom
-# for time the budget does not cover: the browser keyboard round-trips (one per
-# key), any composer setup already spent before typing starts, and the Send
-# click after. Keeps the *whole* messaging operation under budget, not just the
-# sleeps.
+# Fraction of the budget spent on deliberate pauses. The remainder is headroom
+# for the Send click after typing and for any composer setup already spent
+# before it. The pause phase is measured against a wall clock (below), so the
+# per-key browser round-trips count against it too.
 _TYPING_SLEEP_FRACTION = 0.8
 
 
@@ -72,36 +66,41 @@ async def human_type(
 
     ``budget_seconds`` bounds the total typing time. Human cadence is ~0.16s per
     character, so a long message (thousands of characters) would otherwise run
-    for minutes and overrun the caller's tool timeout. When the natural pace
-    would exceed the budget the per-key timing is scaled down proportionally --
-    a person types a long message faster per key anyway -- so timing stays
-    jittered and human but total time is bounded for any length. Short messages
-    (the common case) are under budget and type at full natural cadence.
+    for minutes and overrun the caller's tool timeout. The deliberate pauses run
+    only until a wall-clock deadline (a fraction of the budget); past it the
+    remaining characters are typed at the browser's own pace with no added
+    pauses. Because the deadline is checked against ``time.monotonic()``, the
+    serial keyboard round-trips count against it too -- so total typing time is
+    bounded by ``budget_seconds`` regardless of message length *or* per-key I/O
+    latency, not merely the summed sleeps. Short messages (the common case)
+    finish well inside the deadline and type at full natural cadence.
 
-    Only a fraction of the budget is spent sleeping; the rest is headroom for
-    the browser keyboard round-trips and composer setup the budget cannot see.
-    The default (30s) sits well under typical tool timeouts; set it lower than
-    the caller's timeout if that timeout is unusually short.
+    MCP does not surface the client's timeout to the server, so there is no
+    caller deadline to inherit; ``budget_seconds`` is the knob. The default
+    (30s) sits well under typical tool timeouts; pass a smaller value if a
+    caller runs an unusually short one.
     """
     kb = page.keyboard
-    sleep_budget = budget_seconds * _TYPING_SLEEP_FRACTION
-    est = len(text) * _NATURAL_SECONDS_PER_CHAR
-    scale = min(1.0, sleep_budget / est) if est > sleep_budget else 1.0
+    # Wall-clock cutoff for deliberate pauses; keyboard I/O advances the clock
+    # too, so a long message stops pausing once real elapsed reaches the budget.
+    pause_until = time.monotonic() + budget_seconds * _TYPING_SLEEP_FRACTION
     for ch in text:
+        pacing = time.monotonic() < pause_until
         # Occasionally slip: type an adjacent-ish wrong letter, pause, undo it.
-        if ch.isalpha() and _rng.random() < typo_rate:
+        if pacing and ch.isalpha() and _rng.random() < typo_rate:
             wrong = _rng.choice("asdfghjklqwertyuiop")
             await kb.type(wrong)
-            await asyncio.sleep(_rng.uniform(0.09, 0.28) * scale)
+            await asyncio.sleep(_rng.uniform(0.09, 0.28))
             await kb.press("Backspace")
-            await asyncio.sleep(_rng.uniform(0.05, 0.16) * scale)
+            await asyncio.sleep(_rng.uniform(0.05, 0.16))
 
         await kb.type(ch)
-        delay = _rng.uniform(0.04, 0.17)
-        # Now and then, pause as if thinking or reading back.
-        if _rng.random() < 0.07:
-            delay += _rng.uniform(0.3, 0.9)
-        await asyncio.sleep(delay * scale)
+        if pacing:
+            delay = _rng.uniform(0.04, 0.17)
+            # Now and then, pause as if thinking or reading back.
+            if _rng.random() < 0.07:
+                delay += _rng.uniform(0.3, 0.9)
+            await asyncio.sleep(delay)
 
 
 async def humanize_after_nav(page: Any) -> None:
