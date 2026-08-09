@@ -101,6 +101,11 @@ _PAGE = b"""<!doctype html>
     // Automation artefacts a launcher can leave in the page's own realm.
     automationGlobals: Object.getOwnPropertyNames(window)
       .filter(n => /^(__pw|__playwright|\\$cdc_|__driver|__selenium|__webdriver)/.test(n)),
+    // The prototype accessor can be left perfectly native while an own
+    // property on the instance shadows it, which reads as false and leaves
+    // every descriptor attribute untouched. Measured against the bundled
+    // browser: the prototype still stringifies to [native code].
+    ownWebdriver: Object.hasOwn(navigator, 'webdriver'),
     webdriverDescriptor: (() => {
       const d = Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver');
       // The getter's own source, because that is what distinguishes a native

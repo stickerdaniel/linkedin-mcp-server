@@ -63,7 +63,14 @@ pytestmark = [
 #: GREASE brands exist to stop anyone parsing the list positionally. They carry
 #: deliberately meaningless versions, so a real brand has to be found by
 #: excluding them rather than by index.
-_GREASE = re.compile(r"not[)/\-_. ]?a[)/\-_. ]?brand", re.IGNORECASE)
+#:
+#: The separator class has to be wide. Chromium draws it from a fixed set that
+#: includes ``;``, ``:``, ``(``, ``=`` and ``?`` alongside the obvious ones, and
+#: the entry this browser actually sends is ``Not)A;Brand`` -- which an earlier
+#: spelling of this pattern did not match, quietly promoting the GREASE entry to
+#: a real brand. ``[\W_]`` covers the whole set, since ``_`` is the one
+#: separator that is also a word character.
+_GREASE = re.compile(r"not[\W_]?a[\W_]?brand", re.IGNORECASE)
 
 
 def _running_in_ci() -> bool:
@@ -164,9 +171,15 @@ async def _for_mode(tmp_path_factory, cache: dict, headless: bool) -> dict:
     times.
 
     ``BaseException`` because the outcomes worth remembering are the ones
-    pytest raises. ``pytest.fail`` and ``pytest.skip`` both raise from
-    ``OutcomeException``, which does not descend from ``Exception``, and either
-    one re-raised for the remaining cases is exactly the right answer for them.
+    pytest raises: ``pytest.fail`` and ``pytest.skip`` both raise from
+    ``OutcomeException``, which does not descend from ``Exception``.
+
+    What is kept is a description rather than the exception object. Re-raising
+    the instance works, and it also carries its traceback, its context and the
+    frame locals of the launch that failed, so every replay appends another
+    stack to the same chain and pins the first ``BrowserManager`` alive until
+    the module ends. The first case to run reports the real failure in full;
+    the rest need only to be told that it already happened.
     """
     key = "headless" if headless else "headed"
     if key not in cache:
@@ -174,12 +187,15 @@ async def _for_mode(tmp_path_factory, cache: dict, headless: bool) -> dict:
         try:
             cache[key] = (None, await _describe(base, headless=headless))
         except BaseException as exc:
-            cache[key] = (exc, None)
+            skipped = isinstance(exc, pytest.skip.Exception)
+            cache[key] = ((skipped, f"{type(exc).__name__}: {exc}"), None)
             raise
 
     failure, described = cache[key]
     if failure is not None:
-        raise failure
+        skipped, reason = failure
+        already = f"the {key} launch already failed in this module ({reason})"
+        pytest.skip(already) if skipped else pytest.fail(already)
     return described
 
 
@@ -343,8 +359,18 @@ class TestNothingAnnouncesAutomation:
 
         The getter's source does give it away. A native accessor stringifies to
         ``[native code]``; anything written in JavaScript stringifies to itself.
+
+        And the prototype is not the only place to look. Defining ``webdriver``
+        directly on ``navigator`` shadows the accessor without touching it, so
+        the value reads false while every attribute above still measures
+        native. Measured in the bundled browser, which is why the instance is
+        asked about separately: a real browser has no own property there.
         """
         assert either_mode["page"]["webdriver"] is False
+        assert either_mode["ownWebdriver"] is False, (
+            "navigator carries its own webdriver property, which shadows the "
+            "prototype accessor and leaves it looking untouched"
+        )
         descriptor = either_mode["webdriverDescriptor"]
         assert descriptor is not None
         assert descriptor["get"] == "function", descriptor
@@ -362,14 +388,22 @@ class TestNothingAnnouncesAutomation:
 class TestTheHintsAgreeWithTheUserAgent:
     async def test_the_brand_major_matches_the_user_agent_major(self, either_mode):
         """Order is not pinned: the brand list is deliberately shuffled and
-        salted with a GREASE entry to stop anyone reading it positionally."""
+        salted with a GREASE entry to stop anyone reading it positionally.
+
+        Every real brand has to agree, not one of them. Chrome for Testing
+        advertises ``Chromium`` and branded Chrome adds ``Google Chrome``, both
+        at the running major; a list carrying one brand at the user agent's
+        major and another at a different one is a contradiction the browser is
+        publishing about itself, and ``any`` would read the agreeing half and
+        call it settled.
+        """
         page = either_mode["page"]
         ua_major = re.search(r"Chrome/(\d+)", page["ua"])
         assert ua_major, page["ua"]
         real = [b for b in page["brands"] if not _GREASE.search(b["brand"])]
 
         assert real, page["brands"]
-        assert any(b["version"].split(".")[0] == ua_major.group(1) for b in real), (
+        assert all(b["version"].split(".")[0] == ua_major.group(1) for b in real), (
             f"user agent says {ua_major.group(1)}, brands say "
             f"{[(b['brand'], b['version']) for b in real]}"
         )
@@ -423,14 +457,27 @@ class TestTheHintsAgreeWithTheUserAgent:
         )
 
     async def test_the_header_brand_major_matches_too(self, either_mode):
+        """The same relation on the wire, and the same reason for ``all``.
+
+        Parsed rather than substring-matched, so a major appearing anywhere in
+        the item, including inside a brand name, cannot stand in for the
+        version.
+        """
         headers = either_mode["page"]["headers"]
         ua_major = re.search(r"Chrome/(\d+)", either_mode["page"]["ua"])
         assert ua_major
 
-        brands = headers.get("sec-ch-ua", "")
-        reals = [part for part in brands.split(",") if not _GREASE.search(part)]
-        assert reals, brands
-        assert any(f'"{ua_major.group(1)}"' in part for part in reals), brands
+        listed = _brand_list(headers.get("sec-ch-ua"))
+        reals = {
+            brand: version
+            for brand, version in listed.items()
+            if not _GREASE.search(brand)
+        }
+        assert reals, headers.get("sec-ch-ua")
+        assert all(
+            (version or "").split(".")[0] == ua_major.group(1)
+            for version in reals.values()
+        ), f"user agent says {ua_major.group(1)}, sec-ch-ua says {reals}"
 
 
 class TestTheWindowFitsTheScreenItStandsOn:
