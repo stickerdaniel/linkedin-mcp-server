@@ -190,6 +190,17 @@ class BrowserDowngradeError(LinkedInMCPError):
         )
 
 
+class VisualCPPRuntimeUnavailableError(LinkedInMCPError):
+    """greenlet's extension would not load, and neither would the C++ runtime.
+
+    Unavailable rather than missing: absent, wrong-architecture and damaged all
+    arrive as the same ``OSError``, so which one it is stays unknown and the
+    message quotes the loader instead of naming a cause. Its own class because
+    nothing here can install a system DLL, so the only useful response is to say
+    what was asked for and what came back. See ``greenlet_runtime``.
+    """
+
+
 class CookieDecryptionError(LinkedInMCPError):
     """A browser cookie could not be decrypted."""
 
