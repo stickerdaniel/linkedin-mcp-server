@@ -54,7 +54,12 @@ const describeAccessor = (name) => {
     // somebody redefined. The descriptor alone does not: redefining an
     // existing configurable property leaves every attribute the caller did
     // not name exactly as it was.
-    getSource: d.get ? String(d.get) : null,
+    //
+    // Through Function.prototype.toString and never String(), which would
+    // call the getter's *own* toString if it has one. Measured: a redefined
+    // getter carrying `toString: () => 'function get webdriver() { [native
+    // code] }'` produced exactly that text and passed for native.
+    getSource: d.get ? Function.prototype.toString.call(d.get) : null,
   };
 };
 
@@ -69,6 +74,8 @@ const describeAccessor = (name) => {
       ? await navigator.userAgentData.getHighEntropyValues(
           ['architecture', 'bitness', 'fullVersionList'])
       : null,
+    platform: navigator.userAgentData ? navigator.userAgentData.platform : null,
+    mobile: navigator.userAgentData ? navigator.userAgentData.mobile : null,
     hasWebdriver: 'webdriver' in navigator,
     webdriver: navigator.webdriver,
   });
@@ -141,6 +148,10 @@ const describeAccessor = (name) => {
     // against a remembered spelling. userAgent is the control: it is a native
     // accessor on the same prototype that nothing has any reason to touch, so
     // whatever shape V8 gives it is the shape webdriver must have too.
+    // The reader itself, because everything above trusts it. A patched
+    // Function.prototype.toString could return whatever it liked about every
+    // accessor at once, and asking it to describe itself is where that stops.
+    toStringSource: Function.prototype.toString.call(Function.prototype.toString),
     webdriverDescriptor: describeAccessor('webdriver'),
     userAgentDescriptor: describeAccessor('userAgent'),
   };

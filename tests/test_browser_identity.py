@@ -95,8 +95,21 @@ _GREASE = re.compile(r"not[\W_]?a[\W_]?brand", re.IGNORECASE)
 #: themselves are not. What it refuses is anything carrying a function body,
 #: which is every accessor written in JavaScript.
 _NATIVE_FUNCTION = re.compile(
-    r"function\s+(get|set)\s+\S+\s*\(\s*\)\s*\{\s*\[\s*native\s+code\s*\]\s*\}"
+    r"function\s+((get|set)\s+)?\S*\s*\(\s*\)\s*\{\s*\[\s*native\s+code\s*\]\s*\}"
 )
+
+#: What the user agent has to say for a platform the client hint claims. Only
+#: the ones this browser can currently report, and a platform that is not here
+#: is not judged: a new one belongs in this table after somebody looks it up,
+#: rather than failing a browser that is telling the truth about itself.
+_PLATFORM_TOKENS = {
+    "macOS": "Macintosh",
+    "Windows": "Windows",
+    "Linux": "Linux",
+    "Android": "Android",
+    "Chrome OS": "CrOS",
+    "Chromium OS": "CrOS",
+}
 
 
 def _running_in_ci() -> bool:
@@ -280,6 +293,8 @@ def _split_outside_quotes(value: str, separator: str) -> list[str]:
             current = []
             continue
         current.append(character)
+    if quoted or escaped:
+        raise ValueError(f"an unterminated structured string: {value!r}")
     parts.append("".join(current))
     return parts
 
@@ -307,7 +322,10 @@ def _structured_string(value: str | None) -> str | None:
     token = value.strip()
     if len(token) < 2 or not token.startswith('"') or not token.endswith('"'):
         return None
-    return _unescape(token[1:-1]) or None
+    inner = _unescape(token[1:-1])
+    if '"' in inner and '\\"' not in token:
+        raise ValueError(f"an unescaped quote inside a structured string: {value!r}")
+    return inner or None
 
 
 def _unescape(text: str) -> str:
@@ -436,6 +454,63 @@ class TestEveryRealmTellsTheSameStory:
                 f"{page.get(hint)!r} on the page"
             )
 
+    async def test_the_platform_and_form_factor_agree_with_javascript(
+        self, either_mode
+    ):
+        """Two hints that were compared between origins and nowhere else.
+
+        Agreeing across origins says only that whatever is being reported is
+        reported consistently, so a change that reached both said nothing: a
+        browser sending ``"Windows"`` and ``?1`` from a machine whose user
+        agent says Macintosh passed every case. The JavaScript side is the
+        other channel, and it is the one that has to match.
+
+        The user agent is brought in only where the platform is one this knows
+        a token for. An unfamiliar platform is left alone rather than guessed
+        at, because a new one is a thing to look up and not a reason to fail a
+        browser that is telling the truth.
+        """
+        page = either_mode["page"]
+        headers = page["headers"]
+
+        assert _structured_string(headers["sec-ch-ua-platform"]) == page["platform"], (
+            f"sec-ch-ua-platform says {headers['sec-ch-ua-platform']!r} and "
+            f"userAgentData says {page['platform']!r}"
+        )
+        assert headers["sec-ch-ua-mobile"] == ("?1" if page["mobile"] else "?0"), (
+            f"sec-ch-ua-mobile says {headers['sec-ch-ua-mobile']!r} and "
+            f"userAgentData.mobile is {page['mobile']!r}"
+        )
+
+        token = _PLATFORM_TOKENS.get(page["platform"])
+        if token is not None:
+            assert token in page["ua"], (
+                f"the platform is {page['platform']!r} and the user agent "
+                f"({page['ua']}) does not mention {token!r}"
+            )
+
+    async def test_the_two_brand_lists_name_the_same_browser(self, either_mode):
+        """The short list and the full one describe one browser, or should.
+
+        Each was tied to the user agent's major and to its own counterpart on
+        the wire, and never to the other. So ``brands`` could name ``Chromium``
+        while ``fullVersionList`` named something else entirely at the same
+        version, on both channels, and every case passed. The names have to be
+        the same names, and each short version has to be the major of the full
+        one it belongs to.
+        """
+        page = either_mode["page"]
+        short = _js_brand_list(page["brands"])
+        full = _js_brand_list(page["highEntropy"]["fullVersionList"])
+
+        assert [brand for brand, _ in short] == [brand for brand, _ in full], (
+            f"brands names {[b for b, _ in short]} and fullVersionList names "
+            f"{[b for b, _ in full]}"
+        )
+        assert short == [
+            (brand, (version or "").split(".")[0]) for brand, version in full
+        ], f"brands says {short} and fullVersionList says {full}"
+
 
 class TestNothingAnnouncesAutomation:
     async def test_no_headless_token_where_a_window_is_possible(self, headed_mode):
@@ -527,6 +602,10 @@ class TestNothingAnnouncesAutomation:
         descriptor = either_mode["webdriverDescriptor"]
         native = either_mode["userAgentDescriptor"]
         assert descriptor is not None and native is not None
+        assert _NATIVE_FUNCTION.fullmatch(either_mode["toStringSource"]), (
+            "Function.prototype.toString is not itself native, so nothing it "
+            f"says about any other function counts: {either_mode['toStringSource']!r}"
+        )
         assert _NATIVE_FUNCTION.fullmatch(native["getSource"]), (
             f"the control accessor is not native either: {native['getSource']!r}"
         )
