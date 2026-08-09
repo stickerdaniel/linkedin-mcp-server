@@ -66,10 +66,12 @@ pytestmark = [
 #:
 #: The separator class has to be wide. Chromium draws it from a fixed set that
 #: includes ``;``, ``:``, ``(``, ``=`` and ``?`` alongside the obvious ones, and
-#: the entry this browser actually sends is ``Not)A;Brand`` -- which an earlier
-#: spelling of this pattern did not match, quietly promoting the GREASE entry to
-#: a real brand. ``[\W_]`` covers the whole set, since ``_`` is the one
-#: separator that is also a word character.
+#: two of those are in play right here: the bundled browser sends
+#: ``Not)A;Brand`` and Chrome 151 under ``CHROME_PATH`` sends ``Not=A?Brand``.
+#: An earlier spelling of this pattern listed five characters and matched
+#: neither, quietly promoting the GREASE entry to a real brand. ``[\W_]`` covers
+#: the whole set, since ``_`` is the one separator that is also a word
+#: character.
 _GREASE = re.compile(r"not[\W_]?a[\W_]?brand", re.IGNORECASE)
 
 
@@ -390,12 +392,13 @@ class TestTheHintsAgreeWithTheUserAgent:
         """Order is not pinned: the brand list is deliberately shuffled and
         salted with a GREASE entry to stop anyone reading it positionally.
 
-        Every real brand has to agree, not one of them. Chrome for Testing
-        advertises ``Chromium`` and branded Chrome adds ``Google Chrome``, both
-        at the running major; a list carrying one brand at the user agent's
-        major and another at a different one is a contradiction the browser is
-        publishing about itself, and ``any`` would read the agreeing half and
-        call it settled.
+        Every real brand has to agree, not one of them. Measured: Chrome for
+        Testing advertises ``Chromium`` alone, and Chrome 151 under
+        ``CHROME_PATH`` advertises ``Google Chrome`` and ``Chromium`` at the
+        same major. A list carrying one brand at the user agent's major and
+        another at a different one is a contradiction the browser is publishing
+        about itself, and ``any`` would read the agreeing half and call it
+        settled.
         """
         page = either_mode["page"]
         ua_major = re.search(r"Chrome/(\d+)", page["ua"])
