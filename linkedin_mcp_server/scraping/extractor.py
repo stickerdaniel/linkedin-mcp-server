@@ -1623,7 +1623,7 @@ class LinkedInExtractor:
                         break
                     await target.scroll_into_view_if_needed(timeout=2000)
                     await target.click(timeout=2000)
-                    await asyncio.sleep(1.0)
+                    await human_pause(1.0)
                 except PlaywrightTimeoutError:
                     logger.debug("Show more click timed out after %d clicks", i)
                     break
@@ -2648,7 +2648,7 @@ class LinkedInExtractor:
             {"candidates": normalized_candidates},
         )
         if selected:
-            await asyncio.sleep(0.75)
+            await human_pause(0.75)
         return bool(selected)
 
     async def _wait_for_message_composer(self) -> bool:
@@ -2772,7 +2772,7 @@ class LinkedInExtractor:
             return
         try:
             await self._click_first(_MESSAGING_CLOSE_SELECTOR, timeout=1500)
-            await asyncio.sleep(0.5)
+            await human_pause(0.5)
         except Exception:
             logger.debug("Could not dismiss LinkedIn messaging UI", exc_info=True)
 
@@ -4291,7 +4291,7 @@ class LinkedInExtractor:
         # Human-like typing: jittered per-key timing with occasional
         # typo-then-backspace, instead of a uniform 15ms cadence.
         await human_type(self._page, message)
-        await asyncio.sleep(0.3)
+        await human_pause(0.3)
 
         # patchright actionability also blocks send_button.click(). Use JS click
         # on any visible, enabled send button; fall back to Enter key which

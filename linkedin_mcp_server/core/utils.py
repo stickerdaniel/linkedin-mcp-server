@@ -135,7 +135,8 @@ async def scroll_job_sidebar(
             for (let i = 0; i < maxScrolls; i++) {
                 const prevHeight = container.scrollHeight;
                 container.scrollTop = container.scrollHeight;
-                await new Promise(r => setTimeout(r, pauseTime * 1000));
+                // Jittered pause (0.6x-1.4x): a constant scroll cadence is a bot tell.
+                await new Promise(r => setTimeout(r, pauseTime * 1000 * (0.6 + Math.random() * 0.8)));
                 if (container.scrollHeight === prevHeight) break;
                 scrollCount++;
             }
