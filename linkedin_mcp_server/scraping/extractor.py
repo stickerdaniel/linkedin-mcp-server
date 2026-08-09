@@ -3809,6 +3809,35 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    async def get_notifications(self, limit: int = 20) -> dict[str, Any]:
+        """List recent notifications from the notifications page."""
+        url = "https://www.linkedin.com/notifications/"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context="Notifications")
+        await handle_modal_close(self._page)
+
+        scrolls = max(1, limit // 10)
+        await self._scroll_main_scrollable_region(
+            position="bottom", attempts=scrolls, pause_time=0.5
+        )
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+        references: list[Reference] = (
+            build_references(raw_result["references"], "notifications")
+            if cleaned
+            else []
+        )
+
+        return self._single_section_result(
+            url,
+            "notifications",
+            cleaned,
+            references=references,
+        )
+
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
         url = "https://www.linkedin.com/messaging/"
