@@ -4743,6 +4743,189 @@ class TestGetInbox:
         assert refs[0]["text"] == "Tony Chan"
 
 
+class TestNormalizePostUrl:
+    """Tests for LinkedInExtractor._normalize_post_url."""
+
+    def test_posts_path_becomes_absolute(self):
+        url = LinkedInExtractor._normalize_post_url("/posts/abc-def-activity-123/")
+        assert url == "https://www.linkedin.com/posts/abc-def-activity-123/"
+
+    def test_bare_slug_gets_leading_slash(self):
+        url = LinkedInExtractor._normalize_post_url("posts/abc-def-activity-123")
+        assert url == "https://www.linkedin.com/posts/abc-def-activity-123"
+
+    def test_feed_update_urn_accepted(self):
+        url = LinkedInExtractor._normalize_post_url(
+            "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+        )
+        assert url == "https://www.linkedin.com/feed/update/urn:li:activity:123/"
+
+    def test_full_url_without_www_normalized(self):
+        url = LinkedInExtractor._normalize_post_url(
+            "https://linkedin.com/posts/abc-def-activity-123/"
+        )
+        assert url == "https://linkedin.com/posts/abc-def-activity-123/"
+
+    def test_company_post_permalink_accepted(self):
+        url = LinkedInExtractor._normalize_post_url(
+            "/company/acme/posts/abc-def-activity-123/"
+        )
+        assert url == "https://www.linkedin.com/company/acme/posts/abc-def-activity-123/"
+
+    def test_non_linkedin_host_rejected(self):
+        with pytest.raises(LinkedInScraperException, match="linkedin.com"):
+            LinkedInExtractor._normalize_post_url(
+                "https://example.com/posts/abc-def/"
+            )
+
+    def test_non_post_path_rejected(self):
+        with pytest.raises(LinkedInScraperException, match="post permalink"):
+            LinkedInExtractor._normalize_post_url("/in/someuser/")
+
+    def test_empty_string_rejected(self):
+        with pytest.raises(LinkedInScraperException, match="post permalink"):
+            LinkedInExtractor._normalize_post_url("")
+
+
+class TestGetPostComments:
+    async def test_returns_post_comments_section(self, mock_page):
+        """get_post_comments returns sections with post_comments key."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_expand_comment_thread", new_callable=AsyncMock
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={
+                    "text": "Post body\nJane Doe\nGreat insight!",
+                    "references": [],
+                },
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="Post body\nJane Doe\nGreat insight!",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+        ):
+            result = await extractor.get_post_comments("/posts/abc-activity-123/")
+
+        assert "sections" in result
+        assert "post_comments" in result["sections"]
+        assert "Great insight!" in result["sections"]["post_comments"]
+        assert result["url"] == "https://www.linkedin.com/posts/abc-activity-123/"
+
+    async def test_empty_post_page(self, mock_page):
+        """get_post_comments returns empty sections when page has no content."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_expand_comment_thread", new_callable=AsyncMock
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="",
+            ),
+        ):
+            result = await extractor.get_post_comments("/posts/abc-activity-123/")
+
+        assert result["sections"] == {}
+
+    async def test_expands_thread_before_extraction(self, mock_page):
+        """get_post_comments clicks pagination up to max_expansions times."""
+        extractor = LinkedInExtractor(mock_page)
+        expand_mock = AsyncMock()
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(extractor, "_expand_comment_thread", expand_mock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "Post body", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="Post body",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+        ):
+            await extractor.get_post_comments(
+                "/posts/abc-activity-123/", max_expansions=7
+            )
+
+        expand_mock.assert_awaited_once_with(7)
+
+    async def test_invalid_permalink_rejected_before_navigation(
+        self, mock_page
+    ):
+        """A non-post permalink raises without navigating."""
+        extractor = LinkedInExtractor(mock_page)
+        nav_mock = AsyncMock()
+        with (
+            patch.object(extractor, "_navigate_to_page", nav_mock),
+            pytest.raises(LinkedInScraperException, match="post permalink"),
+        ):
+            await extractor.get_post_comments("/in/someuser/")
+
+        nav_mock.assert_not_awaited()
+
+
 class TestGetConversation:
     async def test_returns_conversation_by_thread_id(self, mock_page):
         """get_conversation with thread_id navigates directly to thread URL."""

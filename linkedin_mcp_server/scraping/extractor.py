@@ -3809,6 +3809,97 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    # Comment-thread pagination buttons. innerText carries no URL or
+    # attribute signal distinguishing these controls from regular buttons,
+    # so the labels are matched on visible text — guarded by an explicit
+    # per-locale table (CLAUDE.md → Scraping Rules). BrowserManager forces
+    # the context locale to en-US (core/browser.py), so the "en" entry is
+    # the operative one.
+    _COMMENT_EXPANSION_RE = re.compile(
+        r"^See \d+ (more comment|previous repl)", re.IGNORECASE
+    )
+
+    @staticmethod
+    def _normalize_post_url(post_permalink: str) -> str:
+        """Normalize a post permalink or path into a canonical absolute URL.
+
+        Accepts a full URL, a path (``/posts/<slug>``, ``/feed/update/<urn>/``),
+        or a bare ``posts/<slug>``. Raises for anything that is not a post
+        permalink — the wrong target silently scraped is worse than a loud
+        refusal.
+        """
+        candidate = post_permalink.strip()
+        parsed = urlparse(candidate)
+        if parsed.netloc:
+            if parsed.netloc not in ("www.linkedin.com", "linkedin.com"):
+                raise LinkedInScraperException(
+                    f"post_permalink must point at linkedin.com, got {parsed.netloc}"
+                )
+            url = candidate
+        else:
+            path = candidate if candidate.startswith("/") else f"/{candidate}"
+            url = f"https://www.linkedin.com{path}"
+        parsed = urlparse(url)
+        if not re.match(r"^/(?:posts|feed/update|company/.+/posts)/", parsed.path):
+            raise LinkedInScraperException(
+                "post_permalink must be a post permalink "
+                "(/posts/<slug> or /feed/update/<urn>/), "
+                f"got {parsed.path or '(empty)'}"
+            )
+        return url
+
+    async def _expand_comment_thread(self, max_expansions: int) -> None:
+        """Click comment-pagination buttons until the thread is fully loaded."""
+        for i in range(max_expansions):
+            button = self._page.locator("main button").filter(
+                has_text=self._COMMENT_EXPANSION_RE
+            )
+            try:
+                if await button.count() == 0:
+                    logger.debug("No comment-pagination button after %d clicks", i)
+                    break
+                target = button.first
+                if not await target.is_visible():
+                    break
+                await target.scroll_into_view_if_needed(timeout=2000)
+                await target.click(timeout=2000)
+                await asyncio.sleep(1.0)
+            except PlaywrightTimeoutError:
+                logger.debug("Comment-pagination click timed out at %d", i)
+                break
+            except Exception as e:
+                logger.debug("Comment-pagination click failed: %s", e)
+                break
+
+    async def get_post_comments(
+        self, post_permalink: str, max_expansions: int = 5
+    ) -> dict[str, Any]:
+        """Read the full comment thread of a single post."""
+        url = self._normalize_post_url(post_permalink)
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context="Post comments")
+        await handle_modal_close(self._page)
+
+        await self._expand_comment_thread(max_expansions)
+        await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        cleaned = strip_linkedin_noise(raw) if raw else ""
+        references: list[Reference] = (
+            build_references(raw_result["references"], "post_comments")
+            if cleaned
+            else []
+        )
+
+        return self._single_section_result(
+            url,
+            "post_comments",
+            cleaned,
+            references=references,
+        )
+
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
         url = "https://www.linkedin.com/messaging/"
