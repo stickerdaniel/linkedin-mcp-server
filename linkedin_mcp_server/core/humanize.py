@@ -40,7 +40,19 @@ async def human_pause(base: float, spread: float = 0.5) -> None:
     await asyncio.sleep(jitter(base, spread))
 
 
-async def human_type(page: Any, text: str, *, typo_rate: float = 0.06) -> None:
+# Rough natural cost per character (base key delay plus the amortized cost of
+# occasional thinking pauses and typo corrections). Used only to decide when a
+# message is long enough that natural cadence would overrun the time budget.
+_NATURAL_SECONDS_PER_CHAR = 0.16
+
+
+async def human_type(
+    page: Any,
+    text: str,
+    *,
+    typo_rate: float = 0.06,
+    budget_seconds: float = 60.0,
+) -> None:
     """Type ``text`` the way a person does: jittered per-key timing, an
     occasional longer "thinking" pause, and now and then a wrong keystroke that
     is immediately backspaced and corrected.
@@ -49,23 +61,33 @@ async def human_type(page: Any, text: str, *, typo_rate: float = 0.06) -> None:
     followed by one Backspace and the right char, so nothing is left behind.
     A uniform per-key delay (the old fixed 15ms) is itself a tell; this removes
     it. Used on the message composer, the one place the scraper types.
+
+    ``budget_seconds`` bounds the total typing time. Human cadence is ~0.16s per
+    character, so a long message (thousands of characters) would otherwise run
+    for minutes and overrun the caller's tool timeout. When the natural pace
+    would exceed the budget the per-key timing is scaled down proportionally --
+    a person types a long message faster per key anyway -- so timing stays
+    jittered and human but total time is bounded for any length. Short messages
+    (the common case) are under budget and type at full natural cadence.
     """
     kb = page.keyboard
+    est = len(text) * _NATURAL_SECONDS_PER_CHAR
+    scale = min(1.0, budget_seconds / est) if est > budget_seconds else 1.0
     for ch in text:
         # Occasionally slip: type an adjacent-ish wrong letter, pause, undo it.
         if ch.isalpha() and _rng.random() < typo_rate:
             wrong = _rng.choice("asdfghjklqwertyuiop")
             await kb.type(wrong)
-            await asyncio.sleep(_rng.uniform(0.09, 0.28))
+            await asyncio.sleep(_rng.uniform(0.09, 0.28) * scale)
             await kb.press("Backspace")
-            await asyncio.sleep(_rng.uniform(0.05, 0.16))
+            await asyncio.sleep(_rng.uniform(0.05, 0.16) * scale)
 
         await kb.type(ch)
         delay = _rng.uniform(0.04, 0.17)
         # Now and then, pause as if thinking or reading back.
         if _rng.random() < 0.07:
             delay += _rng.uniform(0.3, 0.9)
-        await asyncio.sleep(delay)
+        await asyncio.sleep(delay * scale)
 
 
 async def humanize_after_nav(page: Any) -> None:
