@@ -303,7 +303,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 ### Authentication
 
-Docker runs headless (no browser window), so you need to create a browser profile locally first and mount it into the container.
+Docker runs full Chromium headed on a virtual display. No browser window reaches the host, so you still need to create a browser profile locally first and mount it into the container.
 
 **Step 1: Create profile on the host (one-time setup)**
 
@@ -334,7 +334,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 > Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx mcp-server-linkedin@latest --login` again if you encounter authentication issues.
 
 > [!NOTE]
-> **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
+> **Why can't I run `--login` in Docker?** The container has a virtual display for Chromium, but no viewer that can show it to you or accept the form, 2FA, or captcha. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
 
 ### Docker Setup Help
 
@@ -370,7 +370,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--proxy-server URL` - Route the browser through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD` (no flag, so it stays out of the process list)
 
 > [!NOTE]
-> `--login` and `--no-headless` are not available in Docker (no display server). Use the [uvx setup](#-uvx-setup-recommended---universal) to create profiles.
+> `--login` is not usable in Docker yet: Chromium has a virtual display, but the image has no viewer for completing the login. Docker is already headed by default; `--no-headless` therefore changes nothing. Use the [uvx setup](#-uvx-setup-recommended---universal) to create profiles. The experimental `--daemon` is also ignored in Docker because its owner can outlive the virtual display.
 
 **HTTP Mode Example (for web-based MCP clients):**
 

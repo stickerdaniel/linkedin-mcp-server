@@ -78,8 +78,8 @@ headless".
 | Full Chromium headless (`channel="chromium"`) | 67% / 50% | Two high-severity fpscanner rules from the headless token |
 | Headless shell (the old default) | — | `plugins.length = 0`, no `window.chrome`, notification permission incoherent |
 | Hidden target, windowless mode (macOS) | — | No headless token in UA or brands; `visible` / focused; rAF at 100% of a control window |
-| Docker, headed under Xvfb | 0% / 44% | No headless token, native hints; needs `xauth` |
-| Docker, Xvfb + Mesa llvmpipe | 0% / 44% | Restores WebGL; renderer string is a known software renderer |
+| Docker, headed under Xvfb | 0% / 44% | No headless token, native hints; Xvfb is started directly in Python's process group |
+| Docker, Xvfb + Mesa llvmpipe | 0% / 44% | WebGL1 and WebGL2; byte-identical renderer across both published architectures |
 
 The windowless mode, measured end to end through `BrowserManager`:
 
@@ -111,6 +111,66 @@ like Linux, so it is not claimed.
 Linux is less a gap than a different answer: under a virtual display nobody is
 looking at the screen, so an ordinary window is already invisible and there is
 nothing to hide.
+
+### Docker WebGL on the virtual display
+
+Measured in the candidate image on Linux amd64 and arm64, ten cold browser
+launches per architecture. Headed Chromium under Xvfb started with no WebGL1 or
+WebGL2 context even though Mesa's `swrast_dri.so` and `kms_swrast_dri.so` were
+present. The result was 0/10 on both architectures, and every explicit renderer
+selector tried stayed there: `--use-gl=angle --use-angle=gl`, `--use-gl=egl`,
+`--use-gl=desktop` and ANGLE Vulkan.
+
+The working configuration is the simpler one:
+
+```
+--enable-webgl --ignore-gpu-blocklist
+```
+
+It does not choose a renderer. It lets Chromium use the Mesa path already in the
+image. Results, across all twenty cold launches:
+
+| | amd64 | arm64 |
+|---|---|---|
+| WebGL1 context | 10/10 | 10/10 |
+| WebGL2 context | 10/10 | 10/10 |
+| Unmasked renderer | `ANGLE (Mesa/X.org, llvmpipe (LLVM 15.0.6 128 bits), OpenGL 4.5)` | same, byte-identical |
+| SwiftShader | absent | absent |
+| GPU-process crash | none | none |
+| High-entropy architecture / bitness | `x86` / `64` | `arm` / `64` |
+| Headless token | absent | absent |
+| Page, workers and cross-origin frame agree | yes | yes |
+| `outer <= screen` | yes | yes |
+
+SwiftShader was measured as the one other path that creates both contexts. It is
+excluded: its renderer names `SwiftShader` explicitly, and Patchright strips the
+unsafe fallback on purpose because that string is an automation signal in its
+own right. `LIBGL_ALWAYS_SOFTWARE=1` changed none of the failed explicit-selector
+results and is not set.
+
+The display adds no package of its own: Xvfb already comes from Patchright's
+Chromium dependency set, and starting it directly needs no `xauth`. Installing
+only full Chromium with `--no-shell` makes the resulting image smaller than the
+previous full-plus-shell image, not larger. Measured from clean builds of the
+same source: 543.5 to 429.6 MiB on arm64 (-113.9 MiB), and 512.4 to 406.2 MiB on
+amd64 (-106.2 MiB), using Docker's uncompressed image size.
+
+### Docker shutdown and display lifetime
+
+`xvfb-run` is not the image supervisor. Measured under `docker stop`,
+`tini -g -- xvfb-run ... python` exited 143 without Python running its shutdown
+path: `xvfb-run` has an EXIT trap for Xvfb and no TERM forwarder for its child.
+Starting Xvfb and Python under one small supervisor in the same process group
+lets `tini -g` deliver TERM to all three. The supervisor also makes display
+liveness container liveness: if Xvfb dies, it terminates Python and exits
+non-zero instead of leaving a live MCP endpoint whose next browser cannot open.
+Uvicorn logged its complete application shutdown before the container exited,
+in 0.50 seconds.
+
+The experimental daemon is refused in a container. Its owner deliberately
+starts a new session so it can outlive a stdio frontend; measured there, it had
+a distinct process group while Xvfb remained the frontend's child. Letting that
+owner survive would give the browser a lifetime the display does not share.
 
 Two things this does not claim. The half second of visible window on every
 browser start cannot be shortened from here — roughly 250 ms passes before

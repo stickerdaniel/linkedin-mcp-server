@@ -535,9 +535,45 @@ class TestWhetherTheDaemonAppliesAtAll:
 
         assert daemon_would_be_used(config) is False
 
-    def test_stdio_with_the_flag_on_uses_a_daemon(self):
+    def test_stdio_with_the_flag_on_uses_a_daemon(self, monkeypatch):
         config = AppConfig()
         config.server.daemon_enabled = True
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.get_runtime_id",
+            lambda: "linux-amd64-host",
+        )
 
         assert config.server.transport == "stdio"
         assert daemon_would_be_used(config) is True
+
+    def test_a_container_refuses_the_daemon_and_says_why(self, monkeypatch, caplog):
+        """An owner outliving its frontend would also outlive its X display."""
+        config = AppConfig()
+        config.server.daemon_enabled = True
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.get_runtime_id",
+            lambda: "docker-amd64-container",
+        )
+
+        with caplog.at_level("WARNING", logger="linkedin_mcp_server.daemon"):
+            applies = daemon_would_be_used(config)
+
+        assert applies is False
+        assert "DAEMON_ENABLED is ignored in a container" in caplog.text
+        assert "virtual display" in caplog.text
+
+    def test_container_http_needs_no_daemon_warning(self, monkeypatch, caplog):
+        """HTTP is one shared server already, in every runtime."""
+        config = AppConfig()
+        config.server.daemon_enabled = True
+        config.server.transport = "streamable-http"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.get_runtime_id",
+            lambda: "docker-arm64-container",
+        )
+
+        with caplog.at_level("WARNING", logger="linkedin_mcp_server.daemon"):
+            applies = daemon_would_be_used(config)
+
+        assert applies is False
+        assert caplog.text == ""
