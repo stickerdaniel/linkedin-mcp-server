@@ -291,6 +291,31 @@ class TestEnrichCompanyDeep:
         extractor.scrape_company.assert_not_awaited()
         extractor.extract_page.assert_not_awaited()
 
+    async def test_a_rate_limited_jobs_page_is_not_cached_as_fresh(
+        self, mcp, wired, mock_context
+    ):
+        """extract_page can return the soft rate-limit sentinel WITHOUT raising.
+        Caching it would serve a failed lookup as fresh for the jobs TTL, so the
+        jobs half must stay stale (unrecorded) instead."""
+        from linkedin_mcp_server.scraping.extractor import (
+            _RATE_LIMITED_MSG,
+            ExtractedSection,
+        )
+
+        cache, _ = wired
+        extractor = self._deep_extractor()
+        extractor.extract_page = AsyncMock(
+            return_value=ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        )
+
+        fn = await get_tool_fn(mcp, "enrich_company_deep")
+        await fn("Acme", mock_context, extractor=extractor)
+
+        rec = cache.get("Acme")
+        assert rec.has_firmographics()  # About succeeded
+        assert not rec.has_jobs()  # rate-limited jobs NOT stamped fresh
+        assert cache.needs_jobs("Acme", datetime.now().astimezone())  # retried next
+
     async def test_stale_jobs_refetch_uses_cached_urn_without_about(
         self, mcp, wired, mock_context
     ):

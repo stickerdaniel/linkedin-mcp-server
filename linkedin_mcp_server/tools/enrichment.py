@@ -99,6 +99,10 @@ def register_enrichment_tools(
             Job summary: queued count, duplicates dropped, effective cap today.
         """
         try:
+            if job_name == ACCOUNT_BUDGET_JOB:
+                raise ToolError(
+                    f"{job_name!r} is a reserved internal name; choose another."
+                )
             cleaned = [_normalize(u) for u in usernames]
             cleaned = [u for u in cleaned if u]
             if not cleaned:

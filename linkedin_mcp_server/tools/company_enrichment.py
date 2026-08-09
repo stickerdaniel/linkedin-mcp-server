@@ -62,6 +62,7 @@ from linkedin_mcp_server.scraping.company_parse import (
     parse_job_search,
     parse_search_results,
 )
+from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG
 
 logger = logging.getLogger(__name__)
 
@@ -393,14 +394,22 @@ def register_company_enrichment_tools(
                     f"https://www.linkedin.com/jobs/search/?f_C={urn}&geoId=92000000"
                 )
                 extracted = await extractor.extract_page(jobs_url, section_name="jobs")
-                parsed = parse_job_search(extracted.text or "")
-                cache.record_jobs(
-                    company,
-                    now,
-                    count=parsed.count,
-                    sample=parsed.sample,
-                    raw_jobs=extracted.text or "",
-                )
+                text = extracted.text or ""
+                # extract_page can hand back an error section or the soft
+                # rate-limit sentinel *without raising*. Caching that would
+                # stamp jobs fresh for the TTL and serve a failed lookup as
+                # real data. Only record on a genuine page; the load happened
+                # either way, so it still costs a budget action, and the jobs
+                # half stays stale so the next call retries.
+                if text and text != _RATE_LIMITED_MSG and not extracted.error:
+                    parsed = parse_job_search(text)
+                    cache.record_jobs(
+                        company,
+                        now,
+                        count=parsed.count,
+                        sample=parsed.sample,
+                        raw_jobs=text,
+                    )
                 budget.ledger.record(now)
         except RateLimitError:
             jobs.save(budget)

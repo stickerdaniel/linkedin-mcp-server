@@ -143,6 +143,12 @@ class TestStartJob:
         with pytest.raises(ToolError, match="No usable usernames"):
             await fn("j", ["", "   ", "/"])
 
+    async def test_reserved_budget_name_is_refused(self, mcp):
+        # A user job named like the internal budget record would overwrite it.
+        fn = await get_tool_fn(mcp, "start_enrichment_job")
+        with pytest.raises(ToolError, match="reserved"):
+            await fn(ACCOUNT_BUDGET_JOB, ["a"])
+
 
 class TestRunBunch:
     async def _seed(self, mcp, store, usernames):

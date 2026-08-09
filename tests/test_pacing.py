@@ -264,16 +264,23 @@ class TestJobStore:
     def test_list_is_empty_before_anything_is_written(self, tmp_path):
         assert JobStore(tmp_path / "unborn").list_jobs() == []
 
-    def test_job_names_cannot_escape_the_store_directory(self, tmp_path):
+    def test_unsafe_names_are_rejected_not_lossily_mapped(self, tmp_path):
+        # Path traversal and separators are refused outright, so nothing is
+        # written outside the store and no two names alias to one file.
         store = JobStore(tmp_path / "jobs")
-        job = Job(name="../../etc/passwd", started_on=date(2026, 8, 5))
-        store.save(job)
+        for bad in ("../../etc/passwd", "a/b", "egypt gulf", "../.."):
+            with pytest.raises(ValueError, match="may contain only"):
+                store.save(Job(name=bad, started_on=date(2026, 8, 5)))
         assert not (tmp_path / "etc").exists()
-        assert store.list_jobs() == ["etcpasswd"]
 
-    def test_a_name_with_nothing_usable_is_rejected(self, tmp_path):
-        with pytest.raises(ValueError, match="no usable characters"):
-            JobStore(tmp_path / "jobs").load("../..")
+    def test_distinct_names_do_not_collide(self, tmp_path):
+        # "a-b" and "ab" are different files (the old strip-based path mapped
+        # "a/b" and "ab" to the same one).
+        store = JobStore(tmp_path / "jobs")
+        store.save(Job(name="a-b", started_on=date(2026, 8, 5), pending=["x"]))
+        store.save(Job(name="ab", started_on=date(2026, 8, 5), pending=["y"]))
+        assert store.load("a-b").pending == ["x"]
+        assert store.load("ab").pending == ["y"]
 
     def test_no_tmp_file_is_left_behind(self, tmp_path):
         store = JobStore(tmp_path / "jobs")

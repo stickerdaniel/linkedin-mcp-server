@@ -32,6 +32,7 @@ import json
 import logging
 import math
 import random
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -298,10 +299,18 @@ class JobStore:
         self.root = Path(root).expanduser()
 
     def _path(self, name: str) -> Path:
-        safe = "".join(c for c in name if c.isalnum() or c in "-_")
-        if not safe:
-            raise ValueError(f"Job name {name!r} has no usable characters")
-        return self.root / f"{safe}.json"
+        # The filename is the name verbatim, so distinct names cannot collide.
+        # Stripping unsafe characters instead (the old behaviour) aliased
+        # "a/b" and "ab" to one file, silently merging two jobs' state -- and
+        # let a user job overwrite the private budget record. Reject anything
+        # outside the safe set rather than lossily map it.
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise ValueError(
+                f"Job name {name!r} may contain only letters, digits, '-' or "
+                "'_' (no spaces, slashes or other characters), so that distinct "
+                "names cannot collide on disk."
+            )
+        return self.root / f"{name}.json"
 
     def exists(self, name: str) -> bool:
         return self._path(name).exists()
