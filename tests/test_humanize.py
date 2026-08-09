@@ -41,6 +41,39 @@ async def test_human_type_produces_exactly_the_text_correcting_typos(monkeypatch
     assert "".join(buf) == "Hi there"
 
 
+async def test_human_type_bounds_total_time_for_long_messages(monkeypatch):
+    """A long message must not type for minutes and overrun the tool timeout:
+    the per-key timing scales down so total time stays near the budget, while
+    still reproducing the exact text."""
+    slept: list[float] = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    monkeypatch.setattr("linkedin_mcp_server.core.humanize.asyncio.sleep", fake_sleep)
+
+    buf: list[str] = []
+
+    async def type_(s):
+        buf.append(s)
+
+    page = MagicMock()
+    page.keyboard = MagicMock()
+    page.keyboard.type = AsyncMock(side_effect=type_)
+    page.keyboard.press = AsyncMock()
+
+    msg = "a" * 3000  # ~480s at natural cadence
+    # typo_rate=0: this test is about the time bound; typo correctness is
+    # covered by test_human_type_produces_exactly_the_text_correcting_typos.
+    await human_type(page, msg, typo_rate=0.0, budget_seconds=30.0)
+
+    assert "".join(buf) == msg
+    total = sum(slept)
+    # Bounded near the budget, and far below the unbounded natural pace.
+    assert total <= 30.0 * 1.3
+    assert total < 3000 * 0.16 * 0.5
+
+
 class TestJitter:
     def test_stays_within_the_spread_band(self):
         for _ in range(200):
