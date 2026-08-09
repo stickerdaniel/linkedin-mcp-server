@@ -69,8 +69,9 @@ async def test_human_type_bounds_total_time_for_long_messages(monkeypatch):
 
     assert "".join(buf) == msg
     total = sum(slept)
-    # Bounded near the budget, and far below the unbounded natural pace.
-    assert total <= 30.0 * 1.3
+    # Sleeps stay within the budget (headroom is reserved for keyboard I/O),
+    # and far below the unbounded natural pace.
+    assert total <= 30.0
     assert total < 3000 * 0.16 * 0.5
 
 
