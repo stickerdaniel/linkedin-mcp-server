@@ -222,6 +222,11 @@ class TestEnrichCompanies:
 
 class TestEnrichCompanyDeep:
     def _deep_extractor(self):
+        """Mock the two calls the tool now makes: scrape_company(about) -- which
+        yields the firmographics and the company URN reference -- and
+        extract_page(job-search URL) for the open-roles count."""
+        from linkedin_mcp_server.scraping.extractor import ExtractedSection
+
         mock = MagicMock()
         mock.scrape_company = AsyncMock(
             return_value={
@@ -232,15 +237,27 @@ class TestEnrichCompanyDeep:
                         "Company size\n1,001-5,000 employees\n"
                         "Headquarters\nCairo, Egypt\n"
                     ),
-                    "jobs": "12 open jobs\nSalesforce Administrator\nRevOps Manager\n",
+                },
+                "references": {
+                    "about": [
+                        {
+                            "kind": "company_urn",
+                            "url": "/search/results/people/?currentCompany=%5B%229999%22%5D",
+                            "value": "9999",
+                        }
+                    ]
                 },
             }
         )
+        mock.extract_page = AsyncMock(
+            return_value=ExtractedSection(
+                text="Jobs in Worldwide\n42 results\nSalesforce Administrator\n",
+                references=[],
+            )
+        )
         return mock
 
-    async def test_fetches_about_and_jobs_and_caches_both(
-        self, mcp, wired, mock_context
-    ):
+    async def test_fetches_firmographics_and_open_roles(self, mcp, wired, mock_context):
         cache, _ = wired
         extractor = self._deep_extractor()
 
@@ -250,10 +267,13 @@ class TestEnrichCompanyDeep:
         assert out["status"] == "fetched"
         assert out["industry"] == "Retail"
         assert out["employee_count"] == "1,001-5,000 employees"
-        assert out["open_roles_count"] == 12
-        # Both halves persisted.
+        assert out["open_roles_count"] == 42  # from the job SEARCH, not the tab
+        # Open roles came from job-search-by-URN, not the company /jobs/ tab.
+        jobs_url = extractor.extract_page.await_args.args[0]
+        assert "/jobs/search/?f_C=9999" in jobs_url
         rec = cache.get("Acme")
         assert rec.has_firmographics() and rec.has_jobs()
+        assert rec.company_urn == "9999"  # cached for later jobs-only refresh
 
     async def test_cache_fresh_skips_the_fetch(self, mcp, wired, mock_context):
         cache, _ = wired
@@ -269,15 +289,22 @@ class TestEnrichCompanyDeep:
 
         assert out["status"] == "cache_fresh"
         extractor.scrape_company.assert_not_awaited()
+        extractor.extract_page.assert_not_awaited()
 
-    async def test_stale_jobs_refetch_only_jobs(self, mcp, wired, mock_context):
-        """Firmographics fresh, jobs stale -> only the Jobs tab is requested."""
+    async def test_stale_jobs_refetch_uses_cached_urn_without_about(
+        self, mcp, wired, mock_context
+    ):
+        """Firmographics fresh, jobs stale -> re-fetch ONLY open roles, using
+        the URN cached from the earlier deep fetch (no About re-scrape)."""
         cache, _ = wired
         now = datetime.now().astimezone()
         cache.record_firmographics(
-            "Acme", now, source="company_page", industry="Retail"
+            "Acme",
+            now,
+            source="company_page",
+            industry="Retail",
+            company_urn="9999",
         )
-        # Jobs recorded 30 days ago -> past the 14-day TTL.
         old = (now - timedelta(days=30)).isoformat()
         rec = cache.get("Acme")
         rec.open_roles_count = 5
@@ -288,20 +315,21 @@ class TestEnrichCompanyDeep:
         fn = await get_tool_fn(mcp, "enrich_company_deep")
         await fn("Acme", mock_context, extractor=extractor)
 
-        called_sections = extractor.scrape_company.await_args.args[1]
-        assert "jobs" in called_sections
-        assert "about" not in called_sections
+        extractor.scrape_company.assert_not_awaited()  # firmographics still fresh
+        extractor.extract_page.assert_awaited_once()  # only open roles refreshed
+        assert "f_C=9999" in extractor.extract_page.await_args.args[0]
 
-    async def test_include_jobs_false_skips_jobs(self, mcp, wired, mock_context):
+    async def test_include_jobs_false_skips_the_job_search(
+        self, mcp, wired, mock_context
+    ):
         cache, _ = wired
         extractor = self._deep_extractor()
 
         fn = await get_tool_fn(mcp, "enrich_company_deep")
         await fn("Acme", mock_context, include_jobs=False, extractor=extractor)
 
-        called_sections = extractor.scrape_company.await_args.args[1]
-        assert "about" in called_sections
-        assert "jobs" not in called_sections
+        extractor.scrape_company.assert_awaited_once()  # About still fetched
+        extractor.extract_page.assert_not_awaited()  # no open-roles lookup
 
 
 class TestGetCompanyCache:

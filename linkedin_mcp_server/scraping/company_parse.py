@@ -117,40 +117,48 @@ _JOBS_NOISE = re.compile(
 )
 
 
-def parse_jobs(text: str) -> ParsedJobs:
-    """Count and sample the open roles on a company Jobs tab.
+_JOB_RESULTS = re.compile(r"(\d[\d,]*)\s*\+?\s*results?\b", re.I)
+_NO_JOBS = re.compile(r"no matching jobs|no results|0 results", re.I)
 
-    ``count`` is read *only* from LinkedIn's own "N open jobs" heading, which is
-    authoritative; with no heading it stays ``None``. It is never derived from
-    how many role-ish lines were scraped -- a company with zero openings still
-    renders the nav/footer (verified against real empty jobs tabs), and counting
-    those would invent a positive hiring signal, the exact thing this module
-    must not do. ``sample`` is a best-effort handful of titles for the
-    buying-signal read.
+
+def parse_job_search(text: str) -> ParsedJobs:
+    """Count and sample open roles from a job-SEARCH page filtered by company.
+
+    This is the real source of a company's openings: LinkedIn's
+    ``/jobs/search/?f_C=<company id>`` page, which shows its "N results" count
+    and the job cards. (The company Page's own /jobs/ tab only lists roles
+    posted directly on the Page, which most employers don't use, so it reads
+    "no jobs" even for companies hiring thousands -- verified live.)
+
+    ``count`` comes from the "N results" header; a "2,000+ results" cap is read
+    as its floor (2000). ``sample`` is a best-effort set of titles.
     """
     if not text:
         return ParsedJobs(None, [])
+    if _NO_JOBS.search(text):
+        return ParsedJobs(0, [])
 
     count: int | None = None
-    heading = re.search(
-        r"([\d,]+)\s*(?:open\s+jobs?|open\s+roles?|open\s+positions?|jobs?\b)",
-        text,
-        re.I,
-    )
-    if heading:
-        count = int(heading.group(1).replace(",", ""))
+    m = _JOB_RESULTS.search(text)
+    if m:
+        count = int(m.group(1).replace(",", ""))
 
     seen: list[str] = []
     for raw in text.splitlines():
         line = raw.strip()
         if not (3 <= len(line) <= 80):
             continue
+        # LinkedIn renders each title twice: once plain, once
+        # "<title> with verification". Keep the plain line, drop the dup.
+        if line.lower().endswith("with verification"):
+            continue
+        if "results" in line.lower():
+            continue
         if _ROLE_HINT.search(line) and not _JOBS_NOISE.search(line):
             if line not in seen:
                 seen.append(line)
         if len(seen) >= 8:
             break
-
     return ParsedJobs(count, seen)
 
 

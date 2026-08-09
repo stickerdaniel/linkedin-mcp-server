@@ -15,7 +15,7 @@ from linkedin_mcp_server.company_cache import (
 )
 from linkedin_mcp_server.scraping.company_parse import (
     parse_about,
-    parse_jobs,
+    parse_job_search,
     parse_search_results,
 )
 
@@ -246,36 +246,25 @@ class TestParseAbout:
         assert parse_about("") == {}
 
 
-class TestParseJobs:
-    def test_reads_the_heading_count(self):
-        text = "Jobs\n47 open jobs\nSalesforce Administrator\nAccount Executive\n"
-        out = parse_jobs(text)
+class TestParseJobSearch:
+    def test_reads_the_results_count(self):
+        text = "Jobs in Worldwide\n47 results\nSalesforce Administrator\n"
+        out = parse_job_search(text)
         assert out.count == 47
         assert "Salesforce Administrator" in out.sample
 
-    def test_no_heading_means_no_count_never_invented(self):
-        # Without LinkedIn's own "N jobs" heading, count stays None -- it is
-        # never derived from how many role-ish lines were scraped.
-        text = "Careers\nSalesforce Developer\nRevenue Operations Manager\n"
-        out = parse_jobs(text)
-        assert out.count is None
-        assert "Salesforce Developer" in out.sample
+    def test_plus_capped_count_read_as_floor(self):
+        assert parse_job_search("2,000+ results\n").count == 2000
 
-    def test_footer_chrome_is_not_counted_as_open_roles(self):
-        # A company hiring for nothing still renders the global footer, whose
-        # items carry role-ish words. Those must not become a positive count
-        # or fabricated sample entries.
-        text = (
-            "0 open jobs\n"
-            "Sales Solutions\nMarketing Solutions\nTalent Solutions\n"
-            "Advertising\nAbout\nCareers\nHelp Center\n"
-        )
-        out = parse_jobs(text)
-        assert out.count == 0
-        assert out.sample == []
+    def test_no_matching_jobs_is_zero(self):
+        assert parse_job_search("No matching jobs found").count == 0
+
+    def test_never_invents_a_count_without_a_results_header(self):
+        # Text with role-ish lines but no "N results" -> count stays None.
+        assert parse_job_search("Some page\nSenior Manager\n").count is None
 
     def test_empty(self):
-        assert parse_jobs("") == (None, [])
+        assert parse_job_search("") == (None, [])
 
 
 class TestParseSearchResults:
@@ -330,12 +319,24 @@ _NOT_FOUND_LIVE = (
     "This LinkedIn Page isn't available\n"
     "The page you're searching for no longer exists."
 )
-_EMPTY_JOBS_LIVE = (
-    "Interested in working with us in the future?\n"
-    "Members who share that they're interested in a company may be 2x as likely "
-    "to get a message from a recruiter than those who don't. Learn more\n"
-    "There are no jobs right now.\n"
-    "Create a job alert and we'll let you know when relevant jobs are posted."
+# Real job-SEARCH-by-company text (Accenture, f_C=1033), captured live
+# 2026-08-09. This is the actual open-roles source; note the "2,000+ results"
+# header and the title/"title with verification"/company/location cadence.
+_ACCENTURE_JOBSEARCH_LIVE = (
+    "Jobs in Worldwide\n"
+    "2,000+ results\n"
+    "Set alert\n"
+    "Principal Director of Content Operations\n"
+    "Principal Director of Content Operations with verification\n"
+    "Accenture\n"
+    "Montreal, QC (On-site)\n"
+    "19 connections work here\n"
+    "Viewed\n"
+    "Droga5 Senior Copywriter\n"
+    "Droga5 Senior Copywriter with verification\n"
+    "Accenture\n"
+    "New York, NY (On-site)\n"
+    "1 week ago"
 )
 
 
@@ -359,11 +360,13 @@ class TestParseRealLinkedInPages:
     def test_real_not_found_page_yields_nothing(self):
         # A deleted/renamed company page must not fabricate any field.
         assert parse_about(_NOT_FOUND_LIVE) == {}
-        assert parse_jobs(_NOT_FOUND_LIVE) == (None, [])
+        assert parse_job_search(_NOT_FOUND_LIVE) == (None, [])
 
-    def test_real_empty_jobs_tab_reports_no_openings(self):
-        # Zero real jobs -> count None, and the footer's 'recruiter' line does
-        # not leak in as a fabricated role.
-        out = parse_jobs(_EMPTY_JOBS_LIVE)
-        assert out.count is None
-        assert out.sample == []
+    def test_real_job_search_reads_count_and_titles(self):
+        out = parse_job_search(_ACCENTURE_JOBSEARCH_LIVE)
+        assert out.count == 2000  # "2,000+ results" floor
+        # Real titles come through; the "with verification" dup line and the
+        # company/location lines do not.
+        assert "Principal Director of Content Operations" in out.sample
+        assert not any("with verification" in s for s in out.sample)
+        assert "Montreal, QC (On-site)" not in out.sample

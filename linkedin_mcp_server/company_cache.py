@@ -100,6 +100,7 @@ class CompanyRecord:
     headquarters: str = ""
     website: str = ""
     linkedin_url: str = ""
+    company_urn: str = ""  # numeric LinkedIn company id, for job-search-by-company
     firmographics_source: str = ""  # "search" | "company_page"
     firmographics_fetched_at: str = ""  # ISO 8601, empty = never
 
@@ -212,6 +213,7 @@ class CompanyCache:
         headquarters: str = "",
         website: str = "",
         linkedin_url: str = "",
+        company_urn: str = "",
         raw_about: str = "",
     ) -> CompanyRecord:
         rec = self.get_or_new(name)
@@ -228,6 +230,8 @@ class CompanyCache:
             rec.website = website
         if linkedin_url:
             rec.linkedin_url = linkedin_url
+        if company_urn:
+            rec.company_urn = company_urn
         if raw_about:
             rec.raw_about = raw_about
 

@@ -8,10 +8,11 @@ Two levers, both entirely within LinkedIn, no third-party data:
   paced action per search to cover the rest. This is the ~10x that turns a
   two-month job into days.
 
-* **Tier 2, company page (dear, deep):** ``enrich_company_deep`` opens a single
-  company's About and Jobs tabs for the exact headcount band and its live open
-  roles -- the buying signal. Reserved for the short list of high-value targets
-  the summary surfaces, not the whole network.
+* **Tier 2, company page (dear, deep):** ``enrich_company_deep`` reads a single
+  company's About tab for the exact headcount band and its open-roles count
+  from LinkedIn's job search filtered by that company (NOT the Page's own
+  /jobs/ tab, which is empty for most employers) -- the buying signal. Reserved
+  for the short list of high-value targets, not the whole network.
 
 Both are cache-first with the two TTLs in ``company_cache``: firmographics stay
 fresh for 90 days, open roles for 14. Both draw down the single shared account
@@ -58,7 +59,7 @@ from linkedin_mcp_server.pacing import (
 )
 from linkedin_mcp_server.scraping.company_parse import (
     parse_about,
-    parse_jobs,
+    parse_job_search,
     parse_search_results,
 )
 
@@ -312,11 +313,14 @@ def register_company_enrichment_tools(
         """
         Deep firmographics plus live open roles for one company.
 
-        Opens the company's About tab (exact headcount band, HQ, website) and,
-        by default, its Jobs tab (count and a sample of open roles -- the
-        active-investment signal). Cache-first: a company whose firmographics
+        Reads the company's About tab (exact headcount band, HQ, website, and
+        the numeric company id) and, by default, its live open-roles count from
+        LinkedIn's job search filtered by that company -- the active-investment
+        signal. (The company Page's own /jobs/ tab is NOT used: it lists only
+        roles posted directly on the Page, so it reads "no jobs" even for
+        employers hiring thousands.) Cache-first: a company whose firmographics
         are fresh (<90d) and whose jobs are fresh (<14d) returns without any
-        page load. Costs one action per tab actually fetched.
+        page load. Costs one action per surface actually fetched.
 
         Reserve this for the high-value short list (top companies by contacts
         or decision makers). For breadth, use enrich_companies instead.
@@ -356,20 +360,55 @@ def register_company_enrichment_tools(
             ctx, tool_name="enrich_company_deep"
         )
         slug = _slug(company)
-        sections: set[str] = set()
-        if want_firmographics:
-            sections.add("about")
-        if want_jobs:
-            sections.add("jobs")
+        urn = rec.company_urn if rec else ""
 
         try:
-            result = await extractor.scrape_company(slug, sections)
+            # Firmographics from the About tab; also yields the numeric company
+            # URN, which the open-roles lookup below is keyed on.
+            if want_firmographics:
+                result = await extractor.scrape_company(slug, {"about"})
+                secs = result.get("sections", {})
+                about = secs.get("about", "")
+                fields = parse_about(about)
+                urn = _company_urn(result) or urn
+                cache.record_firmographics(
+                    company,
+                    now,
+                    source="company_page",
+                    industry=fields.get("industry", ""),
+                    employee_count=fields.get("employee_count", ""),
+                    headquarters=fields.get("headquarters", ""),
+                    website=fields.get("website", ""),
+                    linkedin_url=result.get("url", ""),
+                    company_urn=urn,
+                    raw_about=about,
+                )
+                budget.ledger.record(now)
+
+            # Open roles come from job SEARCH filtered by the company URN -- the
+            # company Page's own /jobs/ tab is empty for most employers. Needs
+            # the URN, so a jobs-only refresh relies on the one cached earlier.
+            if want_jobs and urn:
+                jobs_url = (
+                    f"https://www.linkedin.com/jobs/search/?f_C={urn}&geoId=92000000"
+                )
+                extracted = await extractor.extract_page(jobs_url, section_name="jobs")
+                parsed = parse_job_search(extracted.text or "")
+                cache.record_jobs(
+                    company,
+                    now,
+                    count=parsed.count,
+                    sample=parsed.sample,
+                    raw_jobs=extracted.text or "",
+                )
+                budget.ledger.record(now)
         except RateLimitError:
+            jobs.save(budget)
             return {
                 "company": company,
                 "status": "rate_limited",
                 "next_run_after_seconds": 3600,
-                **_firmographics_view(rec, "cache"),
+                **_firmographics_view(cache.get(company) or rec, "cache"),
             }
         except AuthenticationError as e:
             try:
@@ -379,39 +418,18 @@ def register_company_enrichment_tools(
         except Exception as e:
             raise_tool_error(e, "enrich_company_deep")  # NoReturn
 
-        secs = result.get("sections", {})
-        if want_firmographics and "about" in secs:
-            fields = parse_about(secs["about"])
-            cache.record_firmographics(
-                company,
-                now,
-                source="company_page",
-                industry=fields.get("industry", ""),
-                employee_count=fields.get("employee_count", ""),
-                headquarters=fields.get("headquarters", ""),
-                website=fields.get("website", ""),
-                linkedin_url=result.get("url", ""),
-                raw_about=secs["about"],
-            )
-            budget.ledger.record(now)
-
-        if want_jobs and "jobs" in secs:
-            parsed = parse_jobs(secs["jobs"])
-            cache.record_jobs(
-                company,
-                now,
-                count=parsed.count,
-                sample=parsed.sample,
-                raw_jobs=secs["jobs"],
-            )
-            budget.ledger.record(now)
-
         jobs.save(budget)
-        return {
+        out = {
             "company": company,
             "status": "fetched",
             **_firmographics_view(cache.get(company), "company_page"),
         }
+        if want_jobs and not urn:
+            out["jobs_note"] = (
+                "Open roles unavailable: no company URN known (fetch "
+                "firmographics first, or the About page exposed no id)."
+            )
+        return out
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -446,6 +464,19 @@ def _slug(company: str) -> str:
     if "/company/" in c:
         c = c.split("/company/", 1)[1].split("/")[0].split("?")[0]
     return c
+
+
+def _company_urn(result: dict[str, Any]) -> str:
+    """The numeric company id from an About scrape's references, if present.
+
+    The About page carries a ``company_urn`` reference whose ``value`` is the
+    id LinkedIn uses in the ``currentCompany``/``f_C`` facets -- what the
+    open-roles job search is keyed on.
+    """
+    for ref in result.get("references", {}).get("about", []):
+        if ref.get("kind") == "company_urn" and ref.get("value"):
+            return str(ref["value"])
+    return ""
 
 
 def _firmographics_view(
