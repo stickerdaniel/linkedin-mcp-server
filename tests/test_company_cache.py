@@ -279,6 +279,29 @@ class TestParseSearchResults:
         assert [h["slug"] for h in hits] == ["copado", "gearset"]
         assert hits[0]["url"] == "https://www.linkedin.com/company/copado"
 
+    def test_page_by_ad_prefix_is_stripped(self):
+        # LinkedIn's promoted top result is labelled "Page by <Company>" but
+        # links to the real company (verified live: Page by Salesforce ->
+        # /company/salesforce/). The label must not defeat name matching.
+        refs = [
+            {"url": "/company/salesforce/", "text": "Page by Salesforce"},
+        ]
+        hits = parse_search_results(refs)
+        assert hits[0]["name"] == "Salesforce"
+        assert hits[0]["slug"] == "salesforce"
+
+    def test_follower_blurb_falls_back_to_slug(self):
+        # A follower/relationship blurb also carries a /company/ link but is
+        # not a company name; the slug is the reliable identity.
+        refs = [
+            {
+                "url": "/company/docusign/",
+                "text": "Vamsi & 1 other connection follow this page",
+            },
+        ]
+        hits = parse_search_results(refs)
+        assert hits[0]["name"] == "docusign"  # slug, not the blurb
+
     def test_empty(self):
         assert parse_search_results([]) == []
 

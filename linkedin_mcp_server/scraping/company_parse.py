@@ -162,14 +162,27 @@ def parse_job_search(text: str) -> ParsedJobs:
     return ParsedJobs(count, seen)
 
 
-def parse_search_results(references: list[dict]) -> list[dict[str, str]]:
-    """Reduce company-search link references to {name, url} hits.
+# LinkedIn labels a promoted top result "Page by <Company>" -- verified live,
+# where "Page by Salesforce" links to /company/salesforce/. The literal label
+# must be stripped or it never matches the query.
+_PAGE_BY = re.compile(r"^page by\s+", re.I)
+# Follower/relationship blurbs also carry a /company/ link ("Vamsi Krishna &
+# 1 other connection follow this page") but are not company names.
+_REF_NOISE = re.compile(
+    r"follow this page|connections? follow|other connection|alternative to",
+    re.I,
+)
 
-    LinkedIn's company-search results page carries ~10 company links, each a
-    reference with the company's display text. Industry/location sit in the
-    surrounding innerText rather than the link, so the caller keeps the raw
-    ``search_results`` text for that; this just gives the clean company list
-    and their canonical /company/<slug> URLs to key the cache on.
+
+def parse_search_results(references: list[dict]) -> list[dict[str, str]]:
+    """Reduce company-search link references to {name, slug, url} hits.
+
+    LinkedIn's company-search results carry a company link per card, but the
+    link *text* is unreliable: the top result is labelled "Page by <Company>",
+    and follower/blurb lines also link to /company/. The slug in the URL is the
+    canonical identity, so it is the fallback whenever the text is an ad label
+    or noise -- that is what lets a query like "Salesforce" resolve to the
+    /company/salesforce/ card even though its label reads "Page by Salesforce".
     """
     hits: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -182,10 +195,13 @@ def parse_search_results(references: list[dict]) -> list[dict[str, str]]:
         if slug in seen:
             continue
         seen.add(slug)
-        # A whitespace-only text ("  ") is truthy, so `text or slug` would keep
-        # it and then .strip() to "" -- an empty name later blows up the cache
-        # key. Strip first, fall back to slug only when nothing survives.
-        name = (ref.get("text") or "").strip() or slug
+        # Strip the "Page by " ad prefix; drop follower/blurb text entirely.
+        # Whatever is left, if anything, is the name; else fall back to the
+        # slug (spaces for dashes), which is the reliable company identity.
+        text = (ref.get("text") or "").strip()
+        if _REF_NOISE.search(text):
+            text = ""
+        name = _PAGE_BY.sub("", text).strip() or slug.replace("-", " ")
         hits.append(
             {
                 "name": name,
