@@ -4770,13 +4770,13 @@ class TestNormalizePostUrl:
         url = LinkedInExtractor._normalize_post_url(
             "/company/acme/posts/abc-def-activity-123/"
         )
-        assert url == "https://www.linkedin.com/company/acme/posts/abc-def-activity-123/"
+        assert (
+            url == "https://www.linkedin.com/company/acme/posts/abc-def-activity-123/"
+        )
 
     def test_non_linkedin_host_rejected(self):
         with pytest.raises(LinkedInScraperException, match="linkedin.com"):
-            LinkedInExtractor._normalize_post_url(
-                "https://example.com/posts/abc-def/"
-            )
+            LinkedInExtractor._normalize_post_url("https://example.com/posts/abc-def/")
 
     def test_non_post_path_rejected(self):
         with pytest.raises(LinkedInScraperException, match="post permalink"):
@@ -4802,9 +4802,7 @@ class TestGetPostComments:
                 new_callable=AsyncMock,
             ),
             patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
-            patch.object(
-                extractor, "_expand_comment_thread", new_callable=AsyncMock
-            ),
+            patch.object(extractor, "_expand_comment_thread", new_callable=AsyncMock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
                 new_callable=AsyncMock,
@@ -4848,9 +4846,7 @@ class TestGetPostComments:
                 new_callable=AsyncMock,
             ),
             patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
-            patch.object(
-                extractor, "_expand_comment_thread", new_callable=AsyncMock
-            ),
+            patch.object(extractor, "_expand_comment_thread", new_callable=AsyncMock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
                 new_callable=AsyncMock,
@@ -4909,11 +4905,56 @@ class TestGetPostComments:
                 "/posts/abc-activity-123/", max_expansions=7
             )
 
-        expand_mock.assert_awaited_once_with(7)
+        expand_mock.assert_awaited_once_with(7, locale="en")
 
-    async def test_invalid_permalink_rejected_before_navigation(
-        self, mock_page
-    ):
+    async def test_unknown_locale_skips_pagination(self, mock_page):
+        """An unknown locale leaves comment pagination untouched (no guessing)."""
+        extractor = LinkedInExtractor(mock_page)
+        expand_mock = AsyncMock()
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(extractor, "_expand_comment_thread", expand_mock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "Post body", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="Post body",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+        ):
+            await extractor.get_post_comments(
+                "/posts/abc-activity-123/", max_expansions=7, locale="fr"
+            )
+
+        expand_mock.assert_awaited_once_with(7, locale="fr")
+
+    async def test_expand_skips_unknown_locale_without_touching_page(self, mock_page):
+        """_expand_comment_thread returns immediately for an unknown locale."""
+        extractor = LinkedInExtractor(mock_page)
+        await extractor._expand_comment_thread(5, locale="fr")
+        mock_page.locator.assert_not_called()
+
+    async def test_invalid_permalink_rejected_before_navigation(self, mock_page):
         """A non-post permalink raises without navigating."""
         extractor = LinkedInExtractor(mock_page)
         nav_mock = AsyncMock()
