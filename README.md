@@ -117,8 +117,8 @@ When you set up or maintain this server, verify its entry in the MCP client conf
 - `--logout` - Clear stored LinkedIn browser profile
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
-- `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in. `--login-viewer` closes remote control after a hard 1,800 seconds; protected profile restoration may finish afterward.
-- `--login-viewer` - With `--login` inside Docker, expose the login browser through one token-authenticated noVNC URL on port 6080. Requires a distinct persistent mount containing the configured profile.
+- `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in. `--login-viewer` caps the effective limit at its 1,800-second viewer wall, so `0` becomes 30 minutes in viewer mode; protected profile restoration may finish afterward.
+- `--login-viewer` - With `--login` inside Docker, expose the login browser through one token-authenticated noVNC URL on port 6080. Requires a writable, non-memory mount covering the authentication root above the configured profile.
 - `--login-inline-wait SECONDS` - Bounded inline wait for a tool call to resume after login completes, in seconds (default: 25, max 45; 0 = return immediately).
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters when several MCP clients run at the same time.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it to a waiting process (default: 20, clamped below `--browser-wait` so a waiting client is served before its own timeout; 0 = hand over after every tool call). Raising it means fewer browser restarts but longer waits for other clients.
@@ -306,9 +306,10 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 ### Authentication
 
-Docker includes an authenticated, short-lived browser viewer for explicit login. Create the profile directly in the mounted directory:
+Docker includes an authenticated, short-lived browser viewer for explicit login. Create the host directory before mounting it so the unprivileged container user can write the session:
 
 ```bash
+mkdir -p ~/.linkedin-mcp
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:6080:6080 \
@@ -316,9 +317,9 @@ docker run -it --rm \
   --login --login-viewer
 ```
 
-Open the complete loopback URL printed by the command. Its token stays in the URL fragment, so the initial HTTP request does not carry it. Static viewer files are public on port 6080; the token protects the WebSocket that controls the browser. The viewer fixes client-side scaling, keeps remote resize disabled, and closes after login, failure, a stop signal, or 1,800 seconds. Protected profile restoration may finish after remote control has closed, because interrupting a move on the mounted auth root could split the previous session. The profile mount is required before any existing session can be rotated. For the default profile, use the exact `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mapping above.
+Open the complete loopback URL printed by the command. Its token stays in the URL fragment, so the initial HTTP request does not carry it. Static viewer files are public on port 6080; the token protects the WebSocket that controls the browser. The viewer fixes client-side scaling, keeps remote resize disabled, and closes after login, failure, a stop signal, or 1,800 seconds. Protected profile restoration may finish after remote control has closed, because interrupting a move on the mounted auth root could split the previous session. The profile mount is required before any existing session can be rotated. For the default profile, use the exact `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mapping above. If an older rootful Docker run created that host directory as root, repair it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
 
-You can still create the profile on the host with `uvx mcp-server-linkedin@latest --login` and mount `~/.linkedin-mcp` into Docker. On startup, Docker derives a Linux browser profile from the source cookies and creates a fresh session each time.
+A profile created by the Docker viewer belongs to the container runtime and is reused directly on later Docker startups with the same runtime identity. A profile created on the host with `uvx mcp-server-linkedin@latest --login` or `--import-from-browser` belongs to a foreign runtime, so Docker derives a fresh Linux bridge from its source cookies on each startup.
 
 **Configure Claude Desktop with Docker**
 
@@ -338,7 +339,7 @@ You can still create the profile on the host with `uvx mcp-server-linkedin@lates
 ```
 
 > [!NOTE]
-> Docker creates a fresh session on each startup. Sessions may expire over time. Repeat the Docker viewer command above or run `uvx mcp-server-linkedin@latest --login` on the host.
+> Docker reuses a source profile created by the viewer under the same runtime identity. Host-created and otherwise foreign source profiles use a fresh Linux bridge on each startup. Sessions may expire over time; repeat the Docker viewer command above or run `uvx mcp-server-linkedin@latest --login` on the host.
 
 ### Docker Setup Help
 
@@ -362,8 +363,8 @@ You can still create the profile on the host with `uvx mcp-server-linkedin@lates
 - `--logout` - Clear all stored LinkedIn auth state, including source and derived runtime profiles and any retired sessions
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
-- `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in. `--login-viewer` closes remote control after a hard 1,800 seconds; protected profile restoration may finish afterward.
-- `--login-viewer` - With `--login` inside Docker, expose the login browser through one token-authenticated noVNC URL on port 6080. Requires a distinct persistent mount containing the configured profile.
+- `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in. `--login-viewer` caps the effective limit at its 1,800-second viewer wall, so `0` becomes 30 minutes in viewer mode; protected profile restoration may finish afterward.
+- `--login-viewer` - With `--login` inside Docker, expose the login browser through one token-authenticated noVNC URL on port 6080. Requires a writable, non-memory mount covering the authentication root above the configured profile.
 - `--login-inline-wait SECONDS` - Bounded inline wait for a tool call to resume after login completes, in seconds (default: 25, max 45; 0 = return immediately).
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters when several MCP clients run at the same time.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it to a waiting process (default: 20, clamped below `--browser-wait` so a waiting client is served before its own timeout; 0 = hand over after every tool call). Raising it means fewer browser restarts but longer waits for other clients.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
@@ -19,10 +20,23 @@ from linkedin_mcp_server.session_state import canonical
 VIEWER_WALL_SECONDS = 1800.0
 VIEWER_PORT = 6080
 _MOUNT_ESCAPE = re.compile(r"\\([0-7]{3})")
+# A filesystem held in RAM answers every question a bind mount answers: it is a
+# distinct mount, it is writable, and it is not the container root. It still
+# loses the session when the container stops, which is the one thing the
+# preflight exists to prevent.
+_MEMORY_FILESYSTEMS = frozenset({"tmpfs", "ramfs"})
 
 
 class LoginViewerError(RuntimeError):
     """The Docker login viewer could not be started safely."""
+
+
+@dataclass(frozen=True)
+class MountRecord:
+    """One Linux mountinfo line, reduced to what the preflight judges."""
+
+    point: Path
+    filesystem: str
 
 
 def _decode_mount_field(value: str) -> str:
@@ -30,14 +44,39 @@ def _decode_mount_field(value: str) -> str:
     return _MOUNT_ESCAPE.sub(lambda match: chr(int(match.group(1), 8)), value)
 
 
-def mount_points(mountinfo: str) -> tuple[Path, ...]:
-    """Return canonical-looking mount points from Linux mountinfo text."""
-    points: list[Path] = []
+def mount_records(mountinfo: str) -> tuple[MountRecord, ...]:
+    """Parse Linux mountinfo text into mount points and filesystem types."""
+    records: list[MountRecord] = []
     for line in mountinfo.splitlines():
         fields = line.split()
-        if len(fields) >= 5 and "-" in fields:
-            points.append(Path(_decode_mount_field(fields[4])))
-    return tuple(points)
+        # Fields 0-5 are fixed, then a variable number of optional tags, then
+        # the "-" separator with the filesystem type directly behind it.
+        # Searching from index 6 keeps a mount point spelled "-" from being
+        # mistaken for that separator.
+        separator = next(
+            (index for index in range(6, len(fields)) if fields[index] == "-"), None
+        )
+        if separator is None or separator + 1 >= len(fields):
+            continue
+        records.append(
+            MountRecord(
+                point=Path(_decode_mount_field(fields[4])),
+                filesystem=fields[separator + 1],
+            )
+        )
+    return tuple(records)
+
+
+def mount_points(mountinfo: str) -> tuple[Path, ...]:
+    """Return canonical-looking mount points from Linux mountinfo text."""
+    return tuple(record.point for record in mount_records(mountinfo))
+
+
+def _remedy(profile: Path) -> str:
+    """Name the mount that would make this profile survive the container."""
+    if profile == canonical(Path(DEFAULT_USER_DATA_DIR)):
+        return "Use -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp and try again."
+    return f"Mount a host directory or named volume at {profile.parent} and try again."
 
 
 def require_persistent_profile_mount(
@@ -45,30 +84,89 @@ def require_persistent_profile_mount(
     *,
     mountinfo_path: Path = Path("/proc/self/mountinfo"),
 ) -> None:
-    """Refuse a viewer login whose result would die with the container."""
+    """Refuse a viewer login whose result would die with the container.
+
+    The authentication root one level above the profile has to persist:
+    ``cookies.json``, ``source-state.json`` and the retired sessions all live
+    there, and a rotation moves the profile *within* that directory.
+    """
     profile = canonical(profile_dir)
+    auth_root = profile.parent
     try:
-        points = mount_points(mountinfo_path.read_text(encoding="utf-8"))
+        records = mount_records(mountinfo_path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise LoginViewerError(
             f"Cannot verify the Docker profile mount from {mountinfo_path}: {exc}"
         ) from exc
+    remedy = _remedy(profile)
 
-    persistent = any(
-        point != Path("/") and (point == profile or point in profile.parents)
-        for point in points
-    )
-    if persistent:
+    # A mount on the profile, or anywhere inside it, is worse than no mount at
+    # all. Rotation moves that directory aside, and a mountpoint cannot be
+    # moved: `shutil.move` falls back to copy-then-delete across devices, so the
+    # session is duplicated and emptied before the rename fails with EBUSY.
+    for record in records:
+        if record.point == profile or profile in record.point.parents:
+            raise LoginViewerError(
+                f"--login-viewer cannot rotate the profile: {record.point} is "
+                "itself a mount point, and retiring a session moves that "
+                "directory. Mount the authentication root "
+                f"{auth_root} instead, so the profile can move inside it. "
+                f"{remedy}"
+            )
+
+    # The nearest covering mount is the one the authentication root lives on. An
+    # ancestor further up describes a different filesystem once something closer
+    # is mounted over it, so it cannot answer for this directory.
+    covering = [
+        record
+        for record in records
+        if record.point == auth_root or record.point in auth_root.parents
+    ]
+    boundary = max(covering, key=lambda record: len(record.point.parts), default=None)
+    if boundary is None or boundary.point == Path("/"):
+        raise LoginViewerError(
+            "--login-viewer requires the configured profile to be on a distinct "
+            f"persistent mount, but {auth_root} is part of the container "
+            f"filesystem and is discarded with it. {remedy}"
+        )
+    if boundary.filesystem in _MEMORY_FILESYSTEMS:
+        raise LoginViewerError(
+            "--login-viewer requires the configured profile to be on a distinct "
+            f"persistent mount, but {boundary.point} is a {boundary.filesystem} "
+            f"filesystem held in memory and discarded with the container. "
+            f"{remedy}"
+        )
+    _require_a_writable_auth_root(auth_root, profile=profile)
+
+
+def _require_a_writable_auth_root(auth_root: Path, *, profile: Path) -> None:
+    """Refuse before rotation when the persistent root cannot be written.
+
+    Docker seeds a named volume from the image, so a volume for a path the image
+    never created arrives as ``root:root``. So does a host directory that an
+    earlier rootful ``docker run`` created. Either way the unprivileged runtime
+    only finds out on its first write, which happens after the previous session
+    has already been moved aside.
+    """
+    existing = auth_root
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
+    if existing.is_dir() and os.access(existing, os.W_OK | os.X_OK):
         return
 
-    default_profile = canonical(Path(DEFAULT_USER_DATA_DIR))
-    if profile == default_profile:
-        remedy = "-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp"
+    identity = ""
+    repair = "give the mounted host directory to the container user"
+    if hasattr(os, "geteuid"):
+        identity = f" by uid {os.geteuid()}"
+        repair = f"sudo chown -R {os.geteuid()}:{os.getegid()} <host directory>"
+    if profile == canonical(Path(DEFAULT_USER_DATA_DIR)):
+        create = "Create it first with mkdir -p ~/.linkedin-mcp"
     else:
-        remedy = f"mount a host directory or named volume at {profile.parent}"
+        create = "Create the mounted host directory before starting the container"
     raise LoginViewerError(
-        "--login-viewer requires the configured profile to be on a distinct "
-        f"persistent mount. Use {remedy} and try again."
+        f"--login-viewer cannot write the authentication root {auth_root}: "
+        f"{existing} is not writable{identity}. {create}, or repair a root-owned "
+        f"one with {repair}."
     )
 
 
