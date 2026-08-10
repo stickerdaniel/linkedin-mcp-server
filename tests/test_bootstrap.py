@@ -1,8 +1,10 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import os
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,9 +13,11 @@ import pytest
 from linkedin_mcp_server.bootstrap import (
     AuthState,
     _auto_import_allowed,
+    _CACHE_REPORT_MARKER,
     _force_move_auth_state_aside,
     _has_install_for,
     _patchright_install_targets,
+    _report_retained_browser_revisions,
     _start_login_if_needed,
     browser_setup_ready,
     browsers_path,
@@ -180,17 +184,21 @@ class TestBootstrap:
     def test_reset_bootstrap_cancels_running_tasks(self):
         setup_task = MagicMock()
         setup_task.done.return_value = False
+        cache_report_task = MagicMock()
+        cache_report_task.done.return_value = False
         login_task = MagicMock()
         login_task.done.return_value = False
 
         initialize_bootstrap("managed")
         state = get_bootstrap_state()
         state.setup_task = setup_task
+        state.cache_report_task = cache_report_task
         state.login_task = login_task
 
         reset_bootstrap_for_testing()
 
         setup_task.cancel.assert_called_once_with()
+        cache_report_task.cancel.assert_called_once_with()
         login_task.cancel.assert_called_once_with()
 
     def test_managed_browser_path_defaults_under_auth_root(self, isolate_profile_dir):
@@ -529,6 +537,419 @@ class TestBrowserReady:
         _materialize_install(bdir, ["chromium-1217", "chromium_headless_shell-1217"])
         _write_metadata(install_metadata_path(), bdir, version=2)
         assert browser_ready() is False
+
+
+def _fill(directory: Path, num_bytes: int) -> None:
+    """Give *directory* a payload file of a known size."""
+    (directory / "payload.bin").write_bytes(b"\0" * num_bytes)
+
+
+class TestRetainedRevisionReport:
+    """The managed cache is inventoried and reported, never pruned (#686).
+
+    Patchright keeps every revision a valid `.links` reference names, and uv
+    keeps one readable archive per version anyone has run, so old browsers stay
+    on disk for good. Deleting a link or a browser directory would break an
+    installation that can still be launched, so the server says what it is
+    holding and how to reclaim it by hand.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _headless_config(self, monkeypatch):
+        _set_headless(monkeypatch, True)
+
+    def _report(self, caplog) -> str:
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+            _report_retained_browser_revisions()
+        return caplog.text
+
+    def test_current_revision_alone_is_silent(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """A fresh install holds nothing it will not launch."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217"])
+
+        assert self._report(caplog) == ""
+        assert not (bdir / _CACHE_REPORT_MARKER).exists()
+
+    def test_old_full_and_every_shell_are_reported(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """The running revision is active; the older one and the shells are not."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(
+            bdir,
+            [
+                "chromium-1208",
+                "chromium-1217",
+                "chromium_headless_shell-1208",
+                "chromium_headless_shell-1217",
+            ],
+        )
+
+        text = self._report(caplog)
+
+        assert "chromium-1208" in text
+        assert "chromium_headless_shell-1208" in text
+        assert "chromium_headless_shell-1217" in text
+        assert "chromium-1217" not in text
+
+    def test_unrelated_directories_are_left_out(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """Only the two browsers this server installs are the report's business."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(
+            bdir,
+            [
+                "chromium-1217",
+                "chromium-1208",
+                "chromium_tip_of_tree-1208",
+                "ffmpeg-1011",
+            ],
+        )
+
+        text = self._report(caplog)
+
+        assert "chromium-1208" in text
+        assert "chromium_tip_of_tree" not in text
+        assert "ffmpeg" not in text
+
+    def test_symlinked_revisions_are_neither_named_nor_measured(
+        self, isolate_profile_dir, monkeypatch, tmp_path, caplog
+    ):
+        """A link is not the storage it points at.
+
+        Counting it would attribute another directory's bytes to this cache and
+        name something the remedy would not free.
+        """
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium_headless_shell-1217"])
+        _fill(bdir / "chromium_headless_shell-1217", 2048)
+
+        elsewhere = tmp_path / "elsewhere" / "chromium-1208"
+        elsewhere.mkdir(parents=True)
+        _fill(elsewhere, 4 * 1024 * 1024)
+        (bdir / "chromium-1208").symlink_to(elsewhere, target_is_directory=True)
+
+        text = self._report(caplog)
+
+        assert "chromium_headless_shell-1217" in text
+        assert "chromium-1208" not in text
+        assert "2.0 KiB" in text
+
+    def test_warning_carries_size_path_and_remedy(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+        _fill(bdir / "chromium-1208", 3 * 1024 * 1024)
+
+        text = self._report(caplog)
+
+        assert "3.0 MiB" in text
+        assert "chromium-1208" in text
+        assert str(bdir) in text
+        assert "stop every LinkedIn MCP Server instance" in text
+
+    def test_the_same_cache_state_warns_once(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """A restart on an unchanged cache has nothing new to say."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+
+        assert "chromium-1208" in self._report(caplog)
+        caplog.clear()
+        assert self._report(caplog) == ""
+        assert (bdir / _CACHE_REPORT_MARKER).is_file()
+
+    def test_concurrent_process_report_is_suppressed_by_the_cache_lock(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """A second process stays quiet while the first records this state."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+        scan_started = threading.Event()
+        finish_scan = threading.Event()
+
+        def blocked_size(_path: Path) -> int:
+            scan_started.set()
+            assert finish_scan.wait(timeout=1)
+            return 1024
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._directory_size", blocked_size
+        )
+        with (
+            caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"),
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            first = pool.submit(_report_retained_browser_revisions)
+            assert scan_started.wait(timeout=1)
+            second = pool.submit(_report_retained_browser_revisions)
+            second.result(timeout=1)
+            finish_scan.set()
+            first.result(timeout=1)
+
+        assert caplog.text.count("The managed browser cache") == 1
+
+    def test_a_changed_retained_set_warns_again(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """The next patchright bump is exactly what the user needs to hear about."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+        self._report(caplog)
+        caplog.clear()
+
+        _materialize_install(bdir, ["chromium_headless_shell-1208"])
+
+        assert "chromium_headless_shell-1208" in self._report(caplog)
+
+    def test_a_new_current_revision_warns_again(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """Same directories on disk, and the one that runs them has moved on."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+        self._report(caplog)
+        caplog.clear()
+
+        _patch_targets_and_version(
+            monkeypatch,
+            targets={"chromium-": "1228", "chromium_headless_shell-": "1228"},
+        )
+
+        assert "chromium-1217" in self._report(caplog)
+
+    def test_a_malformed_marker_reports_again(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """Silence about a gigabyte is the worse answer to an unparsable file."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+        (bdir / _CACHE_REPORT_MARKER).write_text("not json {{{")
+
+        assert "chromium-1208" in self._report(caplog)
+        assert json.loads((bdir / _CACHE_REPORT_MARKER).read_text())["retained"] == [
+            "chromium-1208"
+        ]
+
+    def test_an_invalid_utf8_marker_reports_again(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+        (bdir / _CACHE_REPORT_MARKER).write_bytes(b"\xff\xfe")
+
+        assert "chromium-1208" in self._report(caplog)
+
+    def test_a_marker_write_failure_is_survivable(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+
+        def boom(*args, **kwargs):
+            raise OSError("read-only cache")
+
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.secure_write_text", boom)
+
+        assert "chromium-1208" in self._report(caplog)
+
+    def test_files_that_vanish_mid_scan_are_skipped(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """Another process may be installing into the same cache."""
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+        _fill(bdir / "chromium-1208", 4096)
+
+        def vanish(_path):
+            raise FileNotFoundError(_path)
+
+        monkeypatch.setattr(os, "lstat", vanish)
+
+        text = self._report(caplog)
+
+        assert "chromium-1208" in text
+        assert "0.0 B" in text
+
+    def test_an_unreadable_scan_never_raises(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        _patch_targets_and_version(monkeypatch)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+
+        def denied(*args, **kwargs):
+            raise PermissionError("no access")
+
+        monkeypatch.setattr(os, "walk", denied)
+
+        assert self._report(caplog) == ""
+
+    def test_an_unreadable_registry_reports_nothing(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        """Without the registry, the running browser is indistinguishable from dead weight."""
+        _patch_targets_and_version(monkeypatch, targets=None)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217", "chromium-1208"])
+
+        assert self._report(caplog) == ""
+
+    def test_a_missing_cache_reports_nothing(
+        self, isolate_profile_dir, monkeypatch, caplog
+    ):
+        _patch_targets_and_version(monkeypatch)
+
+        assert self._report(caplog) == ""
+
+    def test_a_custom_browsers_path_is_inventoried(
+        self, isolate_profile_dir, monkeypatch, tmp_path, caplog
+    ):
+        """The report follows the path patchright actually uses."""
+        _patch_targets_and_version(monkeypatch)
+        custom = tmp_path / "operator-cache"
+        _materialize_install(custom, ["chromium-1217", "chromium-1208"])
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(custom))
+
+        text = self._report(caplog)
+
+        assert str(custom) in text
+        assert "chromium-1208" in text
+        assert (custom / _CACHE_REPORT_MARKER).is_file()
+        assert not (browsers_path() / _CACHE_REPORT_MARKER).exists()
+
+
+class TestRetainedRevisionReportCallSites:
+    """Every managed path that concludes the browser is in place reports it."""
+
+    def _record(self, monkeypatch) -> list[int]:
+        calls: list[int] = []
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._report_retained_browser_revisions",
+            lambda: calls.append(1),
+        )
+        return calls
+
+    async def test_ready_background_setup_reports(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        _patch_targets_and_version(monkeypatch)
+        _set_headless(monkeypatch, True)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217"])
+        _write_metadata(install_metadata_path(), bdir)
+        calls = self._record(monkeypatch)
+
+        initialize_bootstrap("managed")
+        await start_background_browser_setup_if_needed()
+        report_task = get_bootstrap_state().cache_report_task
+        assert report_task is not None
+        await report_task
+
+        assert get_bootstrap_state().setup_state is SetupState.READY
+        assert calls == [1]
+
+    async def test_ready_background_setup_does_not_wait_for_the_scan(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """A slow cache filesystem cannot hold up the server lifespan."""
+        _patch_targets_and_version(monkeypatch)
+        _set_headless(monkeypatch, True)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217"])
+        _write_metadata(install_metadata_path(), bdir)
+        scan_started = threading.Event()
+        finish_scan = threading.Event()
+
+        def blocked_report() -> None:
+            scan_started.set()
+            assert finish_scan.wait(timeout=1)
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._report_retained_browser_revisions",
+            blocked_report,
+        )
+
+        initialize_bootstrap("managed")
+        await start_background_browser_setup_if_needed()
+
+        assert get_bootstrap_state().setup_state is SetupState.READY
+        assert await asyncio.to_thread(scan_started.wait, 1)
+        report_task = get_bootstrap_state().cache_report_task
+        assert report_task is not None
+        assert report_task.done() is False
+        finish_scan.set()
+        await report_task
+
+    async def test_a_custom_chrome_skips_the_report(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        """No managed cache is involved, so there is nothing to inventory."""
+        config = SimpleNamespace(
+            browser=SimpleNamespace(headless=True, chrome_path="/usr/bin/chromium"),
+        )
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+        calls = self._record(monkeypatch)
+
+        initialize_bootstrap("managed")
+        await start_background_browser_setup_if_needed()
+        ensure_browser_installed()
+
+        assert calls == []
+
+    async def test_a_finished_install_reports(self, isolate_profile_dir, monkeypatch):
+        _patch_targets_and_version(monkeypatch)
+        config = SimpleNamespace(
+            browser=SimpleNamespace(headless=True, eager_full_chromium=False)
+        )
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
+
+        async def fake_install(extra_arg: str) -> None:
+            return None
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_patchright_install", fake_install
+        )
+        calls = self._record(monkeypatch)
+
+        from linkedin_mcp_server.bootstrap import _run_browser_setup
+
+        await _run_browser_setup()
+        report_task = get_bootstrap_state().cache_report_task
+        assert report_task is not None
+        await report_task
+
+        assert calls == [1]
+
+    def test_a_ready_cli_setup_reports(self, isolate_profile_dir, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._uses_custom_chrome", lambda: False
+        )
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.browser_ready", lambda: True)
+        calls = self._record(monkeypatch)
+
+        ensure_browser_installed()
+
+        assert calls == [1]
 
 
 class TestSetupGate:

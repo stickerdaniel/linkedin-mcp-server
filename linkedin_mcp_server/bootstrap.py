@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import stat
 import sys
 from typing import NoReturn
 
@@ -34,6 +35,11 @@ from linkedin_mcp_server.exceptions import (
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
     DockerHostLoginRequiredError,
+)
+from linkedin_mcp_server.profile_lease import (
+    ProfileLeaseUnavailableError,
+    _release_locked_fd,
+    acquire_locked_fd,
 )
 from linkedin_mcp_server.server_role import ServerRole, process_role
 from linkedin_mcp_server.session_state import (
@@ -73,6 +79,15 @@ _SHELL_DIR_PREFIX = "chromium_headless_shell-"
 # in either mode.
 _FULL_DIR_PREFIX = "chromium-"
 
+# Sidecar recording the cache state the retained-revision warning last named. It
+# lives inside the configured browsers path so it travels with the cache it
+# describes, and its name starts with a dot so patchright's own collector passes
+# over it: that collector deletes directories whose name begins with a browser
+# name, and link files under `.links`, and nothing else.
+_CACHE_REPORT_MARKER = ".linkedin-mcp-cache-report.json"
+_CACHE_REPORT_LOCK = ".linkedin-mcp-cache-report.lock"
+_CACHE_REPORT_SCHEMA = 1
+
 
 class RuntimePolicy(str, Enum):
     MANAGED = "managed"
@@ -105,6 +120,7 @@ class BootstrapState:
     auth_started_at: str | None = None
     auth_completed_at: str | None = None
     setup_task: asyncio.Task[None] | None = None
+    cache_report_task: asyncio.Task[None] | None = None
     login_task: asyncio.Task[None] | None = None
     import_task: asyncio.Task[bool] | None = None
     import_attempted: bool = False
@@ -133,7 +149,12 @@ def reset_bootstrap_for_testing() -> None:
     """Reset bootstrap singleton state for test isolation."""
     global _state, _lock, _AUTO_IMPORT_ANNOUNCED
     global _auth_quiescent, _auth_quiescent_generation
-    for task in (_state.setup_task, _state.login_task, _state.import_task):
+    for task in (
+        _state.setup_task,
+        _state.cache_report_task,
+        _state.login_task,
+        _state.import_task,
+    ):
         if task is not None and not task.done():
             task.cancel()
     _state = BootstrapState()
@@ -241,6 +262,185 @@ def _uses_custom_chrome() -> bool:
     return bool(get_config().browser.chrome_path)
 
 
+def _revision_dir_prefix(name: str) -> str | None:
+    """Return the browser prefix of a revision directory, or ``None``.
+
+    Only a numeric suffix counts, and only for the two browsers this server
+    installs. Patchright can leave other directories in the same cache
+    (``chromium_tip_of_tree-``, ``ffmpeg-``, a partially downloaded
+    ``*.downloads-`` staging dir), and a report has nothing to say about a
+    browser it never asked for.
+    """
+    for prefix in (_FULL_DIR_PREFIX, _SHELL_DIR_PREFIX):
+        if name.startswith(prefix) and name[len(prefix) :].isdigit():
+            return prefix
+    return None
+
+
+def _retained_revision_dirs(configured: Path, current_revision: str) -> list[Path]:
+    """Return the browser directories in *configured* that will never launch again.
+
+    The full Chromium at *current_revision* is the one every launch names, so it
+    is active. Every older full revision is retained, and so is every headless
+    shell at any revision: nothing launches the shell since the install became
+    single-stage, and a cache written before that still holds one.
+
+    Symlinks are skipped before anything else. A link is not the storage it
+    points at, so counting it would attribute somebody else's bytes to this
+    cache and name a directory the remedy below would not free.
+    """
+    retained: list[Path] = []
+    for entry in sorted(configured.iterdir()):
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        prefix = _revision_dir_prefix(entry.name)
+        if prefix is None:
+            continue
+        if prefix == _FULL_DIR_PREFIX and entry.name[len(prefix) :] == current_revision:
+            continue
+        retained.append(entry)
+    return retained
+
+
+def _directory_size(path: Path) -> int:
+    """Sum the bytes of the real files under *path*, following no symlink.
+
+    A file that vanishes or turns unreadable mid-walk is skipped: an install
+    running in another process may be writing into the same cache, and an
+    approximate figure beats a diagnostic that raises.
+    """
+    total = 0
+    for root, _dirs, files in os.walk(path, followlinks=False):
+        for name in files:
+            try:
+                info = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+    return total
+
+
+def _format_size(num_bytes: int) -> str:
+    """Render a logical byte count in binary units."""
+    size = float(num_bytes)
+    for unit in ("B", "KiB", "MiB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GiB"
+
+
+def _cache_report_signature(
+    current_revision: str, retained: list[Path]
+) -> dict[str, object]:
+    """Describe a cache state precisely enough to know when it has changed."""
+    return {
+        "version": _CACHE_REPORT_SCHEMA,
+        "current_revision": current_revision,
+        "retained": sorted(entry.name for entry in retained),
+    }
+
+
+def _cache_report_is_current(marker: Path, signature: dict[str, object]) -> bool:
+    """Whether *marker* already records exactly this cache state.
+
+    An unreadable or malformed marker answers False, so the report is made
+    again. Warning twice costs a log line; staying silent about a gigabyte
+    because a file could not be parsed costs the whole point of the report.
+    """
+    try:
+        payload = json.loads(marker.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return payload == signature
+
+
+def _report_retained_browser_revisions() -> None:
+    """Warn about retained revisions and suppress later reports of the same state.
+
+    Patchright preserves every revision named by a valid reference under
+    ``.links``, and uv keeps one readable archive per version anyone has ever
+    resolved, so a browser downloaded by an older installation survives every
+    later install (#686). Deleting either side of that would break an
+    installation that can still be launched, so this reports the cache and
+    leaves it exactly as it found it.
+
+    The warning is bound to the cache state rather than to the process: the
+    marker records the current revision together with the retained directory
+    names, so a restart on the same cache stays quiet while the next patchright
+    bump says its piece. A cache-local kernel lock makes the read, warning, and
+    marker replacement one cross-process operation. Measuring the size comes
+    after the marker check, so the walk over a multi-gigabyte cache happens once
+    per state.
+
+    Diagnostics, never a gate. Every failure is swallowed at debug level;
+    browser setup must not depend on being able to measure a directory.
+    """
+    lock_fd: int | None = None
+    try:
+        configured = configure_browser_environment()
+        if not configured.is_dir():
+            return
+        targets = _patchright_install_targets()
+        current_revision = (targets or {}).get(_FULL_DIR_PREFIX)
+        if current_revision is None:
+            # Without the registry there is no way to tell the active revision
+            # from a superseded one, and reporting the running browser as dead
+            # weight is worse than reporting nothing.
+            logger.debug("No patchright registry; skipping the browser cache report")
+            return
+        lock_fd = acquire_locked_fd(configured / _CACHE_REPORT_LOCK, exclusive=True)
+        if lock_fd is None:
+            # Another process is already reporting this shared cache. Its marker
+            # will suppress later runs once it finishes.
+            return
+        retained = _retained_revision_dirs(configured, current_revision)
+        if not retained:
+            return
+        signature = _cache_report_signature(current_revision, retained)
+        marker = configured / _CACHE_REPORT_MARKER
+        if _cache_report_is_current(marker, signature):
+            return
+        total = sum(_directory_size(entry) for entry in retained)
+        logger.warning(
+            "The managed browser cache at %s holds %s in browser revisions this "
+            "server no longer launches: %s. Patchright keeps a revision for as "
+            "long as any installed package still references it, and each "
+            "installed server version that has run its browser installer leaves "
+            "such a reference behind, so old revisions can stay indefinitely. "
+            "To reclaim the "
+            "space: stop every LinkedIn MCP Server instance, delete %s, and let "
+            "the next launch download the current browser.",
+            configured,
+            _format_size(total),
+            ", ".join(entry.name for entry in retained),
+            configured,
+        )
+        try:
+            secure_write_text(
+                marker, json.dumps(signature, indent=2, sort_keys=True) + "\n"
+            )
+        except OSError:
+            logger.debug("Could not record the browser cache report", exc_info=True)
+    except (OSError, ProfileLeaseUnavailableError):
+        logger.debug("Could not inventory the managed browser cache", exc_info=True)
+    finally:
+        if lock_fd is not None:
+            _release_locked_fd(lock_fd)
+
+
+def _schedule_retained_browser_revision_report() -> None:
+    """Run the cache inventory off the event loop without delaying startup."""
+    task = _state.cache_report_task
+    if task is not None and not task.done():
+        return
+    _state.cache_report_task = asyncio.create_task(
+        asyncio.to_thread(_report_retained_browser_revisions),
+        name="browser-cache-report",
+    )
+
+
 def initialize_bootstrap(runtime_policy: RuntimePolicy | str | None = None) -> None:
     """Initialize bootstrap state and configure the shared browser cache."""
     if _state.initialized:
@@ -268,6 +468,7 @@ async def start_background_browser_setup_if_needed() -> None:
 
     async with _lock:
         if _browser_setup_ready():
+            _schedule_retained_browser_revision_report()
             _state.setup_state = SetupState.READY
             _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
             return
@@ -446,6 +647,11 @@ async def _run_browser_setup() -> None:
         browser_dir,
         {_SHELL_DIR_PREFIX: False, _FULL_DIR_PREFIX: True},
     )
+    # After the installer, because that is the moment a bump has just added a
+    # revision beside the old one and patchright has already had its chance to
+    # collect what it could. The inventory is diagnostic, so it runs separately
+    # and does not delay browser readiness.
+    _schedule_retained_browser_revision_report()
 
 
 async def _ensure_browser_installed() -> None:
@@ -473,6 +679,7 @@ def ensure_browser_installed() -> None:
     if _uses_custom_chrome():
         return
     if browser_ready():
+        _report_retained_browser_revisions()
         return
     print("   Installing Patchright Chromium browser...")
     try:
