@@ -24,9 +24,10 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-Docker includes full Chromium and an authenticated viewer for an explicit one-shot login. Create the profile directly in its persistent mount:
+Docker includes full Chromium and an authenticated viewer for an explicit one-shot login. Create the host directory before mounting it so the unprivileged container user can write the session:
 
 ```bash
+mkdir -p ~/.linkedin-mcp
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:6080:6080 \
@@ -34,9 +35,9 @@ docker run -it --rm \
   --login --login-viewer
 ```
 
-Open the complete loopback URL printed once by the command. The token is generated for that run, stored in a mode-0600 file, and carried in the URL fragment so the initial HTTP request remains token-free. Static noVNC files remain public; the token protects WebSocket control. Remote resize stays disabled, client-side scaling is fixed on, and the viewer closes after login, failure, a stop signal, or 1,800 seconds. Protected profile restoration may finish after remote control has closed, because interrupting a move on the mounted auth root could split the previous session. The command refuses to rotate any existing session unless the configured profile is on a distinct mount.
+Open the complete loopback URL printed once by the command. The token is generated for that run, stored in a mode-0600 file, and carried in the URL fragment so the initial HTTP request remains token-free. Static noVNC files remain public; the token protects WebSocket control. Remote resize stays disabled, client-side scaling is fixed on, and the viewer closes after login, failure, a stop signal, or 1,800 seconds. Protected profile restoration may finish after remote control has closed, because interrupting a move on the mounted auth root could split the previous session. The command refuses to rotate any existing session unless the authentication root above the profile is on a writable, non-memory mount. If an older rootful Docker run created that host directory as root, repair it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
 
-You can alternatively run `uvx mcp-server-linkedin@latest --login` or `--import-from-browser` on the host and mount the resulting `~/.linkedin-mcp` directory. On startup, Docker derives a Linux profile from the source cookies and creates a fresh session each time.
+A profile created by the Docker viewer belongs to the container runtime and is reused directly on later Docker startups with the same runtime identity. A profile created on the host with `uvx mcp-server-linkedin@latest --login` or `--import-from-browser` belongs to a foreign runtime, so Docker derives a fresh Linux bridge from its source cookies on each startup.
 
 **Configure Claude Desktop with Docker**
 
@@ -85,7 +86,7 @@ You can alternatively run `uvx mcp-server-linkedin@latest --login` or `--import-
 | `LOG_LEVEL` | `WARNING` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
 | `TOOL_TIMEOUT` | `180` | Per-tool MCP execution timeout in seconds. Increase further for heavy scrapes (multi-section profiles, cold-start Chromium, slow networks/containers). |
-| `LOGIN_TIMEOUT` | `1800` | Manual login wait timeout in seconds (`0` = no ordinary limit). Docker remote control closes after a hard 1,800 seconds; protected profile restoration may finish afterward. |
+| `LOGIN_TIMEOUT` | `1800` | Manual login wait timeout in seconds (`0` = no ordinary limit). The Docker viewer caps the effective limit at its 1,800-second wall, so `0` becomes 30 minutes in viewer mode. Protected profile restoration may finish afterward. |
 | `LOGIN_INLINE_WAIT` | `25` | Bounded inline wait (seconds, max 45) for a tool call to resume after login completes. No effect in normal container server mode; the explicit `--login --login-viewer` command is the Docker login path. |
 | `BROWSER_WAIT` | `25` | How long (seconds, max 45) to wait for another server process to hand over the shared browser before reporting that it is busy. `0` reports busy immediately. |
 | `BROWSER_MIN_HOLD` | `20` | Shortest time (seconds) a process keeps the shared browser before handing it to a waiting process. Higher means fewer browser restarts but longer waits for other clients; clamped below `BROWSER_WAIT` so a waiting client is served before its own timeout. `0` hands over after every tool call. |

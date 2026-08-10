@@ -75,6 +75,88 @@ def test_mount_preflight_accepts_a_distinct_ancestor_mount(tmp_path: Path) -> No
     require_persistent_profile_mount(profile, mountinfo_path=mountinfo)
 
 
+def test_mount_preflight_accepts_the_authentication_root_mount(tmp_path: Path) -> None:
+    profile = tmp_path / "auth-root" / "profile"
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"36 25 0:31 / / rw - overlay overlay rw\n"
+        f"51 36 8:1 / {profile.parent} rw - ext4 /dev/sda rw\n",
+        encoding="utf-8",
+    )
+
+    require_persistent_profile_mount(profile, mountinfo_path=mountinfo)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_mount_preflight_rejects_mounts_at_or_inside_the_profile(
+    tmp_path: Path, nested: bool
+) -> None:
+    profile = tmp_path / "auth-root" / "profile"
+    mount_point = profile / "Default" if nested else profile
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"36 25 0:31 / / rw - overlay overlay rw\n"
+        f"50 36 8:1 / {profile.parent} rw - ext4 /dev/sda rw\n"
+        f"51 50 8:2 / {mount_point} rw - ext4 /dev/sdb rw\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LoginViewerError, match="cannot rotate the profile"):
+        require_persistent_profile_mount(profile, mountinfo_path=mountinfo)
+
+
+@pytest.mark.parametrize("filesystem", ["tmpfs", "ramfs"])
+def test_mount_preflight_rejects_a_memory_backed_authentication_root(
+    tmp_path: Path, filesystem: str
+) -> None:
+    profile = tmp_path / "persistent" / "auth-root" / "profile"
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"36 25 0:31 / / rw - overlay overlay rw\n"
+        f"50 36 8:1 / {profile.parents[1]} rw - ext4 /dev/sda rw\n"
+        f"51 50 0:51 / {profile.parent} rw - {filesystem} {filesystem} rw\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LoginViewerError, match=filesystem):
+        require_persistent_profile_mount(profile, mountinfo_path=mountinfo)
+
+
+def test_mount_preflight_uses_the_most_specific_covering_mount(tmp_path: Path) -> None:
+    profile = tmp_path / "persistent" / "auth-root" / "nested" / "profile"
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"36 25 0:31 / / rw - overlay overlay rw\n"
+        f"50 36 0:51 / {profile.parents[2]} rw - tmpfs tmpfs rw\n"
+        f"51 50 8:1 / {profile.parents[1]} rw - ext4 /dev/sda rw\n",
+        encoding="utf-8",
+    )
+
+    require_persistent_profile_mount(profile, mountinfo_path=mountinfo)
+
+
+def test_mount_preflight_rejects_an_unwritable_authentication_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = tmp_path / "auth-root" / "profile"
+    profile.mkdir(parents=True)
+    marker = profile / "session-marker"
+    marker.write_text("unchanged", encoding="utf-8")
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        f"36 25 0:31 / / rw - overlay overlay rw\n"
+        f"51 36 8:1 / {profile.parent} rw - ext4 /dev/sda rw\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(viewer_module.os, "access", lambda *_args: False)
+
+    with pytest.raises(LoginViewerError, match="is not writable") as error:
+        require_persistent_profile_mount(profile, mountinfo_path=mountinfo)
+
+    assert "mkdir -p ~/.linkedin-mcp" not in str(error.value)
+    assert marker.read_text(encoding="utf-8") == "unchanged"
+
+
 def test_mount_preflight_rejects_only_the_container_root(tmp_path: Path) -> None:
     mountinfo = tmp_path / "mountinfo"
     mountinfo.write_text("36 25 0:31 / / rw - overlay overlay rw\n", encoding="utf-8")
@@ -286,6 +368,61 @@ async def test_viewer_signal_cancels_and_awaits_login_cleanup() -> None:
 
     assert interrupted.value.signum == signal.SIGTERM
     assert cleaned is True
+
+
+@pytest.mark.parametrize(
+    ("login_timeout", "login_viewer", "expected_budget"),
+    [
+        (0, False, "no time limit"),
+        (3600, False, "60 minutes"),
+        (0, True, "30 minutes"),
+        (600, True, "10 minutes"),
+        (3600, True, "30 minutes"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_login_prompt_reports_the_effective_viewer_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    login_timeout: float,
+    login_viewer: bool,
+    expected_budget: str,
+) -> None:
+    import linkedin_mcp_server.setup as setup
+
+    class Manager:
+        close_confirmed = True
+
+    class Viewer:
+        def start_window_manager(self) -> None:
+            pass
+
+        def stop_window_manager(self) -> None:
+            pass
+
+    async def login_succeeds(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    config = SimpleNamespace(
+        browser=SimpleNamespace(login_timeout_seconds=login_timeout, slow_mo=0)
+    )
+    monkeypatch.setattr(setup, "build_launch_options", lambda _config: ({}, None))
+    monkeypatch.setattr(setup, "describe_launch", lambda _options: None)
+    monkeypatch.setattr(setup, "BrowserManager", lambda **_kwargs: Manager())
+    monkeypatch.setattr(setup, "LoginViewer", Viewer)
+    monkeypatch.setattr(setup, "_run_login", login_succeeds)
+
+    assert await setup._login_into_fresh_profile(
+        tmp_path / "profile",
+        config=config,
+        state=setup._LoginState(),
+        login_viewer=login_viewer,
+    )
+
+    assert f"You have {expected_budget} to complete authentication" in (
+        capsys.readouterr().out
+    )
 
 
 def test_viewer_hard_cap_applies_when_login_timeout_is_unlimited(

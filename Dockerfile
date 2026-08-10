@@ -33,6 +33,10 @@ RUN patchright install-deps chromium && \
     chmod -R 755 /opt/patchright && \
     rm -rf /var/lib/apt/lists/*
 
+# Docker seeds a fresh named volume from this directory. Bind mounts retain the
+# host directory's ownership and are prepared by the documented login command.
+RUN install -d -m 0700 -o pwuser -g pwuser /home/pwuser/.linkedin-mcp
+
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/linkedin-mcp-entrypoint
 
 # A full headed browser on a virtual display. No window reaches the host, and

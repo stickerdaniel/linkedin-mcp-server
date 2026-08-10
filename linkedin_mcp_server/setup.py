@@ -238,10 +238,16 @@ async def _login_into_fresh_profile(
     caller must not release the profile when it was not: Chromium may still be
     holding it.
     """
-    login_timeout_ms = int(config.browser.login_timeout_seconds * 1000)
+    login_timeout_seconds = config.browser.login_timeout_seconds
+    login_timeout_ms = int(login_timeout_seconds * 1000)
 
-    if config.browser.login_timeout_seconds:
-        budget = f"{config.browser.login_timeout_seconds / 60:.0f} minutes"
+    effective_timeout = login_timeout_seconds
+    if login_viewer and (
+        not effective_timeout or VIEWER_WALL_SECONDS < effective_timeout
+    ):
+        effective_timeout = VIEWER_WALL_SECONDS
+    if effective_timeout:
+        budget = f"{effective_timeout / 60:.0f} minutes"
     else:
         budget = "no time limit"
 
