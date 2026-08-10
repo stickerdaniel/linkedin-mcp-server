@@ -92,6 +92,34 @@
       "url": "https://github.com/pypa/packaging",
       "branch": "main",
       "specialNotes": "PyPA packaging. version.Version parsing/comparison for the PyPI update check (update_check.py)."
+    },
+    {
+      "type": "git",
+      "name": "openbox",
+      "url": "https://github.com/danakj/openbox",
+      "branch": "main",
+      "specialNotes": "Openbox window manager used to place and focus the Docker login browser."
+    },
+    {
+      "type": "git",
+      "name": "x11vnc",
+      "url": "https://github.com/LibVNC/x11vnc",
+      "branch": "master",
+      "specialNotes": "Loopback-only VNC server for the Docker login viewer."
+    },
+    {
+      "type": "git",
+      "name": "noVNC",
+      "url": "https://github.com/novnc/noVNC",
+      "branch": "master",
+      "specialNotes": "Browser client for the Docker login viewer. Debian Bookworm ships vnc_lite.html from this project."
+    },
+    {
+      "type": "git",
+      "name": "websockify",
+      "url": "https://github.com/novnc/websockify",
+      "branch": "master",
+      "specialNotes": "Token-authenticated WebSocket proxy between noVNC and x11vnc."
     }
   ]
 }

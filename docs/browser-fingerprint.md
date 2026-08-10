@@ -112,6 +112,30 @@ Linux is less a gap than a different answer: under a virtual display nobody is
 looking at the screen, so an ordinary window is already invisible and there is
 nothing to hide.
 
+### Docker login viewer
+
+The Openbox, x11vnc and noVNC candidate passed the G4 interaction check on both
+published architectures. Measurements were stable before connection, after
+connection, after a trusted click, and after disconnect:
+
+| | amd64 | arm64 |
+|---|---|---|
+| Focus / visibility | `true` / `visible` | `true` / `visible` |
+| Screen | 1920x1080 | 1920x1080 |
+| Outer window | 945x1060 | 945x1060 |
+| Inner height | 969 | 913 |
+| Device pixel ratio | 1 | 1 |
+| Chromium active | yes | yes |
+| Trusted click reached page | yes | yes |
+
+The client scales the fixed framebuffer locally. x11vnc remote resize remains
+disabled, so connecting cannot change Chromium's reported screen. The package
+closure adds 107.2 MiB to Docker's image-inspect content size on amd64 and
+102.8 MiB on arm64. The uncompressed new layer shown by `docker history` is
+383 MB on amd64 and 362 MB on arm64. Those metrics describe different things
+and should not be compared as though the history layer were the downloadable
+image delta.
+
 ### Docker WebGL on the virtual display
 
 Measured in the candidate image on Linux amd64 and arm64, ten cold browser

@@ -22,9 +22,14 @@ COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright
 
+# One-shot CLI modes re-run the installer to record profile-local metadata. It
+# exits without downloading when this exact revision is present, but still needs
+# to acquire its cache lock as pwuser.
 RUN patchright install-deps chromium && \
     patchright install chromium --no-shell && \
-    apt-get update && apt-get install -y --no-install-recommends tini && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        tini openbox x11vnc novnc websockify && \
+    chown -R pwuser:pwuser /opt/patchright && \
     chmod -R 755 /opt/patchright && \
     rm -rf /var/lib/apt/lists/*
 
@@ -39,11 +44,10 @@ ENV HEADLESS=false
 
 USER pwuser
 
-# -g sends TERM to the whole process group: Python gets to run FastMCP's
-# graceful shutdown, and Xvfb leaves with it. The entrypoint supervises both in
-# that group, so either one dying terminates the other instead of leaving a live
-# server with no display. A handled SIGTERM can still report 143, so -e maps
-# that expected `docker stop` path to success. Without an init, Chromium
-# subprocesses orphaned onto PID 1 would also accumulate as zombies.
-ENTRYPOINT ["tini", "-g", "-e", "143", "--", "linkedin-mcp-entrypoint", "python", "-m", "linkedin_mcp_server"]
+# Tini signals the supervisor, which gives Python its graceful shutdown before
+# stopping Xvfb. Keeping the display alive is required while an active login
+# browser closes. A handled SIGTERM can still report 143, so -e maps that
+# expected `docker stop` path to success. Without an init, Chromium subprocesses
+# orphaned onto PID 1 would also accumulate as zombies.
+ENTRYPOINT ["tini", "-e", "143", "--", "linkedin-mcp-entrypoint", "python", "-m", "linkedin_mcp_server"]
 CMD []

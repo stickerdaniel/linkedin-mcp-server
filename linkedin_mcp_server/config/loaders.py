@@ -625,6 +625,15 @@ def load_from_args(config: AppConfig) -> AppConfig:
     )
 
     parser.add_argument(
+        "--login-viewer",
+        action="store_true",
+        help=(
+            "Expose the --login browser at an authenticated noVNC URL in Docker "
+            "(requires --login and -p 127.0.0.1:6080:6080)"
+        ),
+    )
+
+    parser.add_argument(
         "--status",
         action="store_true",
         help="Check if current session is valid and exit",
@@ -810,6 +819,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
     # Session management
     if args.login:
         config.server.login = True
+
+    if args.login_viewer:
+        config.server.login_viewer = True
 
     if args.status:
         config.server.status = True

@@ -82,9 +82,9 @@ async def handle_auth_error(
     """
     if get_runtime_policy() == RuntimePolicy.DOCKER:
         raise DockerHostLoginRequiredError(
-            "No valid LinkedIn session is available in Docker. "
-            "Run --login on the host machine to create a session, "
-            "then retry this tool."
+            "No valid LinkedIn session is available in Docker. Create one with "
+            "the explicit --login --login-viewer Docker command, or run --login "
+            "on the host, then retry this tool."
         ) from error
 
     # Read before the close rather than after it, deliberately, though the

@@ -24,19 +24,21 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-Create a browser profile locally, then mount it into Docker. You still need [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on the host for the one-time `uvx mcp-server-linkedin@latest --login` step. Docker already includes its own full Chromium runtime, running headed on a virtual display with no window exposed to the host, so the managed Patchright Chromium browser download used by MCPB/`uvx` is not needed here.
-
-**Step 1: Create profile on the host (one-time setup)**
+Docker includes full Chromium and an authenticated viewer for an explicit one-shot login. Create the profile directly in its persistent mount:
 
 ```bash
-uvx mcp-server-linkedin@latest --login
+docker run -it --rm \
+  -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+  -p 127.0.0.1:6080:6080 \
+  stickerdaniel/linkedin-mcp-server:latest \
+  --login --login-viewer
 ```
 
-This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. For better stability, consider the [uvx setup](https://github.com/stickerdaniel/linkedin-mcp-server#-uvx-setup-recommended---universal).
+Open the complete loopback URL printed once by the command. The token is generated for that run, stored in a mode-0600 file, and carried in the URL fragment so the initial HTTP request remains token-free. Static noVNC files remain public; the token protects WebSocket control. Remote resize stays disabled, client-side scaling is fixed on, and the viewer closes after login, failure, a stop signal, or 1,800 seconds. Protected profile restoration may finish after remote control has closed, because interrupting a move on the mounted auth root could split the previous session. The command refuses to rotate any existing session unless the configured profile is on a distinct mount.
 
-> **Already signed into LinkedIn in a browser on the host?** Run `uvx mcp-server-linkedin@latest --import-from-browser` on the host to reuse that session instead of `--login`. It supports Chrome, Chromium, Brave, Edge, Arc, Vivaldi, Helium, Yandex, and Naver Whale, auto-picks the most recently used browser with a live LinkedIn session (pass a browser name to target one), writes the same `~/.linkedin-mcp/` profile Docker mounts, and the Docker bridge still narrows to the minimal auth cookie subset it uses for a normal session. Cookies under Chrome 127+ app-bound encryption cannot be imported; use `--login` in that case.
+You can alternatively run `uvx mcp-server-linkedin@latest --login` or `--import-from-browser` on the host and mount the resulting `~/.linkedin-mcp` directory. On startup, Docker derives a Linux profile from the source cookies and creates a fresh session each time.
 
-**Step 2: Configure Claude Desktop with Docker**
+**Configure Claude Desktop with Docker**
 
 ```json
 {
@@ -53,7 +55,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 }
 ```
 
-> **Note:** The container has a virtual display for Chromium, but no viewer that can show it to you or accept the login form, 2FA, or captcha. Create a source profile on your host first. The experimental shared-browser daemon is ignored in Docker because its owner can outlive the virtual display.
+> **Note:** Plain `--login` does not publish a viewer. Use `--login --login-viewer` only for the one-shot login container, with port 6080 published to loopback. The experimental shared-browser daemon is ignored in Docker because its owner can outlive the virtual display.
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
@@ -83,8 +85,8 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `LOG_LEVEL` | `WARNING` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
 | `TOOL_TIMEOUT` | `180` | Per-tool MCP execution timeout in seconds. Increase further for heavy scrapes (multi-section profiles, cold-start Chromium, slow networks/containers). |
-| `LOGIN_TIMEOUT` | `1800` | Manual login wait timeout in seconds (`0` = no limit). Applies to the host-side `--login` browser; the container itself never opens one. |
-| `LOGIN_INLINE_WAIT` | `25` | Bounded inline wait (seconds, max 45) for a tool call to resume after login completes. No effect in containers: the Docker runtime never opens a login window and raises a host-login-required error instead, so the session must be created on the host with `--login`. |
+| `LOGIN_TIMEOUT` | `1800` | Manual login wait timeout in seconds (`0` = no ordinary limit). Docker remote control closes after a hard 1,800 seconds; protected profile restoration may finish afterward. |
+| `LOGIN_INLINE_WAIT` | `25` | Bounded inline wait (seconds, max 45) for a tool call to resume after login completes. No effect in normal container server mode; the explicit `--login --login-viewer` command is the Docker login path. |
 | `BROWSER_WAIT` | `25` | How long (seconds, max 45) to wait for another server process to hand over the shared browser before reporting that it is busy. `0` reports busy immediately. |
 | `BROWSER_MIN_HOLD` | `20` | Shortest time (seconds) a process keeps the shared browser before handing it to a waiting process. Higher means fewer browser restarts but longer waits for other clients; clamped below `BROWSER_WAIT` so a waiting client is served before its own timeout. `0` hands over after every tool call. |
 | `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the shared profile after this many seconds without a tool call. `0` keeps it open until the server exits. |

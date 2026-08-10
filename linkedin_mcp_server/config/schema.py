@@ -415,6 +415,10 @@ class ServerConfig:
     transport_explicitly_set: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "WARNING"
     login: bool = False
+    # Expose the Docker login browser through a short-lived authenticated noVNC
+    # endpoint. CLI-only: there is deliberately no environment switch that could
+    # expose browser control on an ordinary container startup.
+    login_viewer: bool = False
     status: bool = False  # Check session validity and exit
     logout: bool = False
     # Take over a USER_DATA_DIR that is neither the default nor already ours.
@@ -444,6 +448,20 @@ class ServerConfig:
             raise ConfigurationError(
                 f"tool_timeout_seconds must be a positive finite number, got {self.tool_timeout_seconds}"
             )
+        if self.login_viewer:
+            if not self.login:
+                raise ConfigurationError("--login-viewer requires --login")
+            incompatible = []
+            if self.status:
+                incompatible.append("--status")
+            if self.logout:
+                incompatible.append("--logout")
+            if self.import_from_browser is not None:
+                incompatible.append("--import-from-browser")
+            if incompatible:
+                raise ConfigurationError(
+                    "--login-viewer cannot be combined with " + ", ".join(incompatible)
+                )
         if self.import_from_browser is not None:
             # Import the submodule, NOT the package, to avoid a config ->
             # browser_import -> drivers.browser -> config import cycle.

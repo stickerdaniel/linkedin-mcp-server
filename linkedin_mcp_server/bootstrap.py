@@ -594,7 +594,9 @@ def _raise_if_docker_auth_missing() -> None:
     if _auth_ready():
         return
     raise DockerHostLoginRequiredError(
-        "No valid LinkedIn session is available in Docker. Run --login on the host machine to create a session, then retry this tool."
+        "No valid LinkedIn session is available in Docker. Create one with "
+        "the explicit --login --login-viewer Docker command, or run --login "
+        "on the host, then retry this tool."
     )
 
 
