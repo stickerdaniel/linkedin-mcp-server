@@ -16,6 +16,7 @@ from linkedin_mcp_server.scraping.connection import (
 )
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
+    FilterValidationError,
     LinkedInExtractor,
     _CONTENT_DATE_POSTED_MAP,
     _RATE_LIMITED_MSG,
@@ -3099,11 +3100,21 @@ class TestSearchPeople:
 
     async def test_search_people_combines_all_filters(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        with patch.object(
-            extractor,
-            "extract_page",
-            new_callable=AsyncMock,
-            return_value=extracted("Jane Doe"),
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Jane Doe"),
+            ),
+            # location is resolved to a numeric geo id via the site dropdown;
+            # stub the resolver so this stays a pure URL-building test.
+            patch.object(
+                extractor,
+                "_resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value="104116203",
+            ),
         ):
             result = await extractor.search_people(
                 "engineer",
@@ -3113,9 +3124,41 @@ class TestSearchPeople:
             )
 
         assert "keywords=engineer" in result["url"]
-        assert "location=Seattle" in result["url"]
+        # location becomes a resolved geoUrn facet, not a free-text location=.
+        assert "geoUrn=%5B%22104116203%22%5D" in result["url"]
+        assert "location=Seattle" not in result["url"]
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
+
+    async def test_search_people_unresolvable_location_raises(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "_resolve_geo_urn",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            with pytest.raises(FilterValidationError, match="Could not resolve"):
+                await extractor.search_people("engineer", location="Nowhereland")
+
+    async def test_resolve_geo_urn_reads_geoid_and_caches(self, mock_page):
+        """Drives the dropdown once: types the name, clicks the top suggestion,
+        reads geoId from the URL, and caches it (second call does not re-drive)."""
+        extractor = LinkedInExtractor(mock_page)
+        suggestion = AsyncMock()
+        mock_page.query_selector = AsyncMock(return_value=suggestion)
+        mock_page.url = "https://www.linkedin.com/jobs/search/?geoId=106155005&foo=1"
+        with patch.object(
+            extractor, "_goto_with_auth_checks", new_callable=AsyncMock
+        ) as goto:
+            first = await extractor._resolve_geo_urn("Egypt")
+            assert first == "106155005"
+            assert extractor._geo_cache["egypt"] == "106155005"
+
+            # Second call (case-insensitive) is served from cache: the dropdown
+            # is not driven again, so no further navigation happens.
+            assert await extractor._resolve_geo_urn("EGYPT") == "106155005"
+            assert goto.await_count == 1
 
 
 class TestBuildContentSearchUrl:
