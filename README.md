@@ -200,6 +200,7 @@ while a container is running.
 
 - Browser profile is stored at `~/.linkedin-mcp/profile/`
 - Managed browser downloads are cached at `~/.linkedin-mcp/patchright-browsers/`
+- *The browser cache keeps growing*: a server upgrade can bring a new Chromium revision, and Patchright keeps the old one for as long as any installed version still references it. `uvx` keeps one archive per version you have ever run, so every one of them holds such a reference and the old revisions stay. The server logs a warning naming the revisions it is holding and how much space they take. To reclaim it, stop every LinkedIn MCP Server instance, delete `~/.linkedin-mcp/patchright-browsers/`, and let the next launch download the current browser.
 - Make sure you have only one active LinkedIn session at a time
 
 **Login issues:**
@@ -274,6 +275,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 - Claude Desktop starts the bundle immediately; browser setup continues in the background
 - If the Patchright Chromium browser is still downloading, retry the tool after a short wait
 - Managed browser downloads are shared under `~/.linkedin-mcp/patchright-browsers/`
+- *The browser cache keeps growing*: Patchright keeps an old Chromium revision for as long as any installed version still references it, so an upgrade can leave both on disk. The server logs a warning naming what it holds. To reclaim the space, stop every LinkedIn MCP Server instance, delete `~/.linkedin-mcp/patchright-browsers/`, and let the next launch download the current browser.
 - *Windows, the bundle exits with `DLL load failed while importing _greenlet`*: install the [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist). The published Windows wheels for greenlet 3.3.1 through 3.5.4 need `MSVCP140.dll` from it, and neither the python.org installer nor the `uv`-managed builds carry that DLL. A greenlet built from source can need it at any version. The server names this itself on startup, and only after checking that the loader cannot produce that DLL. Tracked upstream as [greenlet#525](https://github.com/python-greenlet/greenlet/issues/525).
 
 **Login issues:**
@@ -588,6 +590,8 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 **Session issues:**
 
 - Browser profile is stored at `~/.linkedin-mcp/profile/`
+- Managed browser downloads are cached at `~/.linkedin-mcp/patchright-browsers/`, shared with the `uvx` and MCP Bundle installations
+- *The browser cache keeps growing*: Patchright keeps an old Chromium revision for as long as any installed version still references it, and a `uv` archive or a second worktree is such a reference. The server logs a warning naming what it holds. To reclaim the space, stop every LinkedIn MCP Server instance, delete `~/.linkedin-mcp/patchright-browsers/`, and let the next launch download the current browser.
 - Use `--logout` to clear the profile and start fresh
 
 **Python/Patchright issues:**
