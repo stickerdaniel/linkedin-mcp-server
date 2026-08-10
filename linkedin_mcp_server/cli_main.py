@@ -9,7 +9,10 @@ from typing import Literal
 import inquirer
 
 from linkedin_mcp_server.authentication import clear_auth_state
-from linkedin_mcp_server.bootstrap import configure_browser_environment
+from linkedin_mcp_server.bootstrap import (
+    configure_browser_environment,
+    ensure_browser_installed,
+)
 from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core import AuthenticationError
 from linkedin_mcp_server.drivers.browser import (
@@ -156,7 +159,12 @@ def main() -> None:
         print(f"LinkedIn MCP Server v{version}")
 
     logger.info("LinkedIn MCP Server v%s", version)
-    configure_browser_environment()
+    browser_dir = configure_browser_environment()
+    if not ensure_browser_installed(browser_dir):
+        print(
+            "Warning: automatic Patchright Chromium install failed. "
+            "Run manually: uv run python -m patchright install chromium"
+        )
     set_headless(config.browser.headless)
 
     if config.server.logout:

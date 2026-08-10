@@ -2,6 +2,22 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def stub_browser_install(monkeypatch):
+    """Default: pretend the managed browser is already installed.
+
+    Prevents tests that only exercise unrelated code paths (CLI dispatch, tool
+    gating, etc.) from shelling out to a real, network-dependent
+    `patchright install chromium`. Tests that exercise
+    ``ensure_browser_installed``'s own logic import it directly by name, which
+    binds before this fixture runs and is unaffected by patching the module
+    attribute here.
+    """
+    stub = lambda *_a, **_k: True  # noqa: E731
+    monkeypatch.setattr("linkedin_mcp_server.bootstrap.ensure_browser_installed", stub)
+    monkeypatch.setattr("linkedin_mcp_server.cli_main.ensure_browser_installed", stub)
+
+
+@pytest.fixture(autouse=True)
 def reset_singletons():
     """Reset global state for test isolation."""
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
