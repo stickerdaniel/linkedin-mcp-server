@@ -30,9 +30,14 @@ from linkedin_mcp_server.drivers.browser import (
 )
 from linkedin_mcp_server.debug_trace import should_keep_traces
 from linkedin_mcp_server.logging_config import configure_logging, teardown_trace_logging
+from linkedin_mcp_server.login_viewer import (
+    LoginViewerError,
+    require_persistent_profile_mount,
+)
 from linkedin_mcp_server.profile_claim import ensure_profile_claim
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
+    is_container_runtime,
     load_runtime_state,
     load_source_state,
     portable_cookie_path,
@@ -128,7 +133,9 @@ def get_profile_and_exit() -> None:
     logger.info(f"LinkedIn MCP Server v{version} - Session Creation mode")
 
     user_data_dir = config.browser.user_data_dir
-    success = run_profile_creation(user_data_dir)
+    success = run_profile_creation(
+        user_data_dir, login_viewer=config.server.login_viewer
+    )
 
     sys.exit(0 if success else 1)
 
@@ -423,10 +430,23 @@ def _exit_on_a_bad_setting(error: ConfigurationError) -> NoReturn:
     sys.exit(1)
 
 
+def _preflight_login_viewer(config: AppConfig) -> None:
+    """Validate the container boundary and persistent mount before mutation."""
+    if not config.server.login_viewer:
+        return
+    if not is_container_runtime():
+        raise ConfigurationError("--login-viewer is available only inside a container")
+    try:
+        require_persistent_profile_mount(Path(config.browser.user_data_dir))
+    except LoginViewerError as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
 def main() -> None:
     """Main application entry point."""
     try:
         config = get_config()
+        _preflight_login_viewer(config)
     except ConfigurationError as e:
         # A bad setting used to leave the loader as an exception nothing
         # caught, so Python printed the whole stack down through the loader and

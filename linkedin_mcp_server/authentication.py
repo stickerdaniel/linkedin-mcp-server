@@ -51,8 +51,9 @@ def get_authentication_source() -> bool:
         "  1. Run with --login to create a source browser profile (recommended)\n"
         "  2. Run with --no-headless to login interactively\n\n"
         "For Docker users:\n"
-        "  Create profile on host first: uv run -m linkedin_mcp_server --login\n"
-        "  Then mount into Docker: -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp"
+        "  Create the mounted profile with --login --login-viewer, or create it "
+        "on the host with --login.\n"
+        "  Mount it into Docker: -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp"
     )
 
 

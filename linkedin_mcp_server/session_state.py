@@ -228,6 +228,11 @@ def _is_container_runtime() -> bool:
     return False
 
 
+def is_container_runtime() -> bool:
+    """Public container-runtime answer for feature gates."""
+    return _is_container_runtime()
+
+
 #: Escape hatch for a machine this detection gets wrong. Spelled the same way
 #: as every other boolean environment variable this server reads
 #: (``config/loaders.py``), but read here rather than through the config

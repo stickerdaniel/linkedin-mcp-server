@@ -1,11 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# Xvfb, Python and this supervisor stay in one process group. `tini -g` then
-# delivers SIGTERM to all three, so FastMCP runs its graceful shutdown before
-# the display goes away. `xvfb-run` is not a substitute: measured under
-# `docker stop`, its EXIT trap cleaned up Xvfb but it never forwarded TERM to
-# Python; the container exited 143 without the server's shutdown path.
+# Tini delivers SIGTERM to this supervisor, which stops Python before Xvfb so
+# browser cleanup keeps a live display. `xvfb-run` is not a substitute: measured
+# under `docker stop`, its EXIT trap cleaned up Xvfb but it never forwarded TERM
+# to Python; the container exited 143 without the server's shutdown path.
 : "${DISPLAY:=:99}"
 export DISPLAY
 
@@ -60,13 +59,14 @@ server_pid=$!
 
 terminate() {
     trap - TERM INT HUP
-    kill -TERM "$server_pid" "$xvfb_pid" 2>/dev/null || true
+    kill -TERM "$server_pid" 2>/dev/null || true
 
-    # Preserve the server's status. Xvfb receives TERM by design and commonly
-    # reports 143; it is infrastructure for the server rather than the result
-    # Docker should expose.
+    # Keep the display alive until browser and viewer cleanup completes. Killing
+    # Xvfb alongside Python can wedge Chromium teardown until Docker resorts to
+    # SIGKILL, leaving the profile unrestored and the token file behind.
     server_status=0
     wait "$server_pid" || server_status=$?
+    kill -TERM "$xvfb_pid" 2>/dev/null || true
     wait "$xvfb_pid" || true
     exit "$server_status"
 }

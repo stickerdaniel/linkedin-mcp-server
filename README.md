@@ -117,7 +117,8 @@ When you set up or maintain this server, verify its entry in the MCP client conf
 - `--logout` - Clear stored LinkedIn browser profile
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
-- `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in.
+- `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in. `--login-viewer` closes remote control after a hard 1,800 seconds; protected profile restoration may finish afterward.
+- `--login-viewer` - With `--login` inside Docker, expose the login browser through one token-authenticated noVNC URL on port 6080. Requires a distinct persistent mount containing the configured profile.
 - `--login-inline-wait SECONDS` - Bounded inline wait for a tool call to resume after login completes, in seconds (default: 25, max 45; 0 = return immediately).
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters when several MCP clients run at the same time.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it to a waiting process (default: 20, clamped below `--browser-wait` so a waiting client is served before its own timeout; 0 = hand over after every tool call). Raising it means fewer browser restarts but longer waits for other clients.
@@ -210,7 +211,7 @@ while a container is running.
 
 - *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
 - *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
-- *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
+- *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
 
 **Told to run `--login` on the host when you already did:**
@@ -285,7 +286,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 - *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
 - *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
-- *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
+- *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
 
 **Told to run `--login` on the host when you already did:**
@@ -299,21 +300,25 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 ## 🐳 Docker Setup
 
-**Prerequisites:** Make sure you have [Docker](https://www.docker.com/get-started/) installed and running, and [uv](https://docs.astral.sh/uv/getting-started/installation/) installed on the host for the one-time `--login` step.
+**Prerequisites:** Make sure [Docker](https://www.docker.com/get-started/) is installed and running.
 
 ### Authentication
 
-Docker runs full Chromium headed on a virtual display. No browser window reaches the host, so you still need to create a browser profile locally first and mount it into the container.
-
-**Step 1: Create profile on the host (one-time setup)**
+Docker includes an authenticated, short-lived browser viewer for explicit login. Create the profile directly in the mounted directory:
 
 ```bash
-uvx mcp-server-linkedin@latest --login
+docker run -it --rm \
+  -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+  -p 127.0.0.1:6080:6080 \
+  stickerdaniel/linkedin-mcp-server:latest \
+  --login --login-viewer
 ```
 
-This opens a browser window where you log in manually (5 minute timeout for 2FA, captcha, etc.). The browser profile and cookies are saved under `~/.linkedin-mcp/`. On startup, Docker derives a Linux browser profile from your host cookies and creates a fresh session each time. If you experience stability issues with Docker, consider using the [uvx setup](#-uvx-setup-recommended---universal) instead.
+Open the complete loopback URL printed by the command. Its token stays in the URL fragment, so the initial HTTP request does not carry it. Static viewer files are public on port 6080; the token protects the WebSocket that controls the browser. The viewer fixes client-side scaling, keeps remote resize disabled, and closes after login, failure, a stop signal, or 1,800 seconds. Protected profile restoration may finish after remote control has closed, because interrupting a move on the mounted auth root could split the previous session. The profile mount is required before any existing session can be rotated. For the default profile, use the exact `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mapping above.
 
-**Step 2: Configure Claude Desktop with Docker**
+You can still create the profile on the host with `uvx mcp-server-linkedin@latest --login` and mount `~/.linkedin-mcp` into Docker. On startup, Docker derives a Linux browser profile from the source cookies and creates a fresh session each time.
+
+**Configure Claude Desktop with Docker**
 
 ```json
 {
@@ -331,10 +336,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```
 
 > [!NOTE]
-> Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx mcp-server-linkedin@latest --login` again if you encounter authentication issues.
-
-> [!NOTE]
-> **Why can't I run `--login` in Docker?** The container has a virtual display for Chromium, but no viewer that can show it to you or accept the form, 2FA, or captcha. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
+> Docker creates a fresh session on each startup. Sessions may expire over time. Repeat the Docker viewer command above or run `uvx mcp-server-linkedin@latest --login` on the host.
 
 ### Docker Setup Help
 
@@ -358,7 +360,8 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--logout` - Clear all stored LinkedIn auth state, including source and derived runtime profiles and any retired sessions
 - `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
 - `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
-- `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in.
+- `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in. `--login-viewer` closes remote control after a hard 1,800 seconds; protected profile restoration may finish afterward.
+- `--login-viewer` - With `--login` inside Docker, expose the login browser through one token-authenticated noVNC URL on port 6080. Requires a distinct persistent mount containing the configured profile.
 - `--login-inline-wait SECONDS` - Bounded inline wait for a tool call to resume after login completes, in seconds (default: 25, max 45; 0 = return immediately).
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters when several MCP clients run at the same time.
 - `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it to a waiting process (default: 20, clamped below `--browser-wait` so a waiting client is served before its own timeout; 0 = hand over after every tool call). Raising it means fewer browser restarts but longer waits for other clients.
@@ -370,7 +373,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 - `--proxy-server URL` - Route the browser through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD` (no flag, so it stays out of the process list)
 
 > [!NOTE]
-> `--login` is not usable in Docker yet: Chromium has a virtual display, but the image has no viewer for completing the login. Docker is already headed by default; `--no-headless` therefore changes nothing. Use the [uvx setup](#-uvx-setup-recommended---universal) to create profiles. The experimental `--daemon` is also ignored in Docker because its owner can outlive the virtual display.
+> Plain `--login` still has no visible window in Docker. Add `--login-viewer` and publish `127.0.0.1:6080:6080` only for the one-shot login command. Docker is already headed by default, so `--no-headless` changes nothing. The experimental `--daemon` is ignored in Docker because its owner can outlive the virtual display.
 
 **HTTP Mode Example (for web-based MCP clients):**
 
@@ -445,7 +448,7 @@ belongs behind something that provides it.
 
 - *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
 - *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
-- *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
+- *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
 
 **Told to run `--login` on the host when you already did:**
@@ -597,7 +600,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 - *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
 - *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
-- *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
+- *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host. Create the session on the host with `--login`, or use the explicit Docker `--login --login-viewer` command.
 - Users on slow connections may need higher values for either.
 
 **Told to run `--login` on the host when you already did:**

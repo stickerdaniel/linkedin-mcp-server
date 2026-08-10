@@ -63,7 +63,9 @@ class TestHandleAuthError:
             "linkedin_mcp_server.dependencies.get_runtime_policy",
             return_value="docker",
         ):
-            with pytest.raises(DockerHostLoginRequiredError, match="host machine"):
+            with pytest.raises(
+                DockerHostLoginRequiredError, match="--login --login-viewer"
+            ):
                 await handle_auth_error(
                     AuthenticationError("Session expired"), ctx=None
                 )
