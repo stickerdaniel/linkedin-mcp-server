@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "linkedin-mcp-server",
   "display_name": "MCP Server for LinkedIn",
-  "version": "4.21.0",
+  "version": "4.22.0",
   "description": "MCP server that gives Claude access to LinkedIn profiles, companies, job details, and people search through your own account",
   "long_description": "# MCP Server for LinkedIn\n\n> Disclaimer: This is an independent, community project. It is not affiliated with, authorized by, endorsed by, or sponsored by LinkedIn Corporation or Microsoft. \"LinkedIn\" is a registered trademark of LinkedIn Corporation and is used here only descriptively to identify the third-party service this software interoperates with.\n\nConnect Claude to your LinkedIn account with an MCP Bundle (MCPB, formerly DXT). The bundle starts quickly, downloads the Patchright Chromium browser in the background when needed, and opens LinkedIn login on the first auth-requiring tool call.\n\n## First-time managed runtime flow\n\n1. Install the `.mcpb` bundle in Claude Desktop.\n2. Start Claude Desktop; the MCP server starts and begins preparing the Patchright Chromium browser cache under `~/.linkedin-mcp/patchright-browsers`.\n3. If you call a tool before setup finishes, the tool returns a setup-in-progress error.\n4. On the first tool call that needs authentication, a browser window opens so you can sign into LinkedIn.\n5. Retry the tool after login completes.\n\nDocker remains available as a separate runtime path, but it still requires host-side `--login`.",
   "author": {
