@@ -1629,6 +1629,10 @@ class LinkedInExtractor:
         # description heading to actually appear before extracting, rather
         # than relying on the fixed scroll budget below — otherwise a page
         # whose description hydrates late is extracted without it.
+        # NOTE: keys on the literal English heading text (no locale-agnostic
+        # signal — e.g. aria-label/structural — identifies this panel), so
+        # this wait is a no-op on non-English locales and falls through to
+        # the fixed scroll budget there, same as it would without this branch.
         is_job = "/jobs/view/" in path
         if is_job:
             try:
