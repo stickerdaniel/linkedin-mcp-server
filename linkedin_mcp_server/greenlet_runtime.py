@@ -13,12 +13,16 @@ PE import table of ``greenlet/_greenlet.cp312-win_amd64.pyd``:
 
     3.2.4, 3.3.0       KERNEL32.dll, python312.dll
     3.3.1 .. 3.5.4     + MSVCP140.dll, VCRUNTIME140.dll, VCRUNTIME140_1.dll
+    3.5.5              KERNEL32.dll, python312.dll
 
 ``MSVCP140.dll`` comes with the Microsoft Visual C++ Redistributable and with
 neither distribution this server is normally started from, the python.org
 package and the python-build-standalone builds ``uv`` installs. Reported as
-python-greenlet/greenlet#525, fix in #526, which does not retire this module:
-the affected wheels stay on PyPI for good.
+python-greenlet/greenlet#525 and fixed in #526, which restored the variable and
+shipped as 3.5.5; the ``win_arm64`` wheel of that release measures the same,
+which Appveyor never built. None of that retires this module: the affected
+wheels stay on PyPI for good, and this server is also installed by resolvers
+that never see its lock file.
 
 Three decisions worth stating, because each looks like something else:
 
@@ -26,10 +30,10 @@ Nothing here consults the installed greenlet version, and the reason is worth
 keeping because that check was written and removed. Linking is a property of the
 built artifact, not of the number: 3.2.5 publishes no Windows wheel at all, so a
 Windows install of it comes from the sdist and is linked dynamically unless
-whoever built it set ``GREENLET_STATIC_RUNTIME``, while a release carrying #526
-will be static above every version measured above. A version predicate is wrong
-in both directions and fails in the expensive one, withholding the explanation
-from someone whose problem this is.
+whoever built it set ``GREENLET_STATIC_RUNTIME``, while 3.5.5 is static again at
+a number above every broken one. A version predicate is wrong in both directions
+and fails in the expensive one, withholding the explanation from someone whose
+problem this is.
 
 The two checks narrow the cause and never prove it. ``DLL load failed`` is what
 CPython writes in ``dynload_win.c`` for every ``LoadLibraryExW`` that fails, and
