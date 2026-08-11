@@ -1623,6 +1623,26 @@ class LinkedInExtractor:
                     logger.debug("Show more click failed: %s", e)
                     break
 
+        # Job detail pages (/jobs/view/<id>/) initially render the header,
+        # apply/save chrome, and boilerplate into <main> while the "About the
+        # job" description panel hydrates asynchronously. Wait for the
+        # description heading to actually appear before extracting, rather
+        # than relying on the fixed scroll budget below — otherwise a page
+        # whose description hydrates late is extracted without it.
+        is_job = "/jobs/view/" in path
+        if is_job:
+            try:
+                await self._page.wait_for_function(
+                    """() => {
+                        const main = document.querySelector('main');
+                        if (!main) return false;
+                        return main.innerText.includes('About the job');
+                    }""",
+                    timeout=10000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Job description content did not appear on %s", url)
+
         # Scroll to trigger lazy loading
         if is_activity:
             scrolls = max_scrolls if max_scrolls is not None else 10
