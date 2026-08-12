@@ -1,5 +1,6 @@
 """Tests for the LinkedInExtractor scraping engine."""
 
+from contextlib import ExitStack
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -5662,7 +5663,13 @@ class TestSendMessageComposerInteraction:
             patches[9],
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_count_message_occurrences",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch.object(
+                extractor,
+                "_message_delivered",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -5729,7 +5736,13 @@ class TestSendMessageComposerInteraction:
             patches[9],
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_count_message_occurrences",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch.object(
+                extractor,
+                "_message_delivered",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -5741,6 +5754,220 @@ class TestSendMessageComposerInteraction:
         assert result["status"] == "sent"
         # Enter was pressed as fallback
         mock_keyboard.press.assert_awaited_once_with("Enter")
+
+
+class TestSendMessageDeliveryConfirmation:
+    """The composer's own draft text must never count as proof of delivery (#573)."""
+
+    def _occurrence_counter(self, page_text, composer_text):
+        """Run the real occurrence-counting JS against a fake page."""
+
+        async def evaluate(script, arg=None):
+            expected = (arg or {}).get("expected", "")
+            needle = " ".join(expected.split())
+            body = " ".join(page_text.split())
+            composer = " ".join(composer_text.split())
+            return max(0, body.count(needle) - composer.count(needle))
+
+        return evaluate
+
+    async def test_draft_still_in_composer_is_not_delivery(self, mock_page):
+        """Text typed but never sent lives in body.innerText — it must not confirm."""
+        extractor = LinkedInExtractor(mock_page)
+        message = "Oi Rafael, tudo certo?"
+        # The page shows the message only because it sits in the composer.
+        mock_page.evaluate = AsyncMock(
+            side_effect=self._occurrence_counter(message, message)
+        )
+
+        assert await extractor._count_message_occurrences(message) == 0
+
+    async def test_message_rendered_into_thread_is_delivery(self, mock_page):
+        """Once LinkedIn echoes the message into the thread, it counts."""
+        extractor = LinkedInExtractor(mock_page)
+        message = "Oi Rafael, tudo certo?"
+        # Thread copy present, composer cleared by LinkedIn after the send.
+        mock_page.evaluate = AsyncMock(
+            side_effect=self._occurrence_counter(f"Rafael\n{message}\nSend", "")
+        )
+
+        assert await extractor._count_message_occurrences(message) == 1
+
+    async def test_resend_needs_a_new_occurrence_not_just_presence(self, mock_page):
+        """A message already in the thread does not confirm a later resend."""
+        extractor = LinkedInExtractor(mock_page)
+        message = "ping"
+        mock_page.evaluate = AsyncMock(
+            side_effect=self._occurrence_counter(f"{message} ... {message}", message)
+        )
+
+        # One copy in the thread, one in the composer: baseline for the resend is 1.
+        assert await extractor._count_message_occurrences(message) == 1
+
+    async def test_send_unavailable_when_nothing_new_appears(self, mock_page):
+        """send_message reports failure — not success — when delivery is unconfirmed."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+        interaction = TestSendMessageComposerInteraction()
+        patches = interaction._patch_send_message_to_compose(extractor, mock_page)
+
+        with ExitStack() as stack:
+            for context in patches:
+                stack.enter_context(context)
+            stack.enter_context(
+                patch.object(
+                    extractor,
+                    "_count_message_occurrences",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    extractor,
+                    "_message_delivered",
+                    new_callable=AsyncMock,
+                    return_value=False,
+                )
+            )
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "send_unavailable"
+        assert result["sent"] is False
+
+
+class TestSendMessageMultiline:
+    """A multi-paragraph message must land as one message, not several (#441)."""
+
+    async def _send(self, extractor, mock_page, message):
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+        interaction = TestSendMessageComposerInteraction()
+        patches = interaction._patch_send_message_to_compose(extractor, mock_page)
+
+        with ExitStack() as stack:
+            for context in patches:
+                stack.enter_context(context)
+            stack.enter_context(
+                patch.object(
+                    extractor,
+                    "_count_message_occurrences",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    extractor,
+                    "_message_delivered",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                )
+            )
+            result = await extractor.send_message(
+                "testuser", message, confirm_send=True
+            )
+        return result, mock_keyboard
+
+    async def test_newlines_never_reach_keyboard_type(self, mock_page):
+        """keyboard.type turns \\n into Enter, and Enter submits — so never type one."""
+        extractor = LinkedInExtractor(mock_page)
+        message = "Primeiro paragrafo.\n\nSegundo paragrafo.\n\nAbraco, Ricardo"
+
+        result, keyboard = await self._send(extractor, mock_page, message)
+
+        assert result["status"] == "sent"
+        typed = [call.args[0] for call in keyboard.type.await_args_list]
+        assert all("\n" not in chunk for chunk in typed)
+        # Every paragraph is typed; none is stranded in the composer.
+        assert "Primeiro paragrafo." in typed
+        assert "Segundo paragrafo." in typed
+        assert "Abraco, Ricardo" in typed
+
+    async def test_line_breaks_use_shift_enter(self, mock_page):
+        """Shift+Enter is the composer's newline; plain Enter would send."""
+        extractor = LinkedInExtractor(mock_page)
+        message = "linha um\nlinha dois"
+
+        _, keyboard = await self._send(extractor, mock_page, message)
+
+        presses = [call.args[0] for call in keyboard.press.await_args_list]
+        assert presses.count("Shift+Enter") == 1
+        assert "Enter" not in presses  # the send button was found, so no Enter send
+
+    async def test_blank_line_produces_two_breaks_and_no_empty_type(self, mock_page):
+        """A blank line is two Shift+Enters, not a typed empty string."""
+        extractor = LinkedInExtractor(mock_page)
+
+        _, keyboard = await self._send(extractor, mock_page, "um\n\ndois")
+
+        presses = [call.args[0] for call in keyboard.press.await_args_list]
+        assert presses.count("Shift+Enter") == 2
+        typed = [call.args[0] for call in keyboard.type.await_args_list]
+        assert typed == ["um", "dois"]
+
+    async def test_single_line_message_types_once(self, mock_page):
+        """The common case stays a single type call with no line-break presses."""
+        extractor = LinkedInExtractor(mock_page)
+
+        _, keyboard = await self._send(extractor, mock_page, "Hello!")
+
+        keyboard.type.assert_awaited_once_with("Hello!", delay=15)
+        assert "Shift+Enter" not in [
+            call.args[0] for call in keyboard.press.await_args_list
+        ]
+
+
+class TestSendMessageOverlayHygiene:
+    """A composer left mounted breaks the next send of the session (#433)."""
+
+    async def test_successful_send_dismisses_the_composer(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+        mock_page.evaluate = AsyncMock(side_effect=[True, True])
+        interaction = TestSendMessageComposerInteraction()
+        patches = interaction._patch_send_message_to_compose(extractor, mock_page)
+        dismiss = AsyncMock()
+
+        with ExitStack() as stack:
+            for context in (*patches[:8], patches[9]):
+                stack.enter_context(context)
+            stack.enter_context(patch.object(extractor, "_dismiss_message_ui", dismiss))
+            stack.enter_context(
+                patch.object(
+                    extractor,
+                    "_count_message_occurrences",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    extractor,
+                    "_message_delivered",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                )
+            )
+            result = await extractor.send_message(
+                "testuser", "Hello!", confirm_send=True
+            )
+
+        assert result["status"] == "sent"
+        # Once on entry (clearing any stale overlay) and once after the send.
+        assert dismiss.await_count == 2
 
 
 class TestBuildFeedReferences:
