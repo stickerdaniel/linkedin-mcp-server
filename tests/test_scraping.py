@@ -19,6 +19,7 @@ from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
     _CONTENT_DATE_POSTED_MAP,
+    _MESSAGING_COMPOSE_FALLBACK_SELECTORS,
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
@@ -5803,6 +5804,38 @@ class TestSendMessageDeliveryConfirmation:
 
         # One copy in the thread, one in the composer: baseline for the resend is 1.
         assert await extractor._count_message_occurrences(message) == 1
+
+    async def test_unreadable_page_yields_none_not_zero(self, mock_page):
+        """A failed count must not look like "nothing in the thread yet"."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(side_effect=RuntimeError("page gone"))
+
+        assert await extractor._count_message_occurrences("ping") is None
+
+    async def test_none_baseline_never_confirms(self, mock_page):
+        """Without a baseline, a copy already in the thread must not confirm a resend."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.wait_for_function = AsyncMock(return_value=None)
+
+        assert await extractor._message_delivered("ping", None) is False
+        # The page is never even asked: there is nothing to compare against.
+        mock_page.wait_for_function.assert_not_awaited()
+
+    async def test_every_accepted_composer_shape_is_subtracted(self, mock_page):
+        """The selectors excluded here must match the ones send_message types into."""
+        extractor = LinkedInExtractor(mock_page)
+        captured = {}
+
+        async def evaluate(script, arg=None):
+            captured.update(arg or {})
+            return 0
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate)
+        await extractor._count_message_occurrences("ping")
+
+        assert captured["composerSelectors"] == list(
+            _MESSAGING_COMPOSE_FALLBACK_SELECTORS
+        )
 
     async def test_send_unavailable_when_nothing_new_appears(self, mock_page):
         """send_message reports failure — not success — when delivery is unconfirmed."""
