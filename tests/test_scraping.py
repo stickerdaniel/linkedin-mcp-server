@@ -45,7 +45,7 @@ class TestBuildJobSearchUrl:
 
     def test_with_location(self):
         url = LinkedInExtractor._build_job_search_url("python", location="Remote")
-        assert "keywords=python+in+Remote" in url
+        assert "keywords=python" in url
         assert "location=Remote" in url
 
     def test_date_posted_normalization(self):
@@ -114,7 +114,7 @@ class TestBuildJobSearchUrl:
             easy_apply=True,
             sort_by="date",
         )
-        assert "keywords=python+in+Berlin" in url
+        assert "keywords=python" in url
         assert "location=Berlin" in url
         assert "f_TPR=r604800" in url
         assert "f_E=2,4" in url
@@ -2636,6 +2636,111 @@ class TestSearchJobs:
 
         mock_ids.assert_awaited_once()
         assert result["job_ids"] == ["111", "222"]
+
+    async def test_redirect_with_location_refetches_with_keywords(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/jobs/search-results/?keywords=python"
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Job results"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs(
+                "python", location="Berlin", max_pages=1
+            )
+
+        assert mock_extract.await_count == 2
+        refetch_url = mock_extract.await_args_list[1].args[0]
+        assert "keywords=python+in+Berlin" in refetch_url
+        assert "location=Berlin" in refetch_url
+        assert result["job_ids"] == ["111"]
+        assert result["url"] == refetch_url
+
+    async def test_classic_route_keeps_plain_keywords(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=python"
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Job results"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs(
+                "python", location="Berlin", max_pages=1
+            )
+
+        mock_extract.assert_awaited_once()
+        assert "keywords=python&" in result["url"]
+        assert result["job_ids"] == ["111"]
+
+    async def test_non_linkedin_host_skips_id_extraction(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://evil.example.com/jobs/search/"
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Job results"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        mock_ids.assert_not_awaited()
+        assert result["job_ids"] == []
 
     async def test_non_search_redirect_skips_id_extraction(self, mock_page):
         extractor = LinkedInExtractor(mock_page)

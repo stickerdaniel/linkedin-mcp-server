@@ -95,6 +95,9 @@ async def scroll_job_sidebar(
     not the main page body. This function finds that container through a job
     card, then scrolls it iteratively until no new content loads.
 
+    DOM dependency: scrolling requires an element reference, which
+    innerText extraction cannot provide.
+
     Args:
         page: Patchright page object
         pause_time: Time to pause between scrolls (seconds)
@@ -108,10 +111,8 @@ async def scroll_job_sidebar(
         return
 
     scrolled = await page.evaluate(
-        """async ({pauseTime, maxScrolls}) => {
-            const card = document.querySelector(
-                'a[href*="/jobs/view/"], [componentkey^="job-card-component-ref-"]'
-            );
+        """async ({pauseTime, maxScrolls, cardSelector}) => {
+            const card = document.querySelector(cardSelector);
             if (!card) return -2;
 
             let container = card.parentElement;
@@ -139,7 +140,11 @@ async def scroll_job_sidebar(
             }
             return scrollCount;
         }""",
-        {"pauseTime": pause_time, "maxScrolls": max_scrolls},
+        {
+            "pauseTime": pause_time,
+            "maxScrolls": max_scrolls,
+            "cardSelector": card_selector,
+        },
     )
     if scrolled == -2:
         logger.debug("Job card disappeared before evaluate, skipping scroll")

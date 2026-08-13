@@ -62,3 +62,6 @@ class TestJobSearchCards:
         )
 
         await scroll_job_sidebar(dom_page, pause_time=0, max_scrolls=1)
+
+        scroll_top = await dom_page.evaluate("document.querySelector('main').scrollTop")
+        assert scroll_top > 0
