@@ -45,7 +45,7 @@ class TestBuildJobSearchUrl:
 
     def test_with_location(self):
         url = LinkedInExtractor._build_job_search_url("python", location="Remote")
-        assert "keywords=python" in url
+        assert "keywords=python+in+Remote" in url
         assert "location=Remote" in url
 
     def test_date_posted_normalization(self):
@@ -114,7 +114,7 @@ class TestBuildJobSearchUrl:
             easy_apply=True,
             sort_by="date",
         )
-        assert "keywords=python" in url
+        assert "keywords=python+in+Berlin" in url
         assert "location=Berlin" in url
         assert "f_TPR=r604800" in url
         assert "f_E=2,4" in url
@@ -2605,8 +2605,39 @@ class TestSearchJobs:
         assert result["job_ids"] == []
         assert result["sections"]["search_results"] == "No matching jobs found"
 
-    async def test_url_redirect_skips_id_extraction(self, mock_page):
-        """Unexpected page URL should skip ID extraction but capture text."""
+    async def test_search_results_redirect_extracts_ids(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/jobs/search-results/?keywords=python"
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Job results"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111", "222"],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        mock_ids.assert_awaited_once()
+        assert result["job_ids"] == ["111", "222"]
+
+    async def test_non_search_redirect_skips_id_extraction(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         mock_page.url = "https://www.linkedin.com/uas/login"
         with (

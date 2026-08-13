@@ -3054,18 +3054,19 @@ class LinkedInExtractor:
         return result
 
     async def _extract_job_ids(self) -> list[str]:
-        """Extract unique job IDs from job card links on the current page.
-
-        Finds all `a[href*="/jobs/view/"]` links and extracts the numeric
-        job ID from each href. Returns deduplicated IDs in DOM order.
-        """
+        """Extract unique job IDs from job cards on the current page."""
         return await self._page.evaluate(
             """() => {
-                const links = document.querySelectorAll('a[href*="/jobs/view/"]');
+                const cards = document.querySelectorAll(
+                    'a[href*="/jobs/view/"], [componentkey^="job-card-component-ref-"]'
+                );
                 const seen = new Set();
                 const ids = [];
-                for (const a of links) {
-                    const match = a.href.match(/\\/jobs\\/view\\/(\\d+)/);
+                for (const card of cards) {
+                    const source = card.href || card.getAttribute('componentkey') || '';
+                    const match = source.match(
+                        /(?:\\/jobs\\/view\\/|job-card-component-ref-)(\\d+)/
+                    );
                     if (match && !seen.has(match[1])) {
                         seen.add(match[1]);
                         ids.push(match[1]);
@@ -3203,7 +3204,8 @@ class LinkedInExtractor:
         Comma-separated values are normalized individually.
         Unknown values pass through unchanged.
         """
-        params = f"keywords={quote_plus(keywords)}"
+        search_keywords = f"{keywords} in {location}" if location else keywords
+        params = f"keywords={quote_plus(search_keywords)}"
         if location:
             params += f"&location={quote_plus(location)}"
 
@@ -3316,10 +3318,8 @@ class LinkedInExtractor:
                         if total_pages is not None:
                             logger.debug("LinkedIn reports %d total pages", total_pages)
 
-                # Extract job IDs from hrefs (page is already loaded)
-                if not self._page.url.startswith(
-                    "https://www.linkedin.com/jobs/search/"
-                ):
+                search_path = urlparse(self._page.url).path.rstrip("/")
+                if search_path not in {"/jobs/search", "/jobs/search-results"}:
                     logger.debug(
                         "Unexpected page URL after extraction: %s — "
                         "skipping job ID extraction",
