@@ -64,19 +64,21 @@ def _logical_lines(text: str) -> list[str]:
     return statements
 
 
-def _shell_commands(instruction: str) -> list[str]:
-    """Split a `RUN` into the commands the shell will actually execute.
-
-    Searching the whole instruction for a flag asks whether the text contains
-    it, not whether the command runs with it. Docker joins continuations into
-    a single shell line, so `install foo; # --no-deps` leaves a comment that
-    swallows every flag written on the following lines while each substring
-    assertion still finds them, and `sync --no-install-project && sync` runs a
-    second, unguarded install that no substring reveals.
-    """
-    body = instruction.removeprefix("RUN ").strip()
-    body = re.split(r"(?:^|\s)#", body, maxsplit=1)[0]
-    return [part.strip() for part in re.split(r"&&|\|\||[;|]", body) if part.strip()]
+# The two commands that decide which backend builds the project, written out
+# whole. Reading a flag out of them needs a shell parser, and every version of
+# that parser written here had a hole: a comment swallowing the rest of the
+# line, a `&` keeping two commands in one string, a `$(...)` hiding one inside
+# another, an `ENV=1` prefix moving the command name off the front. Comparing
+# the instruction entire needs no parser and has no hole. It also makes these
+# two lines deliberately awkward to change, which is the point.
+_DEPENDENCY_SYNC = (
+    "RUN uv sync --frozen --no-install-project --no-dev --no-editable "
+    "--compile-bytecode"
+)
+_PROJECT_INSTALL = (
+    "RUN uv pip install --python /app/.venv/bin/python --no-deps "
+    "--compile-bytecode --build-constraints build-constraints.txt ."
+)
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -89,55 +91,81 @@ _DOCKER_GUIDE = (_REPO_ROOT / "docs" / "docker-hub.md").read_text(encoding="utf-
 _BUILD_CONSTRAINTS_PATH = _REPO_ROOT / "build-constraints.txt"
 _PYPROJECT_PATH = _REPO_ROOT / "pyproject.toml"
 _IMAGE_PYTHON = re.search(r"^FROM python:(\d+)\.(\d+)\.(\d+)-slim", _DOCKERFILE, re.M)
-_CONTEXT_PROBE = "FROM busybox\nCOPY . /ctx\n"
+# Pinned: the probe runs against the developer's own machine, and `latest`
+# is whatever the registry serves that day.
+_PROBE_IMAGE = (
+    "busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616"
+)
+
+
+# Sentinels stand in for the real tree. The names on the left have to reach the
+# build; the ones on the right must not, and they cover the root, a suffix and
+# a nested directory, which is the whole of what `**/.env*` claims.
+_CONTEXT_SENTINELS = (
+    "build-constraints.txt",
+    "build-constraints.in",
+    "pyproject.toml",
+    "uv.lock",
+    "README.md",
+    "linkedin_mcp_server/__init__.py",
+    ".env",
+    ".env.example",
+    ".env.local",
+    ".env.previous-proxy",
+    "tests/.env.probe",
+    "nested/deeper/.env.secret",
+)
 
 
 @pytest.fixture(scope="module")
-def build_context() -> frozenset[str]:
-    """The paths BuildKit really sends, read out of a throwaway probe build.
+def build_context(tmp_path_factory: pytest.TempPathFactory) -> frozenset[str]:
+    """Which sentinels this `.dockerignore` lets through, asked of BuildKit.
 
-    `.dockerignore` semantics cannot be recovered from the file alone. Every
+    The semantics are not recoverable from the file alone. Every
     reimplementation measured here disagreed with BuildKit while staying
     silent about it: a leading slash anchors the pattern, `*` stops at a
     separator, `\\!` escapes a negation, and a wildcard such as
     `build-constraints.*` hides a file that a literal-name search still reads
-    as present. Each of those is a false pass, which is the direction that
-    costs something. The release publishes to PyPI and tags the repository
-    before the Docker job runs, so a version can end up on PyPI and as a tag
-    with no image behind it.
+    as present. Each of those is a false pass, and a dropped constraint file
+    costs more than a red build: the release publishes to PyPI and tags the
+    repository before the Docker job runs, so a version can exist on PyPI and
+    as a tag with no image behind it.
 
-    Asking the daemon costs about a second against this 9.6 MB context, and
-    the suite skips where there is none, the way the entrypoint tests skip
-    without Bash 5.
+    The context is synthetic rather than the repository itself. Building the
+    real root sent 310 files to the daemon on a developer checkout, 32 of them
+    under `.debug/`, plus `CLAUDE.local.md`, and `docker rmi` does not
+    necessarily drop the cached `COPY` layer. An ordinary test run has no
+    business copying those anywhere. The probe image is pinned by digest and
+    runs without a network for the same reason.
     """
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("docker is required to read the real build context")
     # Unavailability is what may skip. Once the daemon answers and the base
     # image is local, a failing probe is a failing probe: treating every
-    # non-zero exit as absence turned a malformed `.dockerignore` into a
-    # green run that had checked nothing.
-    for unavailable in ([docker, "info"], [docker, "pull", "-q", "busybox"]):
+    # non-zero exit as absence turned a malformed `.dockerignore` into a green
+    # run that had checked nothing.
+    for available in ([docker, "info"], [docker, "pull", "-q", _PROBE_IMAGE]):
         probe = subprocess.run(
-            unavailable, capture_output=True, text=True, timeout=300, check=False
+            available, capture_output=True, text=True, timeout=300, check=False
         )
         if probe.returncode != 0:
             pytest.skip(f"no usable docker daemon: {probe.stderr.strip()[:200]}")
 
+    context = tmp_path_factory.mktemp("dockerignore-probe")
+    shutil.copyfile(_REPO_ROOT / ".dockerignore", context / ".dockerignore")
+    for sentinel in _CONTEXT_SENTINELS:
+        path = context / sentinel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("sentinel\n", encoding="utf-8")
+
     # The pid alone collides across clients sharing one daemon from separate
     # pid namespaces, where `rmi -f` would then remove another run's tag.
-    unique = f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
-    tag = f"linkedin-mcp-context-probe:{unique}"
-    # A file under a directory proves the `**/` reach of the pattern; `.env`
-    # and the tracked `.env.example` only ever prove the root. `.gitignore`
-    # covers the name, so a crash between here and the cleanup cannot leave
-    # something a later `git add -A` would stage.
-    nested = _REPO_ROOT / "tests" / f".env.probe-{unique}"
+    tag = f"linkedin-mcp-context-probe:{os.getpid()}-{uuid.uuid4().hex[:12]}"
     try:
-        nested.write_text("PROBE=1\n", encoding="utf-8")
         build = subprocess.run(
-            [docker, "build", "-q", "-t", tag, "-f", "-", str(_REPO_ROOT)],
-            input=_CONTEXT_PROBE,
+            [docker, "build", "-q", "-t", tag, "-f", "-", str(context)],
+            input=f"FROM {_PROBE_IMAGE}\nCOPY . /ctx\n",
             capture_output=True,
             text=True,
             timeout=600,
@@ -145,14 +173,27 @@ def build_context() -> frozenset[str]:
         )
         assert build.returncode == 0, f"context probe failed: {build.stderr[-2000:]}"
         listing = subprocess.run(
-            [docker, "run", "--rm", tag, "find", "/ctx", "-type", "f"],
+            # fmt: off
+            [
+                docker,
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--entrypoint",
+                "find",
+                tag,
+                "/ctx",
+                "-type",
+                "f",
+            ],
+            # fmt: on
             capture_output=True,
             text=True,
             timeout=300,
             check=True,
         )
     finally:
-        nested.unlink(missing_ok=True)
         subprocess.run(
             [docker, "rmi", "-f", tag], capture_output=True, text=True, check=False
         )
@@ -176,71 +217,50 @@ def test_the_image_builds_the_project_against_the_hashed_backend() -> None:
     setuptools fresh from PyPI inside the one release job that holds the Docker
     Hub credentials (#655). The project is installed on its own instead, against
     the same hashed file the published distributions use (#654).
-    """
-    commands = [
-        command
-        for instruction in _DOCKERFILE_INSTRUCTIONS
-        if instruction.startswith("RUN ")
-        for command in _shell_commands(instruction)
-    ]
-    installs = [command for command in commands if command.startswith("uv pip install")]
-    assert len(installs) == 1
-    project_install = installs[0]
 
-    assert "--build-constraints build-constraints.txt" in project_install
-    assert project_install.endswith(" .")
-    # Without this the lock stops deciding the runtime dependencies: a bare
-    # `uv pip install .` resolves them again from the index.
-    assert "--no-deps" in project_install
-    # uv verifies the hashes in a constraint file by default, and this switch
-    # turns that off while every other assertion here stays satisfied. A mirror
-    # workaround reaching for it would leave the pin as documentation only.
-    assert "--no-verify-hashes" not in project_install
-    # Every sync has to leave the project alone. One that installs it builds the
-    # backend unconstrained, and a later constrained install cannot undo a build
-    # that already ran.
-    syncs = [command for command in commands if command.startswith("uv sync")]
-    assert syncs
-    for sync in syncs:
-        assert "--no-install-project" in sync
-    # The switch above has an environment twin that reaches every uv invocation
-    # in the stage, including this one, and turns the same verification off.
+    Both commands are compared whole. A flag matched inside them says only that
+    the text contains it, and every attempt here to find out whether the
+    command *runs* with it needed a shell parser that turned out to have a
+    hole. Changing either line therefore fails this test on purpose: the
+    expected form is in the failure output, and a deliberate change updates it.
+    """
+    assert _DEPENDENCY_SYNC in _DOCKERFILE_INSTRUCTIONS, _DEPENDENCY_SYNC
+    assert _PROJECT_INSTALL in _DOCKERFILE_INSTRUCTIONS, _PROJECT_INSTALL
+    # Any further uv invocation is unaccounted for, whatever it is wrapped in.
+    # A second sync would build the backend unconstrained, and a constrained
+    # install afterwards cannot undo a build that already ran.
+    uv_instructions = [
+        instruction
+        for instruction in _DOCKERFILE_INSTRUCTIONS
+        if "uv sync" in instruction or "uv pip install" in instruction
+    ]
+    assert uv_instructions == [_DEPENDENCY_SYNC, _PROJECT_INSTALL], uv_instructions
+    # `--no-verify-hashes` has an environment twin that reaches every uv
+    # invocation in the stage and turns the same verification off.
     assert "UV_NO_VERIFY_HASHES" not in _DOCKERFILE
 
 
 def test_the_dockerfile_stays_within_the_syntax_this_file_parses() -> None:
     """`_logical_lines` handles line continuation, so nothing else may appear.
 
-    Every construct below lets an assertion above pass while the build does
-    something else, so the Dockerfile is held to the subset the parser can
-    read rather than the parser being grown to meet the Dockerfile. Growing it
-    is what failed twice already: a reimplementation of someone else's grammar
-    disagrees quietly, and the direction it disagrees in is a false pass.
+    Only the three constructs that change what an *instruction* is are refused,
+    because that is all the comparison above depends on. A heredoc is data to
+    BuildKit and instructions here, so a payload line spelling one of the two
+    commands would stand in for the real one. A line ending in `\\` ends the
+    instruction for BuildKit and continues it here. An `escape` directive
+    changes the continuation character entirely.
 
-    A heredoc is data to BuildKit and instructions here, so a payload line
-    reading `uv pip install ... .` satisfies the install assertions while no
-    install runs. A line ending in `\\\\` ends the instruction for BuildKit and
-    continues it here. An `escape` directive changes the continuation
-    character. A single `&` backgrounds the first command and leaves both in
-    one string, so `uv sync --no-install-project & uv sync` reads as guarded.
-    A quoted `#` truncates a command away, `$(...)` and backticks hide one
-    inside another, a JSON-form `RUN` executes no shell at all, and keywords
-    are case-insensitive to BuildKit but not here.
+    Nothing else about the shell is restricted. An earlier version refused
+    quotes, `$`, backticks and a single `&` so that a hand-written shell split
+    stayed sound; it was both incomplete, missing an `ENV=1 uv sync` prefix,
+    and in the way of ordinary things like a cache mount. Comparing the two
+    instructions whole removed the need for it.
     """
     assert "<<" not in _DOCKERFILE
     assert not re.search(r"^\s*#\s*escape\s*=", _DOCKERFILE, re.M)
     assert not [
         line for line in _DOCKERFILE.splitlines() if line.rstrip().endswith("\\\\")
     ]
-    for instruction in _DOCKERFILE_INSTRUCTIONS:
-        assert re.match(r"^[A-Z]+ ", instruction), instruction
-        if not instruction.startswith("RUN "):
-            continue
-        body = instruction.removeprefix("RUN ")
-        assert not body.startswith(("[", "--")), instruction
-        for character in ('"', "'", "$", "`"):
-            assert character not in body, (character, instruction)
-        assert not re.search(r"(?<!&)&(?!&)", body), instruction
 
 
 def test_every_build_requirement_is_pinned_with_hashes() -> None:
@@ -328,8 +348,11 @@ def test_the_hashed_build_constraint_reaches_the_build_context(
     build_context: frozenset[str],
 ) -> None:
     """An excluded constraint file drops a pin the build never asked for."""
-    for name in ("build-constraints.txt", "pyproject.toml", "uv.lock", "README.md"):
-        assert name in build_context, name
+    needed = [
+        name for name in _CONTEXT_SENTINELS if not Path(name).name.startswith(".env")
+    ]
+    missing = sorted(name for name in needed if name not in build_context)
+    assert not missing, f"the build needs these and .dockerignore drops them: {missing}"
 
 
 def test_the_build_context_carries_no_environment_file(
@@ -343,11 +366,12 @@ def test_the_build_context_carries_no_environment_file(
     session cookie and proxy credentials; a real build listed it inside `/app`.
     The runtime stage takes only `/app/.venv`, so no published image carried it.
     """
-    # The tracked `.env.example` is what keeps this from passing vacuously, and
-    # the fixture writes a nested one for the `**/` half of the pattern.
-    assert sorted(path.name for path in _REPO_ROOT.glob(".env*")), (
-        "no .env* file exists here, so an empty result would prove nothing"
-    )
+    # The fixture writes one of each shape, so an empty result is a real
+    # exclusion rather than an empty question.
+    offered = [
+        name for name in _CONTEXT_SENTINELS if Path(name).name.startswith(".env")
+    ]
+    assert len(offered) >= 4, offered
     leaked = sorted(
         path for path in build_context if Path(path).name.startswith(".env")
     )
