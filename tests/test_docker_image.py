@@ -6,13 +6,19 @@ browser product, the launch mode, and who receives SIGTERM. The supervisor
 itself is exercised with fake Xvfb and server processes, because child liveness
 is behaviour a string check cannot prove.
 
-Two things resist that treatment and are measured instead. Which paths reach
-the build context is decided by `.dockerignore` semantics that no
-reimplementation here matched without diverging silently, so a throwaway
-`busybox` probe asks the daemon; it costs about a second and skips where there
-is no daemon. And a flag is read out of the command that will run it rather
-than out of the file, because the file also holds the comment explaining the
-flag.
+Two things resist that treatment and are measured instead, because inferring
+them from the Dockerfile was tried and kept producing checks that passed while
+the build did something else.
+
+Which backend builds the project is read off the wheel the builder stage
+produces. Which paths reach the build context is asked of BuildKit through a
+throwaway probe, since `.dockerignore` semantics survived no reimplementation
+here without diverging quietly. Both skip where there is no daemon, the way
+the entrypoint tests skip without Bash 5, and together they cost seconds
+against a warm cache.
+
+What stays a string check is what a build cannot show: that verification was
+not switched off, and that the constraint files still agree with each other.
 """
 
 from __future__ import annotations
@@ -30,7 +36,21 @@ from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
-from packaging.utils import canonicalize_name
+from packaging.utils import NormalizedName, canonicalize_name
+
+
+def _pinned_requirements(path: Path) -> dict[NormalizedName, tuple[Requirement, str]]:
+    """The requirements a constraint file pins, by canonical name.
+
+    The second half of each value is the entry as written, which is where the
+    hashes are: they are not part of PEP 508 and `Requirement` cannot hold
+    them.
+    """
+    parsed = {}
+    for entry in _logical_lines(path.read_text(encoding="utf-8")):
+        requirement = Requirement(entry.split("--hash", 1)[0].strip())
+        parsed[canonicalize_name(requirement.name)] = (requirement, entry)
+    return parsed
 
 
 def _logical_lines(text: str) -> list[str]:
@@ -94,7 +114,6 @@ _README = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
 _DOCKER_GUIDE = (_REPO_ROOT / "docs" / "docker-hub.md").read_text(encoding="utf-8")
 _BUILD_CONSTRAINTS_PATH = _REPO_ROOT / "build-constraints.txt"
 _PYPROJECT_PATH = _REPO_ROOT / "pyproject.toml"
-_IMAGE_PYTHON = re.search(r"^FROM python:(\d+)\.(\d+)\.(\d+)-slim", _DOCKERFILE, re.M)
 # Pinned: the probe runs against the developer's own machine, and `latest`
 # is whatever the registry serves that day.
 _PROBE_IMAGE = (
@@ -102,35 +121,15 @@ _PROBE_IMAGE = (
 )
 
 
-def _named_context_inputs() -> tuple[str, ...]:
-    """Every context path the Dockerfile names, read out of the Dockerfile.
+# `test_the_built_project_records_the_pinned_backend` builds the builder stage,
+# so a missing input fails it: that stage is where the pin is decided and it is
+# cheap to build. `docker-entrypoint.sh` is the exception, copied in the second
+# stage, which only a full image build would reach. Excluding it produced a
+# green suite and a broken `docker build .`, so it is named here.
+_CONTEXT_INPUTS = ("build-constraints.txt", "docker-entrypoint.sh")
 
-    A hand-kept list drifts: this one did not have `docker-entrypoint.sh` on
-    it, so adding that name to `.dockerignore` left the context tests green
-    while the real build failed on the `COPY`. That failure is expensive in
-    the wrong place, because the release publishes to PyPI and tags the
-    repository before the Docker job runs.
-
-    `COPY --from=` reads out of an earlier stage rather than the context, and
-    a bare `.` is the whole tree rather than a name, so neither is a path to
-    check.
-    """
-    named = ["build-constraints.txt"]  # named by the install, not by a COPY
-    for instruction in _DOCKERFILE_INSTRUCTIONS:
-        if not instruction.startswith("COPY ") or "--from=" in instruction:
-            continue
-        arguments = [
-            argument
-            for argument in instruction.split()[1:]
-            if not argument.startswith("--")
-        ]
-        named.extend(source for source in arguments[:-1] if source != ".")
-    return tuple(dict.fromkeys(named))
-
-
-# The names above have to reach the build. These must not, and they cover the
-# root, a suffix and a nested directory, which is the whole of what `**/.env*`
-# claims.
+# These must not reach the build. They cover the root, a suffix and a nested
+# directory, which is the whole of what `**/.env*` claims.
 _ENVIRONMENT_SENTINELS = (
     ".env",
     ".env.example",
@@ -178,7 +177,7 @@ def build_context(tmp_path_factory: pytest.TempPathFactory) -> frozenset[str]:
 
     context = tmp_path_factory.mktemp("dockerignore-probe")
     shutil.copyfile(_REPO_ROOT / ".dockerignore", context / ".dockerignore")
-    for sentinel in _named_context_inputs() + _ENVIRONMENT_SENTINELS:
+    for sentinel in _CONTEXT_INPUTS + _ENVIRONMENT_SENTINELS:
         path = context / sentinel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("sentinel\n", encoding="utf-8")
@@ -250,17 +249,25 @@ def test_the_image_builds_the_project_against_the_hashed_backend() -> None:
     """
     assert _DEPENDENCY_SYNC in _DOCKERFILE_INSTRUCTIONS, _DEPENDENCY_SYNC
     assert _PROJECT_INSTALL in _DOCKERFILE_INSTRUCTIONS, _PROJECT_INSTALL
-    # Any further uv invocation is unaccounted for, whatever it is wrapped in.
-    # A second sync would build the backend unconstrained, and a constrained
-    # install afterwards cannot undo a build that already ran.
-    uv_instructions = [
+    # Any further build of the project is unaccounted for: a second one runs
+    # the backend unconstrained, and a constrained install afterwards cannot
+    # undo a build that already ran. Naming the frontends is a filter, not a
+    # proof; something determined to hide a build can. What it is here for is
+    # the ordinary case, someone adding a second install without noticing that
+    # the first one is load-bearing.
+    builders = [
         instruction
         for instruction in _DOCKERFILE_INSTRUCTIONS
-        if "uv sync" in instruction or "uv pip install" in instruction
+        if any(
+            frontend in instruction
+            for frontend in ("uv sync", "uv pip install", "pip install", "setup.py")
+        )
     ]
-    assert uv_instructions == [_DEPENDENCY_SYNC, _PROJECT_INSTALL], uv_instructions
+    assert builders == [_DEPENDENCY_SYNC, _PROJECT_INSTALL], builders
     # `--no-verify-hashes` has an environment twin that reaches every uv
-    # invocation in the stage and turns the same verification off.
+    # invocation in the stage and turns the same verification off. The wheel
+    # this produces would still name the pinned version, so the measurement
+    # cannot see this one and the string check has to.
     assert "UV_NO_VERIFY_HASHES" not in _DOCKERFILE
 
 
@@ -303,21 +310,23 @@ def test_every_build_requirement_is_pinned_with_hashes() -> None:
     build_system = tomllib.loads(_PYPROJECT_PATH.read_text(encoding="utf-8"))[
         "build-system"
     ]
-    required = {
-        canonicalize_name(Requirement(entry).name) for entry in build_system["requires"]
-    }
+    requirements = [Requirement(entry) for entry in build_system["requires"]]
+    required = {canonicalize_name(requirement.name) for requirement in requirements}
     assert required
+    # An extra pulls its own dependencies into the isolated build environment,
+    # and the name alone says nothing about them. `setuptools[core]` resolved
+    # an unhashed wheel past a green run of this test.
+    extras = sorted(
+        f"{requirement.name}[{','.join(sorted(requirement.extras))}]"
+        for requirement in requirements
+        if requirement.extras
+    )
+    assert not extras, (
+        f"build requirements with extras need their own hashed entries: {extras}"
+    )
 
-    def named(path: Path) -> dict[str, str]:
-        return {
-            canonicalize_name(
-                Requirement(entry.split("--hash", 1)[0].strip()).name
-            ): entry
-            for entry in _logical_lines(path.read_text(encoding="utf-8"))
-        }
-
-    sources = named(_REPO_ROOT / "build-constraints.in")
-    compiled = named(_BUILD_CONSTRAINTS_PATH)
+    sources = _pinned_requirements(_REPO_ROOT / "build-constraints.in")
+    compiled = _pinned_requirements(_BUILD_CONSTRAINTS_PATH)
 
     assert required <= sources.keys(), (
         f"build requirements missing from build-constraints.in: "
@@ -328,68 +337,16 @@ def test_every_build_requirement_is_pinned_with_hashes() -> None:
         f"{sorted(sources.keys() - compiled.keys())}"
     )
     unhashed = sorted(
-        name for name, entry in compiled.items() if "--hash=sha256:" not in entry
+        name for name, (_, entry) in compiled.items() if "--hash=sha256:" not in entry
     )
     assert not unhashed, f"compiled entries without a hash: {unhashed}"
-
-    # A marker that is false where the image builds pins nothing there while
-    # reading as a pin here. `platform_machine` is the live one: the release
-    # builds amd64 and arm64 from this same file, so an entry true for only one
-    # of them leaves the other resolving its backend from the index.
-    assert _IMAGE_PYTHON, "the base image no longer names a Python version"
-    major, minor, patch = _IMAGE_PYTHON.groups()
-    for name, entry in compiled.items():
-        marker = Requirement(entry.split("--hash", 1)[0].strip()).marker
-        if marker is None:
-            continue
-        # These two describe the kernel the build happens to run on, which is
-        # unknown here and differs between a laptop and a release runner. An
-        # earlier version passed empty strings and called that loud; a marker
-        # reading `platform_release == ""` then satisfied the test and left the
-        # backend unconstrained in the image. Unknowable is refused instead.
-        unknowable = [
-            variable
-            for variable in ("platform_release", "platform_version")
-            if variable in str(marker)
-        ]
-        assert not unknowable, (
-            f"{name} is constrained by {unknowable}, which this test cannot "
-            f"evaluate for the image: {marker}"
-        )
-        for machine in ("x86_64", "aarch64"):
-            # Every key `default_environment()` defines has to be named here.
-            # `evaluate` overlays this mapping onto the host's, so anything
-            # omitted is answered by the machine running the test: the host is
-            # on 3.13.15 while the image pins 3.13.13, and a marker reading
-            # `implementation_version != "3.13.13"` evaluated true here and
-            # false in the image.
-            environment = {
-                "implementation_name": "cpython",
-                "implementation_version": f"{major}.{minor}.{patch}",
-                "os_name": "posix",
-                "platform_machine": machine,
-                "platform_python_implementation": "CPython",
-                "platform_release": "",
-                "platform_system": "Linux",
-                "platform_version": "",
-                "python_full_version": f"{major}.{minor}.{patch}",
-                "python_version": f"{major}.{minor}",
-                "sys_platform": "linux",
-            }
-            assert marker.evaluate(environment), (
-                f"{name} is constrained only outside the image: {marker} on {machine}"
-            )
 
 
 def test_the_hashed_build_constraint_reaches_the_build_context(
     build_context: frozenset[str],
 ) -> None:
     """An excluded constraint file drops a pin the build never asked for."""
-    needed = _named_context_inputs()
-    assert "build-constraints.txt" in needed and "docker-entrypoint.sh" in needed, (
-        needed
-    )
-    missing = sorted(name for name in needed if name not in build_context)
+    missing = sorted(name for name in _CONTEXT_INPUTS if name not in build_context)
     assert not missing, f"the build needs these and .dockerignore drops them: {missing}"
 
 
@@ -411,6 +368,92 @@ def test_the_build_context_carries_no_environment_file(
         path for path in build_context if Path(path).name.startswith(".env")
     )
     assert not leaked, f"environment files reached the build context: {leaked}"
+
+
+@pytest.mark.image_build
+def test_the_built_project_records_the_pinned_backend() -> None:
+    """Which setuptools built the project, read off the wheel it produced.
+
+    This is the property #655 is about, and the only check here that observes
+    it rather than inferring it from the Dockerfile. Six rounds of inferring
+    it produced six ways past the inference: a comment, a `&`, an `ENV=1`
+    prefix, an extra space, an inert marker, a second frontend. The wheel says
+    what actually ran.
+
+    It also settles most of the context: a `COPY` source missing from this
+    stage fails the build rather than passing a check that never knew to look
+    for it. Only the second stage's own input is left to `_CONTEXT_INPUTS`.
+
+    The builder stage alone, because the full image downloads Chromium and
+    this runs on every push. The whole repository is the context, as it is for
+    `docker build .`, which is why the cheap `.dockerignore` probe uses a
+    synthetic one instead.
+    """
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("docker is required to build the image")
+    if subprocess.run([docker, "info"], capture_output=True, check=False).returncode:
+        pytest.skip("no usable docker daemon")
+
+    build_system = tomllib.loads(_PYPROJECT_PATH.read_text(encoding="utf-8"))[
+        "build-system"
+    ]
+    required = {
+        canonicalize_name(Requirement(entry).name) for entry in build_system["requires"]
+    }
+    backend, _ = next(
+        pinned
+        for name, pinned in _pinned_requirements(_BUILD_CONSTRAINTS_PATH).items()
+        if name in required
+    )
+    expected = str(backend.specifier).removeprefix("==")
+
+    tag = f"linkedin-mcp-backend-probe:{os.getpid()}-{uuid.uuid4().hex[:12]}"
+    try:
+        build = subprocess.run(
+            # fmt: off
+            [
+                docker,
+                "build",
+                "-q",
+                "--target",
+                "builder",
+                "-t",
+                tag,
+                str(_REPO_ROOT),
+            ],
+            # fmt: on
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+        )
+        assert build.returncode == 0, f"image build failed: {build.stderr[-3000:]}"
+        wheel = subprocess.run(
+            # fmt: off
+            [
+                docker,
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
+                tag,
+                "-c",
+                "cat /app/.venv/lib/python*/site-packages/"
+                "mcp_server_linkedin-*.dist-info/WHEEL",
+            ],
+            # fmt: on
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=True,
+        )
+    finally:
+        subprocess.run(
+            [docker, "rmi", "-f", tag], capture_output=True, text=True, check=False
+        )
+
+    assert f"Generator: setuptools ({expected})" in wheel.stdout, wheel.stdout
 
 
 def test_the_image_defaults_to_headed_on_a_virtual_display() -> None:
