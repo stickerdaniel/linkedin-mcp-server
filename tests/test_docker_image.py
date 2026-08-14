@@ -42,7 +42,11 @@ def _logical_lines(text: str) -> list[str]:
     how an assertion on ``--no-deps`` stayed green after the flag was removed
     from the command it guards.
 
-    Line continuation is the whole of what this handles, and
+    Runs of whitespace collapse, because a shell reads `uv  sync` and
+    `uv sync` alike and a search for the second missed the first entirely,
+    letting a whole unconstrained sync hide behind one extra space.
+
+    Line continuation is the rest of what this handles, and
     `test_the_dockerfile_stays_within_the_syntax_this_file_parses` refuses the
     constructs where that is not enough. A heredoc would otherwise present its
     payload as instructions, and BuildKit reads a `\\\\` line ending and a
@@ -57,10 +61,10 @@ def _logical_lines(text: str) -> list[str]:
         if stripped.endswith("\\"):
             pending += f"{stripped[:-1].strip()} "
             continue
-        statements.append(f"{pending}{stripped}".strip())
+        statements.append(" ".join(f"{pending}{stripped}".split()))
         pending = ""
     if pending:
-        statements.append(pending.strip())
+        statements.append(" ".join(pending.split()))
     return statements
 
 
@@ -98,16 +102,36 @@ _PROBE_IMAGE = (
 )
 
 
-# Sentinels stand in for the real tree. The names on the left have to reach the
-# build; the ones on the right must not, and they cover the root, a suffix and
-# a nested directory, which is the whole of what `**/.env*` claims.
-_CONTEXT_SENTINELS = (
-    "build-constraints.txt",
-    "build-constraints.in",
-    "pyproject.toml",
-    "uv.lock",
-    "README.md",
-    "linkedin_mcp_server/__init__.py",
+def _named_context_inputs() -> tuple[str, ...]:
+    """Every context path the Dockerfile names, read out of the Dockerfile.
+
+    A hand-kept list drifts: this one did not have `docker-entrypoint.sh` on
+    it, so adding that name to `.dockerignore` left the context tests green
+    while the real build failed on the `COPY`. That failure is expensive in
+    the wrong place, because the release publishes to PyPI and tags the
+    repository before the Docker job runs.
+
+    `COPY --from=` reads out of an earlier stage rather than the context, and
+    a bare `.` is the whole tree rather than a name, so neither is a path to
+    check.
+    """
+    named = ["build-constraints.txt"]  # named by the install, not by a COPY
+    for instruction in _DOCKERFILE_INSTRUCTIONS:
+        if not instruction.startswith("COPY ") or "--from=" in instruction:
+            continue
+        arguments = [
+            argument
+            for argument in instruction.split()[1:]
+            if not argument.startswith("--")
+        ]
+        named.extend(source for source in arguments[:-1] if source != ".")
+    return tuple(dict.fromkeys(named))
+
+
+# The names above have to reach the build. These must not, and they cover the
+# root, a suffix and a nested directory, which is the whole of what `**/.env*`
+# claims.
+_ENVIRONMENT_SENTINELS = (
     ".env",
     ".env.example",
     ".env.local",
@@ -154,7 +178,7 @@ def build_context(tmp_path_factory: pytest.TempPathFactory) -> frozenset[str]:
 
     context = tmp_path_factory.mktemp("dockerignore-probe")
     shutil.copyfile(_REPO_ROOT / ".dockerignore", context / ".dockerignore")
-    for sentinel in _CONTEXT_SENTINELS:
+    for sentinel in _named_context_inputs() + _ENVIRONMENT_SENTINELS:
         path = context / sentinel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("sentinel\n", encoding="utf-8")
@@ -318,14 +342,27 @@ def test_every_build_requirement_is_pinned_with_hashes() -> None:
         marker = Requirement(entry.split("--hash", 1)[0].strip()).marker
         if marker is None:
             continue
+        # These two describe the kernel the build happens to run on, which is
+        # unknown here and differs between a laptop and a release runner. An
+        # earlier version passed empty strings and called that loud; a marker
+        # reading `platform_release == ""` then satisfied the test and left the
+        # backend unconstrained in the image. Unknowable is refused instead.
+        unknowable = [
+            variable
+            for variable in ("platform_release", "platform_version")
+            if variable in str(marker)
+        ]
+        assert not unknowable, (
+            f"{name} is constrained by {unknowable}, which this test cannot "
+            f"evaluate for the image: {marker}"
+        )
         for machine in ("x86_64", "aarch64"):
             # Every key `default_environment()` defines has to be named here.
             # `evaluate` overlays this mapping onto the host's, so anything
             # omitted is answered by the machine running the test: the host is
             # on 3.13.15 while the image pins 3.13.13, and a marker reading
             # `implementation_version != "3.13.13"` evaluated true here and
-            # false in the image. The kernel-dependent pair is left empty
-            # rather than guessed, so a marker touching it fails loudly.
+            # false in the image.
             environment = {
                 "implementation_name": "cpython",
                 "implementation_version": f"{major}.{minor}.{patch}",
@@ -348,9 +385,10 @@ def test_the_hashed_build_constraint_reaches_the_build_context(
     build_context: frozenset[str],
 ) -> None:
     """An excluded constraint file drops a pin the build never asked for."""
-    needed = [
-        name for name in _CONTEXT_SENTINELS if not Path(name).name.startswith(".env")
-    ]
+    needed = _named_context_inputs()
+    assert "build-constraints.txt" in needed and "docker-entrypoint.sh" in needed, (
+        needed
+    )
     missing = sorted(name for name in needed if name not in build_context)
     assert not missing, f"the build needs these and .dockerignore drops them: {missing}"
 
@@ -368,10 +406,7 @@ def test_the_build_context_carries_no_environment_file(
     """
     # The fixture writes one of each shape, so an empty result is a real
     # exclusion rather than an empty question.
-    offered = [
-        name for name in _CONTEXT_SENTINELS if Path(name).name.startswith(".env")
-    ]
-    assert len(offered) >= 4, offered
+    assert len(_ENVIRONMENT_SENTINELS) >= 4, _ENVIRONMENT_SENTINELS
     leaked = sorted(
         path for path in build_context if Path(path).name.startswith(".env")
     )
