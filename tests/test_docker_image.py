@@ -25,11 +25,43 @@ _ENTRYPOINT_PATH = _REPO_ROOT / "docker-entrypoint.sh"
 _ENTRYPOINT = _ENTRYPOINT_PATH.read_text(encoding="utf-8")
 _README = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
 _DOCKER_GUIDE = (_REPO_ROOT / "docs" / "docker-hub.md").read_text(encoding="utf-8")
+_BUILD_CONSTRAINTS_PATH = _REPO_ROOT / "build-constraints.txt"
+_DOCKERIGNORE = (_REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
 
 
 def test_the_image_installs_only_the_full_browser() -> None:
     """The shell is a different product and nothing in the image launches it."""
     assert "patchright install chromium --no-shell" in _DOCKERFILE
+
+
+def test_the_image_builds_the_project_against_the_hashed_backend() -> None:
+    """Installing the project runs the build backend, so the image must pin it.
+
+    `uv sync` takes no build constraint, so a plain sync of the project resolves
+    setuptools fresh from PyPI inside the one release job that holds the Docker
+    Hub credentials (#655). The project is installed on its own instead, against
+    the same hashed file the published distributions use (#654).
+    """
+    assert "--build-constraints build-constraints.txt ." in _DOCKERFILE
+    # The dependency sync is the only sync left. One that also installs the
+    # project would build it unconstrained and make the pin above dead weight.
+    assert "uv sync --frozen --no-install-project" in _DOCKERFILE
+    assert "uv sync --frozen --no-dev" not in _DOCKERFILE
+    # Without this the lock stops deciding the runtime dependencies: a bare
+    # `uv pip install .` resolves them again from the index.
+    assert "--no-deps" in _DOCKERFILE
+
+
+def test_the_hashed_build_constraint_reaches_the_build_context() -> None:
+    """A version without hashes, or an excluded file, silently drops the pin."""
+    constraints = _BUILD_CONSTRAINTS_PATH.read_text(encoding="utf-8")
+
+    assert "setuptools==" in constraints
+    assert constraints.count("--hash=sha256:") >= 1
+    ignored = {
+        line.strip() for line in _DOCKERIGNORE.splitlines() if not line.startswith("#")
+    }
+    assert "build-constraints.txt" not in ignored
 
 
 def test_the_image_defaults_to_headed_on_a_virtual_display() -> None:

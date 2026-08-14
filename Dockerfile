@@ -7,8 +7,16 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-install-project --no-dev --no-editable --compile-bytecode
 
+# The project itself is installed separately, because installing it runs
+# `setuptools.build_meta` and `uv sync` has no way to constrain that build. The
+# distributions published from CI pin the backend against this same hashed file
+# (#654); without this the image would resolve setuptools fresh from PyPI in the
+# one job that holds the Docker Hub credentials. `--no-deps` keeps the runtime
+# dependencies exactly as the frozen lock installed them above, so this adds the
+# project and nothing else.
 COPY . .
-RUN uv sync --frozen --no-dev --no-editable --compile-bytecode
+RUN uv pip install --python /app/.venv/bin/python --no-deps --compile-bytecode \
+    --build-constraints build-constraints.txt .
 
 
 # -- Stage 2: Production runtime --
