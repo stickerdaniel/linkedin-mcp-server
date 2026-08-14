@@ -127,8 +127,10 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
-.env
+# Environments. The suffixed variants hold the same session cookie and proxy
+# credentials as the plain file, and the template is the one that belongs here.
+.env*
+!.env.example
 .venv
 env/
 venv/

@@ -25,6 +25,7 @@ import socket
 import subprocess
 import textwrap
 import tomllib
+import uuid
 from pathlib import Path
 
 import pytest
@@ -112,11 +113,26 @@ def build_context() -> frozenset[str]:
     docker = shutil.which("docker")
     if docker is None:
         pytest.skip("docker is required to read the real build context")
+    # Unavailability is what may skip. Once the daemon answers and the base
+    # image is local, a failing probe is a failing probe: treating every
+    # non-zero exit as absence turned a malformed `.dockerignore` into a
+    # green run that had checked nothing.
+    for unavailable in ([docker, "info"], [docker, "pull", "-q", "busybox"]):
+        probe = subprocess.run(
+            unavailable, capture_output=True, text=True, timeout=300, check=False
+        )
+        if probe.returncode != 0:
+            pytest.skip(f"no usable docker daemon: {probe.stderr.strip()[:200]}")
 
-    tag = f"linkedin-mcp-context-probe:{os.getpid()}"
+    # The pid alone collides across clients sharing one daemon from separate
+    # pid namespaces, where `rmi -f` would then remove another run's tag.
+    unique = f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
+    tag = f"linkedin-mcp-context-probe:{unique}"
     # A file under a directory proves the `**/` reach of the pattern; `.env`
-    # and the tracked `.env.example` only ever prove the root.
-    nested = _REPO_ROOT / "tests" / f".env.probe-{os.getpid()}"
+    # and the tracked `.env.example` only ever prove the root. `.gitignore`
+    # covers the name, so a crash between here and the cleanup cannot leave
+    # something a later `git add -A` would stage.
+    nested = _REPO_ROOT / "tests" / f".env.probe-{unique}"
     try:
         nested.write_text("PROBE=1\n", encoding="utf-8")
         build = subprocess.run(
@@ -127,8 +143,7 @@ def build_context() -> frozenset[str]:
             timeout=600,
             check=False,
         )
-        if build.returncode != 0:
-            pytest.skip(f"no usable docker daemon: {build.stderr.strip()[:200]}")
+        assert build.returncode == 0, f"context probe failed: {build.stderr[-2000:]}"
         listing = subprocess.run(
             [docker, "run", "--rm", tag, "find", "/ctx", "-type", "f"],
             capture_output=True,
@@ -196,19 +211,36 @@ def test_the_image_builds_the_project_against_the_hashed_backend() -> None:
 def test_the_dockerfile_stays_within_the_syntax_this_file_parses() -> None:
     """`_logical_lines` handles line continuation, so nothing else may appear.
 
-    BuildKit reads three constructs differently, and each one lets an
-    assertion above pass while the build does something else. A heredoc is
-    data to BuildKit and instructions to this parser, so a payload line
+    Every construct below lets an assertion above pass while the build does
+    something else, so the Dockerfile is held to the subset the parser can
+    read rather than the parser being grown to meet the Dockerfile. Growing it
+    is what failed twice already: a reimplementation of someone else's grammar
+    disagrees quietly, and the direction it disagrees in is a false pass.
+
+    A heredoc is data to BuildKit and instructions here, so a payload line
     reading `uv pip install ... .` satisfies the install assertions while no
-    install runs. A line ending in `\\\\` ends the instruction for BuildKit
-    and continues it here, importing flags from the next line. An `escape`
-    directive changes the continuation character entirely.
+    install runs. A line ending in `\\\\` ends the instruction for BuildKit and
+    continues it here. An `escape` directive changes the continuation
+    character. A single `&` backgrounds the first command and leaves both in
+    one string, so `uv sync --no-install-project & uv sync` reads as guarded.
+    A quoted `#` truncates a command away, `$(...)` and backticks hide one
+    inside another, a JSON-form `RUN` executes no shell at all, and keywords
+    are case-insensitive to BuildKit but not here.
     """
     assert "<<" not in _DOCKERFILE
     assert not re.search(r"^\s*#\s*escape\s*=", _DOCKERFILE, re.M)
     assert not [
         line for line in _DOCKERFILE.splitlines() if line.rstrip().endswith("\\\\")
     ]
+    for instruction in _DOCKERFILE_INSTRUCTIONS:
+        assert re.match(r"^[A-Z]+ ", instruction), instruction
+        if not instruction.startswith("RUN "):
+            continue
+        body = instruction.removeprefix("RUN ")
+        assert not body.startswith(("[", "--")), instruction
+        for character in ('"', "'", "$", "`"):
+            assert character not in body, (character, instruction)
+        assert not re.search(r"(?<!&)&(?!&)", body), instruction
 
 
 def test_every_build_requirement_is_pinned_with_hashes() -> None:
@@ -267,11 +299,22 @@ def test_every_build_requirement_is_pinned_with_hashes() -> None:
         if marker is None:
             continue
         for machine in ("x86_64", "aarch64"):
+            # Every key `default_environment()` defines has to be named here.
+            # `evaluate` overlays this mapping onto the host's, so anything
+            # omitted is answered by the machine running the test: the host is
+            # on 3.13.15 while the image pins 3.13.13, and a marker reading
+            # `implementation_version != "3.13.13"` evaluated true here and
+            # false in the image. The kernel-dependent pair is left empty
+            # rather than guessed, so a marker touching it fails loudly.
             environment = {
                 "implementation_name": "cpython",
+                "implementation_version": f"{major}.{minor}.{patch}",
                 "os_name": "posix",
                 "platform_machine": machine,
+                "platform_python_implementation": "CPython",
+                "platform_release": "",
                 "platform_system": "Linux",
+                "platform_version": "",
                 "python_full_version": f"{major}.{minor}.{patch}",
                 "python_version": f"{major}.{minor}",
                 "sys_platform": "linux",
