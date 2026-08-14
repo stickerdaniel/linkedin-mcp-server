@@ -364,12 +364,454 @@ def _expires_to_unix(expires_utc: int) -> float:
     return _chromium_utc_to_unix(expires_utc)
 
 
+def _read_locked_file_via_duplicate_handle(file_path: str) -> bytes | None:
+    """Read a file locked by a running process without terminating anything.
+
+    Uses ``NtQuerySystemInformation(SystemExtendedHandleInformation)`` to
+    enumerate system-wide handles, identifies the file handle that points to
+    *file_path*, duplicates it from the owning process, and reads the file
+    content directly. Returns ``None`` when the lock-holding process could not
+    be found (e.g. the lock is held by a kernel-mode component), or when the
+    duplicated handle does not grant read access.
+
+    This is the only truly zero-kill approach on Windows — no processes are
+    terminated or interrupted.
+    """
+    import subprocess
+    import threading
+    from ctypes import (
+        WinDLL,  # ty: ignore[unresolved-import]
+        byref,
+        c_long,
+        c_longlong,
+        c_ubyte,
+        c_ulong,
+        c_wchar_p,
+        create_string_buffer,
+        create_unicode_buffer,
+        POINTER,
+    )
+    from ctypes.wintypes import BOOL, DWORD, HANDLE, LPVOID, ULONG
+
+    ntdll = WinDLL("ntdll", use_last_error=True)
+    kernel32 = WinDLL("kernel32", use_last_error=True)
+
+    ntdll.NtQuerySystemInformation.restype = c_ulong  # NTSTATUS
+    ntdll.NtQuerySystemInformation.argtypes = [
+        c_ulong,
+        LPVOID,
+        c_ulong,
+        POINTER(c_ulong),
+    ]
+
+    kernel32.OpenProcess.restype = HANDLE
+    kernel32.OpenProcess.argtypes = [DWORD, BOOL, DWORD]
+
+    kernel32.DuplicateHandle.restype = BOOL
+    kernel32.DuplicateHandle.argtypes = [
+        HANDLE,
+        HANDLE,
+        HANDLE,
+        POINTER(HANDLE),
+        DWORD,
+        BOOL,
+        DWORD,
+    ]
+
+    kernel32.CloseHandle.restype = BOOL
+    kernel32.CloseHandle.argtypes = [HANDLE]
+
+    kernel32.GetFinalPathNameByHandleW.restype = DWORD
+    kernel32.GetFinalPathNameByHandleW.argtypes = [HANDLE, c_wchar_p, DWORD, DWORD]
+
+    kernel32.GetFileType.restype = DWORD
+    kernel32.GetFileType.argtypes = [HANDLE]
+
+    kernel32.GetFileSizeEx.restype = BOOL
+    kernel32.GetFileSizeEx.argtypes = [HANDLE, POINTER(c_longlong)]
+
+    kernel32.SetFilePointer.restype = DWORD
+    kernel32.SetFilePointer.argtypes = [HANDLE, c_long, POINTER(c_long), DWORD]
+
+    kernel32.ReadFile.restype = BOOL
+    kernel32.ReadFile.argtypes = [HANDLE, LPVOID, DWORD, POINTER(DWORD), LPVOID]
+
+    SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
+    STATUS_SUCCESS = 0
+    STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
+    FILE_TYPE_DISK = 1
+    PROCESS_DUP_HANDLE = 0x0040
+    DUPLICATE_SAME_ACCESS = 0x0002
+    VOLUME_NAME_DOS = 0x0
+
+    # ---- 1. Find candidate browser PIDs ----
+    candidate_pids: set[int] = set()
+    for image_name in (
+        "opera.exe",
+        "chrome.exe",
+        "msedge.exe",
+        "brave.exe",
+        "vivaldi.exe",
+        "chromium.exe",
+    ):
+        try:
+            out = subprocess.check_output(
+                ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV"],
+                creationflags=0x08000000,
+                timeout=5,
+            ).decode("utf-8", errors="replace")
+            for line in out.strip().split("\n")[1:]:
+                parts = line.split(",")
+                if len(parts) > 1:
+                    try:
+                        pid = int(parts[1].strip().strip('"'))
+                        candidate_pids.add(pid)
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+
+    if not candidate_pids:
+        return None
+
+    # ---- 2. Query system handle table ----
+    BUF_SIZE = 16 * 1024 * 1024
+    buf = (c_ubyte * BUF_SIZE)()
+    ret_len = ULONG(BUF_SIZE)
+    status = ntdll.NtQuerySystemInformation(
+        SYSTEM_EXTENDED_HANDLE_INFORMATION,
+        buf,
+        len(buf),
+        byref(ret_len),
+    )
+    if status not in (STATUS_SUCCESS, STATUS_INFO_LENGTH_MISMATCH):
+        return None
+
+    total = int.from_bytes(bytes(buf[:8]), "little")
+    # Parse: NumberOfHandles(8) + Reserved(8) + [entries]
+    ENTRY_SIZE = 40  # PVOID(8)+HANDLE(8)+HANDLE(8)+ACCESS_MASK(4)+USHORT(2)+USHORT(2)+ULONG(4)+ULONG(4)
+
+    # Group handles by PID (all types; file-type check is deferred
+    # via GetFileType on the duplicated handle for reliability)
+    pid_handles: dict[int, list[int]] = {}
+    for i in range(total):
+        off = 16 + i * ENTRY_SIZE
+        if off + ENTRY_SIZE > ret_len.value:
+            break
+        pid_val = int.from_bytes(buf[off + 8 : off + 16], "little")
+        handle_val = int.from_bytes(buf[off + 16 : off + 24], "little")
+        if pid_val in candidate_pids:
+            pid_handles.setdefault(pid_val, []).append(handle_val)
+
+    if not pid_handles:
+        return None
+
+    # ---- 3. Scan handles for the target file ----
+    target_norm = file_path.lower().replace("\\??\\", "").replace("\\\\?\\", "")
+    found_handle_val: int | None = None
+    found_pid: int | None = None
+
+    def _try_get_path(
+        h_proc: HANDLE, handle_val: int, timeout_s: float = 0.2
+    ) -> str | None:
+        """Duplicate *handle_val* and resolve its path with a thread timeout."""
+        result: list[str | None] = [None]
+        dup_handle = HANDLE(0)
+
+        def worker() -> None:
+            nonlocal dup_handle
+            ok = kernel32.DuplicateHandle(
+                h_proc,
+                HANDLE(handle_val),
+                kernel32.GetCurrentProcess(),
+                byref(dup_handle),
+                0,
+                False,
+                DUPLICATE_SAME_ACCESS,
+            )
+            if not ok:
+                return
+            if kernel32.GetFileType(dup_handle) != FILE_TYPE_DISK:
+                return
+            name_buf = create_unicode_buffer(32768)
+            nchars = kernel32.GetFinalPathNameByHandleW(
+                dup_handle, name_buf, len(name_buf), VOLUME_NAME_DOS
+            )
+            if nchars > 0 and nchars < len(name_buf) and name_buf.value:
+                result[0] = name_buf.value
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(timeout=timeout_s)
+        if t.is_alive():
+            if dup_handle.value and dup_handle.value != 0:
+                kernel32.CloseHandle(dup_handle)
+            t.join(timeout=0.5)
+            return None
+        p = result[0]
+        if dup_handle.value and dup_handle.value != 0:
+            kernel32.CloseHandle(dup_handle)
+        return p
+
+    for pid, handles in pid_handles.items():
+        h_proc = kernel32.OpenProcess(PROCESS_DUP_HANDLE, False, pid)
+        if not h_proc:
+            continue
+        try:
+            for hval in handles:
+                path = _try_get_path(h_proc, hval, timeout_s=0.15)
+                if path and target_norm == path.lower().replace("\\??\\", "").replace(
+                    "\\\\?\\", ""
+                ):
+                    found_handle_val = hval
+                    found_pid = pid
+                    break
+        finally:
+            kernel32.CloseHandle(h_proc)
+        if found_handle_val is not None:
+            break
+
+    if found_handle_val is None:
+        return None
+
+    # ---- 4. Read the file through the duplicated handle ----
+    h_proc = kernel32.OpenProcess(PROCESS_DUP_HANDLE, False, found_pid)
+    if not h_proc:
+        return None
+
+    data: bytes | None = None
+    dup_h = HANDLE(0)
+    try:
+        ok = kernel32.DuplicateHandle(
+            h_proc,
+            HANDLE(found_handle_val),
+            kernel32.GetCurrentProcess(),
+            byref(dup_h),
+            0,
+            False,
+            DUPLICATE_SAME_ACCESS,
+        )
+        if not ok:
+            return None
+
+        size = c_longlong(0)
+        kernel32.GetFileSizeEx(dup_h, byref(size))
+        if size.value == 0:
+            return None
+
+        raw = create_string_buffer(size.value)
+        bytes_read = DWORD(0)
+        kernel32.SetFilePointer(dup_h, 0, None, 0)
+        ok = kernel32.ReadFile(dup_h, raw, size.value, byref(bytes_read), None)
+        if ok and bytes_read.value == size.value:
+            data = bytes(raw)
+    finally:
+        if dup_h.value and dup_h.value != 0:
+            kernel32.CloseHandle(dup_h)
+        kernel32.CloseHandle(h_proc)
+
+    return data
+
+
+def _release_windows_file_lock(file_path: str, copy_to: str | None = None) -> None:
+    """Use the Windows Restart Manager to kill processes holding a lock on *file_path*.
+
+    When *copy_to* is provided, the file is copied there during the lock-release
+    window (before ``RmEndSession``), so the browser cannot reacquire the lock
+    before the copy completes.
+
+    The Restart Manager (``Rstrtmgr.dll``) terminates only the specific utility
+    process that holds the file lock (e.g. the Chromium network service), not the
+    entire browser. The browser automatically restarts the terminated process on
+    demand. This requires no administrator privileges.
+
+    .. note::
+
+       After ``RmShutdown`` the lock is released only briefly — the browser
+       restarts its network process within milliseconds and the lock is
+       reacquired. The copy must happen **immediately** after shutdown, before
+       ``RmEndSession``, to hit that tiny window.
+    """
+    import time
+    from ctypes import (
+        windll,  # ty: ignore[unresolved-import]
+        byref,
+        create_unicode_buffer,
+        pointer,
+        WINFUNCTYPE,  # ty: ignore[unresolved-import]
+    )
+    from ctypes.wintypes import DWORD, WCHAR, UINT
+
+    RmForceShutdown = 1
+    rstrtmgr = windll.LoadLibrary("Rstrtmgr")
+
+    @WINFUNCTYPE(None, UINT)
+    def _rm_callback(_percent: UINT) -> None:
+        pass
+
+    for _attempt in range(10):
+        try:
+            fd = os.open(
+                file_path,
+                os.O_RDONLY | os.O_BINARY,  # ty: ignore[unresolved-attribute]
+            )
+            os.close(fd)
+            if copy_to is not None:
+                import shutil
+
+                shutil.copy2(file_path, copy_to)
+            return  # file is now free
+        except PermissionError:
+            pass
+
+        session_handle = DWORD(0)
+        session_flags = DWORD(0)
+        session_key = (WCHAR * 256)()
+        rstrtmgr.RmStartSession(byref(session_handle), session_flags, session_key)
+
+        buf = create_unicode_buffer(file_path)
+        rstrtmgr.RmRegisterResources(
+            session_handle, 1, byref(pointer(buf)), 0, None, 0, None
+        )
+        proc_info_needed = DWORD(0)
+        proc_info = DWORD(0)
+        reboot_reasons = DWORD(0)
+        rstrtmgr.RmGetList(
+            session_handle,
+            byref(proc_info_needed),
+            byref(proc_info),
+            None,
+            byref(reboot_reasons),
+        )
+        copied: bool = False
+        if proc_info_needed.value:
+            rstrtmgr.RmShutdown(session_handle, RmForceShutdown, _rm_callback)
+
+            # The browser restarts the network process within milliseconds
+            # and reacquires the lock. Try to open immediately with 1 ms
+            # retries before RmEndSession.
+            for _sub in range(100):
+                try:
+                    fd = os.open(
+                        file_path,
+                        os.O_RDONLY | os.O_BINARY,  # ty: ignore[unresolved-attribute]
+                    )
+                    os.close(fd)
+                    if copy_to is not None:
+                        import shutil
+
+                        shutil.copy2(file_path, copy_to)
+                        copied = True
+                    break
+                except PermissionError:
+                    time.sleep(0.001)
+
+        rstrtmgr.RmEndSession(session_handle)
+        if copied:
+            return
+        time.sleep(0.5)
+
+    raise PermissionError(
+        f"Could not release Windows file lock on {file_path} after multiple attempts"
+    )
+
+
+def _release_windows_file_lock_batch(copies: list[tuple[str, str]]) -> None:
+    """Release locks on multiple files in a single Restart Manager session.
+
+    Each tuple is ``(source_path, dest_path)``. All source files are registered
+    with one ``RmStartSession`` so they are unlocked atomically, copied to their
+    destinations within the unlock window, and the session is ended once.
+    """
+    import time
+    from ctypes import (
+        windll,  # ty: ignore[unresolved-import]
+        byref,
+        create_unicode_buffer,
+        pointer,
+        WINFUNCTYPE,  # ty: ignore[unresolved-import]
+    )
+    from ctypes.wintypes import DWORD, WCHAR, UINT
+
+    if not copies:
+        return
+
+    RmForceShutdown = 1
+    rstrtmgr = windll.LoadLibrary("Rstrtmgr")
+
+    @WINFUNCTYPE(None, UINT)
+    def _rm_callback(_percent: UINT) -> None:
+        pass
+
+    session_handle = DWORD(0)
+    session_flags = DWORD(0)
+    session_key = (WCHAR * 256)()
+    rstrtmgr.RmStartSession(byref(session_handle), session_flags, session_key)
+    try:
+        for src, _dst in copies:
+            buf = create_unicode_buffer(src)
+            rstrtmgr.RmRegisterResources(
+                session_handle, 1, byref(pointer(buf)), 0, None, 0, None
+            )
+        proc_info_needed = DWORD(0)
+        proc_info = DWORD(0)
+        reboot_reasons = DWORD(0)
+        rstrtmgr.RmGetList(
+            session_handle,
+            byref(proc_info_needed),
+            byref(proc_info),
+            None,
+            byref(reboot_reasons),
+        )
+        if proc_info_needed.value:
+            rstrtmgr.RmShutdown(session_handle, RmForceShutdown, _rm_callback)
+            for _sub in range(100):
+                try:
+                    fd = os.open(
+                        copies[0][0],
+                        os.O_RDONLY | os.O_BINARY,  # ty: ignore[unresolved-attribute]
+                    )
+                    os.close(fd)
+                    break
+                except PermissionError:
+                    time.sleep(0.001)
+            import shutil
+
+            for src, dst in copies:
+                shutil.copy2(src, dst)
+        rstrtmgr.RmEndSession(session_handle)
+    except BaseException:
+        rstrtmgr.RmEndSession(session_handle)
+        raise
+
+
+def _copy_file_via_duplicate_or_rm(src: Path, dst: Path) -> bool:
+    """Try DuplicateHandle for *src*; return True on success.
+
+    On failure return False so the caller can batch into
+    ``_release_windows_file_lock_batch``.
+    """
+    data = _read_locked_file_via_duplicate_handle(os.fspath(src))
+    if data is not None:
+        logger.debug("DuplicateHandle succeeded for %s", src.name)
+        dst.write_bytes(data)
+        os.chmod(dst, 0o600)
+        return True
+    return False
+
+
 def _copy_cookies_db(cookies_db: Path) -> tuple[Path, Path]:
     """Copy the Cookies DB and its WAL/SHM sidecars into a hardened temp dir.
 
     Returns ``(temp_dir, db_copy)``. The caller removes ``temp_dir`` in a
     ``finally`` block. WAL/SHM are copied so a just-issued ``li_at`` that is
     committed but not yet checkpointed is visible. The live DB is never opened.
+
+    On Windows, when the source database is locked by a running browser,
+    a zero-kill DuplicateHandle approach is tried first (no processes
+    terminated). If DuplicateHandle fails for any file, ALL files that still
+    need unlocking are handled within a single Restart Manager session so
+    the DB, WAL, and SHM are captured as one consistent snapshot.
     """
     temp_dir = Path(tempfile.mkdtemp(prefix="linkedin-cookie-import-"))
     try:
@@ -377,15 +819,45 @@ def _copy_cookies_db(cookies_db: Path) -> tuple[Path, Path]:
             os.chmod(temp_dir, 0o700)
         except OSError:
             pass
+
+        # Collect all source files (DB + sidecars)
+        copies: list[tuple[Path, Path]] = []
         db_copy = temp_dir / "Cookies"
-        shutil.copy2(cookies_db, db_copy)
-        os.chmod(db_copy, 0o600)
+        copies.append((cookies_db, db_copy))
         for suffix in ("-wal", "-shm"):
             sidecar = cookies_db.with_name(cookies_db.name + suffix)
             if sidecar.is_file():
-                sidecar_copy = temp_dir / (db_copy.name + suffix)
-                shutil.copy2(sidecar, sidecar_copy)
-                os.chmod(sidecar_copy, 0o600)
+                copies.append((sidecar, temp_dir / (db_copy.name + suffix)))
+
+        # Phase 1: try plain shutil.copy2 for each
+        need_duphandle: list[tuple[Path, Path]] = []
+        for src, dst in copies:
+            try:
+                shutil.copy2(src, dst)
+                os.chmod(dst, 0o600)
+            except PermissionError:
+                if os.name == "nt":
+                    need_duphandle.append((src, dst))
+                else:
+                    raise
+
+        # Phase 2: try DuplicateHandle for locked files
+        need_rm: list[tuple[str, str]] = []
+        for src, dst in need_duphandle:
+            if not _copy_file_via_duplicate_or_rm(src, dst):
+                need_rm.append((os.fspath(src), os.fspath(dst)))
+
+        # Phase 3: single Restart Manager session for ALL remaining files
+        if need_rm:
+            logger.debug(
+                "DuplicateHandle failed for %d file(s), falling back to "
+                "a single Restart Manager batch for all",
+                len(need_rm),
+            )
+            _release_windows_file_lock_batch(need_rm)
+            for _src, dst in need_rm:
+                os.chmod(dst, 0o600)
+
     except BaseException:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
