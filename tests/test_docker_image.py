@@ -1,32 +1,152 @@
 """The image's browser and process topology are part of its behaviour.
 
-A Docker build is too expensive for the ordinary unit suite, and string checks
-are enough for the pieces that can disappear silently: the browser product, the
-launch mode, and who receives SIGTERM. The supervisor itself is exercised with
-fake Xvfb and server processes, because child liveness is behaviour a string
-check cannot prove.
+Building the real image is too expensive for the ordinary unit suite, and
+string checks are enough for the pieces that can disappear silently: the
+browser product, the launch mode, and who receives SIGTERM. The supervisor
+itself is exercised with fake Xvfb and server processes, because child liveness
+is behaviour a string check cannot prove.
+
+Two things resist that treatment and are measured instead. Which paths reach
+the build context is decided by `.dockerignore` semantics that no
+reimplementation here matched without diverging silently, so a throwaway
+`busybox` probe asks the daemon; it costs about a second and skips where there
+is no daemon. And a flag is read out of the command that will run it rather
+than out of the file, because the file also holds the comment explaining the
+flag.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import socket
 import subprocess
 import textwrap
+import tomllib
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+
+def _logical_lines(text: str) -> list[str]:
+    """Join backslash continuations and drop comments.
+
+    Both the Dockerfile and the compiled constraint file wrap one logical
+    statement across several physical lines. Matching a flag against the raw
+    text therefore also matches the comment that explains the flag, which is
+    how an assertion on ``--no-deps`` stayed green after the flag was removed
+    from the command it guards.
+
+    Line continuation is the whole of what this handles, and
+    `test_the_dockerfile_stays_within_the_syntax_this_file_parses` refuses the
+    constructs where that is not enough. A heredoc would otherwise present its
+    payload as instructions, and BuildKit reads a `\\\\` line ending and a
+    `# escape=` directive differently again.
+    """
+    statements: list[str] = []
+    pending = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            pending += f"{stripped[:-1].strip()} "
+            continue
+        statements.append(f"{pending}{stripped}".strip())
+        pending = ""
+    if pending:
+        statements.append(pending.strip())
+    return statements
+
+
+def _shell_commands(instruction: str) -> list[str]:
+    """Split a `RUN` into the commands the shell will actually execute.
+
+    Searching the whole instruction for a flag asks whether the text contains
+    it, not whether the command runs with it. Docker joins continuations into
+    a single shell line, so `install foo; # --no-deps` leaves a comment that
+    swallows every flag written on the following lines while each substring
+    assertion still finds them, and `sync --no-install-project && sync` runs a
+    second, unguarded install that no substring reveals.
+    """
+    body = instruction.removeprefix("RUN ").strip()
+    body = re.split(r"(?:^|\s)#", body, maxsplit=1)[0]
+    return [part.strip() for part in re.split(r"&&|\|\||[;|]", body) if part.strip()]
+
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCKERFILE = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+_DOCKERFILE_INSTRUCTIONS = _logical_lines(_DOCKERFILE)
 _ENTRYPOINT_PATH = _REPO_ROOT / "docker-entrypoint.sh"
 _ENTRYPOINT = _ENTRYPOINT_PATH.read_text(encoding="utf-8")
 _README = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
 _DOCKER_GUIDE = (_REPO_ROOT / "docs" / "docker-hub.md").read_text(encoding="utf-8")
 _BUILD_CONSTRAINTS_PATH = _REPO_ROOT / "build-constraints.txt"
-_DOCKERIGNORE = (_REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
+_PYPROJECT_PATH = _REPO_ROOT / "pyproject.toml"
+_IMAGE_PYTHON = re.search(r"^FROM python:(\d+)\.(\d+)\.(\d+)-slim", _DOCKERFILE, re.M)
+_CONTEXT_PROBE = "FROM busybox\nCOPY . /ctx\n"
+
+
+@pytest.fixture(scope="module")
+def build_context() -> frozenset[str]:
+    """The paths BuildKit really sends, read out of a throwaway probe build.
+
+    `.dockerignore` semantics cannot be recovered from the file alone. Every
+    reimplementation measured here disagreed with BuildKit while staying
+    silent about it: a leading slash anchors the pattern, `*` stops at a
+    separator, `\\!` escapes a negation, and a wildcard such as
+    `build-constraints.*` hides a file that a literal-name search still reads
+    as present. Each of those is a false pass, which is the direction that
+    costs something. The release publishes to PyPI and tags the repository
+    before the Docker job runs, so a version can end up on PyPI and as a tag
+    with no image behind it.
+
+    Asking the daemon costs about a second against this 9.6 MB context, and
+    the suite skips where there is none, the way the entrypoint tests skip
+    without Bash 5.
+    """
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("docker is required to read the real build context")
+
+    tag = f"linkedin-mcp-context-probe:{os.getpid()}"
+    # A file under a directory proves the `**/` reach of the pattern; `.env`
+    # and the tracked `.env.example` only ever prove the root.
+    nested = _REPO_ROOT / "tests" / f".env.probe-{os.getpid()}"
+    try:
+        nested.write_text("PROBE=1\n", encoding="utf-8")
+        build = subprocess.run(
+            [docker, "build", "-q", "-t", tag, "-f", "-", str(_REPO_ROOT)],
+            input=_CONTEXT_PROBE,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        if build.returncode != 0:
+            pytest.skip(f"no usable docker daemon: {build.stderr.strip()[:200]}")
+        listing = subprocess.run(
+            [docker, "run", "--rm", tag, "find", "/ctx", "-type", "f"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=True,
+        )
+    finally:
+        nested.unlink(missing_ok=True)
+        subprocess.run(
+            [docker, "rmi", "-f", tag], capture_output=True, text=True, check=False
+        )
+
+    return frozenset(
+        line.removeprefix("/ctx/")
+        for line in listing.stdout.split("\n")
+        if line.startswith("/ctx/")
+    )
 
 
 def test_the_image_installs_only_the_full_browser() -> None:
@@ -42,26 +162,153 @@ def test_the_image_builds_the_project_against_the_hashed_backend() -> None:
     Hub credentials (#655). The project is installed on its own instead, against
     the same hashed file the published distributions use (#654).
     """
-    assert "--build-constraints build-constraints.txt ." in _DOCKERFILE
-    # The dependency sync is the only sync left. One that also installs the
-    # project would build it unconstrained and make the pin above dead weight.
-    assert "uv sync --frozen --no-install-project" in _DOCKERFILE
-    assert "uv sync --frozen --no-dev" not in _DOCKERFILE
+    commands = [
+        command
+        for instruction in _DOCKERFILE_INSTRUCTIONS
+        if instruction.startswith("RUN ")
+        for command in _shell_commands(instruction)
+    ]
+    installs = [command for command in commands if command.startswith("uv pip install")]
+    assert len(installs) == 1
+    project_install = installs[0]
+
+    assert "--build-constraints build-constraints.txt" in project_install
+    assert project_install.endswith(" .")
     # Without this the lock stops deciding the runtime dependencies: a bare
     # `uv pip install .` resolves them again from the index.
-    assert "--no-deps" in _DOCKERFILE
+    assert "--no-deps" in project_install
+    # uv verifies the hashes in a constraint file by default, and this switch
+    # turns that off while every other assertion here stays satisfied. A mirror
+    # workaround reaching for it would leave the pin as documentation only.
+    assert "--no-verify-hashes" not in project_install
+    # Every sync has to leave the project alone. One that installs it builds the
+    # backend unconstrained, and a later constrained install cannot undo a build
+    # that already ran.
+    syncs = [command for command in commands if command.startswith("uv sync")]
+    assert syncs
+    for sync in syncs:
+        assert "--no-install-project" in sync
+    # The switch above has an environment twin that reaches every uv invocation
+    # in the stage, including this one, and turns the same verification off.
+    assert "UV_NO_VERIFY_HASHES" not in _DOCKERFILE
 
 
-def test_the_hashed_build_constraint_reaches_the_build_context() -> None:
-    """A version without hashes, or an excluded file, silently drops the pin."""
-    constraints = _BUILD_CONSTRAINTS_PATH.read_text(encoding="utf-8")
+def test_the_dockerfile_stays_within_the_syntax_this_file_parses() -> None:
+    """`_logical_lines` handles line continuation, so nothing else may appear.
 
-    assert "setuptools==" in constraints
-    assert constraints.count("--hash=sha256:") >= 1
-    ignored = {
-        line.strip() for line in _DOCKERIGNORE.splitlines() if not line.startswith("#")
+    BuildKit reads three constructs differently, and each one lets an
+    assertion above pass while the build does something else. A heredoc is
+    data to BuildKit and instructions to this parser, so a payload line
+    reading `uv pip install ... .` satisfies the install assertions while no
+    install runs. A line ending in `\\\\` ends the instruction for BuildKit
+    and continues it here, importing flags from the next line. An `escape`
+    directive changes the continuation character entirely.
+    """
+    assert "<<" not in _DOCKERFILE
+    assert not re.search(r"^\s*#\s*escape\s*=", _DOCKERFILE, re.M)
+    assert not [
+        line for line in _DOCKERFILE.splitlines() if line.rstrip().endswith("\\\\")
+    ]
+
+
+def test_every_build_requirement_is_pinned_with_hashes() -> None:
+    """The constraint files have to cover all of `[build-system].requires`.
+
+    Asserting only that some hashed `setuptools==` entry exists let an added
+    `wheel` install unpinned while both files still read as pinned. The source
+    file is checked alongside the compiled one because it is what carries the
+    transitive closure: `uv pip compile` writes every dependency of what it is
+    given, so a requirement present there cannot bring an unhashed dependency
+    along, and one added only to the compiled file can. Nothing offline can
+    prove the compiled file is the current output of that command; Renovate's
+    `pip-compile` manager regenerates it, and the hash check below is what
+    catches a partial edit.
+    """
+    build_system = tomllib.loads(_PYPROJECT_PATH.read_text(encoding="utf-8"))[
+        "build-system"
+    ]
+    required = {
+        canonicalize_name(Requirement(entry).name) for entry in build_system["requires"]
     }
-    assert "build-constraints.txt" not in ignored
+    assert required
+
+    def named(path: Path) -> dict[str, str]:
+        return {
+            canonicalize_name(
+                Requirement(entry.split("--hash", 1)[0].strip()).name
+            ): entry
+            for entry in _logical_lines(path.read_text(encoding="utf-8"))
+        }
+
+    sources = named(_REPO_ROOT / "build-constraints.in")
+    compiled = named(_BUILD_CONSTRAINTS_PATH)
+
+    assert required <= sources.keys(), (
+        f"build requirements missing from build-constraints.in: "
+        f"{sorted(required - sources.keys())}"
+    )
+    assert sources.keys() <= compiled.keys(), (
+        f"sources missing from the compiled file: "
+        f"{sorted(sources.keys() - compiled.keys())}"
+    )
+    unhashed = sorted(
+        name for name, entry in compiled.items() if "--hash=sha256:" not in entry
+    )
+    assert not unhashed, f"compiled entries without a hash: {unhashed}"
+
+    # A marker that is false where the image builds pins nothing there while
+    # reading as a pin here. `platform_machine` is the live one: the release
+    # builds amd64 and arm64 from this same file, so an entry true for only one
+    # of them leaves the other resolving its backend from the index.
+    assert _IMAGE_PYTHON, "the base image no longer names a Python version"
+    major, minor, patch = _IMAGE_PYTHON.groups()
+    for name, entry in compiled.items():
+        marker = Requirement(entry.split("--hash", 1)[0].strip()).marker
+        if marker is None:
+            continue
+        for machine in ("x86_64", "aarch64"):
+            environment = {
+                "implementation_name": "cpython",
+                "os_name": "posix",
+                "platform_machine": machine,
+                "platform_system": "Linux",
+                "python_full_version": f"{major}.{minor}.{patch}",
+                "python_version": f"{major}.{minor}",
+                "sys_platform": "linux",
+            }
+            assert marker.evaluate(environment), (
+                f"{name} is constrained only outside the image: {marker} on {machine}"
+            )
+
+
+def test_the_hashed_build_constraint_reaches_the_build_context(
+    build_context: frozenset[str],
+) -> None:
+    """An excluded constraint file drops a pin the build never asked for."""
+    for name in ("build-constraints.txt", "pyproject.toml", "uv.lock", "README.md"):
+        assert name in build_context, name
+
+
+def test_the_build_context_carries_no_environment_file(
+    build_context: frozenset[str],
+) -> None:
+    """A suffixed `.env` carries the same secrets as the plain one.
+
+    `COPY . .` keeps the whole context in the builder layer, and the release
+    workflow exports that layer through `cache-to: type=gha,mode=max`. Ignoring
+    only `.env` let a local `.env.previous-proxy` through, holding a LinkedIn
+    session cookie and proxy credentials; a real build listed it inside `/app`.
+    The runtime stage takes only `/app/.venv`, so no published image carried it.
+    """
+    # The tracked `.env.example` is what keeps this from passing vacuously, and
+    # the fixture writes a nested one for the `**/` half of the pattern.
+    assert sorted(path.name for path in _REPO_ROOT.glob(".env*")), (
+        "no .env* file exists here, so an empty result would prove nothing"
+    )
+    leaked = sorted(
+        path for path in build_context if Path(path).name.startswith(".env")
+    )
+    assert not leaked, f"environment files reached the build context: {leaked}"
 
 
 def test_the_image_defaults_to_headed_on_a_virtual_display() -> None:
