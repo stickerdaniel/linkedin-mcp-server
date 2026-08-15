@@ -35,22 +35,27 @@ class TestPauseHelpers:
     async def test_human_pause_sleeps_when_enabled(self):
         pacing = HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0)
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            new_callable=AsyncMock,
         ) as sleep:
             await human_pause(pacing, "navigation")
         sleep.assert_awaited_once()
-        assert sleep.await_args.args[0] == pytest.approx(2.0)  # ty: ignore[unresolved-attribute]
+        await_args = sleep.await_args
+        assert await_args is not None
+        assert await_args.args[0] == pytest.approx(2.0)
 
     async def test_human_pause_does_nothing_when_disabled(self):
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            new_callable=AsyncMock,
         ) as sleep:
             await human_pause(HumanPacing.disabled(), "navigation")
         sleep.assert_not_awaited()
 
     async def test_human_pause_does_nothing_when_none(self):
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            new_callable=AsyncMock,
         ) as sleep:
             await human_pause(None, "navigation")
         sleep.assert_not_awaited()
@@ -58,14 +63,26 @@ class TestPauseHelpers:
     async def test_skim_pause_sleeps_a_quarter(self):
         pacing = HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0)
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            new_callable=AsyncMock,
         ) as sleep:
             await skim_pause(pacing, "row visit")
-        assert sleep.await_args.args[0] == pytest.approx(1.0)  # ty: ignore[unresolved-attribute]
+        await_args = sleep.await_args
+        assert await_args is not None
+        assert await_args.args[0] == pytest.approx(1.0)
 
     async def test_skim_pause_does_nothing_when_disabled(self):
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            new_callable=AsyncMock,
         ) as sleep:
             await skim_pause(HumanPacing.disabled(), "row visit")
+        sleep.assert_not_awaited()
+
+    async def test_skim_pause_does_nothing_when_none(self):
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep:
+            await skim_pause(None, "row visit")
         sleep.assert_not_awaited()
