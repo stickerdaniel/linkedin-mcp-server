@@ -25,6 +25,7 @@ from linkedin_mcp_server.scraping.extractor import (
     strip_linkedin_noise,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.scraping.pacing import HumanPacing
 
 
 def extracted(
@@ -5197,7 +5198,11 @@ class TestResolveConversationThreadUrls:
             limit=50, context="inbox", name_filter="Jacki McMahan"
         )
 
-        assert captured["arg"] == {"limit": 50, "nameFilter": "Jacki McMahan"}
+        assert captured["arg"] == {
+            "limit": 50,
+            "nameFilter": "Jacki McMahan",
+            "rowPauseMs": 0,
+        }
 
 
 class TestSearchConversations:
@@ -6100,3 +6105,249 @@ class TestNavigationPacing:
                 "test-user", {"main_profile", "experience", "education"}
             )
         assert 2.0 in [c.args[0] for c in extractor_sleep.await_args_list]
+
+
+class TestClickPacing:
+    """Clicks are actions too — and row visits had no delay at all."""
+
+    @staticmethod
+    def _text_button(page, *, count: int) -> None:
+        """Aim ``page.locator(scope).locator(...).filter(...)`` at one button."""
+        matches = MagicMock()
+        matches.count = AsyncMock(return_value=count)
+        matches.first = matches
+        matches.scroll_into_view_if_needed = AsyncMock()
+        matches.click = AsyncMock()
+        locator = MagicMock()
+        locator.locator = MagicMock(return_value=locator)
+        locator.filter = MagicMock(return_value=matches)
+        page.locator = MagicMock(return_value=locator)
+
+    async def test_click_button_by_text_pauses_first(self, mock_page):
+        self._text_button(mock_page, count=1)
+
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
+        )
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            assert await extractor.click_button_by_text("Connect") is True
+        sleep.assert_awaited()
+        assert sleep.await_args_list[0].args[0] == pytest.approx(2.0)
+
+    async def test_click_button_by_text_does_not_pause_by_default(self, mock_page):
+        self._text_button(mock_page, count=1)
+
+        extractor = LinkedInExtractor(mock_page)
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await extractor.click_button_by_text("Connect")
+        sleep.assert_not_awaited()
+
+    async def test_no_pause_when_nothing_matched(self, mock_page):
+        """Pacing stands in for an action; finding nothing is not one."""
+        self._text_button(mock_page, count=0)
+
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
+        )
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            assert await extractor.click_button_by_text("Connect") is False
+        sleep.assert_not_awaited()
+
+    async def test_click_first_pauses_before_the_click(self, mock_page):
+        """A pause after the button is already pressed paces nothing."""
+        order: list[str] = []
+        target = MagicMock()
+        target.scroll_into_view_if_needed = AsyncMock()
+        target.click = AsyncMock(side_effect=lambda **kw: order.append("click"))
+        locator = MagicMock()
+        locator.first = target
+        mock_page.locator = MagicMock(return_value=locator)
+
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
+        )
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            new=AsyncMock(side_effect=lambda *a: order.append("sleep")),
+        ):
+            await extractor._click_first("button.artdeco-modal__dismiss")
+        assert order == ["sleep", "click"]
+
+    async def test_click_first_does_not_pause_by_default(self, mock_page):
+        target = MagicMock()
+        target.scroll_into_view_if_needed = AsyncMock()
+        target.click = AsyncMock()
+        locator = MagicMock()
+        locator.first = target
+        mock_page.locator = MagicMock(return_value=locator)
+
+        extractor = LinkedInExtractor(mock_page)
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await extractor._click_first("button.artdeco-modal__dismiss")
+        sleep.assert_not_awaited()
+
+    async def test_dialog_primary_button_pauses(self, mock_page):
+        buttons = MagicMock()
+        buttons.count = AsyncMock(return_value=2)
+        buttons.nth = MagicMock(return_value=MagicMock(click=AsyncMock()))
+        mock_page.locator = MagicMock(return_value=buttons)
+
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
+        )
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            assert await extractor._click_dialog_primary_button() is True
+        assert sleep.await_args_list[0].args[0] == pytest.approx(2.0)
+
+    async def test_dialog_primary_button_does_not_pause_when_empty(self, mock_page):
+        """No buttons in the dialog means no click to pace."""
+        buttons = MagicMock()
+        buttons.count = AsyncMock(return_value=0)
+        mock_page.locator = MagicMock(return_value=buttons)
+
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
+        )
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            assert await extractor._click_dialog_primary_button() is False
+        sleep.assert_not_awaited()
+
+    @staticmethod
+    def _show_more_button(page) -> None:
+        """Aim ``main button`` at one permanently present "Show more"."""
+        button = MagicMock()
+        button.count = AsyncMock(return_value=1)
+        button.first = button
+        button.filter = MagicMock(return_value=button)
+        button.is_visible = AsyncMock(return_value=True)
+        button.scroll_into_view_if_needed = AsyncMock()
+        button.click = AsyncMock()
+        page.locator = MagicMock(return_value=button)
+
+    @staticmethod
+    async def _details_section(extractor) -> None:
+        """Run the detail-page pipeline, which is where "Show more" lives."""
+        await extractor._extract_loaded_section(
+            "https://www.linkedin.com/in/testuser/details/experience/",
+            "experience",
+            max_scrolls=1,
+        )
+
+    async def test_show_more_keeps_its_fixed_second_when_unpaced(self, mock_page):
+        """Toggle-off has to leave upstream timing byte-identical."""
+        self._show_more_button(mock_page)
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep", new=AsyncMock()
+            ) as sleep,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new=AsyncMock(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new=AsyncMock(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new=AsyncMock(return_value=False),
+            ),
+        ):
+            await self._details_section(extractor)
+        assert 1.0 in [call.args[0] for call in sleep.await_args_list]
+
+    async def test_show_more_replaces_the_fixed_second_when_paced(self, mock_page):
+        """The paced wait stands in for the fixed one — never both."""
+        self._show_more_button(mock_page)
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
+        )
+        # One patch for both sites: ``extractor.asyncio`` and ``pacing.asyncio``
+        # are the same module object, so a second patch would shadow the first
+        # and leave this list reading empty whatever the code did.
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep", new=AsyncMock()
+            ) as sleep,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new=AsyncMock(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new=AsyncMock(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new=AsyncMock(return_value=False),
+            ),
+        ):
+            await self._details_section(extractor)
+        delays = [call.args[0] for call in sleep.await_args_list]
+        assert 2.0 in delays
+        assert 1.0 not in delays
+
+    async def test_conversation_rows_get_a_pause_between_clicks(self, mock_page):
+        """Row visits ran back-to-back with zero delay before this."""
+        mock_page.evaluate = AsyncMock(return_value=[])
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0),
+        )
+        await extractor._extract_conversation_thread_refs(limit=10, context="inbox")
+        call = mock_page.evaluate.await_args
+        assert call is not None
+        # 4.0 * SKIM_FRACTION seconds, handed to the browser in milliseconds.
+        assert call.args[1]["rowPauseMs"] == pytest.approx(1000.0)
+
+    async def test_conversation_rows_have_no_pause_by_default(self, mock_page):
+        mock_page.evaluate = AsyncMock(return_value=[])
+        extractor = LinkedInExtractor(mock_page)
+        await extractor._extract_conversation_thread_refs(limit=10, context="inbox")
+        call = mock_page.evaluate.await_args
+        assert call is not None
+        assert call.args[1]["rowPauseMs"] == 0
+
+    async def test_row_pause_is_not_charged_for_rows_never_clicked(self, mock_page):
+        """A row the filter skips is not an action, and the JS must agree.
+
+        ``resolve_conversation_urls`` passes ``limit=None`` with a name filter:
+        every row in the inbox is read, at most one is clicked. A wait at the
+        top of the loop would charge a skim delay for every row nobody
+        touches, turning one username lookup into half a minute of waiting.
+        The loop runs in the browser, so the only way to pin the ordering
+        without one is on the source handed to ``evaluate``.
+        """
+        mock_page.evaluate = AsyncMock(return_value=[])
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0),
+        )
+        await extractor._extract_conversation_thread_refs(
+            limit=None, context="inbox", name_filter="Ada Lovelace"
+        )
+        call = mock_page.evaluate.await_args
+        assert call is not None
+        source = call.args[0]
+        wait = source.index("setTimeout(r, rowPauseMs)")
+        assert wait > source.index("rowName !== wanted")
+        assert wait > source.index("if (!clickTarget) continue")

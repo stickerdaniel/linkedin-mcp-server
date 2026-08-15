@@ -1058,6 +1058,10 @@ class LinkedInExtractor:
         logger.debug("click_button_by_text(%r): %d matches in %s", text, count, scope)
         if count == 0:
             return False
+        # After the count check: a lookup that found nothing is not an action,
+        # and pausing for it would only slow down the callers that probe for a
+        # button they expect to be absent.
+        await human_pause(self._pacing, f"click on {text!r}")
         target = matches.first
         try:
             await target.scroll_into_view_if_needed(timeout=timeout)
@@ -1094,6 +1098,7 @@ class LinkedInExtractor:
         count = await buttons.count()
         if count == 0:
             return False
+        await human_pause(self._pacing, "dialog primary button")
         try:
             await buttons.nth(count - 1).click(timeout=timeout)
             return True
@@ -1235,6 +1240,7 @@ class LinkedInExtractor:
 
     async def _click_first(self, selector: str, *, timeout: int = 5000) -> None:
         """Click the first visible locator that matches a selector."""
+        await human_pause(self._pacing, f"click on {selector}")
         target = self._page.locator(selector).first
         try:
             await target.scroll_into_view_if_needed(timeout=timeout)
@@ -1650,7 +1656,14 @@ class LinkedInExtractor:
                         break
                     await target.scroll_into_view_if_needed(timeout=2000)
                     await target.click(timeout=2000)
-                    await asyncio.sleep(1.0)
+                    # The fixed second was always both settle time and spacing
+                    # before the next click. Pacing takes over the whole job
+                    # rather than adding to it — the two together would make a
+                    # paced run slower than the operator asked for.
+                    if self._paces_navigations:
+                        await human_pause(self._pacing, "next 'Show more' click")
+                    else:
+                        await asyncio.sleep(1.0)
                 except PlaywrightTimeoutError:
                     logger.debug("Show more click timed out after %d clicks", i)
                     break
@@ -3935,13 +3948,22 @@ class LinkedInExtractor:
             )
             return []
 
+        # Each row click is an SPA navigation, and before pacing they fired
+        # back to back — up to fifty of them with nothing but the URL poll in
+        # between, which is the least human thing this scraper does. The wait
+        # is handed to the JS as a number because the loop it belongs in lives
+        # there; a pause awaited in Python would only sit around the whole
+        # evaluate call.
+        paced = self._pacing if self._paces_navigations else None
+        row_pause_ms = paced.skim_delay() * 1000 if paced else 0
+
         # The Ember click handler lives on an inner div; the <li> and <label>
         # don't trigger SPA navigation.  No role/aria attributes exist on the
         # clickable element, so class-name selectors are unavoidable here.
         # The aria-label value flows through unmodified — Python strips any
         # known locale prefix to derive a clean participant name for refs.
         conversations: list[dict[str, str]] = await self._page.evaluate(
-            """async ({ limit, nameFilter }) => {
+            """async ({ limit, nameFilter, rowPauseMs }) => {
                 const labels = Array.from(document.querySelectorAll(
                     'main li label[aria-label]'
                 ));
@@ -3956,6 +3978,7 @@ class LinkedInExtractor:
                 const wanted = (nameFilter || '')
                     .replace(/\\s+/g, ' ').trim().toLowerCase();
                 const results = [];
+                let clicked = 0;
                 for (let i = 0; i < cap; i++) {
                     const label = labels[i];
                     const ariaLabel = label.getAttribute('aria-label') || '';
@@ -3966,6 +3989,14 @@ class LinkedInExtractor:
                     const clickTarget = label.closest('li')
                         ?.querySelector('div[class*="listitem__link"]');
                     if (!clickTarget) continue;
+                    // Spacing is measured between clicks, past both skips
+                    // above: a name filter reads every row and clicks one, so
+                    // a wait at the top of the loop would charge the whole
+                    // inbox for a single visit.
+                    if (rowPauseMs && clicked > 0) {
+                        await new Promise(r => setTimeout(r, rowPauseMs));
+                    }
+                    clicked++;
                     const before = location.href;
                     clickTarget.click();
                     // Poll for the SPA URL to settle on the thread route. The
@@ -3987,7 +4018,7 @@ class LinkedInExtractor:
                 }
                 return results;
             }""",
-            {"limit": limit, "nameFilter": name_filter},
+            {"limit": limit, "nameFilter": name_filter, "rowPauseMs": row_pause_ms},
         )
         refs: list[Reference] = []
         for conv in conversations:
