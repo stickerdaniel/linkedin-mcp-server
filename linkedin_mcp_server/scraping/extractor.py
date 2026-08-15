@@ -767,6 +767,23 @@ class LinkedInExtractor:
         """
         return bool(self._pacing and self._pacing.enabled)
 
+    async def _section_gap(self) -> None:
+        """Wait the fixed gap between two navigations of one scrape.
+
+        Five loops space their pages with this. Written out at each of them it
+        was a two-line guard wrapping the upstream ``asyncio.sleep`` line and
+        re-indenting it, inside loops upstream edits often — five conflicts on
+        every merge, for one decision stated five times. As a call it is a
+        same-indent substitution for the line it replaces, and the decision
+        lives here.
+
+        When pacing is live the funnel pause in ``_goto_with_auth_checks``
+        has already spaced the navigation, so this adds nothing on top; with
+        pacing off it is exactly the delay it has always been.
+        """
+        if not self._paces_navigations:
+            await asyncio.sleep(_NAV_DELAY)
+
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
         """Compress body text into a short, single-line diagnostic marker."""
@@ -1836,8 +1853,7 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    if not self._paces_navigations:
-                        await asyncio.sleep(_NAV_DELAY)
+                    await self._section_gap()
 
                 url = base_url + suffix
                 try:
@@ -2506,8 +2522,7 @@ class LinkedInExtractor:
                 continue
 
             if not first_show_all:
-                if not self._paces_navigations:
-                    await asyncio.sleep(_NAV_DELAY)
+                await self._section_gap()
             first_show_all = False
 
             try:
@@ -2990,8 +3005,7 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    if not self._paces_navigations:
-                        await asyncio.sleep(_NAV_DELAY)
+                    await self._section_gap()
 
                 url = base_url + suffix
                 try:
@@ -3351,8 +3365,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                if not self._paces_navigations:
-                    await asyncio.sleep(_NAV_DELAY)
+                await self._section_gap()
 
             url = (
                 base_url
@@ -3585,8 +3598,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                if not self._paces_navigations:
-                    await asyncio.sleep(_NAV_DELAY)
+                await self._section_gap()
 
             url = (
                 base_url

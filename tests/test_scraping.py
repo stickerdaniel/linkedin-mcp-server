@@ -6110,6 +6110,145 @@ class TestNavigationPacing:
         assert 2.0 in [c.args[0] for c in extractor_sleep.await_args_list]
 
 
+class TestSectionGapIsWired:
+    """The 2.0s gap between pages, at each of the five loops that space with it.
+
+    The five sites used to spell the guard out; they now call one
+    ``_section_gap``. Collapsing them means a site that loses its call goes
+    quiet rather than wrong — the same failure the scroll call sites were
+    measured to have, where stripping ``pacing=`` from all four left the
+    feature inert and broke no test. Each loop below is driven for real and
+    judged on the delay it produces, not on the method being called, so the
+    assertion survives a rename of the method.
+    """
+
+    # Seven, so a paced wait can never be mistaken for the 2.0s under test.
+    PACED = HumanPacing(enabled=True, min_seconds=7.0, max_seconds=7.0)
+
+    @staticmethod
+    async def _person(extractor):
+        with patch.object(
+            extractor,
+            "extract_page",
+            new=AsyncMock(return_value=extracted("text")),
+        ):
+            await extractor.scrape_person("u", {"main_profile", "experience"})
+
+    @staticmethod
+    async def _company(extractor):
+        with patch.object(
+            extractor,
+            "extract_page",
+            new=AsyncMock(return_value=extracted("text")),
+        ):
+            await extractor.scrape_company("c", {"about", "posts"})
+
+    @staticmethod
+    async def _sidebar_show_all(extractor):
+        extractor._page.evaluate = AsyncMock(
+            side_effect=[
+                {
+                    "sections": {"more_profiles_for_you": ["/in/alice/"]},
+                    "showAllUrls": {
+                        "more_profiles_for_you": "https://www.linkedin.com/search/results/people/?keywords=a",
+                        "people_you_may_know": "https://www.linkedin.com/search/results/people/?keywords=b",
+                    },
+                },
+                ["/in/eve/"],
+                ["/in/frank/"],
+            ]
+        )
+        with (
+            patch.object(extractor, "_navigate_to_page", new=AsyncMock()),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new=AsyncMock(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new=AsyncMock(return_value=False),
+            ),
+        ):
+            await extractor.get_sidebar_profiles("testuser")
+
+    @staticmethod
+    async def _job_search_pages(extractor):
+        # Both loops abandon pagination when the page they land on is not the
+        # list they asked for, so the mock has to answer with one.
+        extractor._page.url = "https://www.linkedin.com/jobs/search/?keywords=python"
+        pages = iter([["100"], ["200"]])
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new=AsyncMock(return_value=extracted("text")),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new=AsyncMock(side_effect=lambda: next(pages)),
+            ),
+            patch.object(
+                extractor, "_get_total_search_pages", new=AsyncMock(return_value=None)
+            ),
+        ):
+            await extractor.search_jobs("python", max_pages=2)
+
+    @staticmethod
+    async def _saved_jobs_pages(extractor):
+        extractor._page.url = "https://www.linkedin.com/my-items/saved-jobs/"
+        pages = iter([["100"], ["200"]])
+        with (
+            patch.object(
+                extractor,
+                "_extract_saved_jobs_page",
+                new=AsyncMock(return_value=extracted("text")),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new=AsyncMock(side_effect=lambda: next(pages)),
+            ),
+            patch.object(
+                extractor, "_get_total_list_pages", new=AsyncMock(return_value=2)
+            ),
+        ):
+            await extractor.get_saved_jobs(max_pages=2)
+
+    LOOPS = pytest.mark.parametrize(
+        "driver",
+        [
+            _person,
+            _company,
+            _sidebar_show_all,
+            _job_search_pages,
+            _saved_jobs_pages,
+        ],
+        ids=["person", "company", "sidebar_show_all", "job_search", "saved_jobs"],
+    )
+
+    async def _delays(self, mock_page, pacing, driver) -> list[float]:
+        extractor = LinkedInExtractor(mock_page, pacing=pacing)
+        # One patch, and it has to be: ``extractor.asyncio`` and
+        # ``pacing.asyncio`` are the same module object, so a second would
+        # shadow this one and record nothing. Values tell the waits apart.
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await driver(extractor)
+        return [call.args[0] for call in sleep.await_args_list]
+
+    @LOOPS
+    async def test_the_gap_still_runs_unpaced(self, mock_page, unpaced, driver):
+        """Toggle-off has to leave upstream timing byte-identical."""
+        assert 2.0 in await self._delays(mock_page, unpaced, driver)
+
+    @LOOPS
+    async def test_the_gap_is_skipped_when_paced(self, mock_page, driver):
+        """The funnel pause replaces the gap — never both."""
+        assert 2.0 not in await self._delays(mock_page, self.PACED, driver)
+
+
 class TestClickPacing:
     """Clicks are actions too — and row visits had no delay at all."""
 
