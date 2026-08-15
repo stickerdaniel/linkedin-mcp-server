@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from linkedin_mcp_server.scraping.pacing import (
+from linkedin_mcp_server.pacing import (
     HumanPacing,
     SKIM_FRACTION,
     human_pause,
@@ -35,7 +35,7 @@ class TestPauseHelpers:
     async def test_human_pause_sleeps_when_enabled(self):
         pacing = HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0)
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            "linkedin_mcp_server.pacing.asyncio.sleep",
             new_callable=AsyncMock,
         ) as sleep:
             await human_pause(pacing, "navigation")
@@ -46,7 +46,7 @@ class TestPauseHelpers:
 
     async def test_human_pause_does_nothing_when_disabled(self):
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            "linkedin_mcp_server.pacing.asyncio.sleep",
             new_callable=AsyncMock,
         ) as sleep:
             await human_pause(HumanPacing.disabled(), "navigation")
@@ -54,7 +54,7 @@ class TestPauseHelpers:
 
     async def test_human_pause_does_nothing_when_none(self):
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            "linkedin_mcp_server.pacing.asyncio.sleep",
             new_callable=AsyncMock,
         ) as sleep:
             await human_pause(None, "navigation")
@@ -63,7 +63,7 @@ class TestPauseHelpers:
     async def test_skim_pause_sleeps_a_quarter(self):
         pacing = HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0)
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            "linkedin_mcp_server.pacing.asyncio.sleep",
             new_callable=AsyncMock,
         ) as sleep:
             await skim_pause(pacing, "row visit")
@@ -73,7 +73,7 @@ class TestPauseHelpers:
 
     async def test_skim_pause_does_nothing_when_disabled(self):
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            "linkedin_mcp_server.pacing.asyncio.sleep",
             new_callable=AsyncMock,
         ) as sleep:
             await skim_pause(HumanPacing.disabled(), "row visit")
@@ -81,7 +81,7 @@ class TestPauseHelpers:
 
     async def test_skim_pause_does_nothing_when_none(self):
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            "linkedin_mcp_server.pacing.asyncio.sleep",
             new_callable=AsyncMock,
         ) as sleep:
             await skim_pause(None, "row visit")

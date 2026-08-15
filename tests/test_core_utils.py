@@ -1,11 +1,16 @@
 """Tests for core utility functions (rate-limit detection, scrolling, modals)."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from linkedin_mcp_server.core.exceptions import RateLimitError
-from linkedin_mcp_server.core.utils import detect_rate_limit
+from linkedin_mcp_server.core.utils import (
+    detect_rate_limit,
+    scroll_job_sidebar,
+    scroll_to_bottom,
+)
+from linkedin_mcp_server.pacing import HumanPacing
 
 
 @pytest.fixture
@@ -109,3 +114,75 @@ class TestDetectRateLimit:
 
         mock_page.locator = MagicMock(side_effect=locator_side_effect)
         await detect_rate_limit(mock_page)
+
+
+class TestScrollPacing:
+    """Scrolling is a glance, so it is paced with a skim delay — or not at all."""
+
+    @staticmethod
+    def _lazy_loading_page() -> MagicMock:
+        """A page that grows once and then stops: two scroll iterations."""
+        page = MagicMock()
+        heights = iter([100, 200, 200, 200])
+        page.evaluate = AsyncMock(side_effect=lambda *a, **k: next(heights, 200))
+        return page
+
+    async def test_scroll_to_bottom_adds_skim_pause_when_paced(self):
+        page = self._lazy_loading_page()
+        # One patch for both waits, and it has to be one: ``core.utils.asyncio``
+        # and ``pacing.asyncio`` name the same module object, so patching them
+        # separately leaves only the second mock installed and the first
+        # recording nothing whatever the code did. Their values tell them apart.
+        with patch(
+            "linkedin_mcp_server.core.utils.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await scroll_to_bottom(
+                page,
+                pause_time=0.5,
+                max_scrolls=2,
+                pacing=HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0),
+            )
+        delays = [call.args[0] for call in sleep.await_args_list]
+        # The existing 0.5s settle survives; 4.0 * SKIM_FRACTION rides on top.
+        assert delays == [pytest.approx(0.5), pytest.approx(1.0)] * 2
+
+    # Two things mean "no pacing" — no ``HumanPacing`` at all, and one that is
+    # disabled — and toggle-off has to leave upstream timing byte-identical
+    # under both. A disabled instance is what the config path builds when the
+    # operator leaves the feature off, so it is the reachable case, not None.
+    UNPACED = pytest.mark.parametrize(
+        "pacing", [None, HumanPacing.disabled()], ids=["none", "disabled"]
+    )
+
+    @UNPACED
+    async def test_scroll_to_bottom_unchanged_without_pacing(self, pacing):
+        page = self._lazy_loading_page()
+        with patch(
+            "linkedin_mcp_server.core.utils.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await scroll_to_bottom(page, pause_time=0.5, max_scrolls=2, pacing=pacing)
+        delays = [call.args[0] for call in sleep.await_args_list]
+        assert delays == [pytest.approx(0.5)] * 2
+
+    @staticmethod
+    async def _sidebar_pause_time(pacing: HumanPacing | None) -> float:
+        """Run the sidebar scroll and return the pause handed to the browser."""
+        page = MagicMock()
+        page.wait_for_selector = AsyncMock()
+        page.evaluate = AsyncMock(return_value=1)
+
+        await scroll_job_sidebar(page, pause_time=0.5, max_scrolls=3, pacing=pacing)
+        call = page.evaluate.await_args
+        assert call is not None
+        return call.args[1]["pauseTime"]
+
+    async def test_job_sidebar_pause_is_randomized_when_paced(self):
+        pause = await self._sidebar_pause_time(
+            HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0)
+        )
+        # A skim, not a decision: 4.0 * SKIM_FRACTION rather than 4.0.
+        assert pause == pytest.approx(1.0)
+
+    @UNPACED
+    async def test_job_sidebar_pause_unchanged_without_pacing(self, pacing):
+        assert await self._sidebar_pause_time(pacing) == pytest.approx(0.5)

@@ -39,10 +39,11 @@ from linkedin_mcp_server.scraping.link_metadata import (
     build_references,
     dedupe_references,
 )
-from linkedin_mcp_server.scraping.pacing import (
+from linkedin_mcp_server.pacing import (
     SKIM_FRACTION,
     HumanPacing,
     human_pause,
+    skim_pause,
 )
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
@@ -1305,6 +1306,7 @@ class LinkedInExtractor:
                 {"position": position},
             )
             await asyncio.sleep(pause_time)
+            await skim_pause(self._pacing, "next region scroll")
 
     async def extract_feed(
         self,
@@ -1420,6 +1422,9 @@ class LinkedInExtractor:
             if count >= num_posts:
                 break
 
+            # Paces the wheel itself. The 1s ticks below are waiting for
+            # responses, not acting, and are left alone.
+            await skim_pause(self._pacing, "feed scroll")
             await self._page.mouse.wheel(0, _WHEEL_DELTA)
 
             new_count = count
@@ -1678,10 +1683,14 @@ class LinkedInExtractor:
         # Scroll to trigger lazy loading
         if is_activity:
             scrolls = max_scrolls if max_scrolls is not None else 10
-            await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=scrolls)
+            await scroll_to_bottom(
+                self._page, pause_time=1.0, max_scrolls=scrolls, pacing=self._pacing
+            )
         else:
             scrolls = max_scrolls if max_scrolls is not None else 5
-            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
+            await scroll_to_bottom(
+                self._page, pause_time=0.5, max_scrolls=scrolls, pacing=self._pacing
+            )
 
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])
@@ -3190,7 +3199,9 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         if main_found:
-            await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
+            await scroll_job_sidebar(
+                self._page, pause_time=0.5, max_scrolls=5, pacing=self._pacing
+            )
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
@@ -3485,7 +3496,9 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         if main_found:
-            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+            await scroll_to_bottom(
+                self._page, pause_time=0.5, max_scrolls=5, pacing=self._pacing
+            )
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]

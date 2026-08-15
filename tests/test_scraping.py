@@ -25,7 +25,7 @@ from linkedin_mcp_server.scraping.extractor import (
     strip_linkedin_noise,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
-from linkedin_mcp_server.scraping.pacing import HumanPacing
+from linkedin_mcp_server.pacing import HumanPacing
 
 
 def extracted(
@@ -6002,14 +6002,14 @@ class TestNavigationPacing:
     """Randomized pacing at the single navigation funnel."""
 
     async def test_navigation_pauses_when_pacing_enabled(self, mock_page):
-        from linkedin_mcp_server.scraping.pacing import HumanPacing
+        from linkedin_mcp_server.pacing import HumanPacing
 
         extractor = LinkedInExtractor(
             mock_page,
             pacing=HumanPacing(enabled=True, min_seconds=3.0, max_seconds=3.0),
         )
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
             await extractor._goto_with_auth_checks("https://www.linkedin.com/feed/")
         assert sleep.await_args_list
@@ -6018,14 +6018,14 @@ class TestNavigationPacing:
     async def test_navigation_does_not_pause_by_default(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
             await extractor._goto_with_auth_checks("https://www.linkedin.com/feed/")
         sleep.assert_not_awaited()
 
     async def test_pause_happens_before_goto(self, mock_page):
         """A pause after the request has already left is not pacing."""
-        from linkedin_mcp_server.scraping.pacing import HumanPacing
+        from linkedin_mcp_server.pacing import HumanPacing
 
         order: list[str] = []
         mock_page.goto = AsyncMock(side_effect=lambda *a, **k: order.append("goto"))
@@ -6034,7 +6034,7 @@ class TestNavigationPacing:
             pacing=HumanPacing(enabled=True, min_seconds=1.0, max_seconds=1.0),
         )
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            "linkedin_mcp_server.pacing.asyncio.sleep",
             new=AsyncMock(side_effect=lambda *a: order.append("sleep")),
         ):
             await extractor._goto_with_auth_checks("https://www.linkedin.com/feed/")
@@ -6049,7 +6049,7 @@ class TestNavigationPacing:
         the page about to be requested — in the diagnostics someone reads when a
         scrape has broken.
         """
-        from linkedin_mcp_server.scraping.pacing import HumanPacing
+        from linkedin_mcp_server.pacing import HumanPacing
 
         order: list[str] = []
         mock_page.on = MagicMock(side_effect=lambda *a: order.append("listen"))
@@ -6059,7 +6059,7 @@ class TestNavigationPacing:
             pacing=HumanPacing(enabled=True, min_seconds=1.0, max_seconds=1.0),
         )
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            "linkedin_mcp_server.pacing.asyncio.sleep",
             new=AsyncMock(side_effect=lambda *a: order.append("sleep")),
         ):
             await extractor._goto_with_auth_checks("https://www.linkedin.com/feed/")
@@ -6067,7 +6067,7 @@ class TestNavigationPacing:
 
     async def test_fixed_nav_delay_is_skipped_when_pacing_enabled(self, mock_page):
         """The funnel pause replaces _NAV_DELAY — never both."""
-        from linkedin_mcp_server.scraping.pacing import HumanPacing
+        from linkedin_mcp_server.pacing import HumanPacing
 
         extractor = LinkedInExtractor(
             mock_page,
@@ -6132,7 +6132,7 @@ class TestClickPacing:
             pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
         )
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
             assert await extractor.click_button_by_text("Connect") is True
         sleep.assert_awaited()
@@ -6143,7 +6143,7 @@ class TestClickPacing:
 
         extractor = LinkedInExtractor(mock_page)
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
             await extractor.click_button_by_text("Connect")
         sleep.assert_not_awaited()
@@ -6157,7 +6157,7 @@ class TestClickPacing:
             pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
         )
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
             assert await extractor.click_button_by_text("Connect") is False
         sleep.assert_not_awaited()
@@ -6177,7 +6177,7 @@ class TestClickPacing:
             pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
         )
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            "linkedin_mcp_server.pacing.asyncio.sleep",
             new=AsyncMock(side_effect=lambda *a: order.append("sleep")),
         ):
             await extractor._click_first("button.artdeco-modal__dismiss")
@@ -6193,7 +6193,7 @@ class TestClickPacing:
 
         extractor = LinkedInExtractor(mock_page)
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
             await extractor._click_first("button.artdeco-modal__dismiss")
         sleep.assert_not_awaited()
@@ -6209,7 +6209,7 @@ class TestClickPacing:
             pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
         )
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
             assert await extractor._click_dialog_primary_button() is True
         assert sleep.await_args_list[0].args[0] == pytest.approx(2.0)
@@ -6225,7 +6225,7 @@ class TestClickPacing:
             pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
         )
         with patch(
-            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
             assert await extractor._click_dialog_primary_button() is False
         sleep.assert_not_awaited()
@@ -6369,3 +6369,167 @@ class TestClickPacing:
         wait = source.index("rowPauseMinMs + Math.random()")
         assert wait > source.index("rowName !== wanted")
         assert wait > source.index("if (!clickTarget) continue")
+
+
+class TestRegionScrollPacing:
+    """The scroll inside main's own scrollable region ran on a fixed 0.5s."""
+
+    @staticmethod
+    async def _region_scroll_delays(mock_page, pacing) -> list[float]:
+        """Scroll the region twice and return every wait, in order."""
+        extractor = LinkedInExtractor(mock_page, pacing=pacing)
+        mock_page.evaluate = AsyncMock(return_value=True)
+        # One patch covers both waits, and has to: ``extractor.asyncio`` and
+        # ``pacing.asyncio`` are the same module object, so a second patch would
+        # shadow this one and record nothing. Their values tell them apart.
+        with patch(
+            "linkedin_mcp_server.scraping.extractor.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await extractor._scroll_main_scrollable_region(
+                position="bottom", attempts=2
+            )
+        return [call.args[0] for call in sleep.await_args_list]
+
+    async def test_region_scroll_adds_skim_pause_when_paced(self, mock_page):
+        delays = await self._region_scroll_delays(
+            mock_page, HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0)
+        )
+        # The 0.5s settle survives; 4.0 * SKIM_FRACTION rides on top of it.
+        assert delays == [pytest.approx(0.5), pytest.approx(1.0)] * 2
+
+    async def test_region_scroll_has_no_skim_pause_by_default(self, mock_page):
+        delays = await self._region_scroll_delays(mock_page, None)
+        assert delays == [pytest.approx(0.5)] * 2
+
+
+class TestScrollPacingIsWired:
+    """Every scroll call site must hand the extractor's pacing to the helper.
+
+    Unit-testing the helpers is not enough to catch a call site that forgets to
+    pass ``pacing``: measured, stripping ``pacing=self._pacing`` from all four
+    sites left the whole feature inert at runtime and broke no test in the
+    suite. Each test below pins one site, and pins it by ``pause_time`` too so
+    it cannot silently start asserting about a different one.
+    """
+
+    PACING = HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0)
+
+    async def _scroll_call(self, mock_page, helper: str, run) -> list[tuple]:
+        """Run *run(extractor)* and report each scroll call's pause and pacing."""
+        extractor = LinkedInExtractor(mock_page, pacing=self.PACING)
+        with (
+            patch(
+                f"linkedin_mcp_server.scraping.extractor.{helper}", new=AsyncMock()
+            ) as scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new=AsyncMock(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new=AsyncMock(return_value=False),
+            ),
+            patch.object(extractor, "_navigate_to_page", new=AsyncMock()),
+        ):
+            await run(extractor)
+        return [
+            (call.kwargs.get("pause_time"), call.kwargs.get("pacing"))
+            for call in scroll.await_args_list
+        ]
+
+    async def test_detail_section_scroll_is_paced(self, mock_page):
+        calls = await self._scroll_call(
+            mock_page,
+            "scroll_to_bottom",
+            lambda e: e._extract_loaded_section(
+                "https://www.linkedin.com/in/testuser/details/experience/",
+                "experience",
+            ),
+        )
+        assert calls == [(0.5, self.PACING)]
+
+    async def test_activity_scroll_is_paced(self, mock_page):
+        calls = await self._scroll_call(
+            mock_page,
+            "scroll_to_bottom",
+            lambda e: e._extract_loaded_section(
+                "https://www.linkedin.com/in/testuser/recent-activity/all/", "posts"
+            ),
+        )
+        assert calls == [(1.0, self.PACING)]
+
+    async def test_job_search_sidebar_scroll_is_paced(self, mock_page):
+        calls = await self._scroll_call(
+            mock_page,
+            "scroll_job_sidebar",
+            lambda e: e._extract_search_page_once(
+                "https://www.linkedin.com/jobs/search/?keywords=python", "job_search"
+            ),
+        )
+        assert calls == [(0.5, self.PACING)]
+
+    async def test_saved_jobs_scroll_is_paced(self, mock_page):
+        calls = await self._scroll_call(
+            mock_page,
+            "scroll_to_bottom",
+            lambda e: e._extract_saved_jobs_page_once(
+                "https://www.linkedin.com/my-items/saved-jobs/", "saved_jobs"
+            ),
+        )
+        assert calls == [(0.5, self.PACING)]
+
+
+class TestFeedScrollPacing:
+    """The feed scrolls by wheel, and only the wheel is an action."""
+
+    @staticmethod
+    async def _feed_scroll_trace(mock_page, pacing) -> list:
+        """Run the feed scroll loop, logging wheels and waits in order.
+
+        Waits arrive as floats and wheels as the string ``"wheel"``, so the
+        trace shows which waits sit against which scroll.
+        """
+        trace: list = []
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse = MagicMock(
+            move=AsyncMock(),
+            wheel=AsyncMock(side_effect=lambda *a: trace.append("wheel")),
+        )
+        extractor = LinkedInExtractor(mock_page, pacing=pacing)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new=AsyncMock(side_effect=lambda delay: trace.append(delay)),
+            ),
+            patch.object(extractor, "_navigate_to_page", new=AsyncMock()),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new=AsyncMock(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new=AsyncMock(return_value=False),
+            ),
+        ):
+            await extractor._extract_feed_body(
+                "https://www.linkedin.com/feed/", 1, [], []
+            )
+        return trace
+
+    async def test_wheel_is_paced_when_pacing_enabled(self, mock_page):
+        trace = await self._feed_scroll_trace(
+            mock_page, HumanPacing(enabled=True, min_seconds=8.0, max_seconds=8.0)
+        )
+        # 8.0 * SKIM_FRACTION, immediately before the wheel and nowhere else:
+        # the 1.0s ticks that follow are waiting for responses, not acting, so
+        # pacing them would multiply the feed's runtime for nothing.
+        assert trace[:3] == [pytest.approx(2.0), "wheel", pytest.approx(1.0)]
+        skims = [x for x in trace if isinstance(x, float) and x == pytest.approx(2.0)]
+        assert len(skims) == trace.count("wheel") > 0
+
+    async def test_feed_scroll_unchanged_without_pacing(self, mock_page):
+        trace = await self._feed_scroll_trace(mock_page, None)
+        assert trace[:2] == ["wheel", pytest.approx(1.0)]
+        # Only the loop's own two waits: the 1.0s response tick and the 0.2s
+        # settle after the loop.
+        assert {x for x in trace if not isinstance(x, str)} == {1.0, 0.2}

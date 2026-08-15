@@ -5,6 +5,8 @@ import logging
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.pacing import HumanPacing, skim_pause
+
 from .exceptions import RateLimitError
 
 logger = logging.getLogger(__name__)
@@ -66,7 +68,10 @@ async def detect_rate_limit(page: Page) -> None:
 
 
 async def scroll_to_bottom(
-    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
+    page: Page,
+    pause_time: float = 1.0,
+    max_scrolls: int = 10,
+    pacing: HumanPacing | None = None,
 ) -> None:
     """Scroll to the bottom of the page to trigger lazy loading.
 
@@ -74,11 +79,14 @@ async def scroll_to_bottom(
         page: Patchright page object
         pause_time: Time to pause between scrolls (seconds)
         max_scrolls: Maximum number of scroll attempts
+        pacing: When enabled, adds a randomized wait on top of ``pause_time``
+            so successive lazy-load requests do not arrive on a fixed cadence.
     """
     for i in range(max_scrolls):
         previous_height = await page.evaluate("document.body.scrollHeight")
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await asyncio.sleep(pause_time)
+        await skim_pause(pacing, "next page scroll")
 
         new_height = await page.evaluate("document.body.scrollHeight")
         if new_height == previous_height:
@@ -87,7 +95,10 @@ async def scroll_to_bottom(
 
 
 async def scroll_job_sidebar(
-    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
+    page: Page,
+    pause_time: float = 1.0,
+    max_scrolls: int = 10,
+    pacing: HumanPacing | None = None,
 ) -> None:
     """Scroll the job search sidebar to load all job cards.
 
@@ -100,6 +111,9 @@ async def scroll_job_sidebar(
         page: Patchright page object
         pause_time: Time to pause between scrolls (seconds)
         max_scrolls: Maximum number of scroll attempts
+        pacing: When enabled, replaces ``pause_time`` with a randomized value
+            for this run. The loop runs inside ``page.evaluate``, so a single
+            value is drawn per call rather than per iteration.
     """
     # Wait for at least one job card link to render before scrolling
     try:
@@ -107,6 +121,9 @@ async def scroll_job_sidebar(
     except PlaywrightTimeoutError:
         logger.debug("No job card links found, skipping sidebar scroll")
         return
+
+    if pacing and pacing.enabled:
+        pause_time = pacing.skim_delay()
 
     scrolled = await page.evaluate(
         """async ({pauseTime, maxScrolls}) => {
