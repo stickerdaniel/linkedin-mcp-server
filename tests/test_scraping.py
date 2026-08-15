@@ -6305,6 +6305,89 @@ class TestClickPacing:
             assert await extractor.click_button_by_text("Connect") is False
         sleep.assert_not_awaited()
 
+    async def test_accepting_an_invitation_pauses_first(self, mock_page):
+        """The one connect-flow click with no navigation to carry a pause.
+
+        ``connect_with_person`` reaches ``_click_incoming_accept`` straight off
+        a state read, so without a pause here the accept fires the instant the
+        profile finishes rendering — on the tool most exposed to throttling,
+        and on a state change LinkedIn meters.
+        """
+        mock_page.evaluate = AsyncMock(return_value=True)
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
+        )
+        with patch(
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            assert await extractor._click_incoming_accept() is True
+        assert sleep.await_args_list[0].args[0] == pytest.approx(2.0)
+
+    async def test_accept_pause_precedes_the_click(self, mock_page):
+        """A pause after an irreversible click paces nothing."""
+        order: list[str] = []
+        mock_page.evaluate = AsyncMock(
+            side_effect=lambda *a, **k: order.append("accept") or True
+        )
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
+        )
+        with patch(
+            "linkedin_mcp_server.pacing.asyncio.sleep",
+            new=AsyncMock(side_effect=lambda *a: order.append("sleep")),
+        ):
+            await extractor._click_incoming_accept()
+        assert order == ["sleep", "accept"]
+
+    async def test_accept_does_not_pause_by_default(self, mock_page, unpaced):
+        mock_page.evaluate = AsyncMock(return_value=True)
+        extractor = LinkedInExtractor(mock_page, pacing=unpaced)
+        with patch(
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await extractor._click_incoming_accept()
+        sleep.assert_not_awaited()
+
+    async def test_opening_the_more_menu_pauses_first(self, mock_page):
+        """Opening the menu is a click a person decides on."""
+        mock_page.evaluate = AsyncMock(return_value=True)
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
+        )
+        with patch(
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            assert await extractor._open_more_menu() is True
+        assert sleep.await_args_list[0].args[0] == pytest.approx(2.0)
+
+    async def test_more_menu_pause_precedes_the_click(self, mock_page):
+        order: list[str] = []
+        mock_page.evaluate = AsyncMock(
+            side_effect=lambda *a, **k: order.append("open") or True
+        )
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=2.0, max_seconds=2.0),
+        )
+        with patch(
+            "linkedin_mcp_server.pacing.asyncio.sleep",
+            new=AsyncMock(side_effect=lambda *a: order.append("sleep")),
+        ):
+            await extractor._open_more_menu()
+        assert order == ["sleep", "open"]
+
+    async def test_more_menu_does_not_pause_by_default(self, mock_page, unpaced):
+        mock_page.evaluate = AsyncMock(return_value=True)
+        extractor = LinkedInExtractor(mock_page, pacing=unpaced)
+        with patch(
+            "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await extractor._open_more_menu()
+        sleep.assert_not_awaited()
+
     async def test_click_first_pauses_before_the_click(self, mock_page):
         """A pause after the button is already pressed paces nothing."""
         order: list[str] = []

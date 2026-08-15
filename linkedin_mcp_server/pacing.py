@@ -13,6 +13,33 @@ list does not deliberate for seconds per row.
 
 Off by default and off means off: with ``enabled`` false nothing sleeps here
 and the caller's existing timing is untouched.
+
+Which clicks get one
+--------------------
+A pause stands for a person deciding, so it goes before the click that
+*begins* something — a navigation, submitting a dialog, accepting an
+invitation, opening a menu — and after whatever check established there is
+something to click, never on the path that finds nothing and returns.
+
+It does not go before a click that only *continues or ends* something a
+pause already stood for: the second button inside a dialog the previous
+pause opened, the key that submits a composer it already filled, the Escape
+that closes a menu, or ``handle_modal_close``, which runs after nearly every
+navigation and would charge a second interval per page load for a click that
+usually finds nothing. Nothing is metered twice for one decision.
+
+Two riders on that rule:
+
+* The shared click helpers pause unconditionally, at the helper, so every
+  future caller inherits it without having to remember. One of them is used
+  for a dismissal, which the rule above would leave unpaced; it pays the
+  interval anyway, because a helper that paces depending on who called it is
+  a helper nobody can reason about, and the cost is one wait at the end of
+  one tool.
+* A click driven from ``page.evaluate`` inside a browser-side loop is paced
+  *inside* that loop, not around the call. One pause around the ``evaluate``
+  would space batches rather than clicks, so the bounds cross into the JS
+  and each iteration draws its own interval.
 """
 
 from __future__ import annotations

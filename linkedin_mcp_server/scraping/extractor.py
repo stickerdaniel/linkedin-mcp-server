@@ -1208,6 +1208,12 @@ class LinkedInExtractor:
         the vanityName invite anchor; this helper does not classify menu
         contents itself.
         """
+        # Paced: opening the menu is a click a person decides on, and the
+        # caller only reaches it after ``detect_connection_state`` returned
+        # "follow_only" — that state check is what established there is
+        # something to act on, so the pause here is not charged to a path
+        # that finds nothing.
+        await human_pause(self._pacing, "open the profile More menu")
         try:
             clicked = await self._page.evaluate(_OPEN_MORE_BUTTON_JS)
         except Exception:
@@ -1233,6 +1239,13 @@ class LinkedInExtractor:
         fingerprint plus the caller's verify-after-click are the
         mitigations. Returns True iff the click landed.
         """
+        # Paced: accepting an invitation is a state change LinkedIn meters,
+        # and it is the one click on ``connect_with_person`` that has no
+        # navigation in front of it to carry the funnel pause. The caller
+        # reaches this only after ``detect_connection_state`` returned
+        # "incoming_request", so the decision that there is something to act
+        # on has already been made.
+        await human_pause(self._pacing, "accept an incoming invitation")
         try:
             return bool(await self._page.evaluate(_CLICK_INCOMING_ACCEPT_JS))
         except Exception:
