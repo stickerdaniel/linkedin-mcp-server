@@ -128,15 +128,22 @@ _PROBE_IMAGE = (
 # green suite and a broken `docker build .`, so it is named here.
 _CONTEXT_INPUTS = ("build-constraints.txt", "docker-entrypoint.sh")
 
-# These must not reach the build. They cover the root, a suffix and a nested
-# directory, which is the whole of what `**/.env*` claims.
-_ENVIRONMENT_SENTINELS = (
+# These must not reach the build. The environment names cover the root, a
+# suffix and a nested directory, which is the whole of what `**/.env*` claims.
+# The rest is local working material that no build reads and that `COPY . .`
+# would otherwise put in a layer the release exports to the GitHub Actions
+# cache.
+_EXCLUDED_SENTINELS = (
     ".env",
     ".env.example",
     ".env.local",
     ".env.previous-proxy",
     "tests/.env.probe",
     "nested/deeper/.env.secret",
+    ".debug/notes.md",
+    "CLAUDE.local.md",
+    ".agents/notes.md",
+    ".claude/settings.json",
 )
 
 
@@ -177,7 +184,7 @@ def build_context(tmp_path_factory: pytest.TempPathFactory) -> frozenset[str]:
 
     context = tmp_path_factory.mktemp("dockerignore-probe")
     shutil.copyfile(_REPO_ROOT / ".dockerignore", context / ".dockerignore")
-    for sentinel in _CONTEXT_INPUTS + _ENVIRONMENT_SENTINELS:
+    for sentinel in _CONTEXT_INPUTS + _EXCLUDED_SENTINELS:
         path = context / sentinel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("sentinel\n", encoding="utf-8")
@@ -341,7 +348,18 @@ def test_every_build_requirement_is_pinned_with_hashes() -> None:
     )
     assert not unhashed, f"compiled entries without a hash: {unhashed}"
 
+    # A half-applied bump moves the source and leaves the compiled file behind,
+    # and everything above still holds: the name is present and it has hashes.
+    # The build then keeps using the old version with a green suite.
+    drifted = {
+        name: (str(source.specifier), str(compiled[name][0].specifier))
+        for name, (source, _) in sources.items()
+        if compiled[name][0].specifier != source.specifier
+    }
+    assert not drifted, f"build-constraints.in and .txt disagree: {drifted}"
 
+
+@pytest.mark.image_build
 def test_the_hashed_build_constraint_reaches_the_build_context(
     build_context: frozenset[str],
 ) -> None:
@@ -350,7 +368,8 @@ def test_the_hashed_build_constraint_reaches_the_build_context(
     assert not missing, f"the build needs these and .dockerignore drops them: {missing}"
 
 
-def test_the_build_context_carries_no_environment_file(
+@pytest.mark.image_build
+def test_the_build_context_carries_nothing_it_should_not(
     build_context: frozenset[str],
 ) -> None:
     """A suffixed `.env` carries the same secrets as the plain one.
@@ -359,26 +378,30 @@ def test_the_build_context_carries_no_environment_file(
     workflow exports that layer through `cache-to: type=gha,mode=max`. Ignoring
     only `.env` let a local `.env.previous-proxy` through, holding a LinkedIn
     session cookie and proxy credentials; a real build listed it inside `/app`.
-    The runtime stage takes only `/app/.venv`, so no published image carried it.
+    The same build carried `.debug/` and `CLAUDE.local.md`, 9.7 MB of local
+    working material that nothing in the image reads. No published image
+    carried any of it: the runtime stage takes only `/app/.venv`.
     """
-    # The fixture writes one of each shape, so an empty result is a real
-    # exclusion rather than an empty question.
-    assert len(_ENVIRONMENT_SENTINELS) >= 4, _ENVIRONMENT_SENTINELS
-    leaked = sorted(
-        path for path in build_context if Path(path).name.startswith(".env")
-    )
-    assert not leaked, f"environment files reached the build context: {leaked}"
+    leaked = sorted(path for path in _EXCLUDED_SENTINELS if path in build_context)
+    assert not leaked, f"these reached the build context: {leaked}"
 
 
 @pytest.mark.image_build
 def test_the_built_project_records_the_pinned_backend() -> None:
     """Which setuptools built the project, read off the wheel it produced.
 
-    This is the property #655 is about, and the only check here that observes
-    it rather than inferring it from the Dockerfile. Six rounds of inferring
-    it produced six ways past the inference: a comment, a `&`, an `ENV=1`
-    prefix, an extra space, an inert marker, a second frontend. The wheel says
-    what actually ran.
+    This observes the property #655 is about rather than inferring it from the
+    Dockerfile, which six rounds of inferring showed the value of: a comment, a
+    `&`, an `ENV=1` prefix, an extra space, an inert marker and a second
+    frontend each passed an inference while the build did something else.
+
+    The version alone would not be enough. `build-constraints.txt` normally
+    pins whatever is current, and Renovate keeps it that way, so an
+    unconstrained build resolves the same number and produces the same wheel.
+    It reads as proof exactly when it proves nothing. The second build settles
+    it: the constraint is corrupted and the build has to fail on it, which no
+    build that ignores the file can do. Together they say the file was read and
+    that what it names is what ran.
 
     It also settles most of the context: a `COPY` source missing from this
     stage fails the build rather than passing a check that never knew to look
@@ -448,12 +471,34 @@ def test_the_built_project_records_the_pinned_backend() -> None:
             timeout=300,
             check=True,
         )
+        # Corrupt every hash and repeat the install off the stage that just
+        # ran it. A build reading the constraint file cannot get past this; one
+        # ignoring it finishes exactly as before.
+        # Not `-q`: the reason has to be readable. Without the build log, any
+        # failure at all would satisfy this, including a typo in the `sed`.
+        tampered = subprocess.run(
+            [docker, "build", "--progress", "plain", "-f", "-", str(_REPO_ROOT)],
+            input=(
+                f"FROM {tag}\n"
+                "RUN sed -i s/--hash=sha256:/--hash=sha256:0/g "
+                "build-constraints.txt\n"
+                f"{_PROJECT_INSTALL} --force-reinstall\n"
+            ),
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+        )
     finally:
         subprocess.run(
             [docker, "rmi", "-f", tag], capture_output=True, text=True, check=False
         )
 
     assert f"Generator: setuptools ({expected})" in wheel.stdout, wheel.stdout
+    assert tampered.returncode != 0, (
+        "a corrupted constraint hash did not stop the build"
+    )
+    assert "Hash mismatch" in tampered.stderr, tampered.stderr[-3000:]
 
 
 def test_the_image_defaults_to_headed_on_a_virtual_display() -> None:

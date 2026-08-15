@@ -165,3 +165,11 @@ assets/*
 .claude
 .github
 .docker
+.agents
+.gemini
+
+# Local working notes and private context. None of it is a build input, and
+# `COPY . .` otherwise keeps all of it in the builder layer, which the release
+# exports through `cache-to: type=gha,mode=max`.
+.debug
+CLAUDE.local.md
