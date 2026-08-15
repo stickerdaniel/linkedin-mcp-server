@@ -2758,6 +2758,28 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             return False
 
+    async def _message_visible_in_thread(self, message: str) -> bool:
+        """Wait until the thread conversation visibly contains the just-sent message text.
+
+        Uses the page-level default timeout (``BrowserConfig.default_timeout``).
+        """
+        try:
+            await self._page.wait_for_function(
+                """({ expected }) => {
+                    const normalize = value =>
+                        (value || '').replace(/\\s+/g, ' ').trim();
+                    const thread = document.querySelector(
+                        '[data-thread-id], .thread, .msg-sender, [role="log"], [aria-label*="Messaging"], .scaffold-feed-list, main .feed'
+                    ) || document.querySelector('main') || document.body;
+                    const threadText = normalize(thread?.innerText || '');
+                    return threadText.includes(normalize(expected));
+                }""",
+                arg={"expected": message},
+            )
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
     async def _dismiss_message_ui(self) -> None:
         """Best-effort dismissal for the profile messaging UI."""
         if not await self._locator_is_visible(_MESSAGING_CLOSE_SELECTOR, timeout=750):
@@ -4504,7 +4526,7 @@ class LinkedInExtractor:
         if not sent_via_js:
             await self._page.keyboard.press("Enter")
 
-        if not await self._message_text_visible(message):
+        if not await self._message_visible_in_thread(message):
             return self._message_action_result(
                 thread_url,
                 "send_unavailable",
