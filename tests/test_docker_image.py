@@ -1,35 +1,548 @@
 """The image's browser and process topology are part of its behaviour.
 
-A Docker build is too expensive for the ordinary unit suite, and string checks
-are enough for the pieces that can disappear silently: the browser product, the
-launch mode, and who receives SIGTERM. The supervisor itself is exercised with
-fake Xvfb and server processes, because child liveness is behaviour a string
-check cannot prove.
+Building the real image is too expensive for the ordinary unit suite, and
+string checks are enough for the pieces that can disappear silently: the
+browser product, the launch mode, and who receives SIGTERM. The supervisor
+itself is exercised with fake Xvfb and server processes, because child liveness
+is behaviour a string check cannot prove.
+
+Two things resist that treatment and are measured instead, because inferring
+them from the Dockerfile was tried and kept producing checks that passed while
+the build did something else.
+
+Which backend builds the project is read off the wheel the builder stage
+produces. Which paths reach the build context is asked of BuildKit through a
+throwaway probe, since `.dockerignore` semantics survived no reimplementation
+here without diverging quietly. Together they cost seconds against a warm
+cache, and they skip locally without a daemon while failing in CI, because a
+gate that skips itself is indistinguishable from one that passed.
+
+What stays a string check is what a build cannot show: that verification was
+not switched off, and that the constraint files still agree with each other.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import socket
 import subprocess
 import textwrap
+import tomllib
+import uuid
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.utils import NormalizedName, canonicalize_name
+
+
+def _no_daemon(reason: str) -> NoReturn:
+    """Fail in CI, skip locally. Never quietly pass.
+
+    These two are the only checks that observe what the build actually does,
+    so a run without a daemon has verified nothing about it. Locally that is a
+    fair trade and the reason says so. In CI it is the whole point, and a
+    silently skipped gate reads exactly like a passing one: the first CI run
+    of these tests could not be told apart from a run where they never
+    executed. Same reasoning as `tests/test_browser_identity.py`.
+    """
+    if os.environ.get("CI", "").lower() in {"1", "true", "yes"}:
+        pytest.fail(
+            f"{reason}. In CI this is a failure rather than a skip: these "
+            f"tests are the only ones that measure the build instead of "
+            f"reading the Dockerfile, so skipping them checks nothing."
+        )
+    pytest.skip(reason)
+
+
+def _pinned_requirements(path: Path) -> dict[NormalizedName, tuple[Requirement, str]]:
+    """The requirements a constraint file pins, by canonical name.
+
+    The second half of each value is the entry as written, which is where the
+    hashes are: they are not part of PEP 508 and `Requirement` cannot hold
+    them.
+    """
+    parsed = {}
+    for entry in _logical_lines(path.read_text(encoding="utf-8")):
+        requirement = Requirement(entry.split("--hash", 1)[0].strip())
+        parsed[canonicalize_name(requirement.name)] = (requirement, entry)
+    return parsed
+
+
+def _logical_lines(text: str) -> list[str]:
+    """Join backslash continuations and drop comments.
+
+    Both the Dockerfile and the compiled constraint file wrap one logical
+    statement across several physical lines. Matching a flag against the raw
+    text therefore also matches the comment that explains the flag, which is
+    how an assertion on ``--no-deps`` stayed green after the flag was removed
+    from the command it guards.
+
+    Runs of whitespace collapse, because a shell reads `uv  sync` and
+    `uv sync` alike and a search for the second missed the first entirely,
+    letting a whole unconstrained sync hide behind one extra space.
+
+    Line continuation is the rest of what this handles, and
+    `test_the_dockerfile_stays_within_the_syntax_this_file_parses` refuses the
+    constructs where that is not enough. A heredoc would otherwise present its
+    payload as instructions, and BuildKit reads a `\\\\` line ending and a
+    `# escape=` directive differently again.
+    """
+    statements: list[str] = []
+    pending = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            pending += f"{stripped[:-1].strip()} "
+            continue
+        statements.append(" ".join(f"{pending}{stripped}".split()))
+        pending = ""
+    if pending:
+        statements.append(" ".join(pending.split()))
+    return statements
+
+
+# The two commands that decide which backend builds the project, written out
+# whole. Reading a flag out of them needs a shell parser, and every version of
+# that parser written here had a hole: a comment swallowing the rest of the
+# line, a `&` keeping two commands in one string, a `$(...)` hiding one inside
+# another, an `ENV=1` prefix moving the command name off the front. Comparing
+# the instruction entire needs no parser and has no hole. It also makes these
+# two lines deliberately awkward to change, which is the point.
+_DEPENDENCY_SYNC = (
+    "RUN uv sync --frozen --no-install-project --no-dev --no-editable "
+    "--compile-bytecode"
+)
+_PROJECT_INSTALL = (
+    "RUN uv pip install --python /app/.venv/bin/python --no-deps "
+    "--compile-bytecode --build-constraints build-constraints.txt ."
+)
+
+
+# Anything that can build this project during the image build. `uv run` is the
+# one that does not look like an install: it syncs and installs the project
+# before running its command, so a smoke check added to the builder stage runs
+# the backend unconstrained. Measured against a real build, which resolved the
+# backend past a corrupted constraint file that the later install still failed
+# on. Naming frontends is a filter rather than a proof, and the comment on its
+# use says so; this is the ordinary-mistake half.
+_PROJECT_BUILDING_COMMANDS = (
+    "uv sync",
+    "uv pip install",
+    "uv run",
+    "uv build",
+    # `uvx` and `uv tool` are the same command under two spellings, and only
+    # the short one was here at first: `uv tool install .` built the project
+    # past a corrupted constraint file while this guard reported nothing.
+    "uvx",
+    "uv tool",
+    "pip install",
+    "pip wheel",
+    "python -m build",
+    "setup.py",
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCKERFILE = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+_DOCKERFILE_INSTRUCTIONS = _logical_lines(_DOCKERFILE)
 _ENTRYPOINT_PATH = _REPO_ROOT / "docker-entrypoint.sh"
 _ENTRYPOINT = _ENTRYPOINT_PATH.read_text(encoding="utf-8")
 _README = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
 _DOCKER_GUIDE = (_REPO_ROOT / "docs" / "docker-hub.md").read_text(encoding="utf-8")
+_BUILD_CONSTRAINTS_PATH = _REPO_ROOT / "build-constraints.txt"
+_PYPROJECT_PATH = _REPO_ROOT / "pyproject.toml"
+# Pinned: the probe runs against the developer's own machine, and `latest`
+# is whatever the registry serves that day.
+_PROBE_IMAGE = (
+    "busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616"
+)
+
+
+# `test_the_built_project_records_the_pinned_backend` builds the builder stage,
+# so a missing input fails it: that stage is where the pin is decided and it is
+# cheap to build. `docker-entrypoint.sh` is the exception, copied in the second
+# stage, which only a full image build would reach. Excluding it produced a
+# green suite and a broken `docker build .`, so it is named here.
+_CONTEXT_INPUTS = ("build-constraints.txt", "docker-entrypoint.sh")
+
+# These must not reach the build. The environment names cover the root, a
+# suffix and a nested directory, which is the whole of what `**/.env*` claims.
+# The rest is local working material that no build reads and that `COPY . .`
+# would otherwise put in a layer the release exports to the GitHub Actions
+# cache.
+_EXCLUDED_SENTINELS = (
+    ".env",
+    ".env.example",
+    ".env.local",
+    ".env.previous-proxy",
+    "tests/.env.probe",
+    "nested/deeper/.env.secret",
+    ".debug/notes.md",
+    "CLAUDE.local.md",
+    ".agents/notes.md",
+    ".claude/settings.json",
+)
+
+
+@pytest.fixture(scope="module")
+def build_context(tmp_path_factory: pytest.TempPathFactory) -> frozenset[str]:
+    """Which sentinels this `.dockerignore` lets through, asked of BuildKit.
+
+    The semantics are not recoverable from the file alone. Every
+    reimplementation measured here disagreed with BuildKit while staying
+    silent about it: a leading slash anchors the pattern, `*` stops at a
+    separator, `\\!` escapes a negation, and a wildcard such as
+    `build-constraints.*` hides a file that a literal-name search still reads
+    as present. Each of those is a false pass, and a dropped constraint file
+    costs more than a red build: the release publishes to PyPI and tags the
+    repository before the Docker job runs, so a version can exist on PyPI and
+    as a tag with no image behind it.
+
+    The context is synthetic rather than the repository itself. Building the
+    real root sent 310 files to the daemon on a developer checkout, 32 of them
+    under `.debug/`, plus `CLAUDE.local.md`, and `docker rmi` does not
+    necessarily drop the cached `COPY` layer. An ordinary test run has no
+    business copying those anywhere. The probe image is pinned by digest and
+    runs without a network for the same reason.
+    """
+    docker = shutil.which("docker")
+    if docker is None:
+        _no_daemon("docker is required to read the real build context")
+    # Unavailability is what may skip. Once the daemon answers and the base
+    # image is local, a failing probe is a failing probe: treating every
+    # non-zero exit as absence turned a malformed `.dockerignore` into a green
+    # run that had checked nothing.
+    for available in ([docker, "info"], [docker, "pull", "-q", _PROBE_IMAGE]):
+        probe = subprocess.run(
+            available, capture_output=True, text=True, timeout=300, check=False
+        )
+        if probe.returncode != 0:
+            _no_daemon(f"no usable docker daemon: {probe.stderr.strip()[:200]}")
+
+    context = tmp_path_factory.mktemp("dockerignore-probe")
+    shutil.copyfile(_REPO_ROOT / ".dockerignore", context / ".dockerignore")
+    for sentinel in _CONTEXT_INPUTS + _EXCLUDED_SENTINELS:
+        path = context / sentinel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("sentinel\n", encoding="utf-8")
+
+    # The pid alone collides across clients sharing one daemon from separate
+    # pid namespaces, where `rmi -f` would then remove another run's tag.
+    tag = f"linkedin-mcp-context-probe:{os.getpid()}-{uuid.uuid4().hex[:12]}"
+    try:
+        build = subprocess.run(
+            [docker, "build", "-q", "-t", tag, "-f", "-", str(context)],
+            input=f"FROM {_PROBE_IMAGE}\nCOPY . /ctx\n",
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        assert build.returncode == 0, f"context probe failed: {build.stderr[-2000:]}"
+        listing = subprocess.run(
+            # fmt: off
+            [
+                docker,
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--entrypoint",
+                "find",
+                tag,
+                "/ctx",
+                "-type",
+                "f",
+            ],
+            # fmt: on
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=True,
+        )
+    finally:
+        subprocess.run(
+            [docker, "rmi", "-f", tag], capture_output=True, text=True, check=False
+        )
+
+    return frozenset(
+        line.removeprefix("/ctx/")
+        for line in listing.stdout.split("\n")
+        if line.startswith("/ctx/")
+    )
 
 
 def test_the_image_installs_only_the_full_browser() -> None:
     """The shell is a different product and nothing in the image launches it."""
     assert "patchright install chromium --no-shell" in _DOCKERFILE
+
+
+def test_the_image_builds_the_project_against_the_hashed_backend() -> None:
+    """Installing the project runs the build backend, so the image must pin it.
+
+    `uv sync` takes no build constraint, so a plain sync of the project resolves
+    setuptools fresh from PyPI inside the one release job that holds the Docker
+    Hub credentials (#655). The project is installed on its own instead, against
+    the same hashed file the published distributions use (#654).
+
+    Both commands are compared whole. A flag matched inside them says only that
+    the text contains it, and every attempt here to find out whether the
+    command *runs* with it needed a shell parser that turned out to have a
+    hole. Changing either line therefore fails this test on purpose: the
+    expected form is in the failure output, and a deliberate change updates it.
+    """
+    assert _DEPENDENCY_SYNC in _DOCKERFILE_INSTRUCTIONS, _DEPENDENCY_SYNC
+    assert _PROJECT_INSTALL in _DOCKERFILE_INSTRUCTIONS, _PROJECT_INSTALL
+    # Any further build of the project is unaccounted for: a second one runs
+    # the backend unconstrained, and a constrained install afterwards cannot
+    # undo a build that already ran. Naming the frontends is a filter, not a
+    # proof; something determined to hide a build can. What it is here for is
+    # the ordinary case, someone adding a second install without noticing that
+    # the first one is load-bearing.
+    # `RUN` only: an instruction that executes nothing at build time cannot
+    # build the project. The `COPY` that brings the uv binaries in names `uvx`
+    # in its source path and would otherwise read as one of these.
+    builders = [
+        instruction
+        for instruction in _DOCKERFILE_INSTRUCTIONS
+        if instruction.startswith("RUN ")
+        and any(frontend in instruction for frontend in _PROJECT_BUILDING_COMMANDS)
+    ]
+    assert builders == [_DEPENDENCY_SYNC, _PROJECT_INSTALL], builders
+    # `--no-verify-hashes` has an environment twin that reaches every uv
+    # invocation in the stage and turns the same verification off. The wheel
+    # this produces would still name the pinned version, so the measurement
+    # cannot see this one and the string check has to.
+    assert "UV_NO_VERIFY_HASHES" not in _DOCKERFILE
+
+
+def test_the_dockerfile_stays_within_the_syntax_this_file_parses() -> None:
+    """`_logical_lines` handles line continuation, so nothing else may appear.
+
+    Only the three constructs that change what an *instruction* is are refused,
+    because that is all the comparison above depends on. A heredoc is data to
+    BuildKit and instructions here, so a payload line spelling one of the two
+    commands would stand in for the real one. A line ending in `\\` ends the
+    instruction for BuildKit and continues it here. An `escape` directive
+    changes the continuation character entirely.
+
+    Nothing else about the shell is restricted. An earlier version refused
+    quotes, `$`, backticks and a single `&` so that a hand-written shell split
+    stayed sound; it was both incomplete, missing an `ENV=1 uv sync` prefix,
+    and in the way of ordinary things like a cache mount. Comparing the two
+    instructions whole removed the need for it.
+    """
+    assert "<<" not in _DOCKERFILE
+    assert not re.search(r"^\s*#\s*escape\s*=", _DOCKERFILE, re.M)
+    assert not [
+        line for line in _DOCKERFILE.splitlines() if line.rstrip().endswith("\\\\")
+    ]
+
+
+def test_every_build_requirement_is_pinned_with_hashes() -> None:
+    """The constraint files have to cover all of `[build-system].requires`.
+
+    Asserting only that some hashed `setuptools==` entry exists let an added
+    `wheel` install unpinned while both files still read as pinned. The source
+    file is checked alongside the compiled one because it is what carries the
+    transitive closure: `uv pip compile` writes every dependency of what it is
+    given, so a requirement present there cannot bring an unhashed dependency
+    along, and one added only to the compiled file can. Nothing offline can
+    prove the compiled file is the current output of that command; Renovate's
+    `pip-compile` manager regenerates it, and the hash check below is what
+    catches a partial edit.
+    """
+    build_system = tomllib.loads(_PYPROJECT_PATH.read_text(encoding="utf-8"))[
+        "build-system"
+    ]
+    requirements = [Requirement(entry) for entry in build_system["requires"]]
+    required = {canonicalize_name(requirement.name) for requirement in requirements}
+    assert required
+    # An extra pulls its own dependencies into the isolated build environment,
+    # and the name alone says nothing about them. `setuptools[core]` resolved
+    # an unhashed wheel past a green run of this test.
+    extras = sorted(
+        f"{requirement.name}[{','.join(sorted(requirement.extras))}]"
+        for requirement in requirements
+        if requirement.extras
+    )
+    assert not extras, (
+        f"build requirements with extras need their own hashed entries: {extras}"
+    )
+
+    sources = _pinned_requirements(_REPO_ROOT / "build-constraints.in")
+    compiled = _pinned_requirements(_BUILD_CONSTRAINTS_PATH)
+
+    assert required <= sources.keys(), (
+        f"build requirements missing from build-constraints.in: "
+        f"{sorted(required - sources.keys())}"
+    )
+    assert sources.keys() <= compiled.keys(), (
+        f"sources missing from the compiled file: "
+        f"{sorted(sources.keys() - compiled.keys())}"
+    )
+    unhashed = sorted(
+        name for name, (_, entry) in compiled.items() if "--hash=sha256:" not in entry
+    )
+    assert not unhashed, f"compiled entries without a hash: {unhashed}"
+
+    # A half-applied bump moves the source and leaves the compiled file behind,
+    # and everything above still holds: the name is present and it has hashes.
+    # The build then keeps using the old version with a green suite.
+    drifted = {
+        name: (str(source.specifier), str(compiled[name][0].specifier))
+        for name, (source, _) in sources.items()
+        if compiled[name][0].specifier != source.specifier
+    }
+    assert not drifted, f"build-constraints.in and .txt disagree: {drifted}"
+
+
+@pytest.mark.image_build
+def test_the_hashed_build_constraint_reaches_the_build_context(
+    build_context: frozenset[str],
+) -> None:
+    """An excluded constraint file drops a pin the build never asked for."""
+    missing = sorted(name for name in _CONTEXT_INPUTS if name not in build_context)
+    assert not missing, f"the build needs these and .dockerignore drops them: {missing}"
+
+
+@pytest.mark.image_build
+def test_the_build_context_carries_nothing_it_should_not(
+    build_context: frozenset[str],
+) -> None:
+    """A suffixed `.env` carries the same secrets as the plain one.
+
+    `COPY . .` keeps the whole context in the builder layer, and the release
+    workflow exports that layer through `cache-to: type=gha,mode=max`. Ignoring
+    only `.env` let a local `.env.previous-proxy` through, holding a LinkedIn
+    session cookie and proxy credentials; a real build listed it inside `/app`.
+    The same build carried `.debug/` and `CLAUDE.local.md`, 9.7 MB of local
+    working material that nothing in the image reads. No published image
+    carried any of it: the runtime stage takes only `/app/.venv`.
+    """
+    leaked = sorted(path for path in _EXCLUDED_SENTINELS if path in build_context)
+    assert not leaked, f"these reached the build context: {leaked}"
+
+
+@pytest.mark.image_build
+def test_the_built_project_records_the_pinned_backend() -> None:
+    """Which setuptools built the project, read off the wheel it produced.
+
+    This observes the property #655 is about rather than inferring it from the
+    Dockerfile, which six rounds of inferring showed the value of: a comment, a
+    `&`, an `ENV=1` prefix, an extra space, an inert marker and a second
+    frontend each passed an inference while the build did something else.
+
+    The version alone would not be enough. `build-constraints.txt` normally
+    pins whatever is current, and Renovate keeps it that way, so an
+    unconstrained build resolves the same number and produces the same wheel.
+    It reads as proof exactly when it proves nothing. The second build settles
+    it: the constraint is corrupted and the build has to fail on it, which no
+    build that ignores the file can do. Together they say the file was read and
+    that what it names is what ran.
+
+    It also settles most of the context: a `COPY` source missing from this
+    stage fails the build rather than passing a check that never knew to look
+    for it. Only the second stage's own input is left to `_CONTEXT_INPUTS`.
+
+    The builder stage alone, because the full image downloads Chromium and
+    this runs on every push. The whole repository is the context, as it is for
+    `docker build .`, which is why the cheap `.dockerignore` probe uses a
+    synthetic one instead.
+    """
+    docker = shutil.which("docker")
+    if docker is None:
+        _no_daemon("docker is required to build the image")
+    if subprocess.run([docker, "info"], capture_output=True, check=False).returncode:
+        _no_daemon("no usable docker daemon")
+
+    build_system = tomllib.loads(_PYPROJECT_PATH.read_text(encoding="utf-8"))[
+        "build-system"
+    ]
+    required = {
+        canonicalize_name(Requirement(entry).name) for entry in build_system["requires"]
+    }
+    backend, _ = next(
+        pinned
+        for name, pinned in _pinned_requirements(_BUILD_CONSTRAINTS_PATH).items()
+        if name in required
+    )
+    expected = str(backend.specifier).removeprefix("==")
+
+    tag = f"linkedin-mcp-backend-probe:{os.getpid()}-{uuid.uuid4().hex[:12]}"
+    try:
+        build = subprocess.run(
+            # fmt: off
+            [
+                docker,
+                "build",
+                "-q",
+                "--target",
+                "builder",
+                "-t",
+                tag,
+                str(_REPO_ROOT),
+            ],
+            # fmt: on
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+        )
+        assert build.returncode == 0, f"image build failed: {build.stderr[-3000:]}"
+        wheel = subprocess.run(
+            # fmt: off
+            [
+                docker,
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
+                tag,
+                "-c",
+                "cat /app/.venv/lib/python*/site-packages/"
+                "mcp_server_linkedin-*.dist-info/WHEEL",
+            ],
+            # fmt: on
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=True,
+        )
+        # Corrupt every hash and repeat the install off the stage that just
+        # ran it. A build reading the constraint file cannot get past this; one
+        # ignoring it finishes exactly as before.
+        # Not `-q`: the reason has to be readable. Without the build log, any
+        # failure at all would satisfy this, including a typo in the `sed`.
+        tampered = subprocess.run(
+            [docker, "build", "--progress", "plain", "-f", "-", str(_REPO_ROOT)],
+            input=(
+                f"FROM {tag}\n"
+                "RUN sed -i s/--hash=sha256:/--hash=sha256:0/g "
+                "build-constraints.txt\n"
+                f"{_PROJECT_INSTALL} --force-reinstall\n"
+            ),
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+        )
+    finally:
+        subprocess.run(
+            [docker, "rmi", "-f", tag], capture_output=True, text=True, check=False
+        )
+
+    assert f"Generator: setuptools ({expected})" in wheel.stdout, wheel.stdout
+    assert tampered.returncode != 0, (
+        "a corrupted constraint hash did not stop the build"
+    )
+    assert "Hash mismatch" in tampered.stderr, tampered.stderr[-3000:]
 
 
 def test_the_image_defaults_to_headed_on_a_virtual_display() -> None:

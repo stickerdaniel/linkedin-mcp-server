@@ -103,8 +103,12 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
-.env
+# Environments. The pattern has to cover the suffixed variants and every
+# directory, because `COPY . .` keeps whatever the context carries in the
+# builder layer, and a `.env.local` holds the same session cookie and proxy
+# credentials as the plain file. That layer is not published, the runtime stage
+# takes only `/app/.venv`, but it is exported by `cache-to: type=gha,mode=max`.
+**/.env*
 .venv
 env/
 venv/
@@ -161,3 +165,11 @@ assets/*
 .claude
 .github
 .docker
+.agents
+.gemini
+
+# Local working notes and private context. None of it is a build input, and
+# `COPY . .` otherwise keeps all of it in the builder layer, which the release
+# exports through `cache-to: type=gha,mode=max`.
+.debug
+CLAUDE.local.md

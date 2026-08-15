@@ -127,8 +127,13 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# Environments. The suffixed variants hold the same session cookie and proxy
+# credentials as the plain file, and the template is the one that belongs here.
+# `.env.*` rather than `.env*`, which also swallowed `.envrc` and left a
+# contributor adding one to wonder why it never showed up in `git status`.
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/

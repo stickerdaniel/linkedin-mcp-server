@@ -7,6 +7,8 @@ def reset_singletons():
     from linkedin_mcp_server.bootstrap import reset_bootstrap_for_testing
     from linkedin_mcp_server.config import reset_config
     from linkedin_mcp_server.daemon_liveness import reset_liveness_for_testing
+    from linkedin_mcp_server.debug_trace import reset_trace_state_for_testing
+    from linkedin_mcp_server.logging_config import teardown_trace_logging
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
     from linkedin_mcp_server.profile_lease import reset_leases_for_testing
     from linkedin_mcp_server.server_role import reset_process_role_for_testing
@@ -25,6 +27,15 @@ def reset_singletons():
     # from process state. Left standing, one OWNER would refuse logins in every
     # test after it, in a suite where most never mention a role.
     reset_process_role_for_testing()
+    # The trace directory is derived from the profile root and cached, so a
+    # test pointing USER_DATA_DIR at its tmp_path otherwise leaves every later
+    # test on this worker writing into a directory pytest has removed. The log
+    # handler holds the same path independently of that cache and has to be
+    # unbound with it, or records keep landing in the previous test's
+    # directory while a fresh one is resolved. `keep_traces` because removing
+    # a directory is a test's own business, not this fixture's.
+    teardown_trace_logging(keep_traces=True)
+    reset_trace_state_for_testing()
     yield
     reset_bootstrap_for_testing()
     reset_browser_for_testing()
@@ -34,6 +45,8 @@ def reset_singletons():
     reset_config()
     reset_process_role_for_testing()
     reset_liveness_for_testing()
+    teardown_trace_logging(keep_traces=True)
+    reset_trace_state_for_testing()
 
 
 @pytest.fixture(autouse=True)
