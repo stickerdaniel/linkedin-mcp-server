@@ -125,6 +125,25 @@ _PROJECT_INSTALL = (
 )
 
 
+# Anything that can build this project during the image build. `uv run` is the
+# one that does not look like an install: it syncs and installs the project
+# before running its command, so a smoke check added to the builder stage runs
+# the backend unconstrained. Measured against a real build, which resolved the
+# backend past a corrupted constraint file that the later install still failed
+# on. Naming frontends is a filter rather than a proof, and the comment on its
+# use says so; this is the ordinary-mistake half.
+_PROJECT_BUILDING_COMMANDS = (
+    "uv sync",
+    "uv pip install",
+    "uv run",
+    "uv build",
+    "uvx",
+    "pip install",
+    "pip wheel",
+    "python -m build",
+    "setup.py",
+)
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DOCKERFILE = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 _DOCKERFILE_INSTRUCTIONS = _logical_lines(_DOCKERFILE)
@@ -282,13 +301,14 @@ def test_the_image_builds_the_project_against_the_hashed_backend() -> None:
     # proof; something determined to hide a build can. What it is here for is
     # the ordinary case, someone adding a second install without noticing that
     # the first one is load-bearing.
+    # `RUN` only: an instruction that executes nothing at build time cannot
+    # build the project. The `COPY` that brings the uv binaries in names `uvx`
+    # in its source path and would otherwise read as one of these.
     builders = [
         instruction
         for instruction in _DOCKERFILE_INSTRUCTIONS
-        if any(
-            frontend in instruction
-            for frontend in ("uv sync", "uv pip install", "pip install", "setup.py")
-        )
+        if instruction.startswith("RUN ")
+        and any(frontend in instruction for frontend in _PROJECT_BUILDING_COMMANDS)
     ]
     assert builders == [_DEPENDENCY_SYNC, _PROJECT_INSTALL], builders
     # `--no-verify-hashes` has an environment twin that reaches every uv

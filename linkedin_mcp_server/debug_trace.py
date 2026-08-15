@@ -188,21 +188,3 @@ async def record_page_trace(
         pass
     with trace_jsonl.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
-
-
-def reset_trace_for_testing() -> None:
-    """Forget the cached trace directory, for test isolation.
-
-    The directory is resolved once and kept, which is right for a process that
-    serves one session and wrong for a suite. It is derived from the profile
-    root, so a test pointing ``USER_DATA_DIR`` at its own ``tmp_path`` leaves
-    every later test on the same worker writing into that directory, long
-    after pytest has torn it down. Measured in CI: a test that asserts the
-    suggested gist command omits a missing ``server.log`` failed, because a
-    daemon test earlier on the same worker had started a real server whose log
-    landed in the directory still cached here.
-    """
-    global _TRACE_DIR, _TRACE_KEEP, _EXPLICIT_TRACE_DIR
-    _TRACE_DIR = None
-    _TRACE_KEEP = False
-    _EXPLICIT_TRACE_DIR = False
