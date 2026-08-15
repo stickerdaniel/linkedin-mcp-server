@@ -13,9 +13,9 @@ the build did something else.
 Which backend builds the project is read off the wheel the builder stage
 produces. Which paths reach the build context is asked of BuildKit through a
 throwaway probe, since `.dockerignore` semantics survived no reimplementation
-here without diverging quietly. Both skip where there is no daemon, the way
-the entrypoint tests skip without Bash 5, and together they cost seconds
-against a warm cache.
+here without diverging quietly. Together they cost seconds against a warm
+cache, and they skip locally without a daemon while failing in CI, because a
+gate that skips itself is indistinguishable from one that passed.
 
 What stays a string check is what a build cannot show: that verification was
 not switched off, and that the constraint files still agree with each other.
@@ -33,10 +33,30 @@ import textwrap
 import tomllib
 import uuid
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from packaging.requirements import Requirement
 from packaging.utils import NormalizedName, canonicalize_name
+
+
+def _no_daemon(reason: str) -> NoReturn:
+    """Fail in CI, skip locally. Never quietly pass.
+
+    These two are the only checks that observe what the build actually does,
+    so a run without a daemon has verified nothing about it. Locally that is a
+    fair trade and the reason says so. In CI it is the whole point, and a
+    silently skipped gate reads exactly like a passing one: the first CI run
+    of these tests could not be told apart from a run where they never
+    executed. Same reasoning as `tests/test_browser_identity.py`.
+    """
+    if os.environ.get("CI", "").lower() in {"1", "true", "yes"}:
+        pytest.fail(
+            f"{reason}. In CI this is a failure rather than a skip: these "
+            f"tests are the only ones that measure the build instead of "
+            f"reading the Dockerfile, so skipping them checks nothing."
+        )
+    pytest.skip(reason)
 
 
 def _pinned_requirements(path: Path) -> dict[NormalizedName, tuple[Requirement, str]]:
@@ -170,7 +190,7 @@ def build_context(tmp_path_factory: pytest.TempPathFactory) -> frozenset[str]:
     """
     docker = shutil.which("docker")
     if docker is None:
-        pytest.skip("docker is required to read the real build context")
+        _no_daemon("docker is required to read the real build context")
     # Unavailability is what may skip. Once the daemon answers and the base
     # image is local, a failing probe is a failing probe: treating every
     # non-zero exit as absence turned a malformed `.dockerignore` into a green
@@ -180,7 +200,7 @@ def build_context(tmp_path_factory: pytest.TempPathFactory) -> frozenset[str]:
             available, capture_output=True, text=True, timeout=300, check=False
         )
         if probe.returncode != 0:
-            pytest.skip(f"no usable docker daemon: {probe.stderr.strip()[:200]}")
+            _no_daemon(f"no usable docker daemon: {probe.stderr.strip()[:200]}")
 
     context = tmp_path_factory.mktemp("dockerignore-probe")
     shutil.copyfile(_REPO_ROOT / ".dockerignore", context / ".dockerignore")
@@ -414,9 +434,9 @@ def test_the_built_project_records_the_pinned_backend() -> None:
     """
     docker = shutil.which("docker")
     if docker is None:
-        pytest.skip("docker is required to build the image")
+        _no_daemon("docker is required to build the image")
     if subprocess.run([docker, "info"], capture_output=True, check=False).returncode:
-        pytest.skip("no usable docker daemon")
+        _no_daemon("no usable docker daemon")
 
     build_system = tomllib.loads(_PYPROJECT_PATH.read_text(encoding="utf-8"))[
         "build-system"
