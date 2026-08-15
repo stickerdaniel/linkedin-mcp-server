@@ -4311,7 +4311,7 @@ class LinkedInExtractor:
         selectors: list[str],
     ) -> dict[str, Any]:
         """Extract innerText and raw anchor metadata from the first matching root."""
-        await self._page.evaluate(
+        result = await self._page.evaluate(
             """({ selectors }) => {
                 const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
                 const containerSelector = 'section, article, li, div';
@@ -4413,7 +4413,7 @@ class LinkedInExtractor:
             }""",
             {"selectors": selectors},
         )
-        return {"source": "unknown", "text": "", "references": []}
+        return result
 
     async def reply_to_thread(
         self,
