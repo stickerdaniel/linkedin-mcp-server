@@ -5990,3 +5990,88 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         # The raw error must not survive as a cause either: the handlers
         # downstream print the whole chain.
         assert excinfo.value.__cause__ is None
+
+
+class TestNavigationPacing:
+    """Randomized pacing at the single navigation funnel."""
+
+    async def test_navigation_pauses_when_pacing_enabled(self, mock_page):
+        from linkedin_mcp_server.scraping.pacing import HumanPacing
+
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=3.0, max_seconds=3.0),
+        )
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await extractor._goto_with_auth_checks("https://www.linkedin.com/feed/")
+        assert sleep.await_args_list
+        assert sleep.await_args_list[0].args[0] == pytest.approx(3.0)
+
+    async def test_navigation_does_not_pause_by_default(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await extractor._goto_with_auth_checks("https://www.linkedin.com/feed/")
+        sleep.assert_not_awaited()
+
+    async def test_pause_happens_before_goto(self, mock_page):
+        """A pause after the request has already left is not pacing."""
+        from linkedin_mcp_server.scraping.pacing import HumanPacing
+
+        order: list[str] = []
+        mock_page.goto = AsyncMock(side_effect=lambda *a, **k: order.append("goto"))
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=1.0, max_seconds=1.0),
+        )
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            new=AsyncMock(side_effect=lambda *a: order.append("sleep")),
+        ):
+            await extractor._goto_with_auth_checks("https://www.linkedin.com/feed/")
+        assert order[:2] == ["sleep", "goto"]
+
+    async def test_fixed_nav_delay_is_skipped_when_pacing_enabled(self, mock_page):
+        """The funnel pause replaces _NAV_DELAY — never both."""
+        from linkedin_mcp_server.scraping.pacing import HumanPacing
+
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=1.0, max_seconds=1.0),
+        )
+        # One patch covers both modules, and has to: ``extractor.asyncio`` and
+        # ``pacing.asyncio`` are the same module object, so patching the two
+        # names separately would leave the second mock installed and this
+        # assertion reading an empty list whatever the code did.
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep", new=AsyncMock()
+            ) as sleep,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.LinkedInExtractor.extract_page",
+                new=AsyncMock(return_value=extracted("text")),
+            ),
+        ):
+            await extractor.scrape_person(
+                "test-user", {"main_profile", "experience", "education"}
+            )
+        assert 2.0 not in [c.args[0] for c in sleep.await_args_list]
+
+    async def test_fixed_nav_delay_still_runs_when_pacing_disabled(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep", new=AsyncMock()
+            ) as extractor_sleep,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.LinkedInExtractor.extract_page",
+                new=AsyncMock(return_value=extracted("text")),
+            ),
+        ):
+            await extractor.scrape_person(
+                "test-user", {"main_profile", "experience", "education"}
+            )
+        assert 2.0 in [c.args[0] for c in extractor_sleep.await_args_list]

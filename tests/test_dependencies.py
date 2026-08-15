@@ -7,6 +7,8 @@ import asyncio
 import pytest
 from fastmcp.exceptions import ToolError
 
+from linkedin_mcp_server.config import set_config
+from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     NetworkError,
@@ -76,6 +78,11 @@ class TestGetReadyExtractor:
         """When gating returns (login resolved in-budget), control falls through
         to get_or_create_browser + ensure_authenticated and returns an extractor.
         """
+        # Installed rather than left to the singleton: `get_ready_extractor`
+        # now reads the config to build the extractor's pacing, and an
+        # uninitialized singleton parses `sys.argv`, which under pytest is the
+        # pytest command line and exits the interpreter.
+        set_config(AppConfig())
         browser = MagicMock()
         browser.page = MagicMock()
         with (
@@ -200,6 +207,47 @@ class TestGetReadyExtractor:
                 await get_ready_extractor(ctx=None, tool_name="test_tool")
 
             mock_invalidate.assert_not_called()
+
+    async def _extractor_for(self, config: AppConfig):
+        set_config(config)
+        browser = MagicMock()
+        browser.page = MagicMock()
+        with (
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.get_or_create_browser",
+                new_callable=AsyncMock,
+                return_value=browser,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_authenticated",
+                new_callable=AsyncMock,
+            ),
+        ):
+            return await get_ready_extractor(ctx=None, tool_name="test_tool")
+
+    async def test_pacing_is_built_from_the_browser_config(self):
+        config = AppConfig()
+        config.browser.human_delays = True
+        config.browser.human_delay_min_seconds = 2.5
+        config.browser.human_delay_max_seconds = 7.5
+
+        extractor = await self._extractor_for(config)
+
+        assert extractor._pacing is not None
+        assert extractor._pacing.enabled is True
+        assert extractor._pacing.min_seconds == 2.5
+        assert extractor._pacing.max_seconds == 7.5
+
+    async def test_pacing_is_off_unless_the_config_asks_for_it(self):
+        """The default config must leave scraping on its upstream timing."""
+        extractor = await self._extractor_for(AppConfig())
+
+        assert extractor._pacing is not None
+        assert extractor._pacing.enabled is False
 
     async def test_mid_scrape_auth_error_triggers_relogin(self):
         """AuthenticationError caught in tool wrapper invokes handle_auth_error."""

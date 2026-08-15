@@ -39,6 +39,7 @@ from linkedin_mcp_server.scraping.link_metadata import (
     build_references,
     dedupe_references,
 )
+from linkedin_mcp_server.scraping.pacing import HumanPacing, human_pause
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
 
@@ -49,7 +50,8 @@ logger = logging.getLogger(__name__)
 
 WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
 
-# Pacing between page navigations
+# Pacing between page navigations. Superseded per-navigation by
+# ``HumanPacing`` when human delays are enabled — the two never both run.
 _NAV_DELAY = 2.0
 
 # Backoff before retrying a temporarily blocked page
@@ -742,8 +744,12 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
 class LinkedInExtractor:
     """Extracts LinkedIn page content via navigate-scroll-innerText pattern."""
 
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, pacing: HumanPacing | None = None):
         self._page = page
+        # Defaults to None so every existing construction — and every test —
+        # keeps upstream timing exactly. Only a caller that asks for pacing
+        # gets it.
+        self._pacing = pacing
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -883,6 +889,17 @@ class LinkedInExtractor:
         self._page.on("framenavigated", record_navigation)
         listener_registered = True
         try:
+            # Every scraping navigation passes through here, which is why the
+            # pause sits at this one point rather than at each caller. It goes
+            # before the trace so the trace records when the request actually
+            # left, not when the method was entered.
+            #
+            # The remember-me retry below re-enters this method and so pauses
+            # again, which is what one-pause-per-request means: that retry is a
+            # second request, sent after a click on the account chooser. It
+            # cannot compound, because the retry passes allow_remember_me=False
+            # and the recursion is one level deep at most.
+            await human_pause(self._pacing, f"navigation to {url}")
             await record_page_trace(
                 self._page,
                 "extractor-before-goto",
@@ -1771,7 +1788,8 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+                    if not (self._pacing and self._pacing.enabled):
+                        await asyncio.sleep(_NAV_DELAY)
 
                 url = base_url + suffix
                 try:
@@ -2440,7 +2458,8 @@ class LinkedInExtractor:
                 continue
 
             if not first_show_all:
-                await asyncio.sleep(_NAV_DELAY)
+                if not (self._pacing and self._pacing.enabled):
+                    await asyncio.sleep(_NAV_DELAY)
             first_show_all = False
 
             try:
@@ -2923,7 +2942,8 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+                    if not (self._pacing and self._pacing.enabled):
+                        await asyncio.sleep(_NAV_DELAY)
 
                 url = base_url + suffix
                 try:
@@ -3281,7 +3301,8 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                if not (self._pacing and self._pacing.enabled):
+                    await asyncio.sleep(_NAV_DELAY)
 
             url = (
                 base_url
@@ -3512,7 +3533,8 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                if not (self._pacing and self._pacing.enabled):
+                    await asyncio.sleep(_NAV_DELAY)
 
             url = (
                 base_url
