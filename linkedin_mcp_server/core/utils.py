@@ -112,8 +112,9 @@ async def scroll_job_sidebar(
         pause_time: Time to pause between scrolls (seconds)
         max_scrolls: Maximum number of scroll attempts
         pacing: When enabled, replaces ``pause_time`` with a randomized value
-            for this run. The loop runs inside ``page.evaluate``, so a single
-            value is drawn per call rather than per iteration.
+            for this run, never a shorter one. The loop runs inside
+            ``page.evaluate``, so a single value is drawn per call rather than
+            per iteration.
     """
     # Wait for at least one job card link to render before scrolling
     try:
@@ -122,8 +123,13 @@ async def scroll_job_sidebar(
         logger.debug("No job card links found, skipping sidebar scroll")
         return
 
+    # Never below what the caller asked for: this value gates the in-page
+    # lazy-load check, so a shorter wait reads scrollHeight before the new
+    # cards render, breaks the loop on its first iteration and costs job
+    # cards. A configured range under ~2s draws below 0.5 every time, so the
+    # floor is what keeps pacing from scraping less than no pacing at all.
     if pacing and pacing.enabled:
-        pause_time = pacing.skim_delay()
+        pause_time = max(pause_time, pacing.skim_delay())
 
     scrolled = await page.evaluate(
         """async ({pauseTime, maxScrolls}) => {

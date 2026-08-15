@@ -6307,6 +6307,41 @@ class TestClickPacing:
         assert 2.0 in delays
         assert 1.0 not in delays
 
+    async def test_show_more_pause_never_undercuts_its_fixed_second(self, mock_page):
+        """Replacing the settle must not shorten it.
+
+        The next iteration re-reads ``main button`` to decide whether another
+        "Show more" is there. Deciding that against content the page has not
+        finished rendering ends the loop early and truncates the section, so a
+        configured range below a second costs entries rather than jitter.
+        """
+        self._show_more_button(mock_page)
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=0.2, max_seconds=0.2),
+        )
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep", new=AsyncMock()
+            ) as sleep,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new=AsyncMock(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new=AsyncMock(),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new=AsyncMock(return_value=False),
+            ),
+        ):
+            await self._details_section(extractor)
+        delays = [call.args[0] for call in sleep.await_args_list]
+        assert 0.2 not in delays
+        assert 1.0 in delays
+
     @staticmethod
     async def _row_pause_bounds(mock_page, pacing) -> dict:
         """Run the row loop and return the bounds handed to the browser."""

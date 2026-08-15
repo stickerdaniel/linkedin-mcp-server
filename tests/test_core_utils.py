@@ -186,3 +186,17 @@ class TestScrollPacing:
     @UNPACED
     async def test_job_sidebar_pause_unchanged_without_pacing(self, pacing):
         assert await self._sidebar_pause_time(pacing) == pytest.approx(0.5)
+
+    async def test_job_sidebar_pause_never_undercuts_the_caller(self):
+        """A shorter draw would scrape less, not merely faster.
+
+        ``pauseTime`` gates the in-page lazy-load check: when it elapses before
+        the new cards render, ``scrollHeight`` is unchanged, the loop breaks on
+        its first iteration and the rest of the sidebar is never loaded. A
+        0.2-0.8s range draws from [0.05, 0.2], which is below the caller's 0.5s
+        on every single call — deterministic, not a tail case.
+        """
+        pause = await self._sidebar_pause_time(
+            HumanPacing(enabled=True, min_seconds=0.2, max_seconds=0.8)
+        )
+        assert pause == pytest.approx(0.5)

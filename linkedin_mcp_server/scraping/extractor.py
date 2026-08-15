@@ -1668,11 +1668,15 @@ class LinkedInExtractor:
                     # The fixed second was always both settle time and spacing
                     # before the next click. Pacing takes over the whole job
                     # rather than adding to it — the two together would make a
-                    # paced run slower than the operator asked for.
-                    if self._paces_navigations:
-                        await human_pause(self._pacing, "next 'Show more' click")
-                    else:
-                        await asyncio.sleep(1.0)
+                    # paced run slower than the operator asked for — but it
+                    # never undercuts the settle, because the next iteration
+                    # decides whether another button exists against whatever
+                    # this wait let render. Shorter, and the section truncates.
+                    settle = 1.0
+                    paced = self._pacing if self._paces_navigations else None
+                    if paced:
+                        settle = max(settle, paced.full_delay())
+                    await asyncio.sleep(settle)
                 except PlaywrightTimeoutError:
                     logger.debug("Show more click timed out after %d clicks", i)
                     break

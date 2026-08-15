@@ -29,9 +29,9 @@ from linkedin_mcp_server.exceptions import (
     DockerHostLoginRequiredError,
     LinuxBrowserDependencyError,
 )
+from linkedin_mcp_server.pacing import HumanPacing
 from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.scraping import LinkedInExtractor
-from linkedin_mcp_server.pacing import HumanPacing
 from linkedin_mcp_server.server_role import (
     ServerRole,
     a_held_profile_means_this_owner_must_go,
