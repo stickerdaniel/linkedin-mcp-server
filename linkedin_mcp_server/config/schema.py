@@ -15,6 +15,12 @@ from urllib.parse import unquote, urlsplit
 
 logger = logging.getLogger(__name__)
 
+# The fixed inter-section gap the paced navigation pause stands in for. Kept
+# here as a literal rather than imported from ``scraping.extractor`` (config
+# must not depend on the scraper); ``tests/test_config.py`` asserts the two
+# still agree, which is what stops them drifting apart.
+REPLACED_NAV_DELAY_SECONDS: float = 2.0
+
 DEFAULT_TOOL_TIMEOUT_SECONDS: float = 180.0
 DEFAULT_LOGIN_TIMEOUT_SECONDS: float = 1800.0  # 30 min; 0 = no limit
 DEFAULT_LOGIN_INLINE_WAIT_SECONDS: float = 25.0  # bounded inline wait
@@ -230,6 +236,31 @@ class BrowserConfig:
                 "human_delay_min_seconds must not exceed human_delay_max_seconds, "
                 f"got {self.human_delay_min_seconds} > {self.human_delay_max_seconds}"
             )
+        # Turning the feature on must never make the scraper faster than
+        # leaving it off. The paced pause at the navigation funnel *replaces*
+        # the fixed inter-section delay rather than adding to it, so a range
+        # whose average falls below that delay speeds every multi-section
+        # scrape up — and min=max=0 with the toggle on removes the delay
+        # outright and adds nothing back, which validated until this check.
+        # The average is the honest bound: the funnel fires on every
+        # navigation while the fixed delay only fired between sections, so
+        # mean >= the replaced delay makes the whole scrape provably no
+        # faster. Individual draws below it are still possible and fine;
+        # only the aggregate is guaranteed. Refused rather than clamped —
+        # a value the operator set is never silently rewritten here.
+        if self.human_delays:
+            mean_delay = (
+                self.human_delay_min_seconds + self.human_delay_max_seconds
+            ) / 2
+            if mean_delay < REPLACED_NAV_DELAY_SECONDS:
+                raise ConfigurationError(
+                    "human_delays is enabled but the configured range averages "
+                    f"{mean_delay}s, below the {REPLACED_NAV_DELAY_SECONDS}s fixed "
+                    "delay it replaces, so pacing would make scrapes faster rather "
+                    "than slower. Raise human_delay_max_seconds (or "
+                    "human_delay_min_seconds) until the two average at least "
+                    f"{REPLACED_NAV_DELAY_SECONDS}s, or set human_delays=false."
+                )
         if self.default_timeout <= 0:
             raise ConfigurationError(
                 f"default_timeout must be positive, got {self.default_timeout}"
