@@ -4091,6 +4091,182 @@ class TestSearchResultsExtraction:
 
         assert result.text == placeholder
 
+    async def test_job_page_waits_for_description_content(self, mock_page):
+        """Job URLs should call wait_for_function to wait for the description."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Acme Corp. About the job. " * 10,
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/jobs/view/12345/",
+                section_name="job_posting",
+            )
+
+        mock_page.wait_for_function.assert_awaited_once()
+        assert "About the job" in result.text
+
+    async def test_job_page_wait_checks_all_locale_headings(self, mock_page):
+        """The job-description wait must check every locale in the table, not just English.
+
+        wait_for_function is mocked (no real browser JS runs in this suite),
+        so this proves the fix by inspecting what was actually passed to it:
+        the full _JOB_DESCRIPTION_HEADINGS table, not a single hardcoded
+        English string. Regression coverage for the Greptile-flagged
+        locale gap on PR #718.
+        """
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Acme Corp. Über den Job. " * 10,
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/jobs/view/12345/",
+                section_name="job_posting",
+            )
+
+        mock_page.wait_for_function.assert_awaited_once()
+        call_kwargs = mock_page.wait_for_function.call_args.kwargs
+        headings = call_kwargs["arg"]["headings"]
+        assert "About the job" in headings
+        assert "Über den Job" in headings
+        assert len(headings) >= 2
+        # Proves the German locale text would satisfy the real (unmocked)
+        # predicate: same membership check the JS predicate performs.
+        assert any(h in result.text for h in headings)
+
+    async def test_non_job_page_does_not_wait_for_job_content(self, mock_page):
+        """Non-job URLs should not trigger the job description wait."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "Profile text", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/",
+                section_name="main_profile",
+            )
+
+        mock_page.wait_for_function.assert_not_awaited()
+
+    async def test_job_page_timeout_proceeds_gracefully(self, mock_page):
+        """When the description never hydrates, extraction proceeds with available text."""
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        placeholder = "Acme Corp. Apply. Save. Set alert for similar jobs."
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": placeholder, "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock(
+            side_effect=PlaywrightTimeoutError("Timeout")
+        )
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/jobs/view/12345/",
+                section_name="job_posting",
+            )
+
+        assert result.text == placeholder
+
+    async def test_scrape_job_includes_description_when_hydrated(self, mock_page):
+        """scrape_job should surface the description once it has hydrated."""
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Acme Corp. About the job. We are hiring. Apply now.",
+                "references": [],
+            }
+        )
+        mock_page.wait_for_function = AsyncMock()
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.scrape_job("12345")
+
+        assert "About the job" in result["sections"]["job_posting"]
+
 
 class TestScrapePersonCallbacks:
     """Test that scrape_person invokes callbacks at each stage."""
