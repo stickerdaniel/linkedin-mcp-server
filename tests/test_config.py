@@ -2,6 +2,7 @@ import logging
 
 import pytest
 
+from linkedin_mcp_server.config.loaders import load_from_env
 from linkedin_mcp_server.config.schema import (
     AppConfig,
     BROWSER_HANDOFF_MARGIN_SECONDS,
@@ -1304,3 +1305,51 @@ class TestProxyEncodedUserinfo:
         config = BrowserConfig(proxy_server="http://gate.example:7000")
         config.validate()
         assert config.proxy_server == "http://gate.example:7000"
+
+
+class TestHumanDelayConfig:
+    """HUMAN_DELAYS toggle and its bounds."""
+
+    def test_defaults_are_off_with_one_to_five_seconds(self):
+        config = BrowserConfig()
+        assert config.human_delays is False
+        assert config.human_delay_min_seconds == 1.0
+        assert config.human_delay_max_seconds == 5.0
+
+    def test_min_above_max_is_refused(self):
+        config = BrowserConfig(human_delay_min_seconds=6.0, human_delay_max_seconds=5.0)
+        with pytest.raises(ConfigurationError, match="human_delay_min_seconds"):
+            config.validate()
+
+    def test_negative_min_is_refused(self):
+        config = BrowserConfig(human_delay_min_seconds=-1.0)
+        with pytest.raises(ConfigurationError, match="human_delay_min_seconds"):
+            config.validate()
+
+    def test_max_above_ceiling_is_refused(self):
+        config = BrowserConfig(human_delay_max_seconds=31.0)
+        with pytest.raises(ConfigurationError, match="human_delay_max_seconds"):
+            config.validate()
+
+    def test_equal_min_and_max_is_allowed(self):
+        BrowserConfig(
+            human_delay_min_seconds=2.0, human_delay_max_seconds=2.0
+        ).validate()
+
+    def test_env_enables_delays(self, monkeypatch):
+        monkeypatch.setenv("HUMAN_DELAYS", "true")
+        monkeypatch.setenv("HUMAN_DELAY_MIN_SECONDS", "2.5")
+        monkeypatch.setenv("HUMAN_DELAY_MAX_SECONDS", "7.5")
+        config = load_from_env(AppConfig())
+        assert config.browser.human_delays is True
+        assert config.browser.human_delay_min_seconds == 2.5
+        assert config.browser.human_delay_max_seconds == 7.5
+
+    def test_env_false_keeps_delays_off(self, monkeypatch):
+        monkeypatch.setenv("HUMAN_DELAYS", "false")
+        assert load_from_env(AppConfig()).browser.human_delays is False
+
+    def test_non_numeric_bound_is_refused(self, monkeypatch):
+        monkeypatch.setenv("HUMAN_DELAY_MIN_SECONDS", "soon")
+        with pytest.raises(ConfigurationError, match="HUMAN_DELAY_MIN_SECONDS"):
+            load_from_env(AppConfig())

@@ -194,12 +194,41 @@ class BrowserConfig:
     # being readable, so it can never be asked to stand down. Both can go once
     # owner turnover survives a fingerprint change.
     eager_full_chromium: bool = False
+    # Randomized waits between browser actions, so the timing between requests
+    # is not a fixed cadence. Off by default: with this false the scraper's
+    # timing is exactly what it has always been. Deliberately absent from
+    # ``SHARED_CONFIG_FIELDS`` — it changes pacing, not what a browser is, so
+    # an owner and a client need not agree on it.
+    human_delays: bool = False
+    human_delay_min_seconds: float = 1.0
+    human_delay_max_seconds: float = 5.0
 
     def validate(self) -> None:
         """Validate browser configuration values."""
         if self.slow_mo < 0:
             raise ConfigurationError(
                 f"slow_mo must be non-negative, got {self.slow_mo}"
+            )
+        if not (
+            math.isfinite(self.human_delay_min_seconds)
+            and self.human_delay_min_seconds >= 0
+        ):
+            raise ConfigurationError(
+                "human_delay_min_seconds must be a non-negative finite number, "
+                f"got {self.human_delay_min_seconds}"
+            )
+        if not (
+            math.isfinite(self.human_delay_max_seconds)
+            and 0 <= self.human_delay_max_seconds <= 30
+        ):
+            raise ConfigurationError(
+                "human_delay_max_seconds must be between 0 and 30, "
+                f"got {self.human_delay_max_seconds}"
+            )
+        if self.human_delay_min_seconds > self.human_delay_max_seconds:
+            raise ConfigurationError(
+                "human_delay_min_seconds must not exceed human_delay_max_seconds, "
+                f"got {self.human_delay_min_seconds} > {self.human_delay_max_seconds}"
             )
         if self.default_timeout <= 0:
             raise ConfigurationError(
