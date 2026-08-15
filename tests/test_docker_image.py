@@ -137,7 +137,11 @@ _PROJECT_BUILDING_COMMANDS = (
     "uv pip install",
     "uv run",
     "uv build",
+    # `uvx` and `uv tool` are the same command under two spellings, and only
+    # the short one was here at first: `uv tool install .` built the project
+    # past a corrupted constraint file while this guard reported nothing.
     "uvx",
+    "uv tool",
     "pip install",
     "pip wheel",
     "python -m build",
