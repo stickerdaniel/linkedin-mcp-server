@@ -39,7 +39,11 @@ from linkedin_mcp_server.scraping.link_metadata import (
     build_references,
     dedupe_references,
 )
-from linkedin_mcp_server.scraping.pacing import HumanPacing, human_pause
+from linkedin_mcp_server.scraping.pacing import (
+    SKIM_FRACTION,
+    HumanPacing,
+    human_pause,
+)
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
 
@@ -3951,11 +3955,18 @@ class LinkedInExtractor:
         # Each row click is an SPA navigation, and before pacing they fired
         # back to back — up to fifty of them with nothing but the URL poll in
         # between, which is the least human thing this scraper does. The wait
-        # is handed to the JS as a number because the loop it belongs in lives
-        # there; a pause awaited in Python would only sit around the whole
-        # evaluate call.
+        # belongs inside the JS because the loop does; a pause awaited in
+        # Python would only sit around the whole evaluate call.
+        #
+        # What crosses is the range, not a delay. This is the one site that
+        # spaces dozens of actions inside a single call, so a value drawn once
+        # here would give all forty-nine gaps the same length to the
+        # millisecond — trading a signature of 0ms for a signature of N ms.
+        # The draw happens per gap, in the loop, over the range ``skim_delay``
+        # would have drawn from.
         paced = self._pacing if self._paces_navigations else None
-        row_pause_ms = paced.skim_delay() * 1000 if paced else 0
+        row_pause_min_ms = paced.min_seconds * SKIM_FRACTION * 1000 if paced else 0
+        row_pause_max_ms = paced.max_seconds * SKIM_FRACTION * 1000 if paced else 0
 
         # The Ember click handler lives on an inner div; the <li> and <label>
         # don't trigger SPA navigation.  No role/aria attributes exist on the
@@ -3963,7 +3974,7 @@ class LinkedInExtractor:
         # The aria-label value flows through unmodified — Python strips any
         # known locale prefix to derive a clean participant name for refs.
         conversations: list[dict[str, str]] = await self._page.evaluate(
-            """async ({ limit, nameFilter, rowPauseMs }) => {
+            """async ({ limit, nameFilter, rowPauseMinMs, rowPauseMaxMs }) => {
                 const labels = Array.from(document.querySelectorAll(
                     'main li label[aria-label]'
                 ));
@@ -3992,9 +4003,13 @@ class LinkedInExtractor:
                     // Spacing is measured between clicks, past both skips
                     // above: a name filter reads every row and clicks one, so
                     // a wait at the top of the loop would charge the whole
-                    // inbox for a single visit.
-                    if (rowPauseMs && clicked > 0) {
-                        await new Promise(r => setTimeout(r, rowPauseMs));
+                    // inbox for a single visit. Drawn per gap — a constant
+                    // interval repeated fifty times is its own fingerprint.
+                    if (rowPauseMaxMs > 0 && clicked > 0) {
+                        const spread = rowPauseMaxMs - rowPauseMinMs;
+                        await new Promise(r => setTimeout(
+                            r, rowPauseMinMs + Math.random() * spread
+                        ));
                     }
                     clicked++;
                     const before = location.href;
@@ -4018,7 +4033,12 @@ class LinkedInExtractor:
                 }
                 return results;
             }""",
-            {"limit": limit, "nameFilter": name_filter, "rowPauseMs": row_pause_ms},
+            {
+                "limit": limit,
+                "nameFilter": name_filter,
+                "rowPauseMinMs": row_pause_min_ms,
+                "rowPauseMaxMs": row_pause_max_ms,
+            },
         )
         refs: list[Reference] = []
         for conv in conversations:

@@ -5201,7 +5201,8 @@ class TestResolveConversationThreadUrls:
         assert captured["arg"] == {
             "limit": 50,
             "nameFilter": "Jacki McMahan",
-            "rowPauseMs": 0,
+            "rowPauseMinMs": 0,
+            "rowPauseMaxMs": 0,
         }
 
 
@@ -6306,26 +6307,43 @@ class TestClickPacing:
         assert 2.0 in delays
         assert 1.0 not in delays
 
+    @staticmethod
+    async def _row_pause_bounds(mock_page, pacing) -> dict:
+        """Run the row loop and return the bounds handed to the browser."""
+        mock_page.evaluate = AsyncMock(return_value=[])
+        extractor = LinkedInExtractor(mock_page, pacing=pacing)
+        await extractor._extract_conversation_thread_refs(limit=10, context="inbox")
+        call = mock_page.evaluate.await_args
+        assert call is not None
+        return call.args[1]
+
     async def test_conversation_rows_get_a_pause_between_clicks(self, mock_page):
         """Row visits ran back-to-back with zero delay before this."""
-        mock_page.evaluate = AsyncMock(return_value=[])
-        extractor = LinkedInExtractor(
-            mock_page,
-            pacing=HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0),
+        argument = await self._row_pause_bounds(
+            mock_page, HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0)
         )
-        await extractor._extract_conversation_thread_refs(limit=10, context="inbox")
-        call = mock_page.evaluate.await_args
-        assert call is not None
         # 4.0 * SKIM_FRACTION seconds, handed to the browser in milliseconds.
-        assert call.args[1]["rowPauseMs"] == pytest.approx(1000.0)
+        assert argument["rowPauseMinMs"] == pytest.approx(1000.0)
+        assert argument["rowPauseMaxMs"] == pytest.approx(1000.0)
+
+    async def test_row_pause_bounds_span_the_configured_range(self, mock_page):
+        """A range crosses into the browser, so each gap can be drawn there.
+
+        One delay drawn in Python and reused would space fifty clicks
+        identically to the millisecond — a cadence no person produces, and the
+        exact thing this feature exists to remove. The JS can only vary the
+        gaps if it is given room to.
+        """
+        argument = await self._row_pause_bounds(
+            mock_page, HumanPacing(enabled=True, min_seconds=1.0, max_seconds=5.0)
+        )
+        assert argument["rowPauseMinMs"] == pytest.approx(250.0)
+        assert argument["rowPauseMaxMs"] == pytest.approx(1250.0)
 
     async def test_conversation_rows_have_no_pause_by_default(self, mock_page):
-        mock_page.evaluate = AsyncMock(return_value=[])
-        extractor = LinkedInExtractor(mock_page)
-        await extractor._extract_conversation_thread_refs(limit=10, context="inbox")
-        call = mock_page.evaluate.await_args
-        assert call is not None
-        assert call.args[1]["rowPauseMs"] == 0
+        argument = await self._row_pause_bounds(mock_page, None)
+        assert argument["rowPauseMinMs"] == 0
+        assert argument["rowPauseMaxMs"] == 0
 
     async def test_row_pause_is_not_charged_for_rows_never_clicked(self, mock_page):
         """A row the filter skips is not an action, and the JS must agree.
@@ -6348,6 +6366,6 @@ class TestClickPacing:
         call = mock_page.evaluate.await_args
         assert call is not None
         source = call.args[0]
-        wait = source.index("setTimeout(r, rowPauseMs)")
+        wait = source.index("rowPauseMinMs + Math.random()")
         assert wait > source.index("rowName !== wanted")
         assert wait > source.index("if (!clickTarget) continue")
