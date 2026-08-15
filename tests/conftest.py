@@ -1,5 +1,7 @@
 import pytest
 
+from linkedin_mcp_server.pacing import HumanPacing
+
 
 @pytest.fixture(autouse=True)
 def reset_singletons():
@@ -189,3 +191,21 @@ def mock_context():
     ctx = MagicMock()
     ctx.report_progress = AsyncMock()
     return ctx
+
+
+@pytest.fixture(params=[None, HumanPacing.disabled()], ids=["none", "disabled"])
+def unpaced(request) -> HumanPacing | None:
+    """Both things production means by "pacing off".
+
+    Two values reach a component as "no pacing" — no ``HumanPacing`` at all,
+    and one that is disabled — and toggle-off has to leave upstream timing
+    byte-identical under both. The disabled instance is the one production
+    actually produces: ``dependencies.get_ready_extractor`` always builds a
+    ``HumanPacing`` and never passes ``None``. They are equivalent today only
+    because ``HumanPacing`` is a frozen dataclass with no ``__bool__``, which
+    is exactly the kind of thing that changes without anyone noticing.
+
+    Shared from here rather than redefined per module so the two stay one
+    list: a second copy is a second place to forget a state.
+    """
+    return request.param

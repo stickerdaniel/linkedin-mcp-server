@@ -146,21 +146,16 @@ class TestScrollPacing:
         # The existing 0.5s settle survives; 4.0 * SKIM_FRACTION rides on top.
         assert delays == [pytest.approx(0.5), pytest.approx(1.0)] * 2
 
-    # Two things mean "no pacing" — no ``HumanPacing`` at all, and one that is
-    # disabled — and toggle-off has to leave upstream timing byte-identical
-    # under both. A disabled instance is what the config path builds when the
-    # operator leaves the feature off, so it is the reachable case, not None.
-    UNPACED = pytest.mark.parametrize(
-        "pacing", [None, HumanPacing.disabled()], ids=["none", "disabled"]
-    )
-
-    @UNPACED
-    async def test_scroll_to_bottom_unchanged_without_pacing(self, pacing):
+    # ``unpaced`` covers both things that mean "no pacing" — no ``HumanPacing``
+    # at all, and one that is disabled. It lives in ``conftest`` so the
+    # extractor-side toggle-off tests run over the same two states; see the
+    # fixture for why the disabled instance is the reachable one.
+    async def test_scroll_to_bottom_unchanged_without_pacing(self, unpaced):
         page = self._lazy_loading_page()
         with patch(
             "linkedin_mcp_server.core.utils.asyncio.sleep", new=AsyncMock()
         ) as sleep:
-            await scroll_to_bottom(page, pause_time=0.5, max_scrolls=2, pacing=pacing)
+            await scroll_to_bottom(page, pause_time=0.5, max_scrolls=2, pacing=unpaced)
         delays = [call.args[0] for call in sleep.await_args_list]
         assert delays == [pytest.approx(0.5)] * 2
 
@@ -183,9 +178,8 @@ class TestScrollPacing:
         # A skim, not a decision: 4.0 * SKIM_FRACTION rather than 4.0.
         assert pause == pytest.approx(1.0)
 
-    @UNPACED
-    async def test_job_sidebar_pause_unchanged_without_pacing(self, pacing):
-        assert await self._sidebar_pause_time(pacing) == pytest.approx(0.5)
+    async def test_job_sidebar_pause_unchanged_without_pacing(self, unpaced):
+        assert await self._sidebar_pause_time(unpaced) == pytest.approx(0.5)
 
     async def test_job_sidebar_pause_never_undercuts_the_caller(self):
         """A shorter draw would scrape less, not merely faster.

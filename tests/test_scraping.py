@@ -6015,8 +6015,8 @@ class TestNavigationPacing:
         assert sleep.await_args_list
         assert sleep.await_args_list[0].args[0] == pytest.approx(3.0)
 
-    async def test_navigation_does_not_pause_by_default(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
+    async def test_navigation_does_not_pause_by_default(self, mock_page, unpaced):
+        extractor = LinkedInExtractor(mock_page, pacing=unpaced)
         with patch(
             "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
@@ -6091,8 +6091,10 @@ class TestNavigationPacing:
             )
         assert 2.0 not in [c.args[0] for c in sleep.await_args_list]
 
-    async def test_fixed_nav_delay_still_runs_when_pacing_disabled(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
+    async def test_fixed_nav_delay_still_runs_when_pacing_disabled(
+        self, mock_page, unpaced
+    ):
+        extractor = LinkedInExtractor(mock_page, pacing=unpaced)
         with (
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep", new=AsyncMock()
@@ -6138,10 +6140,12 @@ class TestClickPacing:
         sleep.assert_awaited()
         assert sleep.await_args_list[0].args[0] == pytest.approx(2.0)
 
-    async def test_click_button_by_text_does_not_pause_by_default(self, mock_page):
+    async def test_click_button_by_text_does_not_pause_by_default(
+        self, mock_page, unpaced
+    ):
         self._text_button(mock_page, count=1)
 
-        extractor = LinkedInExtractor(mock_page)
+        extractor = LinkedInExtractor(mock_page, pacing=unpaced)
         with patch(
             "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
@@ -6183,7 +6187,7 @@ class TestClickPacing:
             await extractor._click_first("button.artdeco-modal__dismiss")
         assert order == ["sleep", "click"]
 
-    async def test_click_first_does_not_pause_by_default(self, mock_page):
+    async def test_click_first_does_not_pause_by_default(self, mock_page, unpaced):
         target = MagicMock()
         target.scroll_into_view_if_needed = AsyncMock()
         target.click = AsyncMock()
@@ -6191,7 +6195,7 @@ class TestClickPacing:
         locator.first = target
         mock_page.locator = MagicMock(return_value=locator)
 
-        extractor = LinkedInExtractor(mock_page)
+        extractor = LinkedInExtractor(mock_page, pacing=unpaced)
         with patch(
             "linkedin_mcp_server.pacing.asyncio.sleep", new=AsyncMock()
         ) as sleep:
@@ -6251,10 +6255,12 @@ class TestClickPacing:
             max_scrolls=1,
         )
 
-    async def test_show_more_keeps_its_fixed_second_when_unpaced(self, mock_page):
+    async def test_show_more_keeps_its_fixed_second_when_unpaced(
+        self, mock_page, unpaced
+    ):
         """Toggle-off has to leave upstream timing byte-identical."""
         self._show_more_button(mock_page)
-        extractor = LinkedInExtractor(mock_page)
+        extractor = LinkedInExtractor(mock_page, pacing=unpaced)
         with (
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep", new=AsyncMock()
@@ -6375,8 +6381,8 @@ class TestClickPacing:
         assert argument["rowPauseMinMs"] == pytest.approx(250.0)
         assert argument["rowPauseMaxMs"] == pytest.approx(1250.0)
 
-    async def test_conversation_rows_have_no_pause_by_default(self, mock_page):
-        argument = await self._row_pause_bounds(mock_page, None)
+    async def test_conversation_rows_have_no_pause_by_default(self, mock_page, unpaced):
+        argument = await self._row_pause_bounds(mock_page, unpaced)
         assert argument["rowPauseMinMs"] == 0
         assert argument["rowPauseMaxMs"] == 0
 
@@ -6432,8 +6438,8 @@ class TestRegionScrollPacing:
         # The 0.5s settle survives; 4.0 * SKIM_FRACTION rides on top of it.
         assert delays == [pytest.approx(0.5), pytest.approx(1.0)] * 2
 
-    async def test_region_scroll_has_no_skim_pause_by_default(self, mock_page):
-        delays = await self._region_scroll_delays(mock_page, None)
+    async def test_region_scroll_has_no_skim_pause_by_default(self, mock_page, unpaced):
+        delays = await self._region_scroll_delays(mock_page, unpaced)
         assert delays == [pytest.approx(0.5)] * 2
 
 
@@ -6562,8 +6568,8 @@ class TestFeedScrollPacing:
         skims = [x for x in trace if isinstance(x, float) and x == pytest.approx(2.0)]
         assert len(skims) == trace.count("wheel") > 0
 
-    async def test_feed_scroll_unchanged_without_pacing(self, mock_page):
-        trace = await self._feed_scroll_trace(mock_page, None)
+    async def test_feed_scroll_unchanged_without_pacing(self, mock_page, unpaced):
+        trace = await self._feed_scroll_trace(mock_page, unpaced)
         assert trace[:2] == ["wheel", pytest.approx(1.0)]
         # Only the loop's own two waits: the 1.0s response tick and the 0.2s
         # settle after the loop.
