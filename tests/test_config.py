@@ -1417,3 +1417,37 @@ class TestHumanDelayConfig:
         monkeypatch.setenv("HUMAN_DELAY_MIN_SECONDS", "soon")
         with pytest.raises(ConfigurationError, match="HUMAN_DELAY_MIN_SECONDS"):
             load_from_env(AppConfig())
+
+    def test_flag_enables_delays(self, monkeypatch):
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--human-delays"])
+        assert load_from_args(AppConfig()).browser.human_delays is True
+
+    def test_no_human_delays_flag_turns_them_off(self, monkeypatch):
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--no-human-delays"])
+        config = AppConfig()
+        config.browser.human_delays = True
+        assert load_from_args(config).browser.human_delays is False
+
+    def test_no_human_delays_flag_overrides_env_true(self, monkeypatch):
+        """The way out for a deployment that sets HUMAN_DELAYS in its .env.
+
+        Without the negative flag an operator whose environment enables pacing
+        has no way to run one unpaced call short of editing the environment.
+        """
+        from linkedin_mcp_server.config import load_config
+
+        monkeypatch.setenv("HUMAN_DELAYS", "true")
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--no-human-delays"])
+        assert load_config().browser.human_delays is False
+
+    def test_absent_flags_leave_the_env_alone(self, monkeypatch):
+        """Neither flag present must not overwrite what the env decided."""
+        from linkedin_mcp_server.config import load_config
+
+        monkeypatch.setenv("HUMAN_DELAYS", "true")
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        assert load_config().browser.human_delays is True

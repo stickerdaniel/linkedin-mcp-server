@@ -513,10 +513,20 @@ def load_from_args(config: AppConfig) -> AppConfig:
         metavar="MS",
         help="Slow down browser actions by N milliseconds (debugging)",
     )
-    parser.add_argument(
+    human_delays_group = parser.add_mutually_exclusive_group()
+    human_delays_group.add_argument(
         "--human-delays",
+        dest="human_delays",
         action="store_true",
+        default=None,
         help="Wait a random interval between browser actions (see --human-delay-min/max)",
+    )
+    human_delays_group.add_argument(
+        "--no-human-delays",
+        dest="human_delays",
+        action="store_false",
+        default=None,
+        help="Keep the fixed cadence between browser actions (default; overrides HUMAN_DELAYS=true).",
     )
     parser.add_argument(
         "--human-delay-min",
@@ -810,8 +820,8 @@ def load_from_args(config: AppConfig) -> AppConfig:
     if args.slow_mo:
         config.browser.slow_mo = args.slow_mo
 
-    if args.human_delays:
-        config.browser.human_delays = True
+    if args.human_delays is not None:
+        config.browser.human_delays = args.human_delays
     if args.human_delay_min is not None:
         config.browser.human_delay_min_seconds = args.human_delay_min
     if args.human_delay_max is not None:
