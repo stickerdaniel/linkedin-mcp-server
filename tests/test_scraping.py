@@ -6034,6 +6034,31 @@ class TestNavigationPacing:
             await extractor._goto_with_auth_checks("https://www.linkedin.com/feed/")
         assert order[:2] == ["sleep", "goto"]
 
+    async def test_pause_precedes_the_hops_listener(self, mock_page):
+        """Pausing with the listener already live files stale hops as ours.
+
+        ``record_navigation`` collects main-frame navigations into the redirect
+        chain reported for *this* navigation, so a listener left running across
+        a multi-second pause would attribute the previous page's SPA activity to
+        the page about to be requested — in the diagnostics someone reads when a
+        scrape has broken.
+        """
+        from linkedin_mcp_server.scraping.pacing import HumanPacing
+
+        order: list[str] = []
+        mock_page.on = MagicMock(side_effect=lambda *a: order.append("listen"))
+        mock_page.goto = AsyncMock(side_effect=lambda *a, **k: order.append("goto"))
+        extractor = LinkedInExtractor(
+            mock_page,
+            pacing=HumanPacing(enabled=True, min_seconds=1.0, max_seconds=1.0),
+        )
+        with patch(
+            "linkedin_mcp_server.scraping.pacing.asyncio.sleep",
+            new=AsyncMock(side_effect=lambda *a: order.append("sleep")),
+        ):
+            await extractor._goto_with_auth_checks("https://www.linkedin.com/feed/")
+        assert order[:3] == ["sleep", "listen", "goto"]
+
     async def test_fixed_nav_delay_is_skipped_when_pacing_enabled(self, mock_page):
         """The funnel pause replaces _NAV_DELAY — never both."""
         from linkedin_mcp_server.scraping.pacing import HumanPacing
