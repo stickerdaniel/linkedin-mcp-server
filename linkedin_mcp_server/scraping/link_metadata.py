@@ -96,7 +96,22 @@ _REFERENCE_CAPS = {
     "languages": 12,
     "posts": 12,
     "jobs": 8,
-    "search_results": 15,
+    # This cap applies per navigation, so it has to hold one search results
+    # page: measured live, that is 26 distinct /in/ slugs behind 10 result
+    # cards, the extras being the mutual connections each card links. It sits
+    # above extractor._ENTITY_SEARCH_SLUGS_PER_PAGE (30) with margin; the cap
+    # on the merged multi-page walk is _ENTITY_SEARCH_REFERENCE_CAP, and the
+    # two are checked against each other in tests/test_link_metadata.py.
+    #
+    # This is a floor on usable results, not cosmetics. The slug inside the
+    # reference URL is the only handle get_person_profile, get_company_profile
+    # and get_company_employees accept, so at the previous 15 a single page
+    # already lost more than half of what it found — and a ten-page walk
+    # returned a hundred people in the text and fifteen anyone could act on.
+    #
+    # search_jobs and get_saved_jobs share this section name but re-cap their
+    # merged reference list at 15 of their own accord, so they are unaffected.
+    "search_results": 100,
     "job_posting": 8,
     "contact_info": 8,
     "inbox": 30,

@@ -267,6 +267,8 @@ class TestPersonTool:
             "New York",
             network=None,
             current_company=None,
+            max_pages=1,
+            start_page=1,
         )
 
     async def test_search_people_with_network_and_company_filters(self, mock_context):
@@ -301,7 +303,94 @@ class TestPersonTool:
             None,
             network=["F"],
             current_company="1115",
+            max_pages=1,
+            start_page=1,
         )
+
+    async def test_search_people_forwards_max_pages(self, mock_context):
+        mock_extractor = _make_mock_extractor(
+            {"url": "https://example.invalid", "sections": {"search_results": "text"}}
+        )
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_people")
+        await tool_fn("engineer", mock_context, max_pages=10, extractor=mock_extractor)
+
+        mock_extractor.search_people.assert_awaited_once_with(
+            "engineer",
+            None,
+            network=None,
+            current_company=None,
+            max_pages=10,
+            start_page=1,
+        )
+
+    async def test_search_people_forwards_start_page(self, mock_context):
+        """A parameter that reaches the URL builder but not the extractor is
+        the failure mode this covers: the call succeeds and quietly returns
+        page one."""
+        mock_extractor = _make_mock_extractor(
+            {"url": "https://example.invalid", "sections": {"search_results": "text"}}
+        )
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_people")
+        await tool_fn(
+            "engineer",
+            mock_context,
+            max_pages=3,
+            start_page=4,
+            extractor=mock_extractor,
+        )
+
+        mock_extractor.search_people.assert_awaited_once_with(
+            "engineer",
+            None,
+            network=None,
+            current_company=None,
+            max_pages=3,
+            start_page=4,
+        )
+
+    @pytest.mark.parametrize("value", [0, 101])
+    async def test_search_people_rejects_out_of_range_start_page(self, value):
+        # FastMCP wraps the pydantic error raised by Field() constraints in
+        # its own ValidationError, which does not subclass pydantic's.
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        with pytest.raises(ValidationError, match="start_page"):
+            await mcp.call_tool(
+                "search_people", {"keywords": "engineer", "start_page": value}
+            )
+
+    @pytest.mark.parametrize("value", [0, 11])
+    async def test_search_people_rejects_out_of_range_max_pages(self, value):
+        # FastMCP wraps the pydantic error raised by Field() constraints in
+        # its own ValidationError, which does not subclass pydantic's.
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        with pytest.raises(ValidationError, match="max_pages"):
+            await mcp.call_tool(
+                "search_people", {"keywords": "engineer", "max_pages": value}
+            )
 
     async def test_search_people_validation_error_surfaced_as_tool_error(
         self, mock_context
@@ -979,7 +1068,77 @@ class TestSearchCompaniesTool:
         tool_fn = await get_tool_fn(mcp, "search_companies")
         result = await tool_fn("fintech", mock_context, extractor=mock_extractor)
         assert "search_results" in result["sections"]
-        mock_extractor.search_companies.assert_awaited_once_with("fintech")
+        mock_extractor.search_companies.assert_awaited_once_with(
+            "fintech", max_pages=1, start_page=1
+        )
+
+    async def test_search_companies_forwards_max_pages(self, mock_context):
+        mock_extractor = _make_mock_extractor(
+            {"url": "https://example.invalid", "sections": {"search_results": "text"}}
+        )
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_companies")
+        await tool_fn("fintech", mock_context, max_pages=10, extractor=mock_extractor)
+
+        mock_extractor.search_companies.assert_awaited_once_with(
+            "fintech", max_pages=10, start_page=1
+        )
+
+    async def test_search_companies_forwards_start_page(self, mock_context):
+        mock_extractor = _make_mock_extractor(
+            {"url": "https://example.invalid", "sections": {"search_results": "text"}}
+        )
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_companies")
+        await tool_fn(
+            "fintech", mock_context, max_pages=3, start_page=7, extractor=mock_extractor
+        )
+
+        mock_extractor.search_companies.assert_awaited_once_with(
+            "fintech", max_pages=3, start_page=7
+        )
+
+    @pytest.mark.parametrize("value", [0, 101])
+    async def test_search_companies_rejects_out_of_range_start_page(self, value):
+        # FastMCP wraps the pydantic error raised by Field() constraints in
+        # its own ValidationError, which does not subclass pydantic's.
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        with pytest.raises(ValidationError, match="start_page"):
+            await mcp.call_tool(
+                "search_companies", {"keywords": "fintech", "start_page": value}
+            )
+
+    @pytest.mark.parametrize("value", [0, 11])
+    async def test_search_companies_rejects_out_of_range_max_pages(self, value):
+        # FastMCP wraps the pydantic error raised by Field() constraints in
+        # its own ValidationError, which does not subclass pydantic's.
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        with pytest.raises(ValidationError, match="max_pages"):
+            await mcp.call_tool(
+                "search_companies", {"keywords": "fintech", "max_pages": value}
+            )
 
     async def test_search_companies_error(self, mock_context):
         from fastmcp.exceptions import ToolError
@@ -997,6 +1156,61 @@ class TestSearchCompaniesTool:
         tool_fn = await get_tool_fn(mcp, "search_companies")
         with pytest.raises(ToolError, match="Session expired"):
             await tool_fn("fintech", mock_context, extractor=mock_extractor)
+
+
+class TestEntitySearchDepthBounds:
+    """The declared ceiling and the one the reference cap is derived from.
+
+    ``_ENTITY_SEARCH_REFERENCE_CAP`` is slugs-per-page times
+    ``_ENTITY_SEARCH_MAX_PAGES``. If the tool schema let a caller ask for more
+    pages than that constant names, the merged reference list would be capped
+    below what the walk actually fetched — silently, since the text would
+    still carry every result.
+    """
+
+    ENTITY_SEARCHES = ["search_people", "search_companies"]
+
+    @pytest.mark.parametrize("tool_name", ENTITY_SEARCHES)
+    async def test_max_pages_ceiling_matches_the_reference_cap_derivation(
+        self, tool_name
+    ):
+        from linkedin_mcp_server.scraping.extractor import _ENTITY_SEARCH_MAX_PAGES
+        from linkedin_mcp_server.server import create_mcp_server
+
+        mcp = create_mcp_server()
+        tool = await mcp.get_tool(tool_name)
+        assert tool is not None
+
+        schema = tool.parameters["properties"]["max_pages"]
+        assert schema["minimum"] == 1
+        assert schema["maximum"] == _ENTITY_SEARCH_MAX_PAGES
+
+    @pytest.mark.parametrize("tool_name", ENTITY_SEARCHES)
+    async def test_pagination_is_opt_in(self, tool_name):
+        """Default depth of one page keeps an existing caller's cost unchanged."""
+        from linkedin_mcp_server.server import create_mcp_server
+
+        mcp = create_mcp_server()
+        tool = await mcp.get_tool(tool_name)
+        assert tool is not None
+
+        assert tool.parameters["properties"]["max_pages"]["default"] == 1
+        assert tool.parameters["properties"]["start_page"]["default"] == 1
+
+    @pytest.mark.parametrize("tool_name", ENTITY_SEARCHES)
+    async def test_start_page_is_bounded_but_not_by_max_pages(self, tool_name):
+        """A deep start costs one navigation like any other, so its ceiling is
+        a claim about LinkedIn rather than about the clock — ``max_pages``
+        alone bounds how long a call runs."""
+        from linkedin_mcp_server.server import create_mcp_server
+
+        mcp = create_mcp_server()
+        tool = await mcp.get_tool(tool_name)
+        assert tool is not None
+
+        schema = tool.parameters["properties"]["start_page"]
+        assert schema["minimum"] == 1
+        assert schema["maximum"] == 100
 
 
 class TestGetCompanyEmployeesTool:

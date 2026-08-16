@@ -6,9 +6,10 @@ with configurable section selection.
 """
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from pydantic import Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -176,30 +177,63 @@ def register_company_tools(
     async def search_companies(
         keywords: str,
         ctx: Context,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 1,
+        start_page: Annotated[int, Field(ge=1, le=100)] = 1,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search for companies on LinkedIn.
 
+        To collect more companies than one call returns, loop: call with
+        start_page=1; if result_counts.stopped_by == "max_pages" there is more,
+        so call again with the same keywords and start_page increased by
+        max_pages (1 -> 4 -> 7 with max_pages=3); stop when stopped_by ==
+        "linkedin_end_of_list". Each call is independent — nothing is
+        remembered between them — and the page ranges abut exactly, so no
+        company is fetched twice.
+
         Args:
             keywords: Search keywords (e.g., "fintech", "anthropic", "electric vehicles")
             ctx: FastMCP context for progress reporting
+            max_pages: How many result pages to load, 10 companies each
+                (1-10, default 1). Each page is a separate navigation, so depth
+                costs time roughly linearly: about four seconds per page. The
+                walk stops as soon as a page returns no new company, so asking
+                for 10 pages of a narrow query costs only the pages that exist.
+            start_page: Which results page to begin at (1-100, default 1). Use
+                it to continue a previous call instead of re-fetching what you
+                already have: start_page=1 with max_pages=3 covers pages 1-3,
+                start_page=4 covers 4-6. Costs nothing extra — a deep start is
+                one navigation like any other.
 
         Returns:
-            Dict with url, sections (search_results -> raw text), and optional references.
+            Dict with url, sections (search_results -> raw text), optional
+            references, and result_counts {rows_seen, returned, stopped_by} —
+            stopped_by is "max_pages" when the depth budget ran out (there is
+            more; call again with start_page += max_pages, or raise max_pages),
+            "linkedin_end_of_list" when LinkedIn had nothing further (stop
+            looping — a further start_page returns nothing), or "error" when a
+            page failed (see section_errors; retry the same start_page).
             The LLM should parse the raw text to extract individual companies and their pages.
         """
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_companies"
             )
-            logger.info("Searching companies: keywords='%s'", keywords)
+            logger.info(
+                "Searching companies: keywords='%s', max_pages=%d, start_page=%d",
+                keywords,
+                max_pages,
+                start_page,
+            )
 
             await ctx.report_progress(
                 progress=0, total=100, message="Starting company search"
             )
 
-            result = await extractor.search_companies(keywords)
+            result = await extractor.search_companies(
+                keywords, max_pages=max_pages, start_page=start_page
+            )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

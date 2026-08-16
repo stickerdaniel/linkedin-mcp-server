@@ -114,15 +114,35 @@ def register_person_tools(
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 1,
+        start_page: Annotated[int, Field(ge=1, le=100)] = 1,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
 
+        To collect more people than one call returns, loop: call with
+        start_page=1; if result_counts.stopped_by == "max_pages" there is more,
+        so call again with the same keywords and start_page increased by
+        max_pages (1 -> 4 -> 7 with max_pages=3); stop when stopped_by ==
+        "linkedin_end_of_list". Each call is independent — nothing is
+        remembered between them — and the page ranges abut exactly, so no
+        person is fetched twice.
+
         Args:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
             ctx: FastMCP context for progress reporting
             location: Optional location filter (e.g., "New York", "Remote")
+            max_pages: How many result pages to load, 10 people each
+                (1-10, default 1). Each page is a separate navigation, so depth
+                costs time roughly linearly: about four seconds per page. The
+                walk stops as soon as a page returns nobody new, so asking for
+                10 pages of a query with one page of matches costs one page.
+            start_page: Which results page to begin at (1-100, default 1). Use
+                it to continue a previous call instead of re-fetching what you
+                already have: start_page=1 with max_pages=3 covers pages 1-3,
+                start_page=4 covers 4-6. Costs nothing extra — a deep start is
+                one navigation like any other.
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
                 Example: ["F"] to only return 1st-degree connections.
@@ -136,7 +156,13 @@ def register_person_tools(
                 slug-based lookup, use get_company_employees instead.
 
         Returns:
-            Dict with url, sections (name -> raw text), and optional references.
+            Dict with url, sections (name -> raw text), optional references, and
+            result_counts {rows_seen, returned, stopped_by} — stopped_by is
+            "max_pages" when the depth budget ran out (there is more; call
+            again with start_page += max_pages, or raise max_pages),
+            "linkedin_end_of_list" when LinkedIn had nothing further (stop
+            looping — a further start_page returns nothing), or "error" when a
+            page failed (see section_errors; retry the same start_page).
             The LLM should parse the raw text to extract individual people and their profiles.
         """
         try:
@@ -144,11 +170,14 @@ def register_person_tools(
                 ctx, tool_name="search_people"
             )
             logger.info(
-                "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
+                "Searching people: keywords='%s', location='%s', network=%s, "
+                "current_company='%s', max_pages=%d, start_page=%d",
                 keywords,
                 location,
                 network,
                 current_company,
+                max_pages,
+                start_page,
             )
 
             await ctx.report_progress(
@@ -161,6 +190,8 @@ def register_person_tools(
                     location,
                     network=network,
                     current_company=current_company,
+                    max_pages=max_pages,
+                    start_page=start_page,
                 )
             except FilterValidationError as e:
                 # Validation messages carry actionable detail; surface

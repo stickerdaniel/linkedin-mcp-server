@@ -144,6 +144,7 @@ Optional additional keys:
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
+- `result_counts: {rows_seen, returned, stopped_by}` (search_people and search_companies) — `stopped_by` is the walk's exit condition: `"max_pages"` (the depth budget ran out, so there is more), `"linkedin_end_of_list"` (a page added nothing new), or `"error"` (see `section_errors`). A caller who asked for ten pages and got two must be able to tell those apart; without it a short answer is silent truncation. `returned` counts references *after* the cap, since that is the list the follow-up tools can act on.
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 
 ## Verifying Bug Reports

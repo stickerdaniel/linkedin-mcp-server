@@ -47,11 +47,11 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#433](https://github.com/stickerdaniel/linkedin-mcp-server/issues/433) [#441](https://github.com/stickerdaniel/linkedin-mcp-server/issues/441) [#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483) [#560](https://github.com/stickerdaniel/linkedin-mcp-server/issues/560) [#573](https://github.com/stickerdaniel/linkedin-mcp-server/issues/573) |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet | working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
-| `search_companies` | Search for companies on LinkedIn by keywords | working |
+| `search_companies` | Search for companies on LinkedIn by keywords, paginated with `max_pages` and resumable with `start_page` | working |
 | `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter | working |
 | `search_jobs` | Search for jobs with keywords and location filters | working |
 | `get_saved_jobs` | List job postings saved by the authenticated user | working |
-| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | [#526](https://github.com/stickerdaniel/linkedin-mcp-server/issues/526) |
+| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company, paginated with `max_pages` and resumable with `start_page` | working |
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) | working |
