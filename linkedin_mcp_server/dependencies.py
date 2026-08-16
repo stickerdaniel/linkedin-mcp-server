@@ -14,6 +14,7 @@ from linkedin_mcp_server.bootstrap import (
     invalidate_auth_and_trigger_relogin,
     invalidate_browser_setup,
 )
+from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core.exceptions import AuthenticationError, NetworkError
 from linkedin_mcp_server.drivers.browser import (
     close_browser,
@@ -28,6 +29,7 @@ from linkedin_mcp_server.exceptions import (
     DockerHostLoginRequiredError,
     LinuxBrowserDependencyError,
 )
+from linkedin_mcp_server.pacing import HumanPacing
 from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.scraping import LinkedInExtractor
 from linkedin_mcp_server.server_role import (
@@ -169,7 +171,19 @@ async def get_ready_extractor(
         await ensure_tool_ready_or_raise(tool_name, ctx)
         browser = await get_or_create_browser()
         await ensure_authenticated()
-        return LinkedInExtractor(browser.page)
+        # Read once, here, and carried as a parameter from now on. The rule this
+        # does not break is against re-reading the singleton *mid-call*: this
+        # runs before the tool has done any work, and nothing downstream reaches
+        # for the config again.
+        browser_config = get_config().browser
+        return LinkedInExtractor(
+            browser.page,
+            pacing=HumanPacing(
+                enabled=browser_config.human_delays,
+                min_seconds=browser_config.human_delay_min_seconds,
+                max_seconds=browser_config.human_delay_max_seconds,
+            ),
+        )
     except AuthenticationError as e:
         # The first statement of every tool body, so a failure here means the
         # scrape has not started and the client may safely run the call again once

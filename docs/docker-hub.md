@@ -97,6 +97,9 @@ A profile created by the Docker viewer belongs to the container runtime and is r
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
+| `HUMAN_DELAYS` | `false` | Wait a random interval between browser actions instead of a fixed cadence. Off by default, and off means unchanged timing. Reduces the chance of tripping LinkedIn's throttling; not a guarantee against it |
+| `HUMAN_DELAY_MIN_SECONDS` | `1.0` | Shortest randomized wait, in seconds |
+| `HUMAN_DELAY_MAX_SECONDS` | `5.0` | Longest randomized wait, in seconds (maximum `30`). With `HUMAN_DELAYS=true` the two bounds must average at least `2.0` — the paced wait replaces a fixed 2.0s gap, so a shorter range would speed the scraper up rather than slow it down, and the server refuses to start |
 | `HEADLESS` | `false` | Docker defaults to full headed Chromium on its virtual display. Set `true` only to deliberately use Chromium's real headless mode, which identifies itself as `HeadlessChrome`. |
 | `DAEMON_ENABLED` | `false` | The experimental shared-browser daemon is ignored in Docker. Its owner is designed to outlive a stdio frontend, while the virtual display belongs to that frontend's process group. |
 | `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT. Docker is headed by default and therefore uses its real Xvfb window size; this applies only when `HEADLESS=true`. |

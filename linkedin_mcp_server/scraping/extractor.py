@@ -39,6 +39,12 @@ from linkedin_mcp_server.scraping.link_metadata import (
     build_references,
     dedupe_references,
 )
+from linkedin_mcp_server.pacing import (
+    SKIM_FRACTION,
+    HumanPacing,
+    human_pause,
+    skim_pause,
+)
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
 
@@ -49,7 +55,8 @@ logger = logging.getLogger(__name__)
 
 WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
 
-# Pacing between page navigations
+# Pacing between page navigations. Superseded per-navigation by
+# ``HumanPacing`` when human delays are enabled — the two never both run.
 _NAV_DELAY = 2.0
 
 # Backoff before retrying a temporarily blocked page
@@ -742,8 +749,40 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
 class LinkedInExtractor:
     """Extracts LinkedIn page content via navigate-scroll-innerText pattern."""
 
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, pacing: HumanPacing | None = None):
         self._page = page
+        # Defaults to None so every existing construction — and every test —
+        # keeps upstream timing exactly. Only a caller that asks for pacing
+        # gets it.
+        self._pacing = pacing
+
+    @property
+    def _paces_navigations(self) -> bool:
+        """Whether pacing is live, stated once for every site that asks.
+
+        Two things mean "no pacing" — no ``HumanPacing`` at all, and one that
+        is disabled — and the fixed-delay sites all have to agree with
+        ``human_pause`` about which is which. One definition is the only way
+        they stay agreed when that answer changes.
+        """
+        return bool(self._pacing and self._pacing.enabled)
+
+    async def _section_gap(self) -> None:
+        """Wait the fixed gap between two navigations of one scrape.
+
+        Five loops space their pages with this. Written out at each of them it
+        was a two-line guard wrapping the upstream ``asyncio.sleep`` line and
+        re-indenting it, inside loops upstream edits often — five conflicts on
+        every merge, for one decision stated five times. As a call it is a
+        same-indent substitution for the line it replaces, and the decision
+        lives here.
+
+        When pacing is live the funnel pause in ``_goto_with_auth_checks``
+        has already spaced the navigation, so this adds nothing on top; with
+        pacing off it is exactly the delay it has always been.
+        """
+        if not self._paces_navigations:
+            await asyncio.sleep(_NAV_DELAY)
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -879,6 +918,24 @@ class LinkedInExtractor:
                 return
             self._page.remove_listener("framenavigated", record_navigation)
             listener_registered = False
+
+        # Every scraping navigation passes through here, which is why the pause
+        # sits at this one point rather than at each caller.
+        #
+        # Ahead of the listener, not just ahead of the goto. `record_navigation`
+        # appends every main-frame navigation to `hops`, and `hops` is reported
+        # as *this* navigation's redirect chain in the failure diagnostics
+        # below. Pausing after registering it would leave the listener running
+        # for seconds while the previous page's SPA is still moving, and file
+        # whatever it did under the next navigation's name -- in exactly the
+        # log someone reads when a scrape has broken.
+        #
+        # The remember-me retry below re-enters this method and so pauses again,
+        # which is what one-pause-per-request means: that retry is a second
+        # request, sent after a click on the account chooser. It cannot
+        # compound, because the retry passes allow_remember_me=False and the
+        # recursion is one level deep at most.
+        await human_pause(self._pacing, f"navigation to {url}")
 
         self._page.on("framenavigated", record_navigation)
         listener_registered = True
@@ -1023,6 +1080,10 @@ class LinkedInExtractor:
         logger.debug("click_button_by_text(%r): %d matches in %s", text, count, scope)
         if count == 0:
             return False
+        # After the count check: a lookup that found nothing is not an action,
+        # and pausing for it would only slow down the callers that probe for a
+        # button they expect to be absent.
+        await human_pause(self._pacing, f"click on {text!r}")
         target = matches.first
         try:
             await target.scroll_into_view_if_needed(timeout=timeout)
@@ -1059,6 +1120,7 @@ class LinkedInExtractor:
         count = await buttons.count()
         if count == 0:
             return False
+        await human_pause(self._pacing, "dialog primary button")
         try:
             await buttons.nth(count - 1).click(timeout=timeout)
             return True
@@ -1146,6 +1208,12 @@ class LinkedInExtractor:
         the vanityName invite anchor; this helper does not classify menu
         contents itself.
         """
+        # Paced: opening the menu is a click a person decides on, and the
+        # caller only reaches it after ``detect_connection_state`` returned
+        # "follow_only" — that state check is what established there is
+        # something to act on, so the pause here is not charged to a path
+        # that finds nothing.
+        await human_pause(self._pacing, "open the profile More menu")
         try:
             clicked = await self._page.evaluate(_OPEN_MORE_BUTTON_JS)
         except Exception:
@@ -1171,6 +1239,13 @@ class LinkedInExtractor:
         fingerprint plus the caller's verify-after-click are the
         mitigations. Returns True iff the click landed.
         """
+        # Paced: accepting an invitation is a state change LinkedIn meters,
+        # and it is the one click on ``connect_with_person`` that has no
+        # navigation in front of it to carry the funnel pause. The caller
+        # reaches this only after ``detect_connection_state`` returned
+        # "incoming_request", so the decision that there is something to act
+        # on has already been made.
+        await human_pause(self._pacing, "accept an incoming invitation")
         try:
             return bool(await self._page.evaluate(_CLICK_INCOMING_ACCEPT_JS))
         except Exception:
@@ -1200,6 +1275,7 @@ class LinkedInExtractor:
 
     async def _click_first(self, selector: str, *, timeout: int = 5000) -> None:
         """Click the first visible locator that matches a selector."""
+        await human_pause(self._pacing, f"click on {selector}")
         target = self._page.locator(selector).first
         try:
             await target.scroll_into_view_if_needed(timeout=timeout)
@@ -1260,6 +1336,7 @@ class LinkedInExtractor:
                 {"position": position},
             )
             await asyncio.sleep(pause_time)
+            await skim_pause(self._pacing, "next region scroll")
 
     async def extract_feed(
         self,
@@ -1375,6 +1452,9 @@ class LinkedInExtractor:
             if count >= num_posts:
                 break
 
+            # Paces the wheel itself. The 1s ticks below are waiting for
+            # responses, not acting, and are left alone.
+            await skim_pause(self._pacing, "feed scroll")
             await self._page.mouse.wheel(0, _WHEEL_DELTA)
 
             new_count = count
@@ -1615,7 +1695,18 @@ class LinkedInExtractor:
                         break
                     await target.scroll_into_view_if_needed(timeout=2000)
                     await target.click(timeout=2000)
-                    await asyncio.sleep(1.0)
+                    # The fixed second was always both settle time and spacing
+                    # before the next click. Pacing takes over the whole job
+                    # rather than adding to it — the two together would make a
+                    # paced run slower than the operator asked for — but it
+                    # never undercuts the settle, because the next iteration
+                    # decides whether another button exists against whatever
+                    # this wait let render. Shorter, and the section truncates.
+                    settle = 1.0
+                    paced = self._pacing if self._paces_navigations else None
+                    if paced:
+                        settle = max(settle, paced.full_delay())
+                    await asyncio.sleep(settle)
                 except PlaywrightTimeoutError:
                     logger.debug("Show more click timed out after %d clicks", i)
                     break
@@ -1626,10 +1717,14 @@ class LinkedInExtractor:
         # Scroll to trigger lazy loading
         if is_activity:
             scrolls = max_scrolls if max_scrolls is not None else 10
-            await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=scrolls)
+            await scroll_to_bottom(
+                self._page, pause_time=1.0, max_scrolls=scrolls, pacing=self._pacing
+            )
         else:
             scrolls = max_scrolls if max_scrolls is not None else 5
-            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
+            await scroll_to_bottom(
+                self._page, pause_time=0.5, max_scrolls=scrolls, pacing=self._pacing
+            )
 
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])
@@ -1771,7 +1866,7 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+                    await self._section_gap()
 
                 url = base_url + suffix
                 try:
@@ -2440,7 +2535,7 @@ class LinkedInExtractor:
                 continue
 
             if not first_show_all:
-                await asyncio.sleep(_NAV_DELAY)
+                await self._section_gap()
             first_show_all = False
 
             try:
@@ -2923,7 +3018,7 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+                    await self._section_gap()
 
                 url = base_url + suffix
                 try:
@@ -3135,7 +3230,9 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         if main_found:
-            await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
+            await scroll_job_sidebar(
+                self._page, pause_time=0.5, max_scrolls=5, pacing=self._pacing
+            )
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
@@ -3281,7 +3378,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await self._section_gap()
 
             url = (
                 base_url
@@ -3429,7 +3526,9 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         if main_found:
-            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+            await scroll_to_bottom(
+                self._page, pause_time=0.5, max_scrolls=5, pacing=self._pacing
+            )
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
@@ -3512,7 +3611,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await self._section_gap()
 
             url = (
                 base_url
@@ -3895,13 +3994,29 @@ class LinkedInExtractor:
             )
             return []
 
+        # Each row click is an SPA navigation, and before pacing they fired
+        # back to back — up to fifty of them with nothing but the URL poll in
+        # between, which is the least human thing this scraper does. The wait
+        # belongs inside the JS because the loop does; a pause awaited in
+        # Python would only sit around the whole evaluate call.
+        #
+        # What crosses is the range, not a delay. This is the one site that
+        # spaces dozens of actions inside a single call, so a value drawn once
+        # here would give all forty-nine gaps the same length to the
+        # millisecond — trading a signature of 0ms for a signature of N ms.
+        # The draw happens per gap, in the loop, over the range ``skim_delay``
+        # would have drawn from.
+        paced = self._pacing if self._paces_navigations else None
+        row_pause_min_ms = paced.min_seconds * SKIM_FRACTION * 1000 if paced else 0
+        row_pause_max_ms = paced.max_seconds * SKIM_FRACTION * 1000 if paced else 0
+
         # The Ember click handler lives on an inner div; the <li> and <label>
         # don't trigger SPA navigation.  No role/aria attributes exist on the
         # clickable element, so class-name selectors are unavoidable here.
         # The aria-label value flows through unmodified — Python strips any
         # known locale prefix to derive a clean participant name for refs.
         conversations: list[dict[str, str]] = await self._page.evaluate(
-            """async ({ limit, nameFilter }) => {
+            """async ({ limit, nameFilter, rowPauseMinMs, rowPauseMaxMs }) => {
                 const labels = Array.from(document.querySelectorAll(
                     'main li label[aria-label]'
                 ));
@@ -3916,6 +4031,7 @@ class LinkedInExtractor:
                 const wanted = (nameFilter || '')
                     .replace(/\\s+/g, ' ').trim().toLowerCase();
                 const results = [];
+                let clicked = 0;
                 for (let i = 0; i < cap; i++) {
                     const label = labels[i];
                     const ariaLabel = label.getAttribute('aria-label') || '';
@@ -3926,6 +4042,18 @@ class LinkedInExtractor:
                     const clickTarget = label.closest('li')
                         ?.querySelector('div[class*="listitem__link"]');
                     if (!clickTarget) continue;
+                    // Spacing is measured between clicks, past both skips
+                    // above: a name filter reads every row and clicks one, so
+                    // a wait at the top of the loop would charge the whole
+                    // inbox for a single visit. Drawn per gap — a constant
+                    // interval repeated fifty times is its own fingerprint.
+                    if (rowPauseMaxMs > 0 && clicked > 0) {
+                        const spread = rowPauseMaxMs - rowPauseMinMs;
+                        await new Promise(r => setTimeout(
+                            r, rowPauseMinMs + Math.random() * spread
+                        ));
+                    }
+                    clicked++;
                     const before = location.href;
                     clickTarget.click();
                     // Poll for the SPA URL to settle on the thread route. The
@@ -3947,7 +4075,12 @@ class LinkedInExtractor:
                 }
                 return results;
             }""",
-            {"limit": limit, "nameFilter": name_filter},
+            {
+                "limit": limit,
+                "nameFilter": name_filter,
+                "rowPauseMinMs": row_pause_min_ms,
+                "rowPauseMaxMs": row_pause_max_ms,
+            },
         )
         refs: list[Reference] = []
         for conv in conversations:

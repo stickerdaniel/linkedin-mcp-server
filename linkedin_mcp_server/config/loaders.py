@@ -145,6 +145,9 @@ class EnvironmentKeys:
     AUTO_IMPORT_FROM_BROWSER = "AUTO_IMPORT_FROM_BROWSER"
     EAGER_FULL_CHROMIUM = "EAGER_FULL_CHROMIUM"
     DAEMON_ENABLED = "DAEMON_ENABLED"
+    HUMAN_DELAYS = "HUMAN_DELAYS"
+    HUMAN_DELAY_MIN_SECONDS = "HUMAN_DELAY_MIN_SECONDS"
+    HUMAN_DELAY_MAX_SECONDS = "HUMAN_DELAY_MAX_SECONDS"
 
 
 # What ``manifest.json`` fills from ``user_config``, and the exact string each
@@ -353,6 +356,26 @@ def load_from_env(config: AppConfig) -> AppConfig:
                 f"Invalid SLOW_MO: '{slow_mo_env}'. Must be an integer."
             )
 
+    # Randomized action pacing (validated in BrowserConfig.validate())
+    if human_delays_env := os.environ.get(EnvironmentKeys.HUMAN_DELAYS):
+        human_delays_value = _normalize_env(human_delays_env)
+        if human_delays_value in TRUTHY_VALUES:
+            config.browser.human_delays = True
+        elif human_delays_value in FALSY_VALUES:
+            config.browser.human_delays = False
+
+    for key, attribute in (
+        (EnvironmentKeys.HUMAN_DELAY_MIN_SECONDS, "human_delay_min_seconds"),
+        (EnvironmentKeys.HUMAN_DELAY_MAX_SECONDS, "human_delay_max_seconds"),
+    ):
+        if raw := os.environ.get(key):
+            try:
+                setattr(config.browser, attribute, float(raw))
+            except ValueError:
+                raise ConfigurationError(
+                    f"Invalid {key}: '{raw}'. Must be a number of seconds."
+                )
+
     # Browser viewport (validated in BrowserConfig.validate())
     if viewport_env := os.environ.get(EnvironmentKeys.VIEWPORT):
         try:
@@ -489,6 +512,35 @@ def load_from_args(config: AppConfig) -> AppConfig:
         default=0,
         metavar="MS",
         help="Slow down browser actions by N milliseconds (debugging)",
+    )
+    human_delays_group = parser.add_mutually_exclusive_group()
+    human_delays_group.add_argument(
+        "--human-delays",
+        dest="human_delays",
+        action="store_true",
+        default=None,
+        help="Wait a random interval between browser actions (see --human-delay-min/max)",
+    )
+    human_delays_group.add_argument(
+        "--no-human-delays",
+        dest="human_delays",
+        action="store_false",
+        default=None,
+        help="Keep the fixed cadence between browser actions (default; overrides HUMAN_DELAYS=true).",
+    )
+    parser.add_argument(
+        "--human-delay-min",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Shortest randomized wait between actions (default: 1.0)",
+    )
+    parser.add_argument(
+        "--human-delay-max",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Longest randomized wait between actions (default: 5.0)",
     )
 
     # Still accepted by the parser so using it produces the explanation above
@@ -767,6 +819,13 @@ def load_from_args(config: AppConfig) -> AppConfig:
     # Browser configuration
     if args.slow_mo:
         config.browser.slow_mo = args.slow_mo
+
+    if args.human_delays is not None:
+        config.browser.human_delays = args.human_delays
+    if args.human_delay_min is not None:
+        config.browser.human_delay_min_seconds = args.human_delay_min
+    if args.human_delay_max is not None:
+        config.browser.human_delay_max_seconds = args.human_delay_max
 
     if args.user_agent:
         raise ConfigurationError(_USER_AGENT_REMOVED.format(setting="--user-agent"))

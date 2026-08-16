@@ -2,6 +2,7 @@ import logging
 
 import pytest
 
+from linkedin_mcp_server.config.loaders import load_from_env
 from linkedin_mcp_server.config.schema import (
     AppConfig,
     BROWSER_HANDOFF_MARGIN_SECONDS,
@@ -1304,3 +1305,149 @@ class TestProxyEncodedUserinfo:
         config = BrowserConfig(proxy_server="http://gate.example:7000")
         config.validate()
         assert config.proxy_server == "http://gate.example:7000"
+
+
+class TestHumanDelayConfig:
+    """HUMAN_DELAYS toggle and its bounds."""
+
+    def test_defaults_are_off_with_one_to_five_seconds(self):
+        config = BrowserConfig()
+        assert config.human_delays is False
+        assert config.human_delay_min_seconds == 1.0
+        assert config.human_delay_max_seconds == 5.0
+
+    def test_min_above_max_is_refused(self):
+        config = BrowserConfig(human_delay_min_seconds=6.0, human_delay_max_seconds=5.0)
+        with pytest.raises(ConfigurationError, match="human_delay_min_seconds"):
+            config.validate()
+
+    def test_negative_min_is_refused(self):
+        config = BrowserConfig(human_delay_min_seconds=-1.0)
+        with pytest.raises(ConfigurationError, match="human_delay_min_seconds"):
+            config.validate()
+
+    def test_max_above_ceiling_is_refused(self):
+        config = BrowserConfig(human_delay_max_seconds=31.0)
+        with pytest.raises(ConfigurationError, match="human_delay_max_seconds"):
+            config.validate()
+
+    def test_equal_min_and_max_is_allowed(self):
+        BrowserConfig(
+            human_delay_min_seconds=2.0, human_delay_max_seconds=2.0
+        ).validate()
+
+    def test_enabled_with_no_delay_at_all_is_refused(self):
+        """Enabled with a zero range is strictly faster than disabled.
+
+        The paced funnel pause *replaces* the fixed inter-section gap rather
+        than adding to it, so this combination removed 2s from every gap and
+        put nothing back — the anti-throttling toggle, raising the request
+        rate.
+        """
+        config = BrowserConfig(
+            human_delays=True,
+            human_delay_min_seconds=0.0,
+            human_delay_max_seconds=0.0,
+        )
+        with pytest.raises(ConfigurationError, match="human_delays is enabled"):
+            config.validate()
+
+    def test_enabled_below_the_replaced_delay_is_refused(self):
+        """A range that averages under the gap it replaces is the same bug."""
+        config = BrowserConfig(
+            human_delays=True,
+            human_delay_min_seconds=0.5,
+            human_delay_max_seconds=1.5,
+        )
+        with pytest.raises(ConfigurationError, match="below the 2.0s fixed delay"):
+            config.validate()
+
+    def test_the_refusal_says_what_to_do_about_it(self):
+        config = BrowserConfig(human_delays=True, human_delay_max_seconds=1.0)
+        with pytest.raises(ConfigurationError) as excinfo:
+            config.validate()
+        message = str(excinfo.value)
+        assert "human_delay_max_seconds" in message
+        assert "human_delays=false" in message
+
+    def test_the_same_range_is_fine_while_the_feature_is_off(self):
+        """Bounds may sit in the environment with the toggle left off."""
+        BrowserConfig(
+            human_delays=False,
+            human_delay_min_seconds=0.0,
+            human_delay_max_seconds=0.0,
+        ).validate()
+
+    def test_the_shipped_defaults_validate_when_enabled(self):
+        BrowserConfig(human_delays=True).validate()
+
+    def test_a_range_averaging_exactly_the_replaced_delay_is_allowed(self):
+        BrowserConfig(
+            human_delays=True,
+            human_delay_min_seconds=1.0,
+            human_delay_max_seconds=3.0,
+        ).validate()
+
+    def test_the_floor_tracks_the_delay_it_replaces(self):
+        """A literal in config, the real value in the scraper — pin them.
+
+        ``config`` must not import the scraper, so the 2.0s appears twice.
+        This is what stops the two drifting apart the day ``_NAV_DELAY``
+        changes.
+        """
+        from linkedin_mcp_server.config.schema import REPLACED_NAV_DELAY_SECONDS
+        from linkedin_mcp_server.scraping.extractor import _NAV_DELAY
+
+        assert REPLACED_NAV_DELAY_SECONDS == _NAV_DELAY
+
+    def test_env_enables_delays(self, monkeypatch):
+        monkeypatch.setenv("HUMAN_DELAYS", "true")
+        monkeypatch.setenv("HUMAN_DELAY_MIN_SECONDS", "2.5")
+        monkeypatch.setenv("HUMAN_DELAY_MAX_SECONDS", "7.5")
+        config = load_from_env(AppConfig())
+        assert config.browser.human_delays is True
+        assert config.browser.human_delay_min_seconds == 2.5
+        assert config.browser.human_delay_max_seconds == 7.5
+
+    def test_env_false_keeps_delays_off(self, monkeypatch):
+        monkeypatch.setenv("HUMAN_DELAYS", "false")
+        assert load_from_env(AppConfig()).browser.human_delays is False
+
+    def test_non_numeric_bound_is_refused(self, monkeypatch):
+        monkeypatch.setenv("HUMAN_DELAY_MIN_SECONDS", "soon")
+        with pytest.raises(ConfigurationError, match="HUMAN_DELAY_MIN_SECONDS"):
+            load_from_env(AppConfig())
+
+    def test_flag_enables_delays(self, monkeypatch):
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--human-delays"])
+        assert load_from_args(AppConfig()).browser.human_delays is True
+
+    def test_no_human_delays_flag_turns_them_off(self, monkeypatch):
+        from linkedin_mcp_server.config.loaders import load_from_args
+
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--no-human-delays"])
+        config = AppConfig()
+        config.browser.human_delays = True
+        assert load_from_args(config).browser.human_delays is False
+
+    def test_no_human_delays_flag_overrides_env_true(self, monkeypatch):
+        """The way out for a deployment that sets HUMAN_DELAYS in its .env.
+
+        Without the negative flag an operator whose environment enables pacing
+        has no way to run one unpaced call short of editing the environment.
+        """
+        from linkedin_mcp_server.config import load_config
+
+        monkeypatch.setenv("HUMAN_DELAYS", "true")
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server", "--no-human-delays"])
+        assert load_config().browser.human_delays is False
+
+    def test_absent_flags_leave_the_env_alone(self, monkeypatch):
+        """Neither flag present must not overwrite what the env decided."""
+        from linkedin_mcp_server.config import load_config
+
+        monkeypatch.setenv("HUMAN_DELAYS", "true")
+        monkeypatch.setattr("sys.argv", ["linkedin-mcp-server"])
+        assert load_config().browser.human_delays is True

@@ -1,11 +1,16 @@
 """Tests for core utility functions (rate-limit detection, scrolling, modals)."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from linkedin_mcp_server.core.exceptions import RateLimitError
-from linkedin_mcp_server.core.utils import detect_rate_limit
+from linkedin_mcp_server.core.utils import (
+    detect_rate_limit,
+    scroll_job_sidebar,
+    scroll_to_bottom,
+)
+from linkedin_mcp_server.pacing import HumanPacing
 
 
 @pytest.fixture
@@ -109,3 +114,83 @@ class TestDetectRateLimit:
 
         mock_page.locator = MagicMock(side_effect=locator_side_effect)
         await detect_rate_limit(mock_page)
+
+
+class TestScrollPacing:
+    """Scrolling is a glance, so it is paced with a skim delay — or not at all."""
+
+    @staticmethod
+    def _lazy_loading_page() -> MagicMock:
+        """A page that grows once and then stops: two scroll iterations."""
+        page = MagicMock()
+        heights = iter([100, 200, 200, 200])
+        page.evaluate = AsyncMock(side_effect=lambda *a, **k: next(heights, 200))
+        return page
+
+    async def test_scroll_to_bottom_adds_skim_pause_when_paced(self):
+        page = self._lazy_loading_page()
+        # One patch for both waits, and it has to be one: ``core.utils.asyncio``
+        # and ``pacing.asyncio`` name the same module object, so patching them
+        # separately leaves only the second mock installed and the first
+        # recording nothing whatever the code did. Their values tell them apart.
+        with patch(
+            "linkedin_mcp_server.core.utils.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await scroll_to_bottom(
+                page,
+                pause_time=0.5,
+                max_scrolls=2,
+                pacing=HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0),
+            )
+        delays = [call.args[0] for call in sleep.await_args_list]
+        # The existing 0.5s settle survives; 4.0 * SKIM_FRACTION rides on top.
+        assert delays == [pytest.approx(0.5), pytest.approx(1.0)] * 2
+
+    # ``unpaced`` covers both things that mean "no pacing" — no ``HumanPacing``
+    # at all, and one that is disabled. It lives in ``conftest`` so the
+    # extractor-side toggle-off tests run over the same two states; see the
+    # fixture for why the disabled instance is the reachable one.
+    async def test_scroll_to_bottom_unchanged_without_pacing(self, unpaced):
+        page = self._lazy_loading_page()
+        with patch(
+            "linkedin_mcp_server.core.utils.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            await scroll_to_bottom(page, pause_time=0.5, max_scrolls=2, pacing=unpaced)
+        delays = [call.args[0] for call in sleep.await_args_list]
+        assert delays == [pytest.approx(0.5)] * 2
+
+    @staticmethod
+    async def _sidebar_pause_time(pacing: HumanPacing | None) -> float:
+        """Run the sidebar scroll and return the pause handed to the browser."""
+        page = MagicMock()
+        page.wait_for_selector = AsyncMock()
+        page.evaluate = AsyncMock(return_value=1)
+
+        await scroll_job_sidebar(page, pause_time=0.5, max_scrolls=3, pacing=pacing)
+        call = page.evaluate.await_args
+        assert call is not None
+        return call.args[1]["pauseTime"]
+
+    async def test_job_sidebar_pause_is_randomized_when_paced(self):
+        pause = await self._sidebar_pause_time(
+            HumanPacing(enabled=True, min_seconds=4.0, max_seconds=4.0)
+        )
+        # A skim, not a decision: 4.0 * SKIM_FRACTION rather than 4.0.
+        assert pause == pytest.approx(1.0)
+
+    async def test_job_sidebar_pause_unchanged_without_pacing(self, unpaced):
+        assert await self._sidebar_pause_time(unpaced) == pytest.approx(0.5)
+
+    async def test_job_sidebar_pause_never_undercuts_the_caller(self):
+        """A shorter draw would scrape less, not merely faster.
+
+        ``pauseTime`` gates the in-page lazy-load check: when it elapses before
+        the new cards render, ``scrollHeight`` is unchanged, the loop breaks on
+        its first iteration and the rest of the sidebar is never loaded. A
+        0.2-0.8s range draws from [0.05, 0.2], which is below the caller's 0.5s
+        on every single call — deterministic, not a tail case.
+        """
+        pause = await self._sidebar_pause_time(
+            HumanPacing(enabled=True, min_seconds=0.2, max_seconds=0.8)
+        )
+        assert pause == pytest.approx(0.5)
