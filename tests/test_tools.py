@@ -37,6 +37,9 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
+    mock.schedule_post = AsyncMock(return_value=scrape_result)
+    mock.get_scheduled_posts = AsyncMock(return_value=scrape_result)
+    mock.edit_scheduled_post = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -1249,6 +1252,313 @@ class TestPostTools:
 
         with pytest.raises(ValidationError, match="max_pages"):
             await mcp.call_tool("search_posts", {"keywords": "python", "max_pages": 0})
+
+    async def test_schedule_post_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "scheduled",
+            "message": "Post scheduled.",
+            "scheduled": True,
+            "scheduled_for": "2099-08-15 17:30",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "schedule_post")
+        result = await tool_fn(
+            "Hello world",
+            "2099-08-15",
+            "17:30",
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "scheduled"
+        assert result["scheduled"] is True
+        mock_extractor.schedule_post.assert_awaited_once_with(
+            "Hello world",
+            year=2099,
+            month=8,
+            day=15,
+            hour=17,
+            minute=30,
+            confirm_schedule=True,
+        )
+
+    async def test_schedule_post_dry_run_passes_confirm_false(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "confirmation_required",
+            "message": "Dry run complete.",
+            "scheduled": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "schedule_post")
+        result = await tool_fn(
+            "Hello world",
+            "2099-01-02",
+            "09:05",
+            False,
+            mock_context,
+            extractor=mock_extractor,
+        )
+
+        assert result["scheduled"] is False
+        mock_extractor.schedule_post.assert_awaited_once_with(
+            "Hello world",
+            year=2099,
+            month=1,
+            day=2,
+            hour=9,
+            minute=5,
+            confirm_schedule=False,
+        )
+
+    async def test_get_scheduled_posts_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "sections": {"scheduled_posts": "Posting Tue, Aug 11 at 10:00 AM\nHello"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_scheduled_posts")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        assert "scheduled_posts" in result["sections"]
+        mock_extractor.get_scheduled_posts.assert_awaited_once_with()
+
+    async def test_get_scheduled_posts_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.get_scheduled_posts = AsyncMock(
+            side_effect=SessionExpiredError()
+        )
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_scheduled_posts")
+        with pytest.raises(ToolError):
+            await tool_fn(mock_context, extractor=mock_extractor)
+
+    async def test_edit_scheduled_post_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "edited",
+            "message": "Scheduled post updated.",
+            "done": True,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "edit_scheduled_post")
+        result = await tool_fn(
+            "old snippet",
+            True,
+            mock_context,
+            new_text="new body",
+            new_date="2099-08-26",
+            new_time="16:30",
+            extractor=mock_extractor,
+        )
+
+        assert result["status"] == "edited"
+        mock_extractor.edit_scheduled_post.assert_awaited_once_with(
+            "old snippet",
+            new_text="new body",
+            new_year=2099,
+            new_month=8,
+            new_day=26,
+            new_hour=16,
+            new_minute=30,
+            occurrence=None,
+            confirm_edit=True,
+        )
+
+    async def test_edit_scheduled_post_time_only(self, mock_context):
+        expected = {"url": "u", "status": "edited", "message": "m", "done": True}
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "edit_scheduled_post")
+        await tool_fn(
+            "snippet",
+            False,
+            mock_context,
+            new_time="09:15",
+            occurrence=2,
+            extractor=mock_extractor,
+        )
+        mock_extractor.edit_scheduled_post.assert_awaited_once_with(
+            "snippet",
+            new_text=None,
+            new_year=None,
+            new_month=None,
+            new_day=None,
+            new_hour=9,
+            new_minute=15,
+            occurrence=2,
+            confirm_edit=False,
+        )
+
+    async def test_edit_scheduled_post_requires_a_change(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "edit_scheduled_post")
+        mock_extractor = _make_mock_extractor({})
+        with pytest.raises(ToolError, match="Nothing to change"):
+            await tool_fn("snippet", True, mock_context, extractor=mock_extractor)
+        mock_extractor.edit_scheduled_post.assert_not_awaited()
+
+    async def test_edit_scheduled_post_rejects_bad_date(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "edit_scheduled_post")
+        mock_extractor = _make_mock_extractor({})
+        with pytest.raises(ToolError, match="YYYY-MM-DD"):
+            await tool_fn(
+                "snippet",
+                True,
+                mock_context,
+                new_date="26/08/2099",
+                extractor=mock_extractor,
+            )
+        mock_extractor.edit_scheduled_post.assert_not_awaited()
+
+    async def test_edit_scheduled_post_rejects_clearly_past_date(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "edit_scheduled_post")
+        mock_extractor = _make_mock_extractor({})
+        with pytest.raises(ToolError, match="already past in every timezone"):
+            await tool_fn(
+                "snippet",
+                True,
+                mock_context,
+                new_date="2020-01-01",
+                extractor=mock_extractor,
+            )
+        mock_extractor.edit_scheduled_post.assert_not_awaited()
+
+    async def test_schedule_post_rejects_bad_date_format(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "schedule_post")
+        mock_extractor = _make_mock_extractor({})
+        with pytest.raises(ToolError, match="YYYY-MM-DD"):
+            await tool_fn(
+                "Hello",
+                "15/08/2099",
+                "17:30",
+                True,
+                mock_context,
+                extractor=mock_extractor,
+            )
+        mock_extractor.schedule_post.assert_not_awaited()
+
+    async def test_schedule_post_rejects_past_datetime(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "schedule_post")
+        mock_extractor = _make_mock_extractor({})
+        with pytest.raises(ToolError, match="already past in every timezone"):
+            await tool_fn(
+                "Hello",
+                "2020-01-01",
+                "12:00",
+                True,
+                mock_context,
+                extractor=mock_extractor,
+            )
+        mock_extractor.schedule_post.assert_not_awaited()
+
+    async def test_schedule_post_defers_near_past_to_linkedin(self, mock_context):
+        """A moment shortly behind the server clock may still be future in the
+        profile's timezone, so the tool must pass it through and let LinkedIn
+        judge it rather than rejecting on the server's own wall clock."""
+        import datetime as _dt
+
+        expected = {
+            "url": "https://www.linkedin.com/feed/?shareActive=true",
+            "status": "schedule_rejected",
+            "message": "LinkedIn did not accept the scheduled date and time.",
+            "scheduled": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "schedule_post")
+        near_past = _dt.datetime.now(_dt.timezone.utc).replace(
+            tzinfo=None
+        ) - _dt.timedelta(hours=1)
+        result = await tool_fn(
+            "Hello",
+            near_past.strftime("%Y-%m-%d"),
+            near_past.strftime("%H:%M"),
+            True,
+            mock_context,
+            extractor=mock_extractor,
+        )
+        assert result["status"] == "schedule_rejected"
+        mock_extractor.schedule_post.assert_awaited_once()
 
 
 class TestToolTimeouts:

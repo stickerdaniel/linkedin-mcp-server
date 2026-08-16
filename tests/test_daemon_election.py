@@ -1485,11 +1485,38 @@ class TestRealOwner:
             names = asyncio.run(served())
 
             # The owner registers the full local set, so the proxy must show it
-            # all — including `close_session`, the one defined inline rather than
-            # in a `register_*` call.
+            # all. The expectation is derived from the same registrars the
+            # owner runs — a hand-counted number silently went stale the first
+            # time a tool was added — plus `close_session`, the one tool
+            # defined inline in `create_mcp_server` rather than in a
+            # `register_*` call. A bare FastMCP carries no role, so building
+            # it here does not collide with the PROXY claim above.
+            async def expected() -> set[str]:
+                from fastmcp import FastMCP
+
+                from linkedin_mcp_server.tools.company import register_company_tools
+                from linkedin_mcp_server.tools.feed import register_feed_tools
+                from linkedin_mcp_server.tools.job import register_job_tools
+                from linkedin_mcp_server.tools.messaging import (
+                    register_messaging_tools,
+                )
+                from linkedin_mcp_server.tools.person import register_person_tools
+                from linkedin_mcp_server.tools.post import register_post_tools
+
+                bare = FastMCP("expected-roster")
+                register_person_tools(bare)
+                register_company_tools(bare)
+                register_job_tools(bare)
+                register_messaging_tools(bare)
+                register_feed_tools(bare)
+                register_post_tools(bare)
+                async with Client(bare) as client:
+                    local = {tool.name for tool in await client.list_tools()}
+                return local | {"close_session"}
+
             assert "get_person_profile" in names
             assert "close_session" in names
-            assert len(names) == 19, sorted(names)
+            assert names == asyncio.run(expected()), sorted(names)
         finally:
             _stop(result.get("pid"))
 

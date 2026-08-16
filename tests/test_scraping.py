@@ -20,6 +20,9 @@ from linkedin_mcp_server.scraping.extractor import (
     _CONTENT_DATE_POSTED_MAP,
     _RATE_LIMITED_MSG,
     _build_feed_references,
+    _format_schedule_date,
+    _format_schedule_time,
+    _match_scheduled_entries,
     _truncate_linkedin_noise,
     strip_conversation_chrome,
     strip_linkedin_noise,
@@ -5990,3 +5993,215 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         # The raw error must not survive as a cause either: the handlers
         # downstream print the whole chain.
         assert excinfo.value.__cause__ is None
+
+
+class TestGetScheduledPostsRead:
+    async def test_empty_read_reports_failure_not_empty_schedule(self):
+        """A failed modal read must not masquerade as an empty schedule —
+        the modal always carries its own heading text, so emptiness is
+        evidence of a broken read, and a caller told "nothing scheduled"
+        double-posts."""
+        from unittest.mock import patch
+
+        page = MagicMock()
+        page.url = "https://www.linkedin.com/feed/?shareActive=true"
+        page.locator.return_value.filter.return_value.first.inner_text = AsyncMock(
+            side_effect=Exception("element detached")
+        )
+        extractor = LinkedInExtractor(page)
+        with (
+            patch.object(
+                extractor,
+                "_open_scheduled_posts_list",
+                AsyncMock(return_value=None),
+            ),
+            patch.object(extractor, "_dismiss_scheduled_posts_list", AsyncMock()),
+        ):
+            result = await extractor.get_scheduled_posts()
+
+        assert result["status"] == "list_read_failed"
+        assert "sections" not in result
+
+
+class TestMatchScheduledEntries:
+    """Snippet matching: unique-match by default, explicit choice otherwise."""
+
+    def test_unique_match_resolves_without_occurrence(self):
+        match = _match_scheduled_entries(
+            ["about x", "about y", "about z"], "about y", None
+        )
+        assert not isinstance(match, tuple)
+        assert (match.index, match.match_count) == (1, 1)
+
+    def test_ambiguous_match_errors_without_occurrence(self):
+        # A defaulted first-pick could edit the wrong post while reporting
+        # success; several matches without an explicit choice must error.
+        result = _match_scheduled_entries(["about x 1", "about x 2"], "about x", None)
+        assert isinstance(result, tuple)
+        assert result[0] == "entry_ambiguous"
+
+    def test_explicit_occurrence_chooses_among_duplicates(self):
+        match = _match_scheduled_entries(
+            ["about x 1", "other", "about x 2"], "about x", 1
+        )
+        assert not isinstance(match, tuple)
+        assert (match.index, match.match_count) == (2, 2)
+
+    def test_occurrence_out_of_range_errors(self):
+        result = _match_scheduled_entries(["about x 1"], "about x", 3)
+        assert isinstance(result, tuple)
+        assert result[0] == "entry_not_found"
+
+    def test_no_match_errors(self):
+        result = _match_scheduled_entries(["something else"], "absent", None)
+        assert isinstance(result, tuple)
+        assert result[0] == "entry_not_found"
+
+    def test_blank_snippet_refused(self):
+        # Normalized to an empty needle, a blank snippet is contained in every
+        # entry; with one queued post it would "uniquely" match a post the
+        # caller never named — and delete flows are not recoverable.
+        for blank in ("", "   ", "\n\t"):
+            result = _match_scheduled_entries(["only post"], blank, None)
+            assert isinstance(result, tuple)
+            assert result[0] == "entry_not_found"
+
+
+class TestOpenScheduledEntryAction:
+    async def test_entry_moved_between_resolution_and_click(self):
+        """The click is positional against a live queue: when the pre-click
+        snapshot no longer shows the resolved text at the resolved index,
+        the action must refuse rather than land on whichever post now
+        occupies the position."""
+        from unittest.mock import patch
+
+        page = MagicMock()
+        page.evaluate = AsyncMock(
+            side_effect=[["post a", "post b"], ["post b", "post a"]]
+        )
+        extractor = LinkedInExtractor(page)
+        with (
+            patch.object(
+                extractor,
+                "_open_scheduled_posts_list",
+                AsyncMock(return_value=None),
+            ),
+            patch.object(extractor, "_dismiss_scheduled_posts_list", AsyncMock()),
+        ):
+            result = await extractor._open_scheduled_entry_action(
+                "post a", None, "button.irrelevant"
+            )
+
+        assert isinstance(result, tuple)
+        assert result[0] == "entry_moved"
+
+
+class TestScheduleFormatHelpers:
+    """The schedule dialog's prefill is the format example the helpers copy."""
+
+    def test_date_month_first_proven_by_prefill_window(self):
+        # Prefill 8/7 read month-first is Aug 7 (inside the today window);
+        # read day-first it is Jul 8 (outside). Order proven, not guessed.
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "8/7/2026", today=dt.date(2026, 8, 7)
+        )
+        assert (value, order) == ("8/15/2026", ("m", "d", "y"))
+
+    def test_date_day_first_proven_by_prefill_window(self):
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "7/8/2026", today=dt.date(2026, 8, 7)
+        )
+        assert (value, order) == ("15/8/2026", ("d", "m", "y"))
+
+    def test_date_ambiguous_prefill_decided_by_placeholder(self):
+        # On a day==month date the prefill reads the same both ways; the
+        # placeholder's m-token breaks the tie.
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "8/8/2026", "dd/mm/yyyy", today=dt.date(2026, 8, 8)
+        )
+        assert (value, order) == ("15/8/2026", ("d", "m", "y"))
+
+    def test_date_german_placeholder_and_separator(self):
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "8.8.2026", "TT.MM.JJJJ", today=dt.date(2026, 8, 8)
+        )
+        assert (value, order) == ("15.8.2026", ("d", "m", "y"))
+
+    def test_date_undecidable_refuses_distinct_day_month(self):
+        # Neither the prefill (day == month) nor a placeholder decides the
+        # order: refusing beats gambling the calendar day, because a reversed
+        # date is a valid date and passes every later check.
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "8/8/2026", "", today=dt.date(2026, 8, 8)
+        )
+        assert (value, order) == (None, None)
+
+    def test_date_undecidable_allows_equal_day_month(self):
+        # Both orders write the same digits, so nothing is gambled.
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 9, 9, "8/8/2026", "", today=dt.date(2026, 8, 8)
+        )
+        assert value == "9/9/2026"
+
+    def test_date_iso_prefill_keeps_year_position(self):
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "2026-08-07", today=dt.date(2026, 8, 7)
+        )
+        assert (value, order) == ("2026-8-15", ("y", "m", "d"))
+
+    def test_date_day_slot_proven_by_over_twelve(self):
+        # 31 cannot be a month, so it names the day slot whatever date the
+        # prefill renders — no today knowledge needed.
+        value, order = _format_schedule_date(
+            2026, 8, 15, "31/8/2026", prefill_renders_today=False
+        )
+        assert (value, order) == ("15/8/2026", ("d", "m", "y"))
+
+    def test_date_edit_prefill_withholds_window_proof(self):
+        # An edit prefill renders the post's schedule, not today; a window
+        # hit there would be a coincidence, so with both numbers <= 12 and no
+        # placeholder the order stays unproven and the format refuses.
+        value, order = _format_schedule_date(
+            2026, 8, 15, "7/8/2026", "", prefill_renders_today=False
+        )
+        assert (value, order) == (None, None)
+
+    def test_date_edit_prefill_still_decided_by_placeholder(self):
+        value, order = _format_schedule_date(
+            2026, 8, 15, "7/8/2026", "dd/mm/yyyy", prefill_renders_today=False
+        )
+        assert (value, order) == ("15/8/2026", ("d", "m", "y"))
+
+    def test_date_empty_prefill_decided_by_placeholder(self):
+        import datetime as dt
+
+        value, order = _format_schedule_date(
+            2026, 8, 15, "", "mm/dd/yyyy", today=dt.date(2026, 8, 8)
+        )
+        assert (value, order) == ("8/15/2026", ("m", "d", "y"))
+
+    def test_time_twelve_hour_from_meridiem_prefill(self):
+        assert _format_schedule_time(17, 30, "2:00 PM") == "5:30 PM"
+        assert _format_schedule_time(9, 5, "2:00 PM") == "9:05 AM"
+
+    def test_time_twelve_hour_boundaries(self):
+        assert _format_schedule_time(0, 5, "1:45 PM") == "12:05 AM"
+        assert _format_schedule_time(12, 0, "1:45 PM") == "12:00 PM"
+
+    def test_time_twenty_four_hour_without_meridiem(self):
+        assert _format_schedule_time(17, 30, "14:00") == "17:30"
+        assert _format_schedule_time(9, 5, "14:00") == "09:05"
