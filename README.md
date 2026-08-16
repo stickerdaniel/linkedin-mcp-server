@@ -544,12 +544,17 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 - `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session moves and deletes this directory *and its parent*, which also holds `cookies.json`, `source-state.json` and the derived runtime profiles. A path other than the default is therefore only used once it carries a `profile-claim.json` marker, written automatically when the parent is empty or already holds a session from this server
 - `--claim-profile-root` - Take over a non-default profile directory this server will not claim on its own: one whose parent already holds other files, or one carrying an ownership marker written for a different path (a mounted volume that moved). Needed once
 - `--slow-mo MS` - Delay between browser actions in milliseconds (default: 0, useful for debugging)
+- `--human-delays` - Wait a random interval between browser actions instead of a fixed cadence (see `--human-delay-min`/`--human-delay-max`)
+- `--human-delay-min SECONDS` - Shortest randomized wait between actions (default: 1.0)
+- `--human-delay-max SECONDS` - Longest randomized wait between actions (default: 5.0, maximum 30)
 - `--viewport WxH` - Browser viewport size (default: 1280x720). Applies to the normal windowless mode only; a headed launch (`--no-headless`, `--login`) uses the real window size
 - `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
 - `--proxy-server URL` - Route the browser through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD` (no flag, so it stays out of the process list)
 - `--help` - Show help
 
 > **Note:** Most CLI options have environment variable equivalents. See `.env.example` for details.
+
+> **Note:** `--human-delays` (`HUMAN_DELAYS`) paces navigations and clicks with a random wait drawn from the configured range, and scrolls and list-row visits with a quarter of it. It is off by default, and with it off the timing is unchanged. Turning it on makes deep multi-section scrapes proportionally slower — raise `--tool-timeout` / `TOOL_TIMEOUT` to match. It reduces the chance of tripping LinkedIn's throttling; it is not a guarantee against it.
 
 **HTTP Mode Example (for web-based MCP clients):**
 
