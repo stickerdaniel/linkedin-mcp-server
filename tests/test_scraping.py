@@ -3085,6 +3085,45 @@ class TestSearchPeople:
         with pytest.raises(ValueError, match="must be a numeric"):
             await extractor.search_people("engineer", current_company="١١١٥")
 
+    async def test_search_people_location_filter_emits_geo_urn(self, mock_page):
+        """LinkedIn's geo facet is ``geoUrn``, not ``location``; a bare
+        ``location=`` param is accepted by the URL and silently ignored."""
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("Jane Doe"),
+        ):
+            result = await extractor.search_people("engineer", location="103644278")
+
+        assert "geoUrn=%5B%22103644278%22%5D" in result["url"]
+        assert "&location=" not in result["url"]
+
+    async def test_search_people_rejects_plain_location_name(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="must be a numeric"):
+            await extractor.search_people("engineer", location="New York")
+
+    async def test_search_people_rejects_unicode_digit_location(self, mock_page):
+        """Geo URN ids are ASCII decimal; reject Unicode digits even though
+        ``str.isdigit()`` would accept them."""
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="must be a numeric"):
+            await extractor.search_people("engineer", location="١٠٣٦٤٤٢٧٨")
+
+    async def test_search_people_empty_location_is_noop(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("Jane Doe"),
+        ):
+            result = await extractor.search_people("engineer", location="")
+
+        assert "geoUrn" not in result["url"]
+
     async def test_search_people_empty_current_company_is_noop(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with patch.object(
@@ -3107,13 +3146,13 @@ class TestSearchPeople:
         ):
             result = await extractor.search_people(
                 "engineer",
-                location="Seattle",
+                location="104116203",
                 network=["F"],
                 current_company="1115",
             )
 
         assert "keywords=engineer" in result["url"]
-        assert "location=Seattle" in result["url"]
+        assert "geoUrn=%5B%22104116203%22%5D" in result["url"]
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
 

@@ -3613,7 +3613,11 @@ class LinkedInExtractor:
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
-            location: Optional location filter ("New York", "Remote").
+            location: Optional location filter. LinkedIn's people-search
+                ``geoUrn`` facet only filters on the numeric geo URN id
+                (e.g. ``"103644278"`` for the United States); plain-text place
+                names are accepted by the URL but ignored by LinkedIn and
+                return the unfiltered result set.
             network: Optional connection-degree filter. Each element is one of
                 ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
                 and beyond). Example: ``["F"]`` to only return 1st-degree
@@ -3637,6 +3641,16 @@ class LinkedInExtractor:
                     f"{invalid!r}; expected any of {list(_NETWORK_TOKENS)!r}"
                 )
 
+        if location and not re.fullmatch(r"[0-9]+", location):
+            raise FilterValidationError(
+                f"location must be a numeric LinkedIn geo URN id "
+                f"(e.g. '103644278' for the United States); got {location!r}. "
+                f"LinkedIn's people-search geo facet only filters on the URN id; "
+                f"plain-text place names are silently ignored and return the "
+                f"unfiltered result set. Omit the filter and put the place name "
+                f"in `keywords` if you do not have the URN."
+            )
+
         if current_company and not re.fullmatch(r"[0-9]+", current_company):
             raise FilterValidationError(
                 f"current_company must be a numeric LinkedIn company URN id "
@@ -3647,7 +3661,7 @@ class LinkedInExtractor:
 
         params = f"keywords={quote_plus(keywords)}"
         if location:
-            params += f"&location={quote_plus(location)}"
+            params += f"&geoUrn={_encode_list_facet([location])}"
         if network:
             params += f"&network={_encode_list_facet(network)}"
         if current_company:
