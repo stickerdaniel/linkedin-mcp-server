@@ -154,7 +154,16 @@ async def test_same_runtime_uses_source_profile(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_same_runtime_clicks_remember_me_during_feed_validation(tmp_path):
+async def test_same_runtime_startup_probe_uses_profile_nav_not_feed(tmp_path):
+    """Startup authentication probe uses /in/me/ (not /feed/), no remember-me.
+
+    The old path called _feed_auth_succeeds which navigated to /feed/ and
+    resolved the remember-me prompt.  The new probe (_probe_post_restart_session
+    -> _probe_auth_via_profile_nav) navigates to /in/me/ instead, which avoids
+    the generic HTTP 400 that /feed/ returns on fresh Chromium after restart.
+    Remember-me resolution is not part of the startup probe; _feed_auth_succeeds
+    remains intact for the bridge/import paths that still use it.
+    """
     _write_source_state(tmp_path, runtime_id="macos-arm64-host")
     source_browser = _make_mock_browser()
 
@@ -181,17 +190,30 @@ async def test_same_runtime_clicks_remember_me_during_feed_validation(tmp_path):
         result = await get_or_create_browser()
 
     assert result is source_browser
-    assert source_browser.page.goto.await_count == 2
-    assert remember_me.await_count == 1
+    # Startup probe navigates exactly once (to /in/me/)
+    assert source_browser.page.goto.await_count == 1
+    # remember_me is NOT part of the startup probe
+    assert remember_me.await_count == 0
 
 
 @pytest.mark.asyncio
 async def test_feed_http_400_without_auth_evidence_keeps_source_state(tmp_path):
-    """A transport failure is retryable, not proof that saved auth is dead."""
+    """A transport failure (HTTP 400 without auth barrier) is retryable, not proof that saved auth is dead.
+
+    The startup probe (_probe_post_restart_session) retries up to _PROBE_MAX_ATTEMPTS
+    times then raises NetworkError; the important property is that source state
+    (cookies, source-state.json) is NOT quarantined/moved/deleted — only a
+    confirmed auth barrier does that.
+
+    Before the post-restart fix (bb3c346): _feed_auth_succeeds raised NetworkError
+    immediately on first attempt.  After the fix: _probe_post_restart_session exhausts
+    all retries and raises NetworkError("Profile probe navigation failed; try again.").
+    The session-retention guarantee (no invalid-state-* created) is preserved either way.
+    """
     source_profile = _write_source_state(tmp_path, runtime_id="macos-arm64-host")
     source_browser = _make_mock_browser()
     source_browser.page.goto = AsyncMock(
-        side_effect=Exception("Page.goto: HTTP 400 while navigating to /feed/")
+        side_effect=Exception("Page.goto: HTTP 400 while navigating to /in/me/")
     )
 
     with (
@@ -213,10 +235,16 @@ async def test_feed_http_400_without_auth_evidence_keeps_source_state(tmp_path):
             new_callable=AsyncMock,
             return_value=None,
         ),
-        pytest.raises(NetworkError, match="Feed navigation failed; try again"),
+        patch(
+            "linkedin_mcp_server.drivers.browser.asyncio",
+            wraps=asyncio,
+        ) as mock_asyncio,
+        pytest.raises(NetworkError, match="Profile probe navigation failed; try again"),
     ):
+        mock_asyncio.sleep = AsyncMock()
         await get_or_create_browser()
 
+    # Session state must NOT be quarantined — transport error is retryable.
     assert source_state_path(source_profile).exists()
     assert portable_cookie_path(source_profile).exists()
     assert not list(source_profile.parent.glob("invalid-state-*"))
