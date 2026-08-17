@@ -18,6 +18,7 @@ from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    NetworkError,
     detect_auth_barrier_quick,
     detect_rate_limit,
     goto_reporting_proxy_errors,
@@ -252,15 +253,13 @@ async def _feed_auth_succeeds(
         # disk and the log is what users paste into issue reports.
         await _log_feed_failure_context(browser, detail)
         if barrier is None:
-            # Nothing loaded and no barrier, so nothing proves the session is
-            # dead -- and with a proxy in front, the most likely cause is the
-            # proxy. Wrong credentials in particular produce no proxy error code
-            # at all: Chromium retries the 407 challenge until the navigation
-            # times out (verified against a local authenticating relay), so the
-            # marker check above cannot catch it. Reporting False would hand the
-            # caller an AuthenticationError, whose recovery moves the stored
-            # profile aside and starts a login through the same broken proxy.
+            # A navigation exception without a login/checkpoint/authwall marker
+            # proves only that the feed transport failed. It must remain a
+            # retryable network failure: converting it to ``False`` makes the
+            # caller manufacture AuthenticationError and quarantine live source
+            # cookies without authentication evidence.
             raise_if_proxy_configured(exc)
+            raise NetworkError("Feed navigation failed; try again.") from exc
         return False
 
 
