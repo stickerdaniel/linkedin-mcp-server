@@ -63,8 +63,10 @@ def register_person_tools(
                 other sections, request heavy sections in a separate call.
 
         Returns:
-            Dict with url, sections (name -> raw text), and optional references.
-            Sections may be absent if extraction yielded no content for that page.
+            Dict with url, sections (name -> raw text), optional top-card location,
+            and optional references. Location is omitted when it cannot be
+            identified conservatively. Sections may be absent if extraction yielded
+            no content for that page.
             Includes unknown_sections list when unrecognised names are passed.
             The LLM should parse the raw text in each section.
         """

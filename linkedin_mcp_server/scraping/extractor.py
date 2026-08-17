@@ -481,6 +481,35 @@ _NOISE_LINES: list[re.Pattern[str]] = [
 ]
 
 
+# ``innerText`` cannot distinguish the header's location from an employer,
+# Experience entry, or sidebar card. This deliberately narrow DOM query is the
+# exception: semantic ``section`` containment around the profile ``h1`` plus
+# LinkedIn's location-specific attribute. No layout classes or positional text
+# parsing are used. If either signal changes, return no location rather than a
+# plausible but wrong value.
+_EXTRACT_TOP_CARD_LOCATION_JS = r"""
+() => {
+  const main = document.querySelector('main');
+  const h1 = main?.querySelector('h1');
+  if (!main || !h1) return null;
+
+  const card = h1.closest('section');
+  if (!card || !main.contains(card)) return null;
+
+  const values = new Set();
+  for (const node of card.querySelectorAll('[data-anonymize="location"]')) {
+    const value = (node.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!value || value.length > 100 || /https?:\/\//i.test(value)) continue;
+    // The marker is the only location identity signal. The shape check merely
+    // rejects UI/control text; it does not classify words or depend on locale.
+    if (!/^[\p{L}][\p{L}\p{M} .,'’()\-\/]+$/u.test(value)) continue;
+    values.add(value);
+  }
+  return values.size === 1 ? [...values][0] : null;
+}
+"""
+
+
 @dataclass
 class ExtractedSection:
     """Text and compact references extracted from a loaded LinkedIn section."""
@@ -488,6 +517,7 @@ class ExtractedSection:
     text: str
     references: list[Reference]
     error: dict[str, Any] | None = None
+    location: str | None = None
 
 
 _FEED_RSC_MARKER = "sduiid=com.linkedin.sdui.pagers.feed.mainFeed"
@@ -997,6 +1027,15 @@ class LinkedInExtractor:
     # ------------------------------------------------------------------
     # Generic browser helpers for LLM-driven connection flow
     # ------------------------------------------------------------------
+
+    async def _extract_top_card_location(self) -> str | None:
+        """Return one conservative location candidate from the profile top card.
+
+        This runs against the DOM before section ``innerText`` is flattened.
+        Ambiguous, absent, and non-location values deliberately become ``None``.
+        """
+        value = await self._page.evaluate(_EXTRACT_TOP_CARD_LOCATION_JS)
+        return value if isinstance(value, str) else None
 
     async def get_page_text(self) -> str:
         """Extract innerText from the main content area of the current page."""
@@ -1631,6 +1670,15 @@ class LinkedInExtractor:
             scrolls = max_scrolls if max_scrolls is not None else 5
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
 
+        # Capture only the top-card field before the generic main.innerText
+        # flattening below. Errors are a safe absence, never a guessed location.
+        location: str | None = None
+        if section_name == "main_profile":
+            try:
+                location = await self._extract_top_card_location()
+            except Exception:
+                logger.debug("Top-card location extraction failed", exc_info=True)
+
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
@@ -1647,6 +1695,7 @@ class LinkedInExtractor:
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name),
+            location=location,
         )
 
     async def _extract_overlay(
@@ -1756,6 +1805,7 @@ class LinkedInExtractor:
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
         profile_urn: str | None = None
+        location: str | None = None
         rate_limited = False
 
         requested_ordered = [
@@ -1807,6 +1857,9 @@ class LinkedInExtractor:
                             section_name=section_name,
                             max_scrolls=max_scrolls,
                         )
+
+                    if section_name == "main_profile" and extracted.location:
+                        location = extracted.location
 
                     if extracted.text and extracted.text != _RATE_LIMITED_MSG:
                         sections[section_name] = extracted.text
@@ -1865,6 +1918,8 @@ class LinkedInExtractor:
         }
         if profile_urn:
             result["profile_urn"] = profile_urn
+        if location:
+            result["location"] = location
         if references:
             result["references"] = references
         if section_errors:

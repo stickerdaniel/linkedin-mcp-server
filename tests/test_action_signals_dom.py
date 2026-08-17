@@ -25,6 +25,7 @@ from patchright.async_api import async_playwright
 from linkedin_mcp_server.scraping.extractor import (
     _ACTION_SIGNALS_JS,
     _CLICK_INCOMING_ACCEPT_JS,
+    _EXTRACT_TOP_CARD_LOCATION_JS,
 )
 
 pytestmark = pytest.mark.browser_dom
@@ -156,6 +157,48 @@ def _page_html(*sections: str) -> str:
     return f"<html><body><main>{''.join(sections)}</main></body></html>"
 
 
+PROFILE_TOP_CARD_TOWN_COUNTRY = """
+<section data-view-name="profile-card">
+  <h1>Test Person</h1>
+  <div data-anonymize="location">Helsinki, Finland</div>
+</section>
+"""
+
+PROFILE_TOP_CARD_TOWN_ONLY = """
+<section>
+  <h1>Test Person</h1>
+  <div data-anonymize="location">Stockholm Metropolitan Area</div>
+</section>
+"""
+
+PROFILE_WITH_UNMARKED_TOP_CARD_TEXT = """
+<section>
+  <h1>Test Person</h1>
+  <div>Stockholm Metropolitan Area</div>
+</section>
+"""
+
+PROFILE_WITH_AMBIGUOUS_TOP_CARD_LOCATIONS = """
+<section>
+  <h1>Test Person</h1>
+  <div data-anonymize="location">Helsinki, Finland</div>
+  <div data-anonymize="location">Espoo, Finland</div>
+</section>
+"""
+
+PROFILE_WITH_EXPERIENCE_AND_SIDEBAR_NOISE = """
+<section data-view-name="profile-card"><h1>Test Person</h1></section>
+<section><h2>Experience</h2><div data-anonymize="location">London, United Kingdom</div></section>
+<aside><div data-anonymize="location">Oslo, Norway</div></aside>
+"""
+
+PROFILE_WITH_NON_LOCATION_TOP_CARD_TEXT = """
+<section data-view-name="profile-card"><h1>Test Person</h1>
+  <div data-anonymize="location">Open to work · Full-time</div>
+</section>
+"""
+
+
 @pytest.fixture
 async def dom_page():
     """Real chromium page, or skip when no browser is installed.
@@ -185,6 +228,55 @@ async def dom_page():
 async def _signals(page, html: str) -> dict:
     await page.set_content(html)
     return await page.evaluate(_ACTION_SIGNALS_JS, "testuser")
+
+
+async def _location(page, html: str) -> str | None:
+    await page.set_content(html)
+    return await page.evaluate(_EXTRACT_TOP_CARD_LOCATION_JS)
+
+
+class TestTopCardLocationExtraction:
+    async def test_town_and_country_from_top_card(self, dom_page):
+        assert (
+            await _location(dom_page, _page_html(PROFILE_TOP_CARD_TOWN_COUNTRY))
+            == "Helsinki, Finland"
+        )
+
+    async def test_town_only_from_top_card(self, dom_page):
+        assert (
+            await _location(dom_page, _page_html(PROFILE_TOP_CARD_TOWN_ONLY))
+            == "Stockholm Metropolitan Area"
+        )
+
+    async def test_unmarked_top_card_text_is_ignored(self, dom_page):
+        assert (
+            await _location(dom_page, _page_html(PROFILE_WITH_UNMARKED_TOP_CARD_TEXT))
+            is None
+        )
+
+    async def test_ambiguous_top_card_locations_are_ignored(self, dom_page):
+        assert (
+            await _location(
+                dom_page, _page_html(PROFILE_WITH_AMBIGUOUS_TOP_CARD_LOCATIONS)
+            )
+            is None
+        )
+
+    async def test_experience_and_sidebar_locations_are_ignored(self, dom_page):
+        assert (
+            await _location(
+                dom_page, _page_html(PROFILE_WITH_EXPERIENCE_AND_SIDEBAR_NOISE)
+            )
+            is None
+        )
+
+    async def test_non_location_top_card_text_is_rejected(self, dom_page):
+        assert (
+            await _location(
+                dom_page, _page_html(PROFILE_WITH_NON_LOCATION_TOP_CARD_TEXT)
+            )
+            is None
+        )
 
 
 class TestIncomingActionRowFingerprint:
