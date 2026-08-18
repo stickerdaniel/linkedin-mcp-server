@@ -2758,6 +2758,28 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             return False
 
+    async def _message_visible_in_thread(self, message: str) -> bool:
+        """Wait until the thread conversation visibly contains the just-sent message text.
+
+        Uses the page-level default timeout (``BrowserConfig.default_timeout``).
+        """
+        try:
+            await self._page.wait_for_function(
+                """({ expected }) => {
+                    const normalize = value =>
+                        (value || '').replace(/\\s+/g, ' ').trim();
+                    const thread = document.querySelector(
+                        '[data-thread-id], .thread, .msg-sender, [role="log"], [aria-label*="Messaging"], .scaffold-feed-list, main .feed'
+                    ) || document.querySelector('main') || document.body;
+                    const threadText = normalize(thread?.innerText || '');
+                    return threadText.includes(normalize(expected));
+                }""",
+                arg={"expected": message},
+            )
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
     async def _dismiss_message_ui(self) -> None:
         """Best-effort dismissal for the profile messaging UI."""
         if not await self._locator_is_visible(_MESSAGING_CLOSE_SELECTOR, timeout=750):
@@ -2773,6 +2795,22 @@ class LinkedInExtractor:
         """Parse a LinkedIn thread id from a messaging thread URL."""
         match = re.search(r"/messaging/thread/([^/?#]+)/", url)
         return match.group(1) if match else None
+
+    @staticmethod
+    def _normalize_thread_id(value: str) -> str | None:
+        """Accept either a raw thread id or a messaging thread reference path."""
+        if not value:
+            return None
+        value = value.strip()
+        if value.startswith("/"):
+            extracted = LinkedInExtractor._extract_thread_id(value)
+            return extracted
+        if "/" in value or value.endswith("="):
+            extracted = LinkedInExtractor._extract_thread_id(
+                f"/messaging/thread/{value}/"
+            )
+            return extracted
+        return value
 
     async def _resolve_conversation_thread_urls(self, display_name: str) -> list[str]:
         """Return all thread URLs whose participant name matches display_name.
@@ -4398,3 +4436,106 @@ class LinkedInExtractor:
             {"selectors": selectors},
         )
         return result
+
+    async def reply_to_thread(
+        self,
+        thread_id: str,
+        message: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Reply to an existing LinkedIn messaging thread by thread ID.
+
+        Args:
+            thread_id: LinkedIn messaging thread ID or reference path
+                (from get_inbox/get_conversation references, e.g.
+                ``2-YThm...`` or ``/messaging/thread/2-YThm.../``).
+            message: The message text to send.
+            confirm_send: Must be True to actually send.
+        """
+        normalized_thread_id = self._normalize_thread_id(thread_id)
+        if not normalized_thread_id:
+            return self._message_action_result(
+                self._page.url,
+                "invalid_thread",
+                "Could not parse a valid thread ID from the provided thread_id.",
+                sent=False,
+            )
+
+        thread_url = (
+            f"https://www.linkedin.com/messaging/thread/{normalized_thread_id}/"
+        )
+        await self._navigate_to_page(thread_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Thread page did not load for %s", normalized_thread_id)
+
+        await handle_modal_close(self._page)
+        compose_box = await self._resolve_message_compose_box()
+        if compose_box is None:
+            return self._message_action_result(
+                thread_url,
+                "composer_unavailable",
+                "LinkedIn did not expose a usable message composer in this thread.",
+            )
+
+        if not confirm_send:
+            return self._message_action_result(
+                thread_url,
+                "confirmation_required",
+                "Set confirm_send=true to send the reply.",
+            )
+
+        focused = await self._page.evaluate(
+            """() => {
+                const el = document.querySelector(
+                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
+                    + 'div[role="textbox"][contenteditable="true"]'
+                );
+                if (!el) return false;
+                el.focus();
+                return true;
+            }"""
+        )
+        if not focused:
+            return self._message_action_result(
+                thread_url,
+                "compose_interact_failed",
+                "Could not focus thread reply compose box via JavaScript.",
+            )
+
+        await asyncio.sleep(0.1)
+        await self._page.keyboard.type(message, delay=15)
+        await asyncio.sleep(0.3)
+
+        await asyncio.sleep(1.0)
+        sent_via_js = await self._page.evaluate(
+            """() => {
+                const btn = Array.from(document.querySelectorAll(
+                    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
+                    + 'button[data-control-name="send"]'
+                )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                if (!btn) return false;
+                btn.click();
+                return true;
+            }"""
+        )
+        if not sent_via_js:
+            await self._page.keyboard.press("Enter")
+
+        if not await self._message_visible_in_thread(message):
+            return self._message_action_result(
+                thread_url,
+                "send_unavailable",
+                "LinkedIn did not confirm that the reply was sent.",
+            )
+
+        return self._message_action_result(
+            thread_url,
+            "sent",
+            "Message sent.",
+            sent=True,
+        )
