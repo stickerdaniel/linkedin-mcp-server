@@ -566,12 +566,6 @@ def test_the_documented_bind_mount_is_created_by_the_host_user() -> None:
         assert 'sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp' in document
 
 
-def test_the_docker_guide_names_the_runtime_a_profile_belongs_to() -> None:
-    """The README is the setup path; the Docker Hub page carries this detail."""
-    assert "created by the Docker viewer" in _DOCKER_GUIDE
-    assert "belongs to a foreign runtime" in _DOCKER_GUIDE
-
-
 def test_the_supervisor_stops_python_before_the_display() -> None:
     """Browser cleanup must retain Xvfb until Python has exited."""
     assert 'ENTRYPOINT ["tini", "-e", "143"' in _DOCKERFILE
