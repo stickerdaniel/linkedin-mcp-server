@@ -106,7 +106,7 @@ When you set up or maintain this server, verify its entry in the MCP client conf
 
 **CLI Options:**
 
-- `--login` - Open browser to log in and save persistent profile
+- `--login` - Open browser to log in and save persistent profile. Complete the sign-in in the window that opens; the wait watches that page.
 - `--import-from-browser [BROWSER]` - Import a LinkedIn session from a locally logged-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, or `auto`). Bare flag picks `auto`, which auto-selects the most recently used browser with a live LinkedIn session.
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
@@ -205,6 +205,7 @@ while a container is running.
 
 **Login issues:**
 
+- *`--login` still logs `Waiting...` after you have signed in*: finish the sign-in in the window the server opened. The wait polls that one page, so completing login in a new tab or another browser window leaves it waiting even though the session itself is valid. If that happens, restart the login and complete it in the tab that opens.
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - LinkedIn may show a captcha challenge during login. Run `uvx mcp-server-linkedin@latest --login` which opens a browser where you can solve it manually.
 
@@ -281,6 +282,7 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 **Login issues:**
 
 - Make sure you have only one active LinkedIn session at a time
+- *`--login` still logs `Waiting...` after you have signed in*: finish the sign-in in the window the server opened. The wait polls that one page, so completing login in a new tab or another browser window leaves it waiting even though the session itself is valid. If that happens, restart the login and complete it in the tab that opens.
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - LinkedIn may show a captcha challenge during login. Run `uvx mcp-server-linkedin@latest --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 
@@ -443,6 +445,7 @@ belongs behind something that provides it.
 **Login issues:**
 
 - Make sure you have only one active LinkedIn session at a time
+- *`--login` still logs `Waiting...` after you have signed in*: finish the sign-in in the window the server opened. The wait polls that one page, so completing login in a new tab or another browser window leaves it waiting even though the session itself is valid. If that happens, restart the login and complete it in the tab that opens.
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - LinkedIn may show a captcha challenge during login. Run `uvx mcp-server-linkedin@latest --login` which opens a browser where you can solve captchas manually. See the [uvx setup](#-uvx-setup-recommended---universal) for prerequisites.
 - If Docker auth becomes stale after you re-login on the host, restart Docker once so it can fresh-bridge from the new source session generation.
@@ -529,7 +532,7 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 
 **CLI Options:**
 
-- `--login` - Open browser to log in and save persistent profile
+- `--login` - Open browser to log in and save persistent profile. Complete the sign-in in the window that opens; the wait watches that page.
 - `--import-from-browser [BROWSER]` - Import a LinkedIn session from a locally logged-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, or `auto`). Bare flag picks `auto`, which auto-selects the most recently used browser with a live LinkedIn session.
 - `--no-headless` - Show browser window (useful for debugging scraping issues)
 - `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
@@ -580,6 +583,7 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 **Login issues:**
 
 - Make sure you have only one active LinkedIn session at a time
+- *`--login` still logs `Waiting...` after you have signed in*: finish the sign-in in the window the server opened. The wait polls that one page, so completing login in a new tab or another browser window leaves it waiting even though the session itself is valid. If that happens, restart the login and complete it in the tab that opens.
 - LinkedIn may require a login confirmation in the LinkedIn mobile app for `--login`
 - LinkedIn may show a captcha challenge during login. The `--login` command opens a browser where you can solve it manually.
 
