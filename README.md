@@ -106,28 +106,26 @@ When you set up or maintain this server, verify its entry in the MCP client conf
 
 **CLI Options:**
 
-- `--login` - Open browser to log in and save persistent profile
-- `--import-from-browser [BROWSER]` - Import a LinkedIn session from a locally logged-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, or `auto`). Bare flag picks `auto`, which auto-selects the most recently used browser with a live LinkedIn session.
-- `--no-headless` - Show browser window (useful for debugging scraping issues)
-- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
-- `--host HOST` - HTTP server host (default: 127.0.0.1)
-- `--port PORT` - HTTP server port (default: 8000)
-- `--path PATH` - HTTP server path (default: /mcp)
-- `--logout` - Clear stored LinkedIn browser profile
-- `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
-- `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
-- `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in. `--login-viewer` caps the effective limit at its 1,800-second viewer wall, so `0` becomes 30 minutes in viewer mode; protected profile restoration may finish afterward.
-- `--login-viewer` - With `--login` inside Docker, expose the login browser through one token-authenticated noVNC URL on port 6080. Requires a writable, non-memory mount covering the authentication root above the configured profile.
-- `--login-inline-wait SECONDS` - Bounded inline wait for a tool call to resume after login completes, in seconds (default: 25, max 45; 0 = return immediately).
-- `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters when several MCP clients run at the same time.
-- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it to a waiting process (default: 20, clamped below `--browser-wait` so a waiting client is served before its own timeout; 0 = hand over after every tool call). Raising it means fewer browser restarts but longer waits for other clients.
-- `--browser-idle-timeout SECONDS` - Close an idle browser and release the shared profile after this long without a tool call (default: 600; 0 = keep it open until the server exits).
-- `--auto-import` / `--no-auto-import` - Enable or disable auto-import of a session from a locally logged-in browser on the first no-session tool call (before falling back to manual login). Auto-import is on by default across interactive and non-interactive desktop runs; pass `--no-auto-import` (or `AUTO_IMPORT_FROM_BROWSER=false`) to require `--login` / `--import-from-browser` instead. No effect under Docker or on a non-loopback HTTP bind. On macOS the keychain may prompt once for Safe Storage access.
-- `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session moves and deletes this directory *and its parent*, which also holds `cookies.json`, `source-state.json` and the derived runtime profiles. A path other than the default is therefore only used once it carries a `profile-claim.json` marker, written automatically when the parent is empty or already holds a session from this server
-- `--claim-profile-root` - Take over a non-default profile directory this server will not claim on its own: one whose parent already holds other files, or one carrying an ownership marker written for a different path (a mounted volume that moved). Needed once
-- `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
-- `--proxy-server URL` - Route the browser through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD` (no flag, so it stays out of the process list)
+- `--login` - Open a browser to sign in and save the session
+- `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
+- `--logout` - Clear the stored session
+- `--no-headless` - Show the browser window (useful for debugging)
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Logging level (default: WARNING)
+- `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
+- `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+- `--timeout MS` - Timeout for a single page operation (default: 5000)
+- `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
+- `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit)
+- `--login-viewer` - Docker only: show the `--login` browser at a token-protected URL on port 6080 (see [Authentication](#authentication))
+- `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
+- `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
+- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Higher means fewer browser restarts but longer waits for other clients.
+- `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
+- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on; no effect in Docker). On macOS the keychain may prompt once.
+- `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
+- `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
+- `--chrome-path PATH` - Path to a Chrome/Chromium executable
+- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD`, which keeps it out of the process list.
 
 **Import a session from your everyday browser:**
 
@@ -306,9 +304,10 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 ### Authentication
 
-Docker includes an authenticated, short-lived browser viewer for explicit login. Create the host directory before mounting it so the unprivileged container user can write the session:
+Log in once. The container opens a LinkedIn login browser that you drive from your own browser tab:
 
 ```bash
+# Create the directory first so the container can save your session into it
 mkdir -p ~/.linkedin-mcp
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
@@ -317,9 +316,9 @@ docker run -it --rm \
   --login --login-viewer
 ```
 
-Open the complete loopback URL printed by the command. Its token stays in the URL fragment, so the initial HTTP request does not carry it. Static viewer files are public on port 6080; the token protects the WebSocket that controls the browser. The viewer fixes client-side scaling, keeps remote resize disabled, and closes after login, failure, a stop signal, or 1,800 seconds. Protected profile restoration may finish after remote control has closed, because interrupting a move on the mounted auth root could split the previous session. The profile mount is required before any existing session can be rotated. For the default profile, use the exact `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mapping above. If an older rootful Docker run created that host directory as root, repair it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
+Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
-A profile created by the Docker viewer belongs to the container runtime and is reused directly on later Docker startups with the same runtime identity. A profile created on the host with `uvx mcp-server-linkedin@latest --login` or `--import-from-browser` belongs to a foreign runtime, so Docker derives a fresh Linux bridge from its source cookies on each startup.
+Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `docker run`, otherwise the server cannot find the session.
 
 **Configure Claude Desktop with Docker**
 
@@ -339,7 +338,7 @@ A profile created by the Docker viewer belongs to the container runtime and is r
 ```
 
 > [!NOTE]
-> Docker reuses a source profile created by the viewer under the same runtime identity. Host-created and otherwise foreign source profiles use a fresh Linux bridge on each startup. Sessions may expire over time; repeat the Docker viewer command above or run `uvx mcp-server-linkedin@latest --login` on the host.
+> Sessions expire over time. When tool calls start asking for authentication, repeat the login command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
 
 ### Docker Setup Help
 
@@ -355,25 +354,23 @@ A profile created by the Docker viewer belongs to the container runtime and is r
 
 **CLI Options:**
 
-- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
-- `--host HOST` - HTTP server host (default: 127.0.0.1)
-- `--port PORT` - HTTP server port (default: 8000)
-- `--path PATH` - HTTP server path (default: /mcp)
-- `--logout` - Clear all stored LinkedIn auth state, including source and derived runtime profiles and any retired sessions
-- `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
-- `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
-- `--login-timeout SECONDS` - Manual login wait timeout in seconds (default: 1800; 0 = no limit). How long the `--login` browser waits for you to finish signing in. `--login-viewer` caps the effective limit at its 1,800-second viewer wall, so `0` becomes 30 minutes in viewer mode; protected profile restoration may finish afterward.
-- `--login-viewer` - With `--login` inside Docker, expose the login browser through one token-authenticated noVNC URL on port 6080. Requires a writable, non-memory mount covering the authentication root above the configured profile.
-- `--login-inline-wait SECONDS` - Bounded inline wait for a tool call to resume after login completes, in seconds (default: 25, max 45; 0 = return immediately).
-- `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters when several MCP clients run at the same time.
-- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it to a waiting process (default: 20, clamped below `--browser-wait` so a waiting client is served before its own timeout; 0 = hand over after every tool call). Raising it means fewer browser restarts but longer waits for other clients.
-- `--browser-idle-timeout SECONDS` - Close an idle browser and release the shared profile after this long without a tool call (default: 600; 0 = keep it open until the server exits).
-- `--auto-import` / `--no-auto-import` - Enable or disable auto-import of a session from a locally logged-in browser on the first no-session tool call (before falling back to manual login). Auto-import is on by default across interactive and non-interactive desktop runs; pass `--no-auto-import` (or `AUTO_IMPORT_FROM_BROWSER=false`) to require `--login` / `--import-from-browser` instead. No effect under Docker or on a non-loopback HTTP bind. On macOS the keychain may prompt once for Safe Storage access.
-- `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session moves and deletes this directory *and its parent*, which also holds `cookies.json`, `source-state.json` and the derived runtime profiles. A path other than the default is therefore only used once it carries a `profile-claim.json` marker, written automatically when the parent is empty or already holds a session from this server
-- `--claim-profile-root` - Take over a non-default profile directory this server will not claim on its own: one whose parent already holds other files, or one carrying an ownership marker written for a different path (a mounted volume that moved). Needed once
-- `--chrome-path PATH` - Path to Chrome/Chromium executable (rarely needed in Docker)
-- `--proxy-server URL` - Route the browser through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD` (no flag, so it stays out of the process list)
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Logging level (default: WARNING)
+- `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
+- `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+- `--logout` - Clear the stored session and every profile derived from it
+- `--timeout MS` - Timeout for a single page operation (default: 5000)
+- `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
+- `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit)
+- `--login-viewer` - With `--login`, show the login browser at a token-protected URL on port 6080. Needs the profile mount from [Authentication](#authentication).
+- `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
+- `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
+- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Higher means fewer browser restarts but longer waits for other clients.
+- `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
+- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (ignored in Docker). On macOS the keychain may prompt once.
+- `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
+- `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
+- `--chrome-path PATH` - Path to a Chrome/Chromium executable (rarely needed in Docker)
+- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD`, which keeps it out of the process list.
 
 > [!NOTE]
 > Plain `--login` still has no visible window in Docker. Add `--login-viewer` and publish `127.0.0.1:6080:6080` only for the one-shot login command. Docker is already headed by default, so `--no-headless` changes nothing. The experimental `--daemon` is ignored in Docker because its owner can outlive the virtual display.
@@ -439,6 +436,7 @@ belongs behind something that provides it.
 
 - Make sure [Docker](https://www.docker.com/get-started/) is installed
 - Check if Docker is running: `docker ps`
+- *Permission errors on `~/.linkedin-mcp`*: an older rootful Docker run may have created the directory as root. Fix it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
 
 **Login issues:**
 
@@ -529,24 +527,22 @@ The local server uses the same managed-runtime flow as MCPB and `uvx`: it prepar
 
 **CLI Options:**
 
-- `--login` - Open browser to log in and save persistent profile
-- `--import-from-browser [BROWSER]` - Import a LinkedIn session from a locally logged-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, or `auto`). Bare flag picks `auto`, which auto-selects the most recently used browser with a live LinkedIn session.
-- `--no-headless` - Show browser window (useful for debugging scraping issues)
-- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Set logging level (default: WARNING)
-- `--transport {stdio,streamable-http}` - Optional: force transport mode (default: stdio)
-- `--host HOST` - HTTP server host (default: 127.0.0.1)
-- `--port PORT` - HTTP server port (default: 8000)
-- `--path PATH` - HTTP server path (default: /mcp)
-- `--logout` - Clear stored LinkedIn browser profile
-- `--timeout MS` - Browser timeout for page operations in milliseconds (default: 5000)
-- `--tool-timeout SECONDS` - Per-tool MCP execution timeout in seconds (default: 180.0). Increase further for heavy scrapes / cold-start Chromium / slow networks.
-- `--status` - Check if current session is valid and exit
-- `--user-data-dir PATH` - Path to persistent browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session moves and deletes this directory *and its parent*, which also holds `cookies.json`, `source-state.json` and the derived runtime profiles. A path other than the default is therefore only used once it carries a `profile-claim.json` marker, written automatically when the parent is empty or already holds a session from this server
-- `--claim-profile-root` - Take over a non-default profile directory this server will not claim on its own: one whose parent already holds other files, or one carrying an ownership marker written for a different path (a mounted volume that moved). Needed once
-- `--slow-mo MS` - Delay between browser actions in milliseconds (default: 0, useful for debugging)
-- `--viewport WxH` - Browser viewport size (default: 1280x720). Applies to the normal windowless mode only; a headed launch (`--no-headless`, `--login`) uses the real window size
-- `--chrome-path PATH` - Path to Chrome/Chromium executable (for custom browser installations)
-- `--proxy-server URL` - Route the browser through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD` (no flag, so it stays out of the process list)
+- `--login` - Open a browser to sign in and save the session
+- `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
+- `--status` - Check whether the stored session is valid, then exit
+- `--logout` - Clear the stored session
+- `--no-headless` - Show the browser window (useful for debugging)
+- `--log-level {DEBUG,INFO,WARNING,ERROR}` - Logging level (default: WARNING)
+- `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
+- `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+- `--timeout MS` - Timeout for a single page operation (default: 5000)
+- `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
+- `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
+- `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
+- `--slow-mo MS` - Delay between browser actions (default: 0, useful for debugging)
+- `--viewport WxH` - Viewport size (default: 1280x720). Applies to windowless mode only; a headed launch uses the real window size.
+- `--chrome-path PATH` - Path to a Chrome/Chromium executable
+- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set the password via `PROXY_PASSWORD`, which keeps it out of the process list.
 - `--help` - Show help
 
 > **Note:** Most CLI options have environment variable equivalents. See `.env.example` for details.
