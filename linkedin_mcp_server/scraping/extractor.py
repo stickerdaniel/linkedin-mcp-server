@@ -2739,20 +2739,101 @@ class LinkedInExtractor:
         )
         return bool(matched)
 
-    async def _message_text_visible(self, message: str) -> bool:
-        """Wait until the compose page visibly contains the just-sent message text.
+    # Counts occurrences of the message text outside the composer. The composer
+    # is contenteditable, so its own draft text is part of document.body.innerText:
+    # a plain `bodyText.includes(message)` is satisfied by the text we just typed
+    # and reports a send that never happened. Only a new occurrence *outside* the
+    # composer means LinkedIn actually rendered the message into the thread.
+    # ``composerSelectors`` is passed in from _MESSAGING_COMPOSE_FALLBACK_SELECTORS
+    # rather than hardcoded here: whatever _resolve_message_compose_box is willing
+    # to type into has to be subtracted, or that composer's draft counts as thread
+    # text and we are back to confirming sends that never happened.
+    _MESSAGE_OCCURRENCES_JS = """({ expected, composerSelectors }) => {
+        const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+        const needle = normalize(expected);
+        if (!needle) return 0;
+        const count = haystack => {
+            let seen = 0;
+            let at = 0;
+            while ((at = haystack.indexOf(needle, at)) !== -1) {
+                seen += 1;
+                at += needle.length;
+            }
+            return seen;
+        };
+        const bodyText = normalize(document.body?.innerText || '');
+        const composers = new Set();
+        for (const selector of composerSelectors) {
+            for (const el of document.querySelectorAll(selector)) {
+                composers.add(el);
+            }
+        }
+        // Drop any composer nested in another, so shared text is not subtracted twice.
+        let composerText = '';
+        for (const el of composers) {
+            let nested = false;
+            for (const other of composers) {
+                if (other !== el && other.contains(el)) {
+                    nested = true;
+                    break;
+                }
+            }
+            if (!nested) composerText += ' ' + normalize(el.innerText || '');
+        }
+        return Math.max(0, count(bodyText) - count(normalize(composerText)));
+    }"""
+
+    async def _count_message_occurrences(self, message: str) -> int | None:
+        """Count occurrences of the message in the thread, ignoring the composer.
+
+        Returns ``None`` when the page could not be evaluated at all. That is not
+        the same as a count of zero, and the caller must not treat it as one: a
+        zero baseline on a resend would let the copy already in the thread confirm
+        a send that never happened.
+        """
+        try:
+            return int(
+                await self._page.evaluate(
+                    self._MESSAGE_OCCURRENCES_JS,
+                    {
+                        "expected": message,
+                        "composerSelectors": list(
+                            _MESSAGING_COMPOSE_FALLBACK_SELECTORS
+                        ),
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("Could not count message occurrences", exc_info=True)
+            return None
+
+    async def _message_delivered(self, message: str, baseline: int | None) -> bool:
+        """Wait until the thread shows one more copy of the message than before.
+
+        ``baseline`` is the occurrence count captured *before* the send attempt,
+        so a message that was already in the visible thread (a resend, or a quote
+        of an earlier message) does not count as confirmation on its own. A
+        ``None`` baseline means the count never happened, and an unverifiable send
+        is reported as unconfirmed rather than guessed either way.
 
         Uses the page-level default timeout (``BrowserConfig.default_timeout``).
         """
+        if baseline is None:
+            logger.debug("No pre-send baseline; cannot confirm delivery")
+            return False
         try:
             await self._page.wait_for_function(
-                """({ expected }) => {
-                    const normalize = value =>
-                        (value || '').replace(/\\s+/g, ' ').trim();
-                    const bodyText = normalize(document.body?.innerText || '');
-                    return bodyText.includes(normalize(expected));
-                }""",
-                arg={"expected": message},
+                f"""({{ expected, baseline, composerSelectors }}) => {{
+                    const occurrences = ({self._MESSAGE_OCCURRENCES_JS})(
+                        {{ expected, composerSelectors }}
+                    );
+                    return occurrences > baseline;
+                }}""",
+                arg={
+                    "expected": message,
+                    "baseline": baseline,
+                    "composerSelectors": list(_MESSAGING_COMPOSE_FALLBACK_SELECTORS),
+                },
             )
             return True
         except PlaywrightTimeoutError:
@@ -4113,6 +4194,10 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         display_name = await self._read_profile_display_name()
+        # A composer left open by an earlier call — one that returned sent, or died
+        # mid-flight — is still mounted and pointed at the previous recipient, which
+        # is what makes the second send_message of a session fail. Clear it first.
+        await self._dismiss_message_ui()
         if profile_urn:
             # Build the full compose URL that LinkedIn's own Message button
             # generates. The minimal ?recipient=<URN> form works for established
@@ -4248,8 +4333,21 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         await asyncio.sleep(0.1)
-        await self._page.keyboard.type(message, delay=15)
+        # keyboard.type() translates "\n" into an Enter press, and Enter is how
+        # LinkedIn's composer submits — so typing a multi-paragraph message raw
+        # sends each paragraph as its own message and strands the last one in the
+        # composer. Type line by line and use Shift+Enter, the composer's own
+        # newline gesture, so the whole text lands as a single message.
+        for position, line in enumerate(message.split("\n")):
+            if position:
+                await self._page.keyboard.press("Shift+Enter")
+            if line:
+                await self._page.keyboard.type(line, delay=15)
         await asyncio.sleep(0.3)
+
+        # Count what the thread already shows before sending, so confirmation can
+        # require a *new* occurrence rather than accepting the draft we just typed.
+        baseline_occurrences = await self._count_message_occurrences(message)
 
         # patchright actionability also blocks send_button.click(). Use JS click
         # on any visible, enabled send button; fall back to Enter key which
@@ -4273,14 +4371,25 @@ class LinkedInExtractor:
         if not sent_via_js:
             await self._page.keyboard.press("Enter")
 
-        if not await self._message_text_visible(message):
+        if not await self._message_delivered(message, baseline_occurrences):
             await self._dismiss_message_ui()
             return self._message_action_result(
                 self._page.url,
                 "send_unavailable",
-                "LinkedIn did not confirm that the message was sent.",
+                "LinkedIn did not confirm that the message was sent."
+                if baseline_occurrences is not None
+                else (
+                    "The message may or may not have been sent: the page could not "
+                    "be read before sending, so delivery could not be verified. "
+                    "Check the conversation before sending it again."
+                ),
                 recipient_selected=recipient_selected,
             )
+
+        # Leave no composer overlay behind: a stale one makes the next
+        # send_message in the same session resolve a dead compose box and fail
+        # with composer_unavailable.
+        await self._dismiss_message_ui()
 
         return self._message_action_result(
             self._page.url,
