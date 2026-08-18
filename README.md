@@ -115,13 +115,13 @@ When you set up or maintain this server, verify its entry in the MCP client conf
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
 - `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
-- `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit)
+- `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit). `--login-viewer` ends the session after 30 minutes either way.
 - `--login-viewer` - Docker only: show the `--login` browser at a token-protected URL on port 6080 (see [Authentication](#authentication))
 - `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
-- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Higher means fewer browser restarts but longer waits for other clients.
+- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
-- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on; no effect in Docker). On macOS the keychain may prompt once.
+- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on). Skipped in Docker, behind a proxy, and on a non-loopback HTTP bind. On macOS the keychain may prompt once.
 - `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
 - `--claim-profile-root` - Take over a profile directory the server will not claim on its own, such as one whose parent already holds other files. Needed once per directory.
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable
@@ -360,11 +360,11 @@ Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `d
 - `--logout` - Clear the stored session and every profile derived from it
 - `--timeout MS` - Timeout for a single page operation (default: 5000)
 - `--tool-timeout SECONDS` - Timeout for a whole tool call (default: 180). Raise it for heavy scrapes, slow networks, or a cold-start browser.
-- `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit)
+- `--login-timeout SECONDS` - How long the login browser waits for you to finish signing in (default: 1800; 0 = no limit). `--login-viewer` ends the session after 30 minutes either way.
 - `--login-viewer` - With `--login`, show the login browser at a token-protected URL on port 6080. Needs the profile mount from [Authentication](#authentication).
 - `--login-inline-wait SECONDS` - How long a tool call waits for a login to finish before telling the model to retry (default: 25, max 45; 0 = return at once)
 - `--browser-wait SECONDS` - How long to wait for another server process to hand over the shared browser (default: 25, max 45; 0 = report busy at once). Only matters with several MCP clients running at once.
-- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Higher means fewer browser restarts but longer waits for other clients.
+- `--browser-min-hold SECONDS` - Shortest time this process keeps the shared browser before handing it over (default: 20). Clamped to 3 seconds below `--browser-wait`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients.
 - `--browser-idle-timeout SECONDS` - Close an idle browser and release the profile after this long without a tool call (default: 600; 0 = keep it open)
 - `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (ignored in Docker). On macOS the keychain may prompt once.
 - `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
