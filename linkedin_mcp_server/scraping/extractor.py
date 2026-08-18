@@ -96,6 +96,11 @@ def rate_limited_section_error() -> dict[str, str]:
 
 # LinkedIn shows 25 results per page
 _PAGE_SIZE = 25
+# Scrolling a page is bounded twice: per page, and across a whole search.
+# max_pages reaches 10 and tool_timeout_seconds defaults to 180, so an
+# unbounded per-page wait could spend the caller's entire budget.
+_SCROLL_DEADLINE_MAX = 12.0
+_SCROLL_BUDGET_TOTAL = 60.0
 
 _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 
@@ -3079,6 +3084,7 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
+        scroll_deadline: float = _SCROLL_DEADLINE_MAX,
     ) -> ExtractedSection:
         """Extract innerText from a job search page with soft rate-limit retry.
 
@@ -3087,7 +3093,9 @@ class LinkedInExtractor:
         ``_RATE_LIMITED_MSG`` sentinel instead of silent empty results.
         """
         try:
-            result = await self._extract_search_page_once(url, section_name)
+            result = await self._extract_search_page_once(
+                url, section_name, scroll_deadline
+            )
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
@@ -3097,7 +3105,9 @@ class LinkedInExtractor:
                 _RATE_LIMIT_RETRY_DELAY,
             )
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            result = await self._extract_search_page_once(url, section_name)
+            result = await self._extract_search_page_once(
+                url, section_name, scroll_deadline
+            )
             if result.text == _RATE_LIMITED_MSG:
                 logger.warning("Search page %s still rate-limited after retry", url)
             return result
@@ -3121,6 +3131,7 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
+        scroll_deadline: float = _SCROLL_DEADLINE_MAX,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
         await self._navigate_to_page(url)
@@ -3135,7 +3146,9 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         if main_found:
-            await scroll_job_sidebar(self._page, target_count=_PAGE_SIZE)
+            await scroll_job_sidebar(
+                self._page, target_count=_PAGE_SIZE, deadline=scroll_deadline
+            )
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
@@ -3266,6 +3279,10 @@ class LinkedInExtractor:
             easy_apply=easy_apply,
             sort_by=sort_by,
         )
+        # Split the search-wide scroll budget over the pages asked for, so a
+        # 10-page search cannot spend more on scrolling than the tool timeout
+        # leaves for navigation and extraction.
+        scroll_deadline = min(_SCROLL_DEADLINE_MAX, _SCROLL_BUDGET_TOTAL / max_pages)
         all_job_ids: list[str] = []
         seen_ids: set[str] = set()
         page_texts: list[str] = []
@@ -3291,7 +3308,9 @@ class LinkedInExtractor:
 
             try:
                 extracted = await self._extract_search_page(
-                    url, section_name="search_results"
+                    url,
+                    section_name="search_results",
+                    scroll_deadline=scroll_deadline,
                 )
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:

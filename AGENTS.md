@@ -148,18 +148,19 @@ Optional additional keys:
 
 ## Tests
 
-- **A test that cannot fail is not a test.** Run a new test against the
-  broken state it is meant to catch before committing it. One that passes
-  there asserts something every implementation satisfies (a count that holds
-  either way, a branch merely touched) and has to be rewritten to assert the
-  behaviour, usually against the log line or the elapsed time. Two of the ten
-  tests in `tests/test_job_sidebar_scroll_dom.py` shipped that way and only
-  review caught them.
+- **A test that cannot fail is not a test.** Before committing one, mutate
+  the code it covers and watch it fail. A test that survives the mutation
+  asserts something every implementation satisfies (a count that holds
+  either way, a branch merely touched), and the usual repair is to assert
+  the log line, the elapsed time, or a count scoped to the thing under
+  test. Fixtures that reload on every scroll event mask a premature stop:
+  slow them down until one batch lands per round, or the mutation survives
+  for the wrong reason.
 - **Browser-DOM tests belong where the unit suite mocks `page.evaluate`.**
   Extractor JS never executes under a mock, so a `browser_dom` test is its
-  only coverage. Elsewhere prefer a unit test: a browser fixture is a claim
-  about LinkedIn's own behaviour, and a wrong claim costs more than the
-  missing test would have.
+  only coverage. Prefer a unit test elsewhere, and keep in mind that a
+  fixture imitating LinkedIn's markup is a claim about LinkedIn, while one
+  driving a synthetic container is a claim about the algorithm only.
 
 ## Verifying Bug Reports
 

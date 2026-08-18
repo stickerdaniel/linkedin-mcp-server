@@ -27,19 +27,30 @@ def sidebar(
     batch: int,
     delays: list[int],
     initial: int = 5,
-    stray: bool = False,
+    strays: int = 0,
+    links_per_card: int = 1,
+    scrollable_pane: bool = False,
 ) -> str:
     """A scrollable sidebar that appends `batch` cards after each scroll.
 
     ``delays`` gives the delay of each successive batch in ms, so a fixture
     can vary latency the way a real connection does. The last value repeats.
-    ``stray`` adds a job link outside the sidebar, standing in for the detail
-    pane's own permalink, which must not count toward the target.
+    ``strays`` adds job links outside the rail, standing in for the detail
+    pane's own permalink. ``links_per_card`` mirrors a card carrying both a
+    title link and an overlay link to the same job. ``scrollable_pane`` puts
+    those stray links in a container that scrolls on its own, which is what
+    makes "first scrollable ancestor" the wrong container to pick.
     """
+    stray_links = "".join(
+        f'<a href="/jobs/view/{900000 + i}/" style="display:block;height:40px">'
+        f"Pane {i}</a>"
+        for i in range(strays)
+    )
     outside = (
-        '<a href="/jobs/view/999999/" style="display:block">Detail pane</a>'
-        if stray
-        else ""
+        f'<div id="pane" style="height:80px;overflow-y:scroll">{stray_links}'
+        '<div style="height:400px"></div></div>'
+        if scrollable_pane
+        else stray_links
     )
     return f"""
     <body style="margin:0">
@@ -57,12 +68,14 @@ def sidebar(
         function add(count) {{
           for (let i = 0; i < count && n < {total}; i++) {{
             n++;
-            const a = document.createElement('a');
-            a.href = '/jobs/view/' + (1000 + n) + '/';
-            a.textContent = 'Job ' + n;
-            a.style.display = 'block';
-            a.style.height = '40px';
-            list.appendChild(a);
+            for (let k = 0; k < {links_per_card}; k++) {{
+              const a = document.createElement('a');
+              a.href = '/jobs/view/' + (1000 + n) + '/';
+              a.textContent = 'Job ' + n;
+              a.style.display = 'block';
+              a.style.height = '40px';
+              list.appendChild(a);
+            }}
           }}
         }}
         add({initial});
@@ -77,6 +90,13 @@ def sidebar(
       </script>
     </body>
     """
+
+
+async def rail_cards(page) -> int:
+    """Links inside the results rail alone, ignoring anything the pane holds."""
+    return await page.evaluate(
+        "document.querySelectorAll('#rail a[href*=\"/jobs/view/\"]').length"
+    )
 
 
 async def cards(page) -> int:
@@ -159,21 +179,28 @@ class TestSidebarScroll:
 
     async def test_ignores_job_links_outside_the_sidebar(self, dom_page):
         """The detail pane's own permalink must not count toward the target."""
-        await dom_page.set_content(sidebar(total=25, batch=5, delays=[30], stray=True))
+        await dom_page.set_content(sidebar(total=25, batch=5, delays=[30], strays=5))
 
         await scroll_job_sidebar(dom_page, target_count=25)
 
-        assert await cards(dom_page) == 26  # 25 in the rail, 1 outside
+        # Counting the whole document would stop the loop 5 cards early.
+        assert await rail_cards(dom_page) == 25
 
-    async def test_returns_at_the_deadline(self, dom_page):
+    async def test_returns_at_the_deadline(self, dom_page, caplog):
         """A page that keeps loading slowly must not spend the tool timeout."""
         await dom_page.set_content(sidebar(total=200, batch=1, delays=[900]))
 
-        await scroll_job_sidebar(
-            dom_page, target_count=25, settle_timeout=2.0, deadline=3.0
-        )
+        started = time.monotonic()
+        with caplog.at_level(logging.DEBUG, logger="linkedin_mcp_server.core.utils"):
+            await scroll_job_sidebar(
+                dom_page, target_count=25, settle_timeout=2.0, deadline=3.0
+            )
+        elapsed = time.monotonic() - started
 
-        assert await cards(dom_page) < 25
+        # A card count alone cannot fail here: max_scrolls caps this fixture
+        # below 25 whatever the deadline does.
+        assert "hit the 3s deadline" in caplog.text
+        assert elapsed < 5.0
 
     async def test_returns_when_the_list_is_exhausted(self, dom_page):
         """The last search page holds fewer cards than the page size.
@@ -203,3 +230,31 @@ class TestSidebarScroll:
             await scroll_job_sidebar(dom_page, target_count=25)
 
         assert "skipping sidebar scroll" in caplog.text
+
+    async def test_counts_jobs_not_links(self, dom_page):
+        """A card with two links to one job must not count twice."""
+        await dom_page.set_content(
+            # Slow enough that one batch lands per round, so a loop
+            # counting links instead of jobs visibly stops at half a page.
+            sidebar(total=25, batch=5, delays=[300], links_per_card=2)
+        )
+
+        await scroll_job_sidebar(dom_page, target_count=25)
+
+        assert await rail_cards(dom_page) == 50  # 25 jobs, two links each
+
+    async def test_picks_the_rail_over_a_scrollable_pane(self, dom_page):
+        """The detail pane scrolls too, and comes first in document order."""
+        await dom_page.set_content(
+            sidebar(
+                total=25,
+                batch=5,
+                delays=[30],
+                strays=6,
+                scrollable_pane=True,
+            )
+        )
+
+        await scroll_job_sidebar(dom_page, target_count=25)
+
+        assert await rail_cards(dom_page) == 25
