@@ -18,6 +18,7 @@ from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    NetworkError,
     detect_auth_barrier_quick,
     detect_rate_limit,
     goto_reporting_proxy_errors,
@@ -58,6 +59,11 @@ from linkedin_mcp_server.session_state import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Post-restart probe constants
+_PROBE_MAX_ATTEMPTS = 3
+_PROBE_RETRY_DELAY_SECONDS = 2.0
 
 
 # Default persistent profile directory
@@ -252,15 +258,13 @@ async def _feed_auth_succeeds(
         # disk and the log is what users paste into issue reports.
         await _log_feed_failure_context(browser, detail)
         if barrier is None:
-            # Nothing loaded and no barrier, so nothing proves the session is
-            # dead -- and with a proxy in front, the most likely cause is the
-            # proxy. Wrong credentials in particular produce no proxy error code
-            # at all: Chromium retries the 407 challenge until the navigation
-            # times out (verified against a local authenticating relay), so the
-            # marker check above cannot catch it. Reporting False would hand the
-            # caller an AuthenticationError, whose recovery moves the stored
-            # profile aside and starts a login through the same broken proxy.
+            # A navigation exception without a login/checkpoint/authwall marker
+            # proves only that the feed transport failed. It must remain a
+            # retryable network failure: converting it to ``False`` makes the
+            # caller manufacture AuthenticationError and quarantine live source
+            # cookies without authentication evidence.
             raise_if_proxy_configured(exc)
+            raise NetworkError("Feed navigation failed; try again.") from exc
         return False
 
 
@@ -287,6 +291,93 @@ def _make_browser(
     )
 
 
+async def _probe_auth_via_profile_nav(browser: BrowserManager) -> bool:
+    """Validate authentication by navigating to /in/me/.
+
+    Uses the same route proven by get_my_profile, which does not suffer the
+    generic HTTP 400 that LinkedIn returns for /feed/ on fresh-started
+    Chromium instances.  Checks for an authentication barrier only — no
+    remember-me resolution required on this path.
+
+    Returns True if authenticated, False if an auth barrier is detected.
+    Raises NetworkError for transport failures without authentication evidence,
+    so callers can retry rather than quarantine a valid session.
+    """
+    try:
+        await goto_reporting_proxy_errors(
+            browser.page,
+            "https://www.linkedin.com/in/me/",
+            wait_until="domcontentloaded",
+        )
+        await stabilize_navigation("profile probe navigation", logger)
+        barrier = await detect_auth_barrier_quick(browser.page)
+        if barrier is not None:
+            logger.warning(
+                "Profile probe auth check failed on %s: %s",
+                browser.page.url,
+                barrier,
+            )
+            return False
+        return True
+    except Exception as exc:
+        raise_if_proxy_error(exc)
+        barrier = await detect_auth_barrier_quick(browser.page)
+        if barrier is None:
+            raise_if_proxy_configured(exc)
+            raise NetworkError("Profile probe navigation failed; try again.") from exc
+        return False
+
+
+async def _probe_post_restart_session(browser: BrowserManager) -> bool:
+    """Probe authentication with bounded retry after service restart.
+
+    LinkedIn's /feed/ endpoint returns a generic HTTP 400 on fresh Chromium
+    launches in some deployment environments; /in/me/ does not exhibit this
+    behaviour.  Up to _PROBE_MAX_ATTEMPTS attempts are made, with
+    _PROBE_RETRY_DELAY_SECONDS between each, so transient startup errors do
+    not propagate as first-call failure.
+
+    Returns True if any attempt succeeds.
+    Raises NetworkError (last attempt's) if all attempts fail with transport
+    errors.  Raises AuthenticationError-worthy False via the caller if an auth
+    barrier is detected (barrier evidence beats retry).
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _PROBE_MAX_ATTEMPTS + 1):
+        try:
+            result = await _probe_auth_via_profile_nav(browser)
+            if result:
+                if attempt > 1:
+                    logger.info(
+                        "Post-restart session probe succeeded on attempt %d/%d",
+                        attempt,
+                        _PROBE_MAX_ATTEMPTS,
+                    )
+                return True
+            # Auth barrier detected — no point retrying; session is invalid.
+            return False
+        except NetworkError as exc:
+            last_exc = exc
+            if attempt < _PROBE_MAX_ATTEMPTS:
+                logger.warning(
+                    "Post-restart session probe attempt %d/%d failed: %s — retrying in %.0fs",
+                    attempt,
+                    _PROBE_MAX_ATTEMPTS,
+                    exc,
+                    _PROBE_RETRY_DELAY_SECONDS,
+                )
+                await asyncio.sleep(_PROBE_RETRY_DELAY_SECONDS)
+            else:
+                logger.warning(
+                    "Post-restart session probe attempt %d/%d failed: %s — no more retries",
+                    attempt,
+                    _PROBE_MAX_ATTEMPTS,
+                    exc,
+                )
+    assert last_exc is not None
+    raise last_exc
+
+
 async def _authenticate_existing_profile(
     profile_dir: Path,
     *,
@@ -300,7 +391,7 @@ async def _authenticate_existing_profile(
     )
     try:
         await browser.start()
-        if not await _feed_auth_succeeds(browser):
+        if not await _probe_post_restart_session(browser):
             raise AuthenticationError(
                 f"Stored runtime profile is invalid: {profile_dir}. "
                 f"Run with --login to refresh the source session.{proxy_hint()}"

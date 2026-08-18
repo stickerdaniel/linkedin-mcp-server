@@ -602,6 +602,21 @@ class TestScrapePersonUrls:
         assert urls[0].endswith("/in/testuser/")
         assert set(result["sections"]) == {"main_profile"}
 
+    async def test_main_profile_location_is_returned_structurally(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=ExtractedSection(
+                text="profile text", references=[], location="Helsinki, Finland"
+            ),
+        ):
+            result = await extractor.scrape_person("testuser", {"main_profile"})
+
+        assert result["location"] == "Helsinki, Finland"
+        assert result["sections"]["main_profile"] == "profile text"
+
     async def test_scrape_person_returns_section_errors(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with (

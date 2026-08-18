@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.core.exceptions import ProxyConnectionError
+from linkedin_mcp_server.core.exceptions import NetworkError, ProxyConnectionError
 from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
     get_or_create_browser,
@@ -154,7 +154,16 @@ async def test_same_runtime_uses_source_profile(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_same_runtime_clicks_remember_me_during_feed_validation(tmp_path):
+async def test_same_runtime_startup_probe_uses_profile_nav_not_feed(tmp_path):
+    """Startup authentication probe uses /in/me/ (not /feed/), no remember-me.
+
+    The old path called _feed_auth_succeeds which navigated to /feed/ and
+    resolved the remember-me prompt.  The new probe (_probe_post_restart_session
+    -> _probe_auth_via_profile_nav) navigates to /in/me/ instead, which avoids
+    the generic HTTP 400 that /feed/ returns on fresh Chromium after restart.
+    Remember-me resolution is not part of the startup probe; _feed_auth_succeeds
+    remains intact for the bridge/import paths that still use it.
+    """
     _write_source_state(tmp_path, runtime_id="macos-arm64-host")
     source_browser = _make_mock_browser()
 
@@ -181,8 +190,64 @@ async def test_same_runtime_clicks_remember_me_during_feed_validation(tmp_path):
         result = await get_or_create_browser()
 
     assert result is source_browser
-    assert source_browser.page.goto.await_count == 2
-    assert remember_me.await_count == 1
+    # Startup probe navigates exactly once (to /in/me/)
+    assert source_browser.page.goto.await_count == 1
+    # remember_me is NOT part of the startup probe
+    assert remember_me.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_feed_http_400_without_auth_evidence_keeps_source_state(tmp_path):
+    """A transport failure (HTTP 400 without auth barrier) is retryable, not proof that saved auth is dead.
+
+    The startup probe (_probe_post_restart_session) retries up to _PROBE_MAX_ATTEMPTS
+    times then raises NetworkError; the important property is that source state
+    (cookies, source-state.json) is NOT quarantined/moved/deleted — only a
+    confirmed auth barrier does that.
+
+    Before the post-restart fix (bb3c346): _feed_auth_succeeds raised NetworkError
+    immediately on first attempt.  After the fix: _probe_post_restart_session exhausts
+    all retries and raises NetworkError("Profile probe navigation failed; try again.").
+    The session-retention guarantee (no invalid-state-* created) is preserved either way.
+    """
+    source_profile = _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+    source_browser = _make_mock_browser()
+    source_browser.page.goto = AsyncMock(
+        side_effect=Exception("Page.goto: HTTP 400 while navigating to /in/me/")
+    )
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="macos-arm64-host",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=source_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.asyncio",
+            wraps=asyncio,
+        ) as mock_asyncio,
+        pytest.raises(NetworkError, match="Profile probe navigation failed; try again"),
+    ):
+        mock_asyncio.sleep = AsyncMock()
+        await get_or_create_browser()
+
+    # Session state must NOT be quarantined — transport error is retryable.
+    assert source_state_path(source_profile).exists()
+    assert portable_cookie_path(source_profile).exists()
+    assert not list(source_profile.parent.glob("invalid-state-*"))
 
 
 @pytest.mark.asyncio
@@ -1054,8 +1119,10 @@ class TestProxyFailureIsNotAnAuthFailure:
         assert "s3cr3t" not in str(excinfo.value)
 
     @pytest.mark.asyncio
-    async def test_ordinary_navigation_error_still_returns_false(self, monkeypatch):
-        # The existing behaviour for a genuinely broken session is unchanged.
+    async def test_ordinary_navigation_error_is_retryable_network_failure(
+        self, monkeypatch
+    ):
+        """A redirect transport error without a barrier cannot invalidate auth."""
         monkeypatch.setattr(
             "linkedin_mcp_server.config.get_config",
             browser_module.get_config,
@@ -1065,12 +1132,15 @@ class TestProxyFailureIsNotAnAuthFailure:
             side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS")
         )
 
-        with patch(
-            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
-            new_callable=AsyncMock,
-            return_value=False,
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(NetworkError, match="Feed navigation failed; try again"),
         ):
-            assert await _feed_auth_succeeds(browser) is False
+            await _feed_auth_succeeds(browser)
 
 
 class TestAmbiguousProxyFailureKeepsTheSession:
@@ -1104,11 +1174,10 @@ class TestAmbiguousProxyFailureKeepsTheSession:
             await _feed_auth_succeeds(browser)
 
     @pytest.mark.asyncio
-    async def test_the_same_timeout_without_a_proxy_still_returns_false(
+    async def test_timeout_without_a_proxy_is_retryable_network_failure(
         self, monkeypatch
     ):
-        # Unchanged behaviour when no proxy is configured: a broken session
-        # must still be reported as one.
+        """A timeout without an auth barrier does not prove session expiry."""
         monkeypatch.setattr(
             "linkedin_mcp_server.config.get_config", browser_module.get_config
         )
@@ -1117,12 +1186,15 @@ class TestAmbiguousProxyFailureKeepsTheSession:
             side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
         )
 
-        with patch(
-            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
-            new_callable=AsyncMock,
-            return_value=False,
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(NetworkError, match="Feed navigation failed; try again"),
         ):
-            assert await _feed_auth_succeeds(browser) is False
+            await _feed_auth_succeeds(browser)
 
     @pytest.mark.asyncio
     async def test_an_auth_barrier_under_a_proxy_still_reports_false(self, monkeypatch):
