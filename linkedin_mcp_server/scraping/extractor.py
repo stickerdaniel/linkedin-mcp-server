@@ -3282,7 +3282,9 @@ class LinkedInExtractor:
         # Split the search-wide scroll budget over the pages asked for, so a
         # 10-page search cannot spend more on scrolling than the tool timeout
         # leaves for navigation and extraction.
-        scroll_deadline = min(_SCROLL_DEADLINE_MAX, _SCROLL_BUDGET_TOTAL / max_pages)
+        scroll_deadline = min(
+            _SCROLL_DEADLINE_MAX, _SCROLL_BUDGET_TOTAL / max(1, max_pages)
+        )
         all_job_ids: list[str] = []
         seen_ids: set[str] = set()
         page_texts: list[str] = []
