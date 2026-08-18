@@ -24,9 +24,10 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-Docker includes full Chromium and an authenticated viewer for an explicit one-shot login. Create the host directory before mounting it so the unprivileged container user can write the session:
+The image ships full Chromium. Log in once through a browser the container shows you in your own browser tab:
 
 ```bash
+# Create the directory first so the container can save your session into it
 mkdir -p ~/.linkedin-mcp
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
@@ -35,9 +36,11 @@ docker run -it --rm \
   --login --login-viewer
 ```
 
-Open the complete loopback URL printed once by the command. The token is generated for that run, stored in a mode-0600 file, and carried in the URL fragment so the initial HTTP request remains token-free. Static noVNC files remain public; the token protects WebSocket control. Remote resize stays disabled, client-side scaling is fixed on, and the viewer closes after login, failure, a stop signal, or 1,800 seconds. Protected profile restoration may finish after remote control has closed, because interrupting a move on the mounted auth root could split the previous session. The command refuses to rotate any existing session unless the authentication root above the profile is on a writable, non-memory mount. If an older rootful Docker run created that host directory as root, repair it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
+Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
-A profile created by the Docker viewer belongs to the container runtime and is reused directly on later Docker startups with the same runtime identity. A profile created on the host with `uvx mcp-server-linkedin@latest --login` or `--import-from-browser` belongs to a foreign runtime, so Docker derives a fresh Linux bridge from its source cookies on each startup.
+Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `docker run`. A session created on the host with `uvx mcp-server-linkedin@latest --login` works too, and the container then rebuilds its own profile from those cookies on each start.
+
+If an older rootful Docker run left that host directory owned by root, repair it with `sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp`.
 
 **Configure Claude Desktop with Docker**
 
@@ -56,7 +59,7 @@ A profile created by the Docker viewer belongs to the container runtime and is r
 }
 ```
 
-> **Note:** Plain `--login` does not publish a viewer. Use `--login --login-viewer` only for the one-shot login container, with port 6080 published to loopback. The experimental shared-browser daemon is ignored in Docker because its owner can outlive the virtual display.
+> **Note:** Plain `--login` does not publish a viewer. Use `--login --login-viewer` only for the one-shot login container, with port 6080 published to loopback.
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
@@ -68,45 +71,41 @@ A profile created by the Docker viewer belongs to the container runtime and is r
 > off your network. Without that prefix Docker publishes on every interface.
 > Only expose it more widely behind something that authenticates.
 >
-> **Note:** Tool calls are serialized to protect the shared LinkedIn browser
-> session, both within one server process and between separate ones. Only one
-> process uses the browser at a time; others wait briefly and take over when it
-> finishes a call. Use `LOG_LEVEL=DEBUG` to see the lock logs.
->
-> **Note:** That coordination works between processes in the same runtime, but
-> not between the host and a container sharing the mounted `~/.linkedin-mcp`
-> directory. Do not run `--login` or `--logout` on the host while a container is
-> running.
+> **Note:** Only one process uses the browser at a time; others wait briefly
+> and take over when it finishes a call. That coordination does not reach
+> between the host and a container sharing the mounted `~/.linkedin-mcp`
+> directory, so do not run `--login` or `--logout` on the host while a
+> container is running.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `USER_DATA_DIR` | `~/.linkedin-mcp/profile` | Path to persistent browser profile directory. The container default is always usable; any other path needs a `profile-claim.json` marker in its parent, or one run with `--claim-profile-root` |
+| `USER_DATA_DIR` | `~/.linkedin-mcp/profile` | Browser profile directory. The container default always works; any other path needs one run with `--claim-profile-root` first. |
 | `LOG_LEVEL` | `WARNING` | Logging level: DEBUG, INFO, WARNING, ERROR |
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
-| `TOOL_TIMEOUT` | `180` | Per-tool MCP execution timeout in seconds. Increase further for heavy scrapes (multi-section profiles, cold-start Chromium, slow networks/containers). |
-| `LOGIN_TIMEOUT` | `1800` | Manual login wait timeout in seconds (`0` = no ordinary limit). The Docker viewer caps the effective limit at its 1,800-second wall, so `0` becomes 30 minutes in viewer mode. Protected profile restoration may finish afterward. |
-| `LOGIN_INLINE_WAIT` | `25` | Bounded inline wait (seconds, max 45) for a tool call to resume after login completes. No effect in normal container server mode; the explicit `--login --login-viewer` command is the Docker login path. |
-| `BROWSER_WAIT` | `25` | How long (seconds, max 45) to wait for another server process to hand over the shared browser before reporting that it is busy. `0` reports busy immediately. |
-| `BROWSER_MIN_HOLD` | `20` | Shortest time (seconds) a process keeps the shared browser before handing it to a waiting process. Higher means fewer browser restarts but longer waits for other clients; clamped below `BROWSER_WAIT` so a waiting client is served before its own timeout. `0` hands over after every tool call. |
-| `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the shared profile after this many seconds without a tool call. `0` keeps it open until the server exits. |
-| `AUTO_IMPORT_FROM_BROWSER` | on by default | Auto-import a LinkedIn session from a locally logged-in browser on the first no-session tool call, before falling back to manual login. On by default across interactive and non-interactive desktop runs; set `false` to require `--login` / `--import-from-browser`. No effect in containers (no host browser or keychain) or on a non-loopback HTTP bind. On macOS the OS keychain may prompt once for Safe Storage access. |
+| `TOOL_TIMEOUT` | `180` | Timeout for a whole tool call, in seconds. Raise it for heavy scrapes, slow networks, or a cold-start browser. |
+| `LOGIN_TIMEOUT` | `1800` | How long the login browser waits for you to finish signing in, in seconds (`0` = no limit). The Docker viewer ends the login after 30 minutes either way. |
+| `LOGIN_INLINE_WAIT` | `25` | How long a tool call waits for a login to finish, in seconds (max 45). Not used in Docker, where `--login --login-viewer` is the login path. |
+| `BROWSER_WAIT` | `25` | How long to wait for another server process to hand over the shared browser, in seconds (max 45; `0` = report busy at once). |
+| `BROWSER_MIN_HOLD` | `20` | Shortest time a process keeps the shared browser before handing it over, in seconds. Clamped to 3 seconds below `BROWSER_WAIT`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients. |
+| `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the profile after this many seconds without a tool call (`0` = keep it open). |
+| `AUTO_IMPORT_FROM_BROWSER` | on | Import a session from a signed-in local browser on the first tool call that needs one. Skipped in containers, which have no host browser or keychain. |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
-| `HEADLESS` | `false` | Docker defaults to full headed Chromium on its virtual display. Set `true` only to deliberately use Chromium's real headless mode, which identifies itself as `HeadlessChrome`. |
-| `DAEMON_ENABLED` | `false` | The experimental shared-browser daemon is ignored in Docker. Its owner is designed to outlive a stdio frontend, while the virtual display belongs to that frontend's process group. |
-| `VIEWPORT` | `1280x720` | Browser viewport size as WIDTHxHEIGHT. Docker is headed by default and therefore uses its real Xvfb window size; this applies only when `HEADLESS=true`. |
+| `HEADLESS` | `false` | Docker runs full headed Chromium on a virtual display. Set `true` only for Chromium's real headless mode, which identifies itself as `HeadlessChrome`. |
+| `DAEMON_ENABLED` | `false` | The experimental shared-browser daemon is ignored in Docker. |
+| `VIEWPORT` | `1280x720` | Viewport size as WIDTHxHEIGHT. Only applies with `HEADLESS=true`; a headed Docker run uses its real window size. |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
-| `PROXY_SERVER` | - | Optional, and most setups are better off without one: LinkedIn advises against proxies and scores the addresses a session signs in from, so a stable known address beats a commercial exit node. Worth it when the container runs somewhere its address is obviously a data centre, and even then a WireGuard or Tailscale exit node on your own network is preferable. Route the browser through a proxy, as `scheme://host:port` (`http`, `https`, `socks4`, `socks5`). May also carry credentials directly (`http://user:pass@host:port`), which is how most providers hand them out. Inside a container `127.0.0.1` is the container itself: for a relay running on the host use `host.docker.internal` (on native Linux Docker, add `--add-host=host.docker.internal:host-gateway`). Only browser traffic is routed, not the MCP transport. |
+| `PROXY_SERVER` | - | Route browser traffic through a proxy, as `scheme://host:port` (`http`, `https`, `socks4`, `socks5`), or with credentials as `http://user:pass@host:port`. Only the browser is routed, not the MCP transport. Inside a container `127.0.0.1` is the container itself, so a relay on the host is `host.docker.internal` (native Linux Docker also needs `--add-host=host.docker.internal:host-gateway`). **Most setups are better off without a proxy:** LinkedIn scores the addresses a session signs in from, so a stable known address beats a commercial exit node. |
 | `PROXY_USERNAME` | - | Username for the proxy |
-| `PROXY_PASSWORD` | - | Password for the proxy. Env-only by design: there is no CLI flag, because command-line arguments are readable by every user on the machine. Chromium cannot authenticate to a SOCKS proxy, so credentials require an `http(s)` endpoint. |
+| `PROXY_PASSWORD` | - | Password for the proxy. Env-only, since command-line arguments are readable by every user on the machine. Chromium cannot authenticate to a SOCKS proxy, so credentials need an `http(s)` endpoint. |
 | `PROXY_BYPASS` | - | Comma-separated hosts to reach directly instead of through the proxy |
-| `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: reuse checkpointed derived Linux runtime profiles across Docker restarts instead of fresh-bridging each startup |
-| `LINKEDIN_TRACE_MODE` | `on_error` | Trace/log retention mode: `on_error` keeps ephemeral artifacts only when a failure occurs, `always` keeps every run, `off` disables trace persistence |
+| `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: keep the container's derived profile across restarts instead of rebuilding it on each start |
+| `LINKEDIN_TRACE_MODE` | `on_error` | Trace retention: `on_error` keeps artifacts only from failed runs, `always` keeps every run, `off` keeps none |
 
 **Example with custom timeouts:**
 
