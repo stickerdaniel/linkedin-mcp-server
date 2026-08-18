@@ -12,6 +12,7 @@ installed; run locally after ``uv run patchright install chromium --no-shell``.
 from __future__ import annotations
 
 import logging
+import time
 
 import pytest
 from patchright.async_api import async_playwright
@@ -110,11 +111,19 @@ class TestSidebarScroll:
         assert await cards(dom_page) == 25
 
     async def test_loads_full_page_on_a_fast_connection(self, dom_page):
+        """Card count alone would pass for any loop, so bound the time too.
+
+        Waiting the full budget every round would take four rounds times
+        settle_timeout here. Measured span on this fixture is 0.17-0.35s.
+        """
         await dom_page.set_content(sidebar(total=25, batch=5, delays=[30]))
 
+        started = time.monotonic()
         await scroll_job_sidebar(dom_page, target_count=25)
+        elapsed = time.monotonic() - started
 
         assert await cards(dom_page) == 25
+        assert elapsed < 2.0
 
     async def test_stops_at_target_without_over_scrolling(self, dom_page):
         """More cards than a page holds must not pull the next page in.
@@ -167,7 +176,11 @@ class TestSidebarScroll:
         assert await cards(dom_page) < 25
 
     async def test_returns_when_the_list_is_exhausted(self, dom_page):
-        """The last search page holds fewer cards than the page size."""
+        """The last search page holds fewer cards than the page size.
+
+        A loop that never concludes the list is done would hang here rather
+        than fail an assertion, which is what this covers.
+        """
         await dom_page.set_content(sidebar(total=16, batch=5, delays=[30]))
 
         await scroll_job_sidebar(dom_page, target_count=25, settle_timeout=0.6)

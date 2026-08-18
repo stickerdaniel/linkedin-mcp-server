@@ -146,6 +146,21 @@ Optional additional keys:
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 
+## Tests
+
+- **A test that cannot fail is not a test.** Run a new test against the
+  broken state it is meant to catch before committing it. One that passes
+  there asserts something every implementation satisfies (a count that holds
+  either way, a branch merely touched) and has to be rewritten to assert the
+  behaviour, usually against the log line or the elapsed time. Two of the ten
+  tests in `tests/test_job_sidebar_scroll_dom.py` shipped that way and only
+  review caught them.
+- **Browser-DOM tests belong where the unit suite mocks `page.evaluate`.**
+  Extractor JS never executes under a mock, so a `browser_dom` test is its
+  only coverage. Elsewhere prefer a unit test: a browser fixture is a claim
+  about LinkedIn's own behaviour, and a wrong claim costs more than the
+  missing test would have.
+
 ## Verifying Bug Reports
 
 Always verify scraping bugs end-to-end against live LinkedIn, not just code analysis. Use `uv run`, not `uvx`, so the running process reflects your workspace. Use `uvx` only for packaged distribution verification. For live Docker investigations, refresh the source session first with `uv run -m linkedin_mcp_server --login` before testing each materially different approach. Assume a valid login profile already exists at `~/.linkedin-mcp/profile/`.
