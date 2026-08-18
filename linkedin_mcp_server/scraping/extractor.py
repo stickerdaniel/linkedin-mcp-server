@@ -3135,7 +3135,7 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         if main_found:
-            await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
+            await scroll_job_sidebar(self._page, target_count=_PAGE_SIZE)
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]

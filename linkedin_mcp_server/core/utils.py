@@ -9,6 +9,8 @@ from .exceptions import RateLimitError
 
 logger = logging.getLogger(__name__)
 
+_JOB_CARD_SELECTOR = 'a[href*="/jobs/view/"]'
+
 
 async def detect_rate_limit(page: Page) -> None:
     """Detect if LinkedIn has rate-limited or security-challenged the session.
@@ -87,33 +89,48 @@ async def scroll_to_bottom(
 
 
 async def scroll_job_sidebar(
-    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
+    page: Page,
+    target_count: int,
+    settle_timeout: float = 3.0,
+    poll_interval: float = 0.15,
+    max_scrolls: int = 10,
 ) -> None:
-    """Scroll the job search sidebar to load all job cards.
+    """Scroll the job search sidebar until the page's worth of cards is loaded.
 
     LinkedIn renders job search results in a scrollable sidebar container,
-    not the main page body. This function finds that container by locating
-    a job card link and walking up to its scrollable ancestor, then scrolls
-    it iteratively until no new content loads.
+    not the main page body. This function finds that container through a job
+    card link and scrolls it until ``target_count`` cards are present or the
+    list stops growing.
+
+    Each scroll waits for the next batch by polling instead of sleeping a
+    fixed amount, because how long a batch takes is a property of the user's
+    connection. ``settle_timeout`` bounds the wait for the first batch; every
+    later round waits three times what the previous batch actually took, so a
+    fast connection stops early and a slow one is given the full budget.
+
+    DOM dependency: scrolling requires an element reference, which innerText
+    extraction cannot provide.
 
     Args:
         page: Patchright page object
-        pause_time: Time to pause between scrolls (seconds)
+        target_count: Cards to stop at, i.e. the pagination page size
+        settle_timeout: Upper bound per round for a batch to appear (seconds)
+        poll_interval: How often to look for the batch (seconds)
         max_scrolls: Maximum number of scroll attempts
     """
-    # Wait for at least one job card link to render before scrolling
     try:
-        await page.wait_for_selector('a[href*="/jobs/view/"]', timeout=5000)
+        await page.wait_for_selector(_JOB_CARD_SELECTOR, timeout=5000)
     except PlaywrightTimeoutError:
         logger.debug("No job card links found, skipping sidebar scroll")
         return
 
-    scrolled = await page.evaluate(
-        """async ({pauseTime, maxScrolls}) => {
-            const link = document.querySelector('a[href*="/jobs/view/"]');
-            if (!link) return -2;
+    result = await page.evaluate(
+        """async ({selector, targetCount, settleMs, pollMs, maxScrolls}) => {
+            const countCards = () => document.querySelectorAll(selector).length;
+            const first = document.querySelector(selector);
+            if (!first) return {status: 'gone'};
 
-            let container = link.parentElement;
+            let container = first.parentElement;
             while (container && container !== document.body) {
                 const style = window.getComputedStyle(container);
                 const overflowY = style.overflowY;
@@ -125,29 +142,65 @@ async def scroll_job_sidebar(
             }
 
             if (!container || container === document.body) {
-                return -1;
+                return {status: 'no-container', cards: countCards()};
             }
 
-            let scrollCount = 0;
-            for (let i = 0; i < maxScrolls; i++) {
-                const prevHeight = container.scrollHeight;
+            const minWaitMs = 400;
+            let budgetMs = settleMs;
+            let scrolls = 0;
+
+            while (countCards() < targetCount && scrolls < maxScrolls) {
+                const beforeCards = countCards();
+                const beforeHeight = container.scrollHeight;
                 container.scrollTop = container.scrollHeight;
-                await new Promise(r => setTimeout(r, pauseTime * 1000));
-                if (container.scrollHeight === prevHeight) break;
-                scrollCount++;
+
+                const started = Date.now();
+                const deadline = started + budgetMs;
+                let grew = false;
+                while (Date.now() < deadline) {
+                    await new Promise(r => setTimeout(r, pollMs));
+                    if (countCards() > beforeCards
+                        || container.scrollHeight > beforeHeight) {
+                        grew = true;
+                        break;
+                    }
+                }
+                if (!grew) break;
+
+                const took = Date.now() - started;
+                budgetMs = Math.min(settleMs, Math.max(minWaitMs, took * 3));
+                scrolls++;
             }
-            return scrollCount;
+
+            return {status: 'ok', scrolls, cards: countCards()};
         }""",
-        {"pauseTime": pause_time, "maxScrolls": max_scrolls},
+        {
+            "selector": _JOB_CARD_SELECTOR,
+            "targetCount": target_count,
+            "settleMs": settle_timeout * 1000,
+            "pollMs": poll_interval * 1000,
+            "maxScrolls": max_scrolls,
+        },
     )
-    if scrolled == -2:
+
+    status = result.get("status")
+    if status == "gone":
         logger.debug("Job card link disappeared before evaluate, skipping scroll")
-    elif scrolled == -1:
+    elif status == "no-container":
         logger.debug("No scrollable container found for job sidebar")
-    elif scrolled:
-        logger.debug("Scrolled job sidebar %d times", scrolled)
+    elif result["cards"] < target_count:
+        logger.debug(
+            "Job sidebar stopped at %d of %d cards after %d scrolls",
+            result["cards"],
+            target_count,
+            result["scrolls"],
+        )
     else:
-        logger.debug("Job sidebar container found but no new content loaded")
+        logger.debug(
+            "Job sidebar loaded %d cards after %d scrolls",
+            result["cards"],
+            result["scrolls"],
+        )
 
 
 async def handle_modal_close(page: Page) -> bool:
