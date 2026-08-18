@@ -30,6 +30,9 @@ def sidebar(
     strays: int = 0,
     links_per_card: int = 1,
     scrollable_pane: bool = False,
+    wrap_cards: bool = False,
+    rerender_after: int | None = None,
+    slugged: bool = False,
 ) -> str:
     """A scrollable sidebar that appends `batch` cards after each scroll.
 
@@ -52,6 +55,9 @@ def sidebar(
         if scrollable_pane
         else stray_links
     )
+    wrap_cards_js = "true" if wrap_cards else "false"
+    slug_js = "true" if slugged else "false"
+    rerender_js = "null" if rerender_after is None else str(rerender_after)
     return f"""
     <body style="margin:0">
       {outside}
@@ -60,8 +66,8 @@ def sidebar(
         <div style="height:600px"></div>
       </div>
       <script>
-        const list = document.getElementById('list');
-        const rail = document.getElementById('rail');
+        let list = document.getElementById('list');
+        let rail = document.getElementById('rail');
         const delays = {delays!r};
         let n = 0;
         let round = 0;
@@ -70,23 +76,50 @@ def sidebar(
             n++;
             for (let k = 0; k < {links_per_card}; k++) {{
               const a = document.createElement('a');
-              a.href = '/jobs/view/' + (1000 + n) + '/';
+              a.href = {slug_js}
+                ? '/jobs/view/senior-engineer-at-acme-' + (1000 + n)
+                : '/jobs/view/' + (1000 + n) + '/';
               a.textContent = 'Job ' + n;
               a.style.display = 'block';
               a.style.height = '40px';
-              list.appendChild(a);
+              if ({wrap_cards_js}) {{
+                const wrap = document.createElement('div');
+                wrap.style.cssText = 'height:20px;overflow-y:auto';
+                const filler = document.createElement('div');
+                filler.style.height = '60px';
+                wrap.appendChild(a);
+                wrap.appendChild(filler);
+                list.appendChild(wrap);
+              }} else {{
+                list.appendChild(a);
+              }}
             }}
           }}
         }}
         add({initial});
         let pending = false;
+        let batches = 0;
+        function mount() {{
         rail.addEventListener('scroll', () => {{
           if (pending || n >= {total}) return;
           pending = true;
           const delay = delays[Math.min(round, delays.length - 1)];
           round++;
-          setTimeout(() => {{ add({batch}); pending = false; }}, delay);
+          setTimeout(() => {{
+            add({batch});
+            batches++;
+            if ({rerender_js} !== null && batches === {rerender_js}) {{
+              const fresh = rail.cloneNode(true);
+              rail.replaceWith(fresh);
+              rail = fresh;
+              list = fresh.querySelector('#list');
+              mount();
+            }}
+            pending = false;
+          }}, delay);
         }});
+        }}
+        mount();
       </script>
     </body>
     """
@@ -244,15 +277,92 @@ class TestSidebarScroll:
         assert await rail_cards(dom_page) == 50  # 25 jobs, two links each
 
     async def test_picks_the_rail_over_a_scrollable_pane(self, dom_page):
-        """The detail pane scrolls too, and comes first in document order."""
+        """The detail pane scrolls too, and comes first in document order.
+
+        ``initial=11`` is what a live search rendered before any scroll, so
+        the rail outweighs a pane holding its permalink plus a handful of
+        similar jobs. The heuristic is "most job ids", so a pane holding more
+        jobs than the rail has rendered would still win; that is documented
+        in the function and has not been observed.
+        """
         await dom_page.set_content(
             sidebar(
                 total=25,
                 batch=5,
                 delays=[30],
+                initial=11,
                 strays=6,
                 scrollable_pane=True,
             )
+        )
+
+        await scroll_job_sidebar(dom_page, target_count=25)
+
+        assert await rail_cards(dom_page) == 25
+
+    async def test_picks_the_rail_over_per_card_wrappers(self, dom_page):
+        """A card in its own scrollable wrapper must not become the container.
+
+        The nearest scrollable ancestor is then a container holding one card,
+        and the rail is never scrolled at all.
+        """
+        await dom_page.set_content(
+            sidebar(total=25, batch=5, delays=[30], wrap_cards=True)
+        )
+
+        await scroll_job_sidebar(dom_page, target_count=25)
+
+        assert await rail_cards(dom_page) == 25
+
+    async def test_shrinks_the_budget_after_fast_batches(self, dom_page):
+        """A fast connection must not pay the full budget to conclude.
+
+        The terminating round costs budget + settle_timeout. Without the
+        shrink that is 2x settle_timeout; with it the first half collapses
+        to min_budget.
+        """
+        await dom_page.set_content(sidebar(total=15, batch=5, delays=[40]))
+
+        started = time.monotonic()
+        await scroll_job_sidebar(dom_page, target_count=25, settle_timeout=3.0)
+        elapsed = time.monotonic() - started
+
+        assert await rail_cards(dom_page) == 15
+        assert elapsed < 5.0
+
+    async def test_recovers_when_the_rail_is_replaced(self, dom_page):
+        """A re-render detaches the rail; polling it would measure a corpse."""
+        await dom_page.set_content(
+            sidebar(total=25, batch=5, delays=[30], rerender_after=1)
+        )
+
+        await scroll_job_sidebar(dom_page, target_count=25, settle_timeout=1.0)
+
+        assert await rail_cards(dom_page) == 25
+
+    async def test_stops_at_the_scroll_cap(self, dom_page, caplog):
+        """The cap must be distinguishable from an exhausted list in the log."""
+        await dom_page.set_content(sidebar(total=200, batch=1, delays=[30]))
+
+        with caplog.at_level(logging.DEBUG, logger="linkedin_mcp_server.core.utils"):
+            await scroll_job_sidebar(dom_page, target_count=25, max_scrolls=3)
+
+        assert "scroll cap reached" in caplog.text
+
+    async def test_a_closed_page_does_not_raise(self, dom_page, caplog):
+        """Scrolling is best effort and must never end the caller's search."""
+        await dom_page.set_content(sidebar(total=25, batch=5, delays=[30]))
+        await dom_page.close()  # stands in for a navigation mid-scroll
+
+        with caplog.at_level(logging.DEBUG, logger="linkedin_mcp_server.core.utils"):
+            await scroll_job_sidebar(dom_page, target_count=25, deadline=1.0)
+
+        assert "scroll failed" in caplog.text
+
+    async def test_reads_ids_from_slugged_hrefs(self, dom_page):
+        """LinkedIn also serves /jobs/view/<slug>-<id>; the id is the target."""
+        await dom_page.set_content(
+            sidebar(total=25, batch=5, delays=[30], slugged=True)
         )
 
         await scroll_job_sidebar(dom_page, target_count=25)

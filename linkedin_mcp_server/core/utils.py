@@ -100,23 +100,28 @@ async def scroll_job_sidebar(
     """Scroll the job search sidebar until the page's worth of cards is loaded.
 
     LinkedIn renders job search results in a scrollable sidebar container,
-    not the main page body. Which container that is cannot be decided from a
-    snapshot: the job detail pane scrolls on its own and carries both its own
-    permalink and a "similar jobs" list, so it can hold more matches than the
-    rail has rendered yet. Every scrollable ancestor of a card is scrolled,
-    and the target counts the richest one, which is the one that grows.
+    not the main page body. Finding it means looking at every scrollable
+    ancestor of every card, not the nearest one of the first card: the job
+    detail pane scrolls on its own and carries its own permalink, and a card
+    may sit in a scrollable wrapper of its own. The rail is the container
+    holding the most distinct job ids, and it is the only one scrolled, so a
+    "similar jobs" list in the pane can neither be lazy-loaded into the page
+    nor be mistaken for progress. Known limit: a pane holding more jobs than
+    the rail has rendered would win the comparison. A live search rendered 11
+    rail cards against a single pane permalink, so the margin is wide, but
+    the heuristic is a count and not proof.
 
-    Cards are counted as distinct job ids rather than selector matches, since
-    one card can carry several links to the same job.
+    Cards count as distinct job ids rather than selector matches, since one
+    card can carry several links to the same job.
 
     Each scroll waits for the next batch by polling instead of sleeping a
     fixed amount, because how long a batch takes belongs to the user's
     connection. A round that sees nothing scrolls once more at the full
     ``settle_timeout`` before the list counts as exhausted, so a single slow
     batch cannot end the page: that is what the fixed 0.5s sleep did, and one
-    measured search lost 14 of 25 cards to it. The longest a round can wait is
-    therefore ``2 * settle_timeout``. Later rounds start from three times what
-    the previous batch took, floored at ``min_budget``, which shortens the
+    measured search lost 14 of 25 cards to it. A round therefore waits at
+    most ``2 * settle_timeout``. Later rounds start from three times what the
+    previous batch took, floored at ``min_budget``, which shortens the
     terminating round on a fast connection.
 
     ``deadline`` bounds the whole call; ``search_jobs`` divides a search-wide
@@ -135,76 +140,94 @@ async def scroll_job_sidebar(
         deadline: Wall-clock bound for the whole call (seconds)
     """
     try:
-        await page.wait_for_selector(_JOB_CARD_SELECTOR, timeout=5000)
+        await page.wait_for_selector(
+            _JOB_CARD_SELECTOR, timeout=min(5000, int(deadline * 1000))
+        )
     except PlaywrightTimeoutError:
         logger.debug("No job card links found, skipping sidebar scroll")
+        return
+    except Exception as exc:
+        # Same reason as the guard around the evaluate below: the page can go
+        # away under us, and scrolling must not take the search with it.
+        logger.warning("Job sidebar scroll failed, page may be short: %s", exc)
         return
 
     try:
         result = await page.evaluate(
-            """async (opts) => {
+            r"""async (opts) => {
             const {selector, targetCount, settleMs, pollMs,
                    minBudgetMs, maxScrolls, deadlineMs} = opts;
 
-            const scrollableAncestor = (card) => {
-                let node = card ? card.parentElement : null;
-                while (node && node !== document.body) {
-                    const style = window.getComputedStyle(node);
-                    const overflowY = style.overflowY;
-                    if ((overflowY === 'auto' || overflowY === 'scroll')
-                        && node.scrollHeight > node.clientHeight) {
-                        return node;
-                    }
-                    node = node.parentElement;
-                }
-                return null;
+            // Slugged hrefs (/jobs/view/<slug>-<id>) and the currentJobId
+            // form both occur. #727 widens the selector to componentkey
+            // cards and has to widen this with it.
+            const idOf = (node) => {
+                const match = (node.getAttribute('href') || '').match(
+                    /\/jobs\/view\/(?:[\w-]*?-)?(\d+)|currentJobId=(\d+)/
+                );
+                return match ? (match[1] || match[2]) : null;
             };
 
             const idsIn = (scope) => {
                 const ids = new Set();
                 for (const node of scope.querySelectorAll(selector)) {
-                    const source = node.getAttribute('href')
-                        || node.getAttribute('componentkey') || '';
-                    const match = source.match(
-                        /(?:\/jobs\/view\/|job-card-component-ref-)(\d+)/
-                    );
-                    if (match) ids.add(match[1]);
+                    const id = idOf(node);
+                    if (id) ids.add(id);
                 }
                 return ids.size;
             };
 
-            const cards = document.querySelectorAll(selector);
-            if (!cards.length) return {status: 'gone'};
-
-            let containers = [];
-            for (const card of cards) {
-                const candidate = scrollableAncestor(card);
-                if (candidate && !containers.includes(candidate)) {
-                    containers.push(candidate);
+            // Every scrollable ancestor of every card is a candidate: a
+            // card can sit in its own scrollable wrapper, and the nearest
+            // one is then a container holding a single card. Collected
+            // fresh on every pick, because a re-render replaces the nodes.
+            const collect = () => {
+                const found = [];
+                for (const card of document.querySelectorAll(selector)) {
+                    let node = card.parentElement;
+                    while (node && node !== document.body) {
+                        const style = window.getComputedStyle(node);
+                        const overflowY = style.overflowY;
+                        if ((overflowY === 'auto' || overflowY === 'scroll')
+                            && node.scrollHeight > node.clientHeight
+                            && !found.includes(node)) {
+                            found.push(node);
+                        }
+                        node = node.parentElement;
+                    }
                 }
-            }
-            if (!containers.length) {
-                return {status: 'no-container', cards: idsIn(document)};
-            }
-
-            const live = () =>
-                containers.filter((node) => document.contains(node));
-            const countCards = () =>
-                live().reduce((most, node) => Math.max(most, idsIn(node)), 0);
-            const totalHeight = () =>
-                live().reduce((sum, node) => sum + node.scrollHeight, 0);
-            const scrollAll = () => {
-                for (const node of live()) {
-                    node.scrollTop = node.scrollHeight;
-                }
+                return found;
             };
+
+            if (!document.querySelectorAll(selector).length) {
+                return {status: 'gone'};
+            }
+
+            // The rail is the candidate holding the most jobs. Scrolling only
+            // it keeps a scrollable detail pane out of the page entirely.
+            const pickRail = () => {
+                let best = 0;
+                let picked = null;
+                for (const node of collect()) {
+                    const held = idsIn(node);
+                    if (held > best) {
+                        best = held;
+                        picked = node;
+                    }
+                }
+                return picked;
+            };
+
+            let rail = pickRail();
+            if (!rail) return {status: 'no-container', cards: 0};
 
             const hardDeadline = Date.now() + deadlineMs;
             const grewSince = async (cardCount, height, budgetMs) => {
                 const until = Math.min(Date.now() + budgetMs, hardDeadline);
                 while (Date.now() < until) {
                     await new Promise(r => setTimeout(r, pollMs));
-                    if (countCards() > cardCount || totalHeight() > height) {
+                    if (idsIn(rail) > cardCount
+                        || rail.scrollHeight > height) {
                         return true;
                     }
                 }
@@ -214,34 +237,37 @@ async def scroll_job_sidebar(
             let budgetMs = settleMs;
             let scrolls = 0;
             let timedOut = false;
+            let cappedOut = false;
 
-            while (countCards() < targetCount && scrolls < maxScrolls) {
+            while (idsIn(rail) < targetCount) {
+                if (scrolls >= maxScrolls) {
+                    cappedOut = true;
+                    break;
+                }
                 if (Date.now() >= hardDeadline) {
                     timedOut = true;
                     break;
                 }
-                if (!live().length) {
-                    // A re-render detaches the rail; polling the old nodes
+                if (!document.contains(rail)) {
+                    // A re-render detaches the rail; polling the old node
                     // would measure a corpse until the deadline.
-                    const again = scrollableAncestor(
-                        document.querySelector(selector)
-                    );
+                    const again = pickRail();
                     if (!again) break;
-                    containers = [again];
+                    rail = again;
                 }
 
-                const beforeCards = countCards();
-                const beforeHeight = totalHeight();
+                const beforeCards = idsIn(rail);
+                const beforeHeight = rail.scrollHeight;
                 const started = Date.now();
 
-                scrollAll();
+                rail.scrollTop = rail.scrollHeight;
                 let grew = await grewSince(
                     beforeCards, beforeHeight, budgetMs
                 );
                 if (!grew) {
                     // One confirmation round at the full budget: a batch
                     // slower than the shrunken budget is not an empty list.
-                    scrollAll();
+                    rail.scrollTop = rail.scrollHeight;
                     grew = await grewSince(
                         beforeCards, beforeHeight, settleMs
                     );
@@ -261,8 +287,9 @@ async def scroll_job_sidebar(
             return {
                 status: 'ok',
                 scrolls,
-                cards: countCards(),
+                cards: idsIn(rail),
                 timedOut,
+                cappedOut,
             };
         }""",
             {
@@ -278,7 +305,7 @@ async def scroll_job_sidebar(
     except Exception as exc:
         # Scrolling is best effort: a navigation or a destroyed context during
         # the evaluate must not discard the page the caller is about to read.
-        logger.debug("Job sidebar scroll failed: %s", exc)
+        logger.warning("Job sidebar scroll failed, page may be short: %s", exc)
         return
 
     status = result.get("status")
@@ -299,7 +326,7 @@ async def scroll_job_sidebar(
             result["cards"],
             target_count,
             result["scrolls"],
-            " (scroll cap reached)" if result["scrolls"] >= max_scrolls else "",
+            " (scroll cap reached)" if result["cappedOut"] else "",
         )
     else:
         logger.debug(
