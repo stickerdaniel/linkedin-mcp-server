@@ -93,7 +93,9 @@ async def scroll_job_sidebar(
     target_count: int,
     settle_timeout: float = 3.0,
     poll_interval: float = 0.15,
+    min_budget: float = 0.4,
     max_scrolls: int = 10,
+    deadline: float = 12.0,
 ) -> None:
     """Scroll the job search sidebar until the page's worth of cards is loaded.
 
@@ -103,10 +105,17 @@ async def scroll_job_sidebar(
     list stops growing.
 
     Each scroll waits for the next batch by polling instead of sleeping a
-    fixed amount, because how long a batch takes is a property of the user's
-    connection. ``settle_timeout`` bounds the wait for the first batch; every
-    later round waits three times what the previous batch actually took, so a
-    fast connection stops early and a slow one is given the full budget.
+    fixed amount, because how long a batch takes belongs to the user's
+    connection. A round that sees nothing scrolls once more at the full
+    ``settle_timeout`` before the list counts as exhausted, so a single slow
+    batch cannot end the page: that is what the fixed 0.5s sleep did, and one
+    measured search lost 14 of 25 cards to it. Later rounds start from three
+    times what the previous batch took, floored at ``min_budget``, which keeps
+    a fast connection fast without making a spike fatal.
+
+    ``deadline`` bounds the whole call. ``max_pages`` reaches 10 and
+    ``tool_timeout_seconds`` defaults to 180, so a per-page bound is what
+    keeps a pathological page from spending the tool's entire budget.
 
     DOM dependency: scrolling requires an element reference, which innerText
     extraction cannot provide.
@@ -114,9 +123,11 @@ async def scroll_job_sidebar(
     Args:
         page: Patchright page object
         target_count: Cards to stop at, i.e. the pagination page size
-        settle_timeout: Upper bound per round for a batch to appear (seconds)
+        settle_timeout: Longest wait for a batch, and the confirmation wait
         poll_interval: How often to look for the batch (seconds)
+        min_budget: Smallest wait a fast connection may shrink to (seconds)
         max_scrolls: Maximum number of scroll attempts
+        deadline: Wall-clock bound for the whole call (seconds)
     """
     try:
         await page.wait_for_selector(_JOB_CARD_SELECTOR, timeout=5000)
@@ -125,61 +136,104 @@ async def scroll_job_sidebar(
         return
 
     result = await page.evaluate(
-        """async ({selector, targetCount, settleMs, pollMs, maxScrolls}) => {
-            const countCards = () => document.querySelectorAll(selector).length;
-            const first = document.querySelector(selector);
-            if (!first) return {status: 'gone'};
+        """async (opts) => {
+            const {selector, targetCount, settleMs, pollMs,
+                   minBudgetMs, maxScrolls, deadlineMs} = opts;
+            const cards = document.querySelectorAll(selector);
+            if (!cards.length) return {status: 'gone'};
 
-            let container = first.parentElement;
-            while (container && container !== document.body) {
-                const style = window.getComputedStyle(container);
-                const overflowY = style.overflowY;
-                if ((overflowY === 'auto' || overflowY === 'scroll')
-                    && container.scrollHeight > container.clientHeight) {
-                    break;
+            // Walk up from every card, not just the first one in the
+            // document: the detail pane carries its own /jobs/view/ link and
+            // sits outside the scrollable rail, so starting there finds no
+            // container at all.
+            let container = null;
+            for (const card of cards) {
+                let node = card.parentElement;
+                while (node && node !== document.body) {
+                    const style = window.getComputedStyle(node);
+                    const overflowY = style.overflowY;
+                    if ((overflowY === 'auto' || overflowY === 'scroll')
+                        && node.scrollHeight > node.clientHeight) {
+                        container = node;
+                        break;
+                    }
+                    node = node.parentElement;
                 }
-                container = container.parentElement;
+                if (container) break;
             }
 
-            if (!container || container === document.body) {
+            // Scope the count to the sidebar: the job detail pane carries its
+            // own /jobs/view/ permalink and would count toward the target.
+            const countCards = () =>
+                (container || document).querySelectorAll(selector).length;
+
+            if (!container) {
                 return {status: 'no-container', cards: countCards()};
             }
 
-            const minWaitMs = 400;
-            let budgetMs = settleMs;
-            let scrolls = 0;
-
-            while (countCards() < targetCount && scrolls < maxScrolls) {
-                const beforeCards = countCards();
-                const beforeHeight = container.scrollHeight;
-                container.scrollTop = container.scrollHeight;
-
-                const started = Date.now();
-                const deadline = started + budgetMs;
-                let grew = false;
-                while (Date.now() < deadline) {
+            const hardDeadline = Date.now() + deadlineMs;
+            const grewSince = async (cards, height, budgetMs) => {
+                const until = Math.min(Date.now() + budgetMs, hardDeadline);
+                while (Date.now() < until) {
                     await new Promise(r => setTimeout(r, pollMs));
-                    if (countCards() > beforeCards
-                        || container.scrollHeight > beforeHeight) {
-                        grew = true;
-                        break;
+                    if (countCards() > cards
+                        || container.scrollHeight > height) {
+                        return true;
                     }
                 }
-                if (!grew) break;
+                return false;
+            };
+
+            let budgetMs = settleMs;
+            let scrolls = 0;
+            let timedOut = false;
+
+            while (countCards() < targetCount && scrolls < maxScrolls) {
+                if (Date.now() >= hardDeadline) {
+                    timedOut = true;
+                    break;
+                }
+                const beforeCards = countCards();
+                const beforeHeight = container.scrollHeight;
+                const started = Date.now();
+
+                container.scrollTop = container.scrollHeight;
+                let grew = await grewSince(beforeCards, beforeHeight, budgetMs);
+                if (!grew) {
+                    // One confirmation round at the full budget: a batch
+                    // slower than the shrunken budget is not an empty list.
+                    container.scrollTop = container.scrollHeight;
+                    grew = await grewSince(
+                        beforeCards, beforeHeight, settleMs
+                    );
+                }
+                if (!grew) {
+                    timedOut = Date.now() >= hardDeadline;
+                    break;
+                }
 
                 const took = Date.now() - started;
-                budgetMs = Math.min(settleMs, Math.max(minWaitMs, took * 3));
+                budgetMs = Math.min(
+                    settleMs, Math.max(minBudgetMs, took * 3)
+                );
                 scrolls++;
             }
 
-            return {status: 'ok', scrolls, cards: countCards()};
+            return {
+                status: 'ok',
+                scrolls,
+                cards: countCards(),
+                timedOut,
+            };
         }""",
         {
             "selector": _JOB_CARD_SELECTOR,
             "targetCount": target_count,
             "settleMs": settle_timeout * 1000,
             "pollMs": poll_interval * 1000,
+            "minBudgetMs": min_budget * 1000,
             "maxScrolls": max_scrolls,
+            "deadlineMs": deadline * 1000,
         },
     )
 
@@ -188,6 +242,13 @@ async def scroll_job_sidebar(
         logger.debug("Job card link disappeared before evaluate, skipping scroll")
     elif status == "no-container":
         logger.debug("No scrollable container found for job sidebar")
+    elif result["timedOut"]:
+        logger.debug(
+            "Job sidebar hit the %.0fs deadline at %d of %d cards",
+            deadline,
+            result["cards"],
+            target_count,
+        )
     elif result["cards"] < target_count:
         logger.debug(
             "Job sidebar stopped at %d of %d cards after %d scrolls",
