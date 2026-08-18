@@ -73,7 +73,7 @@
     },
     {
       "name": "search_companies",
-      "description": "Search for companies on LinkedIn by keywords"
+      "description": "Search for companies on LinkedIn by keywords, paginating with max_pages and resuming a previous walk with start_page"
     },
     {
       "name": "get_company_employees",
@@ -93,7 +93,7 @@
     },
     {
       "name": "search_people",
-      "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company"
+      "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company, paginating with max_pages and resuming a previous walk with start_page"
     },
     {
       "name": "get_inbox",

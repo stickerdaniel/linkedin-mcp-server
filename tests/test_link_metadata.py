@@ -2,7 +2,13 @@
 
 from urllib.parse import quote
 
+from linkedin_mcp_server.scraping.extractor import (
+    _ENTITY_SEARCH_MAX_PAGES,
+    _ENTITY_SEARCH_REFERENCE_CAP,
+    _ENTITY_SEARCH_SLUGS_PER_PAGE,
+)
 from linkedin_mcp_server.scraping.link_metadata import (
+    _REFERENCE_CAPS,
     RawReference,
     build_references,
     classify_link,
@@ -441,6 +447,44 @@ class TestBuildReferences:
         assert len(references) == 8
         assert references[0]["url"] == "/jobs/view/0/"
         assert references[-1]["url"] == "/jobs/view/7/"
+
+    def test_one_search_page_survives_intact(self):
+        """The cap was 15 and a live people page carries 26 distinct slugs.
+
+        So more than half of a single page's usable handles were dropped before
+        pagination was ever in the picture — and the slug is the only handle
+        get_person_profile accepts.
+        """
+        raw: list[RawReference] = [
+            {
+                "href": f"https://www.linkedin.com/in/person-{idx}/",
+                "text": f"Person {idx}",
+            }
+            for idx in range(_ENTITY_SEARCH_SLUGS_PER_PAGE)
+        ]
+
+        references = build_references(raw, "search_results")
+
+        assert len(references) == _ENTITY_SEARCH_SLUGS_PER_PAGE
+
+    def test_the_per_page_cap_holds_a_whole_page(self):
+        """The two caps are stacked, and only the outer one is visible.
+
+        A per-page cap below what a page carries truncates on the way in, and
+        the merged list then sits comfortably under its own cap — so nothing
+        looks wrong while results are being dropped.
+        """
+        assert _REFERENCE_CAPS["search_results"] >= _ENTITY_SEARCH_SLUGS_PER_PAGE
+
+    def test_the_merged_cap_holds_every_page_of_a_full_walk(self):
+        """Sizing the merged cap by results-per-page instead of slugs-per-page
+        truncates a ten-page walk around page four, and it drops the tail — so
+        the last pages' result cards are lost behind the first pages'
+        mutual-connection anchors."""
+        assert (
+            _ENTITY_SEARCH_REFERENCE_CAP
+            >= _ENTITY_SEARCH_SLUGS_PER_PAGE * _ENTITY_SEARCH_MAX_PAGES
+        )
 
     def test_uses_default_cap_for_unknown_section(self):
         raw: list[RawReference] = [

@@ -104,6 +104,42 @@ _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 # list and yields nothing.
 _SAVED_JOBS_PAGE_SIZE = 10
 
+# People and company search page with ``&page=N``, one-based, ten result cards
+# each. Verified live: page 1 and page 2 of one query were disjoint, and the
+# parameter was still in the final URL at page 20 — LinkedIn neither clamps it
+# nor re-serves page one.
+#
+# Scrolling is not an alternative here and never was: the same page-1 URL
+# extracted with a larger scroll budget returned byte-identical text and an
+# identical slug set, because ``document.body.scrollHeight`` equals the
+# viewport height on a fully rendered results page. The scrolls inside
+# ``extract_page`` break after one iteration and can never reach result #11.
+#
+# The constant below is the tool-side ceiling on ``max_pages``, restated here
+# because the reference cap further down is derived from it.
+_ENTITY_SEARCH_MAX_PAGES = 10
+
+# Distinct entity slugs one results page carries, which is not its number of
+# result cards. Measured live: a people page with 10 cards held 26 distinct
+# /in/ slugs, because each card also links the mutual connections it shares
+# with the viewer. Company pages measured at exactly 10; the larger number
+# governs, since one cap serves both.
+_ENTITY_SEARCH_SLUGS_PER_PAGE = 30
+
+# Every reference a full-depth walk can produce, and the reason it is derived
+# from slugs-per-page rather than from results-per-page: sizing this at 100 —
+# the *result* count — truncates a ten-page walk at roughly page four, and what
+# it drops is the tail, so the last pages' result cards are lost behind the
+# first pages' mutual-connection anchors. That is the depth thrown away at the
+# last step, which is the bug this cap exists to avoid. A slug is the only
+# handle get_person_profile and get_company_profile accept, so a capped
+# reference list is a capped result set no matter how much text came back.
+#
+# ``link_metadata._REFERENCE_CAPS["search_results"]`` is the per-navigation cap
+# and has to hold one page's worth (``_ENTITY_SEARCH_SLUGS_PER_PAGE``); this
+# one has to hold the whole walk.
+_ENTITY_SEARCH_REFERENCE_CAP = _ENTITY_SEARCH_SLUGS_PER_PAGE * _ENTITY_SEARCH_MAX_PAGES
+
 # Normalization maps for job search filters. Job search encodes recency as
 # ``f_TPR=r<seconds>``; content search uses named tokens, hence the separate
 # ``_CONTENT_DATE_POSTED_MAP`` below.
@@ -3602,14 +3638,145 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    async def _paginated_entity_search(
+        self,
+        base_url: str,
+        *,
+        entity_kind: str,
+        max_pages: int,
+        context: str,
+        start_page: int = 1,
+    ) -> dict[str, Any]:
+        """Walk ``&page=N`` over a people or company search and merge the pages.
+
+        The same loop ``search_jobs`` runs over ``&start=``, with two
+        differences that follow from the surface rather than from taste. There
+        is no page-count element to read — measured, a fully rendered people
+        results page carries zero ``ul.artdeco-pagination__pages li button``
+        nodes and no element whose class matches /pagination|pager/, so
+        ``_get_total_list_pages`` answers ``None`` here and asking costs a
+        round trip for nothing. And the early stop counts entity slugs rather
+        than job IDs: the slug comes out of the href, so the signal is a URL
+        pattern, never a text value that a locale could change. The results
+        header ("About 5,200 results") would be the obvious source for a total
+        and is deliberately not read, for the same reason.
+
+        A page that adds no slug the walk has not already seen ends it. That is
+        how LinkedIn's end of results shows up from here — a query with one
+        page of matches costs one navigation whether the caller asked for one
+        page or ten. Verified live past the last page: LinkedIn keeps the
+        ``&page=N`` in the URL and renders "No results found" — 78 characters
+        of text and zero entity anchors — so the walk ends on the honest
+        signal rather than on the empty-text branch that means an error.
+
+        ``start_page`` is where the walk begins, and it is the whole of the
+        resumable story: ``&page=N`` is a URL parameter, so a caller resumes
+        by naming a number rather than by handing back a cursor this scraper
+        would have to keep. ``start_page=1, max_pages=3`` walks 1-3 and
+        ``start_page=4, max_pages=3`` walks 4-6, which is why the docstrings
+        can tell an agent to advance by ``max_pages``: the ranges abut.
+
+        The bare URL belongs to page one and to no other, so the parameter is
+        decided by the page number rather than by the loop index. Keying it to
+        the index instead would serve page one for every ``start_page``, and
+        that is the one failure a looping caller cannot detect: the batch comes
+        back full, every slug is new to that call's own seen-set, and the loop
+        walks the same ten people forever.
+        """
+        page_texts: list[str] = []
+        page_references: list[Reference] = []
+        section_errors: dict[str, dict[str, Any]] = {}
+        seen_entities: set[str] = set()
+        stopped_by = "max_pages"
+
+        for offset in range(max_pages):
+            page_num = start_page + offset
+            if offset > 0:
+                await asyncio.sleep(_NAV_DELAY)
+
+            url = base_url if page_num == 1 else f"{base_url}&page={page_num}"
+
+            try:
+                extracted = await self.extract_page(url, section_name="search_results")
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Error on %s page %d: %s", context, page_num, e)
+                section_errors["search_results"] = build_issue_diagnostics(
+                    e,
+                    context=context,
+                    target_url=url,
+                    section_name="search_results",
+                )
+                stopped_by = "error"
+                break
+
+            if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                # Rate limit first: it is the more specific diagnosis, and a
+                # page that was throttled may carry a generic error too.
+                if extracted.text == _RATE_LIMITED_MSG:
+                    section_errors["search_results"] = rate_limited_section_error()
+                elif extracted.error:
+                    section_errors["search_results"] = extracted.error
+                stopped_by = "error"
+                break
+
+            new_entities = [
+                ref["url"]
+                for ref in extracted.references
+                if ref["kind"] == entity_kind and ref["url"] not in seen_entities
+            ]
+
+            page_texts.append(extracted.text)
+            if extracted.references:
+                page_references.extend(extracted.references)
+
+            if not new_entities:
+                logger.debug(
+                    "No new %s results on page %d, stopping", entity_kind, page_num
+                )
+                stopped_by = "linkedin_end_of_list"
+                break
+
+            seen_entities.update(new_entities)
+
+        references = (
+            dedupe_references(page_references, cap=_ENTITY_SEARCH_REFERENCE_CAP)
+            if page_texts
+            else []
+        )
+        result: dict[str, Any] = {
+            "url": base_url,
+            "sections": {"search_results": "\n---\n".join(page_texts)}
+            if page_texts
+            else {},
+            # Not decoration: a caller who asked for ten pages and got two has
+            # to be able to tell "LinkedIn had no more" from "the budget ran
+            # out", and the shortfall is otherwise only inferrable by counting
+            # the text. ``returned`` counts references after the cap, which is
+            # the list the follow-up tools can actually act on.
+            "result_counts": {
+                "rows_seen": len(seen_entities),
+                "returned": len(references),
+                "stopped_by": stopped_by,
+            },
+        }
+        if references:
+            result["references"] = {"search_results": references}
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
     async def search_people(
         self,
         keywords: str,
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        max_pages: int = 1,
+        start_page: int = 1,
     ) -> dict[str, Any]:
-        """Search for people and extract the results page.
+        """Search for people and extract the results pages.
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
@@ -3625,9 +3792,14 @@ class LinkedInExtractor:
                 unfiltered result set. Look up a company's URN via
                 ``get_company_profile`` -- it is exposed under
                 ``references["about"]``.
+            max_pages: How many ``&page=N`` result pages to walk, ten people
+                each (1-10, default 1). Costs one navigation per page.
+            start_page: Which results page the walk begins on (default 1), so
+                a caller can resume where the last call stopped without
+                re-fetching what it already has.
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {name: text}, result_counts: {...}}
         """
         if network is not None:
             invalid = [t for t in network if t not in _NETWORK_TOKENS]
@@ -3654,63 +3826,41 @@ class LinkedInExtractor:
             params += f"&currentCompany={_encode_list_facet([current_company])}"
 
         url = f"https://www.linkedin.com/search/results/people/?{params}"
-        extracted = await self.extract_page(url, section_name="search_results")
-
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-            sections["search_results"] = extracted.text
-            if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.text == _RATE_LIMITED_MSG:
-            section_errors["search_results"] = rate_limited_section_error()
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
-
-        result: dict[str, Any] = {
-            "url": url,
-            "sections": sections,
-        }
-        if references:
-            result["references"] = references
-        if section_errors:
-            result["section_errors"] = section_errors
-        return result
+        return await self._paginated_entity_search(
+            url,
+            entity_kind="person",
+            max_pages=max_pages,
+            context="search_people",
+            start_page=start_page,
+        )
 
     async def search_companies(
         self,
         keywords: str,
+        max_pages: int = 1,
+        start_page: int = 1,
     ) -> dict[str, Any]:
-        """Search for companies and extract the results page.
+        """Search for companies and extract the results pages.
+
+        Args:
+            keywords: Free-text query ("fintech", "electric vehicles").
+            max_pages: How many ``&page=N`` result pages to walk, ten companies
+                each (1-10, default 1). Costs one navigation per page.
+            start_page: Which results page the walk begins on (default 1), so
+                a caller can resume where the last call stopped without
+                re-fetching what it already has.
 
         Returns:
-            {url, sections: {search_results: text}}
+            {url, sections: {search_results: text}, result_counts: {...}}
         """
         url = f"https://www.linkedin.com/search/results/companies/?keywords={quote_plus(keywords)}"
-        extracted = await self.extract_page(url, section_name="search_results")
-
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-            sections["search_results"] = extracted.text
-            if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.text == _RATE_LIMITED_MSG:
-            section_errors["search_results"] = rate_limited_section_error()
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
-
-        result: dict[str, Any] = {
-            "url": url,
-            "sections": sections,
-        }
-        if references:
-            result["references"] = references
-        if section_errors:
-            result["section_errors"] = section_errors
-        return result
+        return await self._paginated_entity_search(
+            url,
+            entity_kind="company",
+            max_pages=max_pages,
+            context="search_companies",
+            start_page=start_page,
+        )
 
     @staticmethod
     def _build_content_search_url(

@@ -18,13 +18,15 @@ from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
     _CONTENT_DATE_POSTED_MAP,
+    _ENTITY_SEARCH_REFERENCE_CAP,
+    _ENTITY_SEARCH_SLUGS_PER_PAGE,
     _RATE_LIMITED_MSG,
     _build_feed_references,
     _truncate_linkedin_noise,
     strip_conversation_chrome,
     strip_linkedin_noise,
 )
-from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.scraping.link_metadata import Reference, ReferenceKind
 
 
 def extracted(
@@ -3116,6 +3118,370 @@ class TestSearchPeople:
         assert "location=Seattle" in result["url"]
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
+
+
+def _entity_page(
+    kind: ReferenceKind, prefix: str, start: int, count: int = 10
+) -> ExtractedSection:
+    """One results page carrying *count* distinct entity anchors."""
+    references: list[Reference] = [
+        {
+            "kind": kind,
+            "url": f"{prefix}{start + i}/",
+            "text": f"Result {start + i}",
+        }
+        for i in range(count)
+    ]
+    return extracted(f"page from {start}", references)
+
+
+class _PagedSearch:
+    """Drive one of the two entity searches over a scripted set of pages."""
+
+    def __init__(self, extractor, pages):
+        self._extractor = extractor
+        self._pages = list(pages)
+        self.urls: list[str] = []
+
+    async def _extract(self, url, *args, **kwargs):
+        self.urls.append(url)
+        if not self._pages:
+            return extracted("")
+        return self._pages.pop(0)
+
+    async def run(self, method: str, *args, **kwargs):
+        with (
+            patch.object(self._extractor, "extract_page", side_effect=self._extract),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            return await getattr(self._extractor, method)(*args, **kwargs)
+
+
+class TestEntitySearchPagination:
+    """``search_people`` / ``search_companies`` had no depth control at all.
+
+    Measured live: the results page has no body scroll (``scrollHeight`` equals
+    the viewport), so the scrolls inside ``extract_page`` could never reach
+    result #11. Depth here is ``&page=N``, one navigation per page, exactly as
+    ``search_jobs`` paginates with ``&start=``.
+    """
+
+    CASES = [
+        ("search_people", "person", "/in/p"),
+        ("search_companies", "company", "/company/c"),
+    ]
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_later_pages_carry_the_page_parameter(
+        self, mock_page, method, kind, prefix
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 0), _entity_page(kind, prefix, 100)],
+        )
+        await driver.run(method, "query", max_pages=2)
+
+        assert "&page=" not in driver.urls[0]
+        assert driver.urls[1] == f"{driver.urls[0]}&page=2"
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_pages_accumulate_into_one_section(
+        self, mock_page, method, kind, prefix
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 0), _entity_page(kind, prefix, 100)],
+        )
+        result = await driver.run(method, "query", max_pages=2)
+
+        assert result["sections"]["search_results"] == "page from 0\n---\npage from 100"
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_references_survive_past_the_first_fifteen(
+        self, mock_page, method, kind, prefix
+    ):
+        """The depth is thrown away at the last step without this.
+
+        ``_REFERENCE_CAPS["search_results"]`` was 15, so ten pages of ten
+        results returned a hundred entities in the text and fifteen usable
+        links — and the slug in the link is the only handle the follow-up
+        tools accept.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 100 * n) for n in range(4)],
+        )
+        result = await driver.run(method, "query", max_pages=4)
+
+        refs = result["references"]["search_results"]
+        assert len(refs) == 40
+        assert refs[-1]["url"] == f"{prefix}309/"
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_the_merged_cap_is_reported_where_it_bites(
+        self, mock_page, method, kind, prefix
+    ):
+        """``returned`` is the list the caller can act on, not what was found.
+
+        Reporting the pre-cap count would say 330 while handing back 300, and
+        the 30 missing are the tail — the last page's results, dropped behind
+        the first page's mutual-connection anchors.
+        """
+        per_page = _ENTITY_SEARCH_SLUGS_PER_PAGE
+        pages = (_ENTITY_SEARCH_REFERENCE_CAP // per_page) + 1
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [
+                _entity_page(kind, prefix, 1000 * n, count=per_page)
+                for n in range(pages)
+            ],
+        )
+        result = await driver.run(method, "query", max_pages=pages)
+
+        assert len(result["references"]["search_results"]) == (
+            _ENTITY_SEARCH_REFERENCE_CAP
+        )
+        assert result["result_counts"]["returned"] == _ENTITY_SEARCH_REFERENCE_CAP
+        assert result["result_counts"]["rows_seen"] == per_page * pages
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_a_page_with_no_new_entities_stops_the_walk(
+        self, mock_page, method, kind, prefix
+    ):
+        """Asking for ten pages of a query with one costs one navigation."""
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 0), _entity_page(kind, prefix, 0)],
+        )
+        result = await driver.run(method, "query", max_pages=10)
+
+        assert len(driver.urls) == 2
+        assert result["result_counts"]["stopped_by"] == "linkedin_end_of_list"
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_exhausting_the_budget_is_reported_as_such(
+        self, mock_page, method, kind, prefix
+    ):
+        """A full batch and an exhausted one must not look alike.
+
+        "20 of 20" and "the first 20 of who knows how many" are the same
+        twenty rows; only ``stopped_by`` separates them.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 100 * n) for n in range(2)],
+        )
+        result = await driver.run(method, "query", max_pages=2)
+
+        assert result["result_counts"] == {
+            "rows_seen": 20,
+            "returned": 20,
+            "stopped_by": "max_pages",
+        }
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_pages_are_spaced_by_the_navigation_gap(
+        self, mock_page, method, kind, prefix
+    ):
+        """Three navigations back to back is not something a person does."""
+        extractor = LinkedInExtractor(mock_page)
+        pages = [_entity_page(kind, prefix, 100 * n) for n in range(3)]
+
+        async def extract(url, *args, **kwargs):
+            return pages.pop(0)
+
+        with (
+            patch.object(extractor, "extract_page", side_effect=extract),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as sleep,
+        ):
+            await getattr(extractor, method)("query", max_pages=3)
+
+        assert [call.args[0] for call in sleep.await_args_list] == [2.0, 2.0]
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_default_depth_is_one_page(self, mock_page, method, kind, prefix):
+        """Pagination is opt-in: the default must cost what it always did."""
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 100 * n) for n in range(5)],
+        )
+        await driver.run(method, "query")
+
+        assert len(driver.urls) == 1
+        assert "&page=" not in driver.urls[0]
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_a_rate_limited_second_page_keeps_the_first(
+        self, mock_page, method, kind, prefix
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 0), extracted(_RATE_LIMITED_MSG)],
+        )
+        result = await driver.run(method, "query", max_pages=3)
+
+        assert result["sections"]["search_results"] == "page from 0"
+        assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
+        assert result["result_counts"]["stopped_by"] == "error"
+
+
+class TestResumableEntitySearch:
+    """The agent loop: fetch a batch, read it, fetch the next one.
+
+    ``&page=N`` is a URL parameter, so nothing has to be carried between
+    calls. ``start_page`` says where the walk begins and ``max_pages`` how far
+    it goes; together they name a half-open range of pages a caller can
+    advance without ever paying for a page twice.
+
+    Confirmed end to end against LinkedIn: ``start_page`` 1 / 4 / 7 at
+    ``max_pages=3`` returned 30 + 30 + 30 result cards with zero overlap, 90
+    distinct people across 9 pages.
+    """
+
+    CASES = TestEntitySearchPagination.CASES
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_a_resumed_walk_starts_where_the_last_one_stopped(
+        self, mock_page, method, kind, prefix
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 100 * n) for n in range(3)],
+        )
+        await driver.run(method, "query", max_pages=3, start_page=4)
+
+        base = driver.urls[0].split("&page=")[0]
+        assert driver.urls == [f"{base}&page={n}" for n in (4, 5, 6)]
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_page_one_is_still_the_bare_url(
+        self, mock_page, method, kind, prefix
+    ):
+        """Default start_page must not start appending ``&page=1``."""
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(extractor, [_entity_page(kind, prefix, 0)])
+        await driver.run(method, "query", max_pages=1)
+
+        assert "&page=" not in driver.urls[0]
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_a_resumed_walk_never_silently_refetches_page_one(
+        self, mock_page, method, kind, prefix
+    ):
+        """The first page of a walk is not the first page of the results.
+
+        Keying the bare-URL case off the loop index rather than the page
+        number hands back page one for every ``start_page``, which is the one
+        failure a looping caller cannot see: the batch is full, the slugs are
+        all new to that call's own seen-set, and the loop runs forever over
+        the same ten people.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(extractor, [_entity_page(kind, prefix, 0)])
+        await driver.run(method, "query", max_pages=1, start_page=2)
+
+        assert driver.urls[0].endswith("&page=2")
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_the_documented_loop_covers_every_page_exactly_once(
+        self, mock_page, method, kind, prefix
+    ):
+        """Three calls of ``start_page += max_pages`` walk 1..9 with no repeat.
+
+        This is the whole feature in one assertion — the docstrings tell an
+        agent to advance by ``max_pages``, and that advice is only true if the
+        ranges abut exactly.
+        """
+        visited: list[str] = []
+        for start in (1, 4, 7):
+            extractor = LinkedInExtractor(mock_page)
+            driver = _PagedSearch(
+                extractor,
+                [_entity_page(kind, prefix, 100 * n) for n in range(3)],
+            )
+            await driver.run(method, "query", max_pages=3, start_page=start)
+            visited.extend(driver.urls)
+
+        base = visited[0]
+        pages = [1 if url == base else int(url.split("&page=")[1]) for url in visited]
+        assert pages == list(range(1, 10))
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_only_max_pages_bounds_the_walk_not_the_end_page(
+        self, mock_page, method, kind, prefix
+    ):
+        """``max_pages`` stays a count of navigations, not a page number."""
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 100 * n) for n in range(5)],
+        )
+        await driver.run(method, "query", max_pages=2, start_page=5)
+
+        assert len(driver.urls) == 2
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_end_of_list_is_still_reported_from_a_resumed_walk(
+        self, mock_page, method, kind, prefix
+    ):
+        """An agent looping on a wrong signal never stops or stops early."""
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 0), _entity_page(kind, prefix, 0)],
+        )
+        result = await driver.run(method, "query", max_pages=5, start_page=4)
+
+        assert len(driver.urls) == 2
+        assert result["result_counts"]["stopped_by"] == "linkedin_end_of_list"
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_a_walk_that_starts_past_the_end_stops_on_the_first_page(
+        self, mock_page, method, kind, prefix
+    ):
+        """Measured live: past the last page LinkedIn keeps ``&page=N`` in the
+        URL and renders "No results found" — 78 characters of text and zero
+        entity anchors. Non-empty text, so this is not the ``error`` branch;
+        no new slugs, so the walk ends and says ``linkedin_end_of_list``.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(extractor, [extracted("No results found")])
+        result = await driver.run(method, "query", max_pages=3, start_page=9)
+
+        assert len(driver.urls) == 1
+        assert result["result_counts"] == {
+            "rows_seen": 0,
+            "returned": 0,
+            "stopped_by": "linkedin_end_of_list",
+        }
+
+    @pytest.mark.parametrize(("method", "kind", "prefix"), CASES)
+    async def test_a_full_resumed_batch_asks_to_be_resumed_again(
+        self, mock_page, method, kind, prefix
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        driver = _PagedSearch(
+            extractor,
+            [_entity_page(kind, prefix, 100 * n) for n in range(2)],
+        )
+        result = await driver.run(method, "query", max_pages=2, start_page=7)
+
+        assert result["result_counts"]["stopped_by"] == "max_pages"
 
 
 class TestBuildContentSearchUrl:
