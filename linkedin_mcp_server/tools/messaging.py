@@ -276,3 +276,47 @@ def register_messaging_tools(
                 raise_tool_error(relogin_exc, "send_message")
         except Exception as e:
             raise_tool_error(e, "send_message")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Reply to Thread",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"messaging", "actions"},
+        exclude_args=["extractor"],
+    )
+    async def reply_to_thread(
+        thread_id: str,
+        message: str,
+        confirm_send: bool,
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """Reply strictly inside an existing LinkedIn messaging thread.
+
+        ``thread_id`` may be a raw ID or a LinkedIn ``/messaging/thread/{id}/``
+        URL. The extractor verifies the final URL before typing. With
+        ``confirm_send=False`` it returns ``confirmation_required`` without
+        entering text. A confirmed send is reported as ``sent`` only after a
+        read-back from the same thread; otherwise it is ``sent_unverified``.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="reply_to_thread"
+            )
+            assert extractor is not None
+            logger.info(
+                "Replying to thread %s (confirm_send=%s)", thread_id, confirm_send
+            )
+            await ctx.report_progress(progress=0, total=100, message="Opening thread")
+            result = await extractor.reply_to_thread(
+                thread_id, message, confirm_send=confirm_send
+            )
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+            return result
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "reply_to_thread")
+        except Exception as e:
+            raise_tool_error(e, "reply_to_thread")  # NoReturn
