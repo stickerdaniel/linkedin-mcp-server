@@ -120,6 +120,10 @@
       "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month)"
     },
     {
+      "name": "schedule_post",
+      "description": "Schedule a LinkedIn feed post via LinkedIn's native Schedule-for-later flow, with explicit confirmation and a dry-run mode"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
     }
