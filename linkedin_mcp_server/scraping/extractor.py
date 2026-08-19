@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 from dataclasses import dataclass
 import json
 import logging
@@ -195,6 +196,280 @@ _MESSAGING_CLOSE_SELECTOR = (
     'button[aria-label*="Dismiss"], '
     'button[aria-label*="Close"]'
 )
+
+# --- Share composer (feed post creation) -----------------------------------
+#
+# The composer renders inside an open shadow root (`#interop-outlet`, LinkedIn's
+# SDUI interop surface). Patchright locators pierce shadow roots, so plain CSS
+# works here; `page.evaluate` + `querySelectorAll` does not — keep any JS out of
+# this flow. All selectors below are structural (role/state/test hooks), never
+# layout class names and never label text.
+#
+# Opened by URL (`/feed/?shareActive=true`) rather than by clicking the
+# "Start a post" trigger, whose only stable identity is its label text.
+_COMPOSER_EDITOR_SELECTOR = 'div[role="textbox"][contenteditable="true"]'
+# The clock icon is the schedule affordance. `data-test-icon` is LinkedIn's own
+# test hook and carries the icon's name, not a translation.
+_COMPOSER_SCHEDULE_BUTTON_SELECTOR = (
+    'button:has(svg[data-test-icon="clock-medium"]), '
+    'button:has(use[href="#clock-medium"])'
+)
+# Semantic element ids, stable across sessions (unlike `ember\d+` ids).
+_SCHEDULE_DATE_INPUT_SELECTOR = "input#share-post__scheduled-date"
+_SCHEDULE_TIME_INPUT_SELECTOR = "input#share-post__scheduled-time"
+# LinkedIn's modal close button carries this test hook in the composer.
+_COMPOSER_DISMISS_SELECTOR = "button[data-test-modal-close-btn]"
+# "View all scheduled posts" inside the schedule dialog: the only button there
+# carrying the forward-arrow icon (again a test-hook name, not a translation).
+_SCHEDULE_VIEW_ALL_BUTTON_SELECTOR = (
+    'button:has(svg[data-test-icon="arrow-right-small"]), '
+    'button:has(use[href="#arrow-right-small"])'
+)
+# Each scheduled-list entry has an overflow ("...") menu.
+_SCHEDULED_ENTRY_OVERFLOW_SELECTOR = (
+    'dialog[open] button:has(svg[data-test-icon*="overflow"]), '
+    '[role="dialog"] button:has(svg[data-test-icon*="overflow"])'
+)
+# The menu's actions are div[role="button"] elements (not native buttons, which
+# keeps these selectors from ever matching composer buttons), identified by
+# icon test hooks: edit-medium = "Edit post", trash-medium = "Delete post".
+_SCHEDULED_MENU_EDIT_SELECTOR = (
+    '[role="button"]:has(svg[data-test-icon="edit-medium"]), '
+    '[role="button"]:has(use[href="#edit-medium"])'
+)
+_SCHEDULED_MENU_DELETE_SELECTOR = (
+    '[role="button"]:has(svg[data-test-icon="trash-medium"]), '
+    '[role="button"]:has(use[href="#trash-medium"])'
+)
+
+# Maps every visible overflow button in the scheduled-posts modal to its
+# entry's text, in DOM order (the same order the modal renders). This is the
+# one place the scheduled-post flows run JS: matching a button to its entry
+# means climbing to the nearest ancestor that holds one entry's text, which
+# CSS locators cannot express. The composer's shadow root is open, so the walk
+# recurses into it explicitly — `querySelectorAll` alone would see nothing.
+_SCHEDULED_ENTRY_MAP_JS = """() => {
+  const out = [];
+  const walk = (root) => {
+    for (const b of root.querySelectorAll('button')) {
+      const hasOverflow = Array.from(b.querySelectorAll('svg')).some(
+        s => (s.getAttribute('data-test-icon') || '').includes('overflow'));
+      if (!hasOverflow || !(b.offsetWidth || b.offsetHeight)) continue;
+      let node = b, entryText = '';
+      for (let i = 0; i < 8 && node; i++) {
+        node = node.parentElement;
+        if (!node) break;
+        const t = (node.innerText || '');
+        // The entry container is the largest ancestor still holding a single
+        // entry; the whole modal's text is far larger and stops the climb.
+        if (t.length > 30 && t.length < 2500) entryText = t;
+        if (t.length >= 2500) break;
+      }
+      out.push(entryText);
+    }
+    for (const el of root.querySelectorAll('*')) if (el.shadowRoot) walk(el.shadowRoot);
+  };
+  walk(document);
+  return out;
+}"""
+
+
+@dataclass(frozen=True)
+class _ScheduledEntryMatch:
+    """A resolved scheduled-list entry: its index and how many entries matched."""
+
+    index: int
+    match_count: int
+
+
+@dataclass(frozen=True)
+class _OpenedScheduledEntry:
+    """A scheduled-list entry whose menu action was successfully opened."""
+
+    entry_text: str
+    match_count: int
+
+
+def _match_scheduled_entries(
+    entries: list[str], match_text: str, occurrence: int | None
+) -> _ScheduledEntryMatch | tuple[str, str]:
+    """Match a body snippet against one snapshot of the scheduled list.
+
+    Pure so a single snapshot can serve matching, preview, and later
+    verification — two separately-taken snapshots can disagree about a live
+    queue. Returns the match, or ``(status, message)``.
+
+    A blank snippet is refused outright: normalized to an empty needle it
+    would be contained in *every* entry, and with a single queued post that
+    "unique" match would act on a post the caller never named.
+
+    ``occurrence=None`` demands a *unique* match: several matching entries
+    are then an error, never a silent first pick — a defaulted zero used to
+    select the first match, and a confirmed edit could change the wrong post
+    while reporting success. Passing an integer states the caller has seen
+    the list and is choosing among known duplicates.
+    """
+    needle = " ".join(match_text.split()).casefold()
+    if not needle:
+        return (
+            "entry_not_found",
+            "match_text is empty; pass a snippet of the post's body text.",
+        )
+    matches = [
+        i
+        for i, entry in enumerate(entries)
+        if needle in " ".join(entry.split()).casefold()
+    ]
+    if not matches:
+        return (
+            "entry_not_found",
+            f"No scheduled post contains {match_text!r} "
+            f"({len(entries)} entries in the list).",
+        )
+    if occurrence is None:
+        if len(matches) > 1:
+            return (
+                "entry_ambiguous",
+                f"{len(matches)} scheduled posts contain {match_text!r}. "
+                "Pass a longer snippet, or an occurrence between 0 and "
+                f"{len(matches) - 1} to choose among them.",
+            )
+        occurrence = 0
+    if occurrence >= len(matches):
+        return (
+            "entry_not_found",
+            f"Only {len(matches)} scheduled post(s) contain "
+            f"{match_text!r}; occurrence={occurrence} is out of range.",
+        )
+    return _ScheduledEntryMatch(index=matches[occurrence], match_count=len(matches))
+
+
+def _resolve_date_order(
+    current_value: str, placeholder: str, today: datetime.date | None
+) -> tuple[str, str, str] | None:
+    """Determine the date input's slot order, e.g. ``("m", "d", "y")``.
+
+    Independent measurements, tried in turn; None when none decides.
+
+    1. A small number above 12 cannot be a month, so it names the day slot
+       outright — valid whatever date the prefill happens to render.
+    2. The prefill is LinkedIn's rendering of its own "today", which can sit
+       at most one calendar day from the server's UTC today. Reading the two
+       small numbers both ways yields two *different* dates whenever day and
+       month differ, and two distinct readings are never both inside a
+       three-consecutive-day window — so a reading that lands in the window is
+       proof of the order, not a guess. Only applies when the caller knows the
+       prefill renders today (``today`` is not None): the edit flow's prefill
+       renders the post's *current schedule*, where a window hit would be a
+       coincidence and could prove the wrong order.
+    3. The placeholder's short tokens. Across the Latin-script locales
+       LinkedIn ships, the month token is the one starting with ``m`` (en
+       ``mm``, de ``MM``/Monat, fr ``mm``/mois, es mes, it mese, pt mês, nl
+       maand) while the day letter varies (``dd``, ``TT``, ``jj``, ``gg``) —
+       a per-locale table in the sense the scraping rules require, documented
+       here as such. Locales outside it (non-Latin scripts) fall through.
+    """
+    numbers = re.findall(r"\d+", current_value)
+    if len(numbers) == 3:
+        values = [int(n) for n in numbers]
+        year_pos = max(range(3), key=lambda i: (len(numbers[i]) >= 4, values[i]))
+        rest = [i for i in range(3) if i != year_pos]
+        a, b = values[rest[0]], values[rest[1]]
+        year = values[year_pos]
+
+        def order_of(day_first: bool) -> tuple[str, str, str]:
+            slots = ["", "", ""]
+            slots[year_pos] = "y"
+            slots[rest[0]] = "d" if day_first else "m"
+            slots[rest[1]] = "m" if day_first else "d"
+            return (slots[0], slots[1], slots[2])
+
+        if a > 12 and b <= 12:
+            return order_of(day_first=True)
+        if b > 12 and a <= 12:
+            return order_of(day_first=False)
+
+        if today is not None:
+            window = {today + datetime.timedelta(days=k) for k in (-1, 0, 1)}
+
+            def in_window(month: int, day: int) -> bool:
+                try:
+                    return datetime.date(year, month, day) in window
+                except ValueError:
+                    return False
+
+            month_first = in_window(a, b)
+            day_first = in_window(b, a)
+            if month_first != day_first:
+                return order_of(day_first)
+
+    tokens = re.findall(r"[^\W\d_]+", placeholder or "")
+    if len(tokens) == 3:
+        parts = [
+            "y" if len(t) > 2 else ("m" if t.lower().startswith("m") else "d")
+            for t in tokens
+        ]
+        if sorted(parts) == ["d", "m", "y"]:
+            return (parts[0], parts[1], parts[2])
+    return None
+
+
+def _format_schedule_date(
+    year: int,
+    month: int,
+    day: int,
+    current_value: str,
+    placeholder: str = "",
+    today: datetime.date | None = None,
+    *,
+    prefill_renders_today: bool = True,
+) -> tuple[str | None, tuple[str, str, str] | None]:
+    """Format a date the way the schedule dialog's own prefill formats one.
+
+    Returns ``(value, order)``. The order comes from `_resolve_date_order`;
+    when it cannot be proven and the target's day differs from its month,
+    ``(None, None)`` is returned so the caller refuses rather than gambling
+    the calendar day — a reversed date passes every later check LinkedIn
+    offers, because both readings are valid dates.
+
+    ``prefill_renders_today`` must be False when the prefill renders anything
+    other than today (the edit flow: it shows the post's current schedule),
+    which withholds the today-window proof and leaves the >12 and placeholder
+    rules.
+    """
+    if today is None and prefill_renders_today:
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+    separators = re.findall(r"\D+", current_value)
+    separator = separators[0] if separators else "/"
+    order = _resolve_date_order(
+        current_value, placeholder, today if prefill_renders_today else None
+    )
+    if order is None:
+        if day != month:
+            return None, None
+        # Either order writes the same digits; en order names the slots.
+        order = ("m", "d", "y")
+    mapping = {"y": str(year), "m": str(month), "d": str(day)}
+    return separator.join(mapping[slot] for slot in order), order
+
+
+def _format_schedule_time(hour: int, minute: int, current_value: str) -> str:
+    """Format a time the way the timepicker's own prefill formats one.
+
+    The timepicker prefills a suggested slot (measured: ``2:00 PM``). A
+    meridiem marker in the prefill means the locale renders 12-hour time; the
+    en markers are the only ones tabled here, and 24-hour ``HH:MM`` is the
+    fallback for every other locale. Documented limitation: a non-English
+    12-hour locale would get a 24-hour string, which LinkedIn's parser may
+    reject — the caller verifies the input's value after filling and reports
+    rejection rather than scheduling at a wrong time.
+    """
+    if re.search(r"\b[AP]\.?M\.?\b", current_value, re.IGNORECASE):
+        marker = "AM" if hour < 12 else "PM"
+        hour12 = hour % 12 or 12
+        return f"{hour12}:{minute:02d} {marker}"
+    return f"{hour:02d}:{minute:02d}"
+
 
 # Shared JS function that walks up from any /messaging/compose/ anchor
 # inside <main> to find the smallest ancestor that satisfies the
@@ -4288,6 +4563,772 @@ class LinkedInExtractor:
             "Message sent.",
             recipient_selected=recipient_selected,
             sent=True,
+        )
+
+    @staticmethod
+    def _schedule_post_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        scheduled: bool = False,
+        scheduled_for: str | None = None,
+        composer_text: str | None = None,
+    ) -> dict[str, Any]:
+        """Build a structured response for the schedule_post tool."""
+        result: dict[str, Any] = {
+            "url": url,
+            "status": status,
+            "message": message,
+            "scheduled": scheduled,
+        }
+        if scheduled_for is not None:
+            result["scheduled_for"] = scheduled_for
+        if composer_text is not None:
+            result["composer_text"] = composer_text
+        return result
+
+    def _composer_dialog(self) -> Any:
+        """The dialog that holds the share composer's editor."""
+        return self._page.locator(_DIALOG_SELECTOR).filter(
+            has=self._page.locator(_COMPOSER_EDITOR_SELECTOR)
+        )
+
+    async def _clear_and_dismiss_composer(self) -> None:
+        """Empty the editor, then close the composer without a draft prompt.
+
+        Escape does not close this composer, and the discard-prompt buttons
+        have no locale-independent identity — but an *empty* composer closes
+        from its Dismiss button without any prompt (measured), so emptiness is
+        the dismissal strategy rather than prompt-button classification.
+        """
+        try:
+            editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
+            if await editor.is_visible():
+                await editor.click(timeout=2000)
+                await self._page.keyboard.press("ControlOrMeta+a")
+                await self._page.keyboard.press("Delete")
+            dismiss = self._page.locator(_COMPOSER_DISMISS_SELECTOR).first
+            await dismiss.click(timeout=3000)
+            await editor.wait_for(state="hidden", timeout=5000)
+        except Exception:
+            logger.debug("Composer dismissal failed", exc_info=True)
+
+    async def _open_schedule_dialog(self) -> tuple[str, str] | None:
+        """Open the share composer and its schedule dialog.
+
+        Returns None on success, or a ``(status, message)`` pair after
+        dismissing whatever partial surface was reached. The composer is opened
+        by URL; the schedule dialog by the clock button.
+        """
+        await self._navigate_to_page("https://www.linkedin.com/feed/?shareActive=true")
+        await detect_rate_limit(self._page)
+
+        editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
+        try:
+            await editor.wait_for(state="visible", timeout=15000)
+        except PlaywrightTimeoutError:
+            return (
+                "composer_unavailable",
+                "LinkedIn did not open the share composer.",
+            )
+
+        schedule_button = self._page.locator(_COMPOSER_SCHEDULE_BUTTON_SELECTOR).first
+        try:
+            await schedule_button.click(timeout=8000)
+        except Exception:
+            await self._clear_and_dismiss_composer()
+            return (
+                "schedule_unavailable",
+                "LinkedIn did not expose a schedule (clock) action in the composer.",
+            )
+
+        try:
+            await self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR).first.wait_for(
+                state="visible", timeout=8000
+            )
+        except PlaywrightTimeoutError:
+            await self._clear_and_dismiss_composer()
+            return ("schedule_unavailable", "The schedule dialog did not open.")
+        return None
+
+    async def _open_scheduled_posts_list(self) -> tuple[str, str] | None:
+        """From anywhere, open the Scheduled posts modal.
+
+        LinkedIn exposes the list only behind the composer's schedule dialog
+        ("View all scheduled posts") — the modal replaces the dialog in place
+        and the address bar never changes, so there is no URL to navigate to.
+        Returns None with the modal open, or ``(status, message)``.
+        """
+        failure = await self._open_schedule_dialog()
+        if failure is not None:
+            return failure
+
+        schedule_dialog = self._page.locator(_DIALOG_SELECTOR).filter(
+            has=self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR)
+        )
+        view_all = schedule_dialog.locator(_SCHEDULE_VIEW_ALL_BUTTON_SELECTOR).first
+        try:
+            await view_all.click(timeout=5000)
+            await self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR).first.wait_for(
+                state="hidden", timeout=8000
+            )
+        except Exception:
+            await self._clear_and_dismiss_composer()
+            return (
+                "list_unavailable",
+                "LinkedIn did not open the scheduled posts view.",
+            )
+        # Hydration is not bounded, so a fixed delay is not either: the modal
+        # renders its heading before its entries, and a read taken in between
+        # looks exactly like an empty queue. Settled means two consecutive
+        # identical non-empty samples of the modal's own text; the deadline
+        # keeps a modal that never settles from hanging the tool.
+        previous = ""
+        for _ in range(16):
+            await asyncio.sleep(0.5)
+            try:
+                sample = await (
+                    self._page.locator(_DIALOG_SELECTOR)
+                    .filter(visible=True)
+                    .first.inner_text()
+                )
+            except Exception:
+                sample = ""
+            if sample.strip() and sample == previous:
+                break
+            previous = sample
+        return None
+
+    async def _dismiss_scheduled_posts_list(self) -> None:
+        """Close the Scheduled posts modal and any composer left behind it."""
+        try:
+            await self._page.locator(_COMPOSER_DISMISS_SELECTOR).first.click(
+                timeout=3000
+            )
+        except Exception:
+            logger.debug("Scheduled posts modal dismissal failed", exc_info=True)
+        # Defensive: tolerates the composer already being gone.
+        await self._clear_and_dismiss_composer()
+
+    async def get_scheduled_posts(self) -> dict[str, Any]:
+        """List the authenticated user's scheduled posts.
+
+        Read-only in effect: the composer is opened, never typed into, and
+        dismissed empty on every path.
+        """
+        failure = await self._open_scheduled_posts_list()
+        if failure is not None:
+            status, message = failure
+            return {"url": self._page.url, "status": status, "message": message}
+
+        list_dialog = self._page.locator(_DIALOG_SELECTOR).filter(visible=True)
+        text = ""
+        try:
+            text = await list_dialog.first.inner_text()
+        except Exception:
+            logger.debug("Could not read scheduled posts modal", exc_info=True)
+        url = self._page.url
+        await self._dismiss_scheduled_posts_list()
+        if not text.strip():
+            # An empty read is a failed read, never an empty schedule: the
+            # modal always carries its own heading, and a schedule with
+            # nothing queued still says so in text. Returning a section-less
+            # result here made the two indistinguishable, and a caller acting
+            # on "nothing scheduled" double-posts.
+            return {
+                "url": url,
+                "status": "list_read_failed",
+                "message": "The scheduled posts view opened but its content "
+                "could not be read. Retry rather than assuming an empty "
+                "schedule.",
+            }
+        return self._single_section_result(url, "scheduled_posts", text)
+
+    @staticmethod
+    def _scheduled_action_result(
+        url: str,
+        status: str,
+        message: str,
+        *,
+        done: bool = False,
+        entry_preview: str | None = None,
+        composer_text: str | None = None,
+    ) -> dict[str, Any]:
+        """Build a structured response for the scheduled-entry action tools."""
+        result: dict[str, Any] = {
+            "url": url,
+            "status": status,
+            "message": message,
+            "done": done,
+        }
+        if entry_preview is not None:
+            result["entry_preview"] = entry_preview
+        if composer_text is not None:
+            result["composer_text"] = composer_text
+        return result
+
+    async def _open_scheduled_entry_action(
+        self, match_text: str, occurrence: int | None, action_selector: str
+    ) -> "_OpenedScheduledEntry | tuple[str, str]":
+        """Open the list, resolve the entry, and click one of its menu actions.
+
+        Resolution happens against the live list at action time rather than
+        against a remembered index — the queue shifts whenever a scheduled
+        post publishes — and from a *single* snapshot: matching and the entry
+        text come from one mapping. Because the click itself is positional, a
+        second snapshot immediately before it must still show the same text at
+        the same index; otherwise the action is refused as ``entry_moved``
+        rather than landing on whichever post now occupies the position.
+
+        Returns the opened entry on success, or ``(status, message)`` with the
+        list dismissed on failure.
+        """
+        failure = await self._open_scheduled_posts_list()
+        if failure is not None:
+            return failure
+
+        entries: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
+        resolved = _match_scheduled_entries(entries, match_text, occurrence)
+        if not isinstance(resolved, _ScheduledEntryMatch):
+            await self._dismiss_scheduled_posts_list()
+            return resolved
+        entry_text = entries[resolved.index]
+
+        recheck: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
+        if resolved.index >= len(recheck) or recheck[resolved.index] != entry_text:
+            await self._dismiss_scheduled_posts_list()
+            return (
+                "entry_moved",
+                "The scheduled list changed while the entry was being "
+                "resolved; nothing was touched. Retry.",
+            )
+
+        try:
+            await (
+                self._page.locator(_SCHEDULED_ENTRY_OVERFLOW_SELECTOR)
+                .nth(resolved.index)
+                .click(timeout=5000)
+            )
+            action = self._page.locator(action_selector).filter(visible=True).first
+            await action.click(timeout=5000)
+        except Exception:
+            logger.debug("Scheduled entry menu action failed", exc_info=True)
+            await self._dismiss_scheduled_posts_list()
+            return (
+                "menu_unavailable",
+                "The scheduled post's menu did not expose the expected action.",
+            )
+        return _OpenedScheduledEntry(
+            entry_text=entry_text, match_count=resolved.match_count
+        )
+
+    async def _abandon_edit_surface(self) -> None:
+        """Leave an edit composer without saving, locale-independently.
+
+        A dirty composer's dismiss button raises a discard prompt whose
+        buttons have only label text to tell apart, so instead of answering it
+        the flow navigates away: an SPA route change tears the modal down and
+        the scheduled post keeps its stored state (verified live — a dry-run
+        edit left the entry unchanged).
+        """
+        try:
+            await self._page.goto(
+                "https://www.linkedin.com/feed/", wait_until="domcontentloaded"
+            )
+        except Exception:
+            logger.debug("Abandoning the edit surface failed", exc_info=True)
+
+    async def edit_scheduled_post(
+        self,
+        match_text: str,
+        *,
+        new_text: str | None = None,
+        new_year: int | None = None,
+        new_month: int | None = None,
+        new_day: int | None = None,
+        new_hour: int | None = None,
+        new_minute: int | None = None,
+        occurrence: int | None = None,
+        confirm_edit: bool,
+    ) -> dict[str, Any]:
+        """Edit a scheduled post's body and/or scheduled moment in place.
+
+        Drives the entry's "Edit post" action, which opens the full composer
+        with the schedule chip, so one flow covers body, time, or both. Date
+        and time components are each optional as a group: whichever is omitted
+        keeps the post's current value, which arrives as the schedule dialog's
+        prefill.
+        """
+        opened = await self._open_scheduled_entry_action(
+            match_text, occurrence, _SCHEDULED_MENU_EDIT_SELECTOR
+        )
+        if not isinstance(opened, _OpenedScheduledEntry):
+            return self._scheduled_action_result(self._page.url, *opened)
+        entry_preview = opened.entry_text[:200]
+
+        editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
+        try:
+            await editor.wait_for(state="visible", timeout=10000)
+        except PlaywrightTimeoutError:
+            await self._abandon_edit_surface()
+            return self._scheduled_action_result(
+                self._page.url,
+                "edit_unavailable",
+                "The edit composer did not open.",
+                entry_preview=entry_preview,
+            )
+        # The right post must be under the cursor before anything is changed.
+        current_text = await editor.inner_text()
+        if (
+            " ".join(match_text.split()).casefold()
+            not in " ".join(current_text.split()).casefold()
+        ):
+            await self._abandon_edit_surface()
+            return self._scheduled_action_result(
+                self._page.url,
+                "edit_mismatch",
+                "The edit composer opened a different post than the matched entry.",
+                entry_preview=entry_preview,
+            )
+
+        wants_reschedule = any(
+            v is not None for v in (new_year, new_month, new_day, new_hour, new_minute)
+        )
+        if wants_reschedule:
+            try:
+                await self._page.locator(
+                    _COMPOSER_SCHEDULE_BUTTON_SELECTOR
+                ).first.click(timeout=8000)
+                date_input = self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR).first
+                time_input = self._page.locator(_SCHEDULE_TIME_INPUT_SELECTOR).first
+                await date_input.wait_for(state="visible", timeout=8000)
+            except Exception:
+                await self._abandon_edit_surface()
+                return self._scheduled_action_result(
+                    self._page.url,
+                    "schedule_unavailable",
+                    "The schedule dialog did not open from the edit composer.",
+                    entry_preview=entry_preview,
+                )
+
+            # The prefills are the post's *current* schedule — the format
+            # example and the fallback for whichever component stays. Because
+            # they do not render today, the today-window order proof is
+            # withheld (prefill_renders_today=False): a coincidental window
+            # hit on an arbitrary scheduled date could prove the wrong order.
+            if new_year is not None:
+                assert new_month is not None and new_day is not None
+                date_value, date_order = _format_schedule_date(
+                    new_year,
+                    new_month,
+                    new_day,
+                    await date_input.input_value(),
+                    await date_input.get_attribute("placeholder") or "",
+                    prefill_renders_today=False,
+                )
+                if date_value is None or date_order is None:
+                    await self._abandon_edit_surface()
+                    return self._scheduled_action_result(
+                        self._page.url,
+                        "schedule_rejected",
+                        "The profile's date-component order could not be "
+                        "proven, and a reversed day/month would move the post "
+                        "to the wrong calendar day, so nothing was changed.",
+                        entry_preview=entry_preview,
+                    )
+                await date_input.fill(date_value)
+                await self._page.keyboard.press("Tab")
+                await asyncio.sleep(0.5)
+                # Position-by-position against the proven order; an unordered
+                # comparison would wave a reversed day/month through.
+                expected_by_pos = [
+                    {"y": new_year, "m": new_month, "d": new_day}[slot]
+                    for slot in date_order
+                ]
+                accepted_by_pos = [
+                    int(n) for n in re.findall(r"\d+", await date_input.input_value())
+                ]
+                if accepted_by_pos != expected_by_pos:
+                    await self._abandon_edit_surface()
+                    return self._scheduled_action_result(
+                        self._page.url,
+                        "schedule_rejected",
+                        f"The date picker did not accept {date_value!r}.",
+                        entry_preview=entry_preview,
+                    )
+            if new_hour is not None:
+                assert new_minute is not None
+                time_value = _format_schedule_time(
+                    new_hour, new_minute, await time_input.input_value()
+                )
+                await time_input.fill(time_value)
+                await self._page.keyboard.press("Tab")
+                await asyncio.sleep(0.5)
+                if (await time_input.input_value()).strip() != time_value:
+                    await self._abandon_edit_surface()
+                    return self._scheduled_action_result(
+                        self._page.url,
+                        "schedule_rejected",
+                        f"The time picker did not accept {time_value!r}.",
+                        entry_preview=entry_preview,
+                    )
+
+            # Confirm the dialog via its last *enabled* visible button. In edit
+            # mode Next stays disabled until something actually changed, and
+            # then the last enabled button is Back — which also returns to the
+            # composer, with the schedule simply kept as it was. Both paths
+            # land where the flow continues.
+            schedule_dialog = self._page.locator(_DIALOG_SELECTOR).filter(
+                has=self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR)
+            )
+            try:
+                await (
+                    schedule_dialog.locator(
+                        'button:not([disabled]):not([aria-disabled="true"])'
+                    )
+                    .filter(visible=True)
+                    .last.click(timeout=5000)
+                )
+                await date_input.wait_for(state="hidden", timeout=8000)
+            except Exception:
+                await self._abandon_edit_surface()
+                return self._scheduled_action_result(
+                    self._page.url,
+                    "schedule_rejected",
+                    "LinkedIn did not accept the new scheduled moment.",
+                    entry_preview=entry_preview,
+                )
+
+        if new_text is not None:
+            await editor.click(timeout=5000)
+            await self._page.keyboard.press("ControlOrMeta+a")
+            await self._page.keyboard.press("Delete")
+            await self._page.keyboard.type(new_text, delay=10)
+            await asyncio.sleep(1.0)
+
+        composer_dialog = self._composer_dialog()
+        composer_text = ""
+        try:
+            composer_text = await composer_dialog.first.inner_text()
+        except Exception:
+            logger.debug("Could not read edit composer text", exc_info=True)
+
+        if not confirm_edit:
+            await self._abandon_edit_surface()
+            return self._scheduled_action_result(
+                self._page.url,
+                "confirmation_required",
+                "Dry run complete. Set confirm_edit=true to save these changes.",
+                entry_preview=entry_preview,
+                composer_text=composer_text,
+            )
+
+        # The save action: in edit mode LinkedIn appends a trailing Back
+        # button, so "last button" no longer names the primary. The primary is
+        # the last visible button carrying no aria-label — utility buttons
+        # (dismiss, media, Back) are labelled for a screen reader, the primary
+        # is labelled by its own visible text. Attribute *presence*, so it
+        # holds across locales.
+        primary = (
+            composer_dialog.locator("button:not([aria-label])")
+            .filter(visible=True)
+            .last
+        )
+        try:
+            if await primary.is_disabled():
+                await self._abandon_edit_surface()
+                return self._scheduled_action_result(
+                    self._page.url,
+                    "edit_unavailable",
+                    "The composer's save action stayed disabled.",
+                    entry_preview=entry_preview,
+                    composer_text=composer_text,
+                )
+            await primary.click(timeout=8000)
+            await editor.wait_for(state="hidden", timeout=10000)
+        except Exception:
+            await self._abandon_edit_surface()
+            return self._scheduled_action_result(
+                self._page.url,
+                "edit_unconfirmed",
+                "LinkedIn did not confirm that the changes were saved.",
+                entry_preview=entry_preview,
+                composer_text=composer_text,
+            )
+
+        url = self._page.url
+        # Saving lands back on the scheduled list; leave everything closed.
+        await self._dismiss_scheduled_posts_list()
+        return self._scheduled_action_result(
+            url,
+            "edited",
+            "Scheduled post updated.",
+            done=True,
+            entry_preview=entry_preview,
+            composer_text=composer_text,
+        )
+
+    async def delete_scheduled_post(
+        self,
+        match_text: str,
+        *,
+        occurrence: int | None = None,
+        confirm_delete: bool,
+    ) -> dict[str, Any]:
+        """Delete a scheduled post via its entry's Delete action.
+
+        The dry run stops after resolving the entry — LinkedIn's own dialog
+        warns "You won't be able to recover it", so the confirmation surface
+        is never even opened without confirm_delete. The confirm dialog's
+        primary is its last button (measured: Dismiss, Cancel, Delete).
+        """
+        if not confirm_delete:
+            failure = await self._open_scheduled_posts_list()
+            if failure is not None:
+                return self._scheduled_action_result(self._page.url, *failure)
+            entries: list[str] = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
+            resolved = _match_scheduled_entries(entries, match_text, occurrence)
+            if not isinstance(resolved, _ScheduledEntryMatch):
+                await self._dismiss_scheduled_posts_list()
+                return self._scheduled_action_result(self._page.url, *resolved)
+            preview = entries[resolved.index][:200]
+            await self._dismiss_scheduled_posts_list()
+            return self._scheduled_action_result(
+                self._page.url,
+                "confirmation_required",
+                "Dry run complete. Set confirm_delete=true to delete this "
+                "scheduled post; LinkedIn cannot recover a deleted one.",
+                entry_preview=preview,
+            )
+
+        opened = await self._open_scheduled_entry_action(
+            match_text, occurrence, _SCHEDULED_MENU_DELETE_SELECTOR
+        )
+        if not isinstance(opened, _OpenedScheduledEntry):
+            return self._scheduled_action_result(self._page.url, *opened)
+        entry_preview = opened.entry_text[:200]
+
+        # The confirmation is the visible dialog holding no entry overflow
+        # icons — the list modal has one per entry and stays open underneath,
+        # and DOM order does not put the topmost dialog last, so "last visible
+        # dialog" resolved to the covered list modal (measured: its trailing
+        # Back button failed actionability under the confirmation overlay).
+        confirm_dialog = (
+            self._page.locator(f"{_DIALOG_SELECTOR}, [role='alertdialog']")
+            .filter(visible=True)
+            .filter(has_not=self._page.locator('svg[data-test-icon*="overflow"]'))
+            .last
+        )
+        try:
+            await confirm_dialog.wait_for(state="visible", timeout=5000)
+            await (
+                confirm_dialog.locator("button")
+                .filter(visible=True)
+                .last.click(timeout=5000)
+            )
+        except Exception:
+            logger.debug("Delete confirmation click failed", exc_info=True)
+            await self._page.keyboard.press("Escape")
+            await self._dismiss_scheduled_posts_list()
+            return self._scheduled_action_result(
+                self._page.url,
+                "delete_unconfirmed",
+                "LinkedIn's delete confirmation could not be completed.",
+                entry_preview=entry_preview,
+            )
+        await asyncio.sleep(1.5)
+
+        # The list modal stays open; the evidence of deletion is the match
+        # count dropping by exactly one. Checking for *absence* would fail
+        # whenever other entries also contain the snippet (an explicit
+        # occurrence among duplicates): the survivors would read as "still
+        # listed", and a caller retrying the reported failure would delete a
+        # second, different post.
+        remaining = await self._page.evaluate(_SCHEDULED_ENTRY_MAP_JS)
+        needle = " ".join(match_text.split()).casefold()
+        remaining_matches = sum(
+            1 for entry in remaining if needle in " ".join(entry.split()).casefold()
+        )
+        url = self._page.url
+        await self._dismiss_scheduled_posts_list()
+        if remaining_matches != opened.match_count - 1:
+            return self._scheduled_action_result(
+                url,
+                "delete_unconfirmed",
+                f"Expected {opened.match_count - 1} matching entr(ies) after "
+                f"deletion but the list shows {remaining_matches}. Re-read "
+                "the list with get_scheduled_posts before retrying anything.",
+                entry_preview=entry_preview,
+            )
+        return self._scheduled_action_result(
+            url,
+            "deleted",
+            "Scheduled post deleted.",
+            done=True,
+            entry_preview=entry_preview,
+        )
+
+    async def schedule_post(
+        self,
+        text: str,
+        *,
+        year: int,
+        month: int,
+        day: int,
+        hour: int,
+        minute: int,
+        confirm_schedule: bool,
+    ) -> dict[str, Any]:
+        """Schedule a feed post via LinkedIn's native Schedule-for-later flow.
+
+        The scheduled time is set *before* the text is typed: the composer
+        rebuilds its editor on the schedule round-trip and drops typed content
+        (measured), while text typed after the round-trip survives.
+
+        Args:
+            text: The post body.
+            year/month/day/hour/minute: Scheduled moment, interpreted by
+                LinkedIn in the profile's own timezone.
+            confirm_schedule: Must be True to actually schedule (False does a
+                dry run that fills everything and then discards).
+        """
+        failure = await self._open_schedule_dialog()
+        if failure is not None:
+            return self._schedule_post_result(self._page.url, *failure)
+
+        editor = self._page.locator(_COMPOSER_EDITOR_SELECTOR).first
+        date_input = self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR).first
+        time_input = self._page.locator(_SCHEDULE_TIME_INPUT_SELECTOR).first
+
+        # The prefilled values are LinkedIn's own rendering of a date and a
+        # time in this profile's locale; format ours the same way.
+        date_value, date_order = _format_schedule_date(
+            year,
+            month,
+            day,
+            await date_input.input_value(),
+            await date_input.get_attribute("placeholder") or "",
+        )
+        if date_value is None or date_order is None:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_rejected",
+                "The profile's date-component order could not be proven from "
+                "the schedule dialog, and a reversed day/month would schedule "
+                "the wrong calendar day, so nothing was scheduled.",
+            )
+        time_value = _format_schedule_time(hour, minute, await time_input.input_value())
+        await date_input.fill(date_value)
+        await time_input.fill(time_value)
+        # Blur so the pickers parse and commit what was typed.
+        await self._page.keyboard.press("Tab")
+        await asyncio.sleep(0.5)
+
+        accepted_date = await date_input.input_value()
+        accepted_time = await time_input.input_value()
+        # Position-by-position against the proven order — an unordered
+        # comparison would wave a reversed day/month through, since the
+        # reversal permutes the same numbers. Ints, so zero-padding
+        # normalization cannot fail the check.
+        expected_by_pos = [
+            {"y": year, "m": month, "d": day}[slot] for slot in date_order
+        ]
+        accepted_by_pos = [int(n) for n in re.findall(r"\d+", accepted_date)]
+        if accepted_by_pos != expected_by_pos:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_rejected",
+                f"The date picker did not accept {date_value!r}; it shows {accepted_date!r}.",
+            )
+        if accepted_time.strip() != time_value:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_rejected",
+                f"The time picker did not accept {time_value!r}; it shows {accepted_time!r}.",
+            )
+
+        # Confirm the schedule: the dialog's primary action is its last button
+        # (Back/Next here — the same last-button convention the rest of this
+        # file relies on), scoped to the dialog that holds the date input so
+        # hidden video-player dialogs elsewhere on the feed cannot shift the
+        # count.
+        schedule_dialog = self._page.locator(_DIALOG_SELECTOR).filter(
+            has=self._page.locator(_SCHEDULE_DATE_INPUT_SELECTOR)
+        )
+        try:
+            await (
+                schedule_dialog.locator("button")
+                .filter(visible=True)
+                .last.click(timeout=5000)
+            )
+            await date_input.wait_for(state="hidden", timeout=8000)
+        except Exception:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_rejected",
+                "LinkedIn did not accept the scheduled date and time.",
+            )
+
+        # Now the text — clearing first, because the composer restores drafts.
+        await editor.click(timeout=5000)
+        await self._page.keyboard.press("ControlOrMeta+a")
+        await self._page.keyboard.press("Delete")
+        await self._page.keyboard.type(text, delay=10)
+        await asyncio.sleep(1.0)  # let the composer enable its primary action
+
+        composer_dialog = self._composer_dialog()
+        composer_text = ""
+        try:
+            composer_text = await composer_dialog.first.inner_text()
+        except Exception:
+            logger.debug("Could not read composer text", exc_info=True)
+
+        scheduled_for = f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}"
+        if not confirm_schedule:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "confirmation_required",
+                "Dry run complete. Set confirm_schedule=true to schedule the post.",
+                scheduled_for=scheduled_for,
+                composer_text=composer_text,
+            )
+
+        primary = composer_dialog.locator("button").filter(visible=True).last
+        try:
+            if await primary.is_disabled():
+                await self._clear_and_dismiss_composer()
+                return self._schedule_post_result(
+                    self._page.url,
+                    "schedule_unavailable",
+                    "The composer's Schedule action stayed disabled after typing.",
+                    scheduled_for=scheduled_for,
+                    composer_text=composer_text,
+                )
+            await primary.click(timeout=8000)
+            await editor.wait_for(state="hidden", timeout=10000)
+        except Exception:
+            await self._clear_and_dismiss_composer()
+            return self._schedule_post_result(
+                self._page.url,
+                "schedule_unconfirmed",
+                "LinkedIn did not confirm that the post was scheduled.",
+                scheduled_for=scheduled_for,
+                composer_text=composer_text,
+            )
+
+        return self._schedule_post_result(
+            self._page.url,
+            "scheduled",
+            "Post scheduled.",
+            scheduled=True,
+            scheduled_for=scheduled_for,
+            composer_text=composer_text,
         )
 
     async def _extract_root_content(
