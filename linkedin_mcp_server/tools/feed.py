@@ -34,6 +34,62 @@ def register_feed_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Get Notifications",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"feed", "notifications", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_notifications(
+        ctx: Context,
+        limit: Annotated[int, Field(ge=1, le=50)] = 20,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List recent notifications from the LinkedIn notifications page.
+
+        Covers every notification type the page shows — replies to your
+        comments, reactions to your comments or posts, mentions, connection
+        requests and accepts, endorsements, job alerts, and company news —
+        as raw text. Pair with get_post_comments to read the full reply
+        text behind a "someone replied to your comment" notification.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            limit: Maximum number of notifications to load (1-50, default 20).
+                   Items load as the page scrolls, so the actual count may
+                   slightly exceed the target.
+
+        Returns:
+            Dict with url, sections (notifications -> raw text), and optional
+            references["notifications"] (profile/post/company links embedded
+            in the notification cards).
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_notifications"
+            )
+            logger.info("Fetching notifications (limit=%d)", limit)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading notifications"
+            )
+
+            result = await extractor.get_notifications(limit=limit)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_notifications")
+        except Exception as e:
+            raise_tool_error(e, "get_notifications")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Get Feed",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"feed", "scraping"},

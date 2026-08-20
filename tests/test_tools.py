@@ -31,6 +31,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
     mock.get_inbox = AsyncMock(return_value=scrape_result)
+    mock.get_notifications = AsyncMock(return_value=scrape_result)
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
@@ -1216,6 +1217,92 @@ class TestFeedTools:
 
         with pytest.raises(ValidationError, match="num_posts"):
             await mcp.call_tool("get_feed", {"num_posts": 51})
+
+    async def test_get_notifications_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/notifications/",
+            "sections": {
+                "notifications": (
+                    "Jane Doe replied to your comment\nJohn Smith liked your post"
+                )
+            },
+        }
+        mock_extractor = MagicMock()
+        mock_extractor.get_notifications = AsyncMock(return_value=expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_notifications")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        assert result["url"] == "https://www.linkedin.com/notifications/"
+        assert "Jane Doe replied to your comment" in result["sections"]["notifications"]
+        mock_extractor.get_notifications.assert_awaited_once_with(limit=20)
+
+    async def test_get_notifications_passes_limit(self, mock_context):
+        """Verify the limit argument is passed through to the extractor."""
+        expected = {
+            "url": "https://www.linkedin.com/notifications/",
+            "sections": {"notifications": "A notification"},
+        }
+        mock_extractor = MagicMock()
+        mock_extractor.get_notifications = AsyncMock(return_value=expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_notifications")
+        await tool_fn(mock_context, limit=7, extractor=mock_extractor)
+        mock_extractor.get_notifications.assert_awaited_once_with(limit=7)
+
+    async def test_get_notifications_surfaces_references(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/notifications/",
+            "sections": {"notifications": "Jane Doe replied to your comment"},
+            "references": {
+                "notifications": [
+                    {
+                        "kind": "person",
+                        "url": "/in/janedoe/",
+                        "text": "Jane Doe",
+                        "context": "notification",
+                    }
+                ]
+            },
+        }
+        mock_extractor = MagicMock()
+        mock_extractor.get_notifications = AsyncMock(return_value=expected)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_notifications")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        refs = result["references"]["notifications"]
+        assert refs[0]["kind"] == "person"
+        assert refs[0]["url"] == "/in/janedoe/"
+
+    async def test_get_notifications_rejects_excessive_limit(self, mock_context):
+        """Verify limit=51 is rejected by Field(le=50) validation."""
+        # FastMCP wraps the pydantic error raised by Field() constraints in
+        # its own ValidationError, which does not subclass pydantic's.
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        with pytest.raises(ValidationError, match="limit"):
+            await mcp.call_tool("get_notifications", {"limit": 51})
 
 
 class TestPostTools:
