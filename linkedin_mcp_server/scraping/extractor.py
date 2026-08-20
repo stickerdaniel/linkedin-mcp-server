@@ -105,7 +105,15 @@ def rate_limited_section_error() -> dict[str, str]:
 
 
 # LinkedIn shows 25 results per page
-_PAGE_SIZE = 25
+# LinkedIn's offset stride in the search URL. It is NOT how many cards a
+# page renders: a live search served 11 per navigation while advertising 25
+# per page, so paging by this number skipped 13 of every 24 jobs. Only the
+# "are we past the last page" check may use it.
+_RESULTS_PER_LINKEDIN_PAGE = 25
+# Scrolling is bounded per navigation and across a whole search, because
+# max_pages reaches 10 and tool_timeout_seconds defaults to 180.
+_SCROLL_DEADLINE_MAX = 12.0
+_SCROLL_BUDGET_TOTAL = 60.0
 
 _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 
@@ -3103,6 +3111,7 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
+        scroll_deadline: float = _SCROLL_DEADLINE_MAX,
     ) -> ExtractedSection:
         """Extract innerText from a job search page with soft rate-limit retry.
 
@@ -3111,7 +3120,9 @@ class LinkedInExtractor:
         ``_RATE_LIMITED_MSG`` sentinel instead of silent empty results.
         """
         try:
-            result = await self._extract_search_page_once(url, section_name)
+            result = await self._extract_search_page_once(
+                url, section_name, scroll_deadline
+            )
             if result.text != _RATE_LIMITED_MSG:
                 return result
 
@@ -3121,7 +3132,9 @@ class LinkedInExtractor:
                 _RATE_LIMIT_RETRY_DELAY,
             )
             await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            result = await self._extract_search_page_once(url, section_name)
+            result = await self._extract_search_page_once(
+                url, section_name, scroll_deadline / 2
+            )
             if result.text == _RATE_LIMITED_MSG:
                 logger.warning("Search page %s still rate-limited after retry", url)
             return result
@@ -3145,6 +3158,7 @@ class LinkedInExtractor:
         self,
         url: str,
         section_name: str,
+        scroll_deadline: float = _SCROLL_DEADLINE_MAX,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
         await self._navigate_to_page(url)
@@ -3159,7 +3173,7 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         if main_found:
-            await scroll_job_sidebar(self._page, pause_time=0.5, max_scrolls=5)
+            await scroll_job_sidebar(self._page, deadline=scroll_deadline)
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
@@ -3298,24 +3312,37 @@ class LinkedInExtractor:
         total_pages: int | None = None
         total_pages_queried = False
 
+        # Split the search-wide scroll budget over the navigations asked for.
+        scroll_deadline = min(
+            _SCROLL_DEADLINE_MAX, _SCROLL_BUDGET_TOTAL / max(1, max_pages)
+        )
+        # The offset follows what the pages actually rendered. LinkedIn's own
+        # stride would skip every result it renders beyond it.
+        offset = 0
+
         for page_num in range(max_pages):
-            # Stop if we already know we've reached the last page
-            if total_pages is not None and page_num >= total_pages:
-                logger.debug("All %d pages fetched, stopping", total_pages)
+            # Stop once the offset is past the last advertised result
+            if (
+                total_pages is not None
+                and offset >= total_pages * _RESULTS_PER_LINKEDIN_PAGE
+            ):
+                logger.debug(
+                    "Offset %d is past the %d advertised pages, stopping",
+                    offset,
+                    total_pages,
+                )
                 break
 
             if page_num > 0:
                 await asyncio.sleep(_NAV_DELAY)
 
-            url = (
-                base_url
-                if page_num == 0
-                else f"{base_url}&start={page_num * _PAGE_SIZE}"
-            )
+            url = base_url if offset == 0 else f"{base_url}&start={offset}"
 
             try:
                 extracted = await self._extract_search_page(
-                    url, section_name="search_results"
+                    url,
+                    section_name="search_results",
+                    scroll_deadline=scroll_deadline,
                 )
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
@@ -3354,6 +3381,9 @@ class LinkedInExtractor:
                         page_references.extend(extracted.references)
                     break
                 page_ids = await self._extract_job_ids()
+                # Advance by what this navigation rendered, duplicates
+                # included: the next unseen result sits right behind them.
+                offset += len(page_ids)
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
                 if not new_ids:
