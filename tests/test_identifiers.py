@@ -445,8 +445,13 @@ class TestTheParserAgreesWithABrowser:
             # on, which for a LinkedIn address is always https.
             ("//de.linkedin.com/in/alice", "alice"),
             ("//www.linkedin.com/in/alice/recent-activity/all/", "alice"),
-            # An explicitly written default port is the same address.
+            # An explicitly written default port is the same address, judged
+            # against the scheme's own default rather than against 443 alone.
             ("https://www.linkedin.com:443/in/alice", "alice"),
+            ("http://www.linkedin.com:80/in/alice", "alice"),
+            # A single trailing dot is the fully qualified spelling of the host,
+            # and LinkedIn answers on it.
+            ("https://www.linkedin.com./in/alice", "alice"),
         ],
     )
     def test_a_form_a_browser_loads_still_resolves(self, value: str, expected: str):
@@ -458,6 +463,12 @@ class TestTheParserAgreesWithABrowser:
             # LinkedIn answers on 443. Reading the path and dropping the port
             # would rebuild an address the caller never named as the live page.
             "https://www.linkedin.com:444/in/williamhgates",
+            # Port 443 spoken in cleartext is a request LinkedIn answers 400 for.
+            # Taking it for a default would rebuild it as the live HTTPS profile.
+            "http://www.linkedin.com:443/in/williamhgates",
+            "https://www.linkedin.com:80/in/williamhgates",
+            # One trailing dot is a spelling; two are not a host.
+            "https://www.linkedin.com../in/williamhgates",
             "https://www.linkedin.com:99999/in/williamhgates",
             "https://www.linkedin.com:foo/in/williamhgates",
             # A browser reads this as a path on linkedin.com; anything splitting

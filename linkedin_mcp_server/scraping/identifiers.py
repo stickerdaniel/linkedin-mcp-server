@@ -98,6 +98,10 @@ _RAW_REFUSED = re.compile(r"[\x00-\x1f\x7f\\]")
 # so this is always a malformed escape rather than content.
 _STRAY_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
+# The port each scheme reaches without being told, so an explicitly written one
+# can be told apart from one that redirects the request somewhere else.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
 # The two segments a browser resolves away. `quote` cannot help here: a period is
 # unreserved, so it survives escaping and `/in/../` still walks up a level.
 _DOT_SEGMENTS = {".", ".."}
@@ -234,7 +238,10 @@ def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
         return None
     if url.scheme not in {"http", "https"}:
         return None
-    host = (url.hostname or "").lower()
+    # A single trailing dot is the fully qualified spelling of the same host, and
+    # LinkedIn answers on it, so it is dropped rather than refused. A second dot
+    # is not a spelling of anything and falls through to the host match below.
+    host = (url.hostname or "").lower().removesuffix(".")
     if _SHORTENER_HOST.match(host):
         raise InvalidReferenceError(
             "That is a shortened LinkedIn link, and only a redirect resolves it. "
@@ -246,11 +253,16 @@ def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
     # path and dropping the port turns an address a browser cannot load into a
     # working call the caller never asked for: `linkedin.com:444/in/x` times out
     # in a browser and would have been rebuilt here as the live profile.
+    #
+    # Judged against the scheme's own default, not against 443 alone.
+    # `http://www.linkedin.com:443/in/x` is a browser request to port 443 spoken
+    # in cleartext, which answers 400, and taking it for the default would have
+    # rebuilt it as the live HTTPS profile.
     try:
         port = url.port
     except ValueError:
         return None
-    if port not in (None, 443):
+    if port is not None and port != _DEFAULT_PORTS[url.scheme]:
         return None
 
     raw_segments = url.path.split("/")
