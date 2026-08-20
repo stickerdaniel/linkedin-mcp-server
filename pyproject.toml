@@ -36,6 +36,7 @@ dependencies = [
     "packaging>=26.2",
     "patchright>=1.55.0",
     "python-dotenv>=1.1.1",
+    "rich>=15.0.0",
 ]
 
 [project.urls]
