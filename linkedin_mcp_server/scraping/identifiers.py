@@ -209,10 +209,21 @@ def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
     # Checked before the parse, which reads these differently than a browser
     # does and would hand back a different reference than the one the caller
     # wrote. See _RAW_REFUSED.
-    if _RAW_REFUSED.search(value):
+    #
+    # Only up to the first `?` or `#`: a backslash separates paths and nothing
+    # else, so a tracking parameter like `?trk=foo\\bar` leaves the path alone
+    # and refusing it would reject an address that works. Everything before that
+    # cut is in scope, the authority included, because
+    # `https://www.linkedin.com\\evil.example/in/alice` is a path on LinkedIn to
+    # a browser and a host swap to anything that splits on `/`.
+    if _RAW_REFUSED.search(re.split(r"[?#]", value, maxsplit=1)[0]):
         return None
     if _HAS_SCHEME.match(value):
         candidate = value
+    elif value.startswith("//"):
+        # A network-path reference. A browser takes the scheme from the page it
+        # is on, which for a LinkedIn address is always https.
+        candidate = f"https:{value}"
     elif value.startswith("/"):
         candidate = f"https://www.linkedin.com{value}"
     else:
@@ -230,6 +241,16 @@ def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
             f"Open it and pass the {want} the address it lands on contains."
         )
     if not _LINKEDIN_HOST.match(host):
+        return None
+    # A port LinkedIn does not answer on is not a formatting quirk. Reading the
+    # path and dropping the port turns an address a browser cannot load into a
+    # working call the caller never asked for: `linkedin.com:444/in/x` times out
+    # in a browser and would have been rebuilt here as the live profile.
+    try:
+        port = url.port
+    except ValueError:
+        return None
+    if port not in (None, 443):
         return None
 
     raw_segments = url.path.split("/")
@@ -349,6 +370,23 @@ def normalize_company_identifier(value: str) -> str:
     return reference
 
 
+def _numeric_tail(segment: str) -> str:
+    """The id at the end of a slugged path segment, or the segment unchanged.
+
+    LinkedIn serves a job under both `/jobs/view/1967281839/` and
+    `/jobs/view/<title>-at-<company>-1967281839/`, and the slugged form is the
+    one a browser address bar holds. Measured, both 301 to the same destination,
+    so the trailing run of digits is the id and the words in front of it are
+    decoration.
+
+    Only reached for a segment taken out of a URL under the id's own route. A
+    bare argument stays strictly numeric, because there the words are not a slug
+    LinkedIn wrote, they are a wrong value.
+    """
+    match = re.fullmatch(r"[\w-]*?-(\d+)", segment)
+    return match.group(1) if match else segment
+
+
 def normalize_opaque_id(
     value: str,
     *,
@@ -371,6 +409,8 @@ def normalize_opaque_id(
     """
     value = value.strip()
     reference = _id_after_route(value, route, want=field) if route else None
+    if reference is not None and numeric:
+        reference = _numeric_tail(reference)
     if reference is None:
         reference = _usable(value)
     if reference is None or (numeric and not _NUMERIC_ID.match(reference)):

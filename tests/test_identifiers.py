@@ -428,6 +428,65 @@ class TestDotSegmentsAnywhere:
         assert normalize_person_identifier("/in/alice/recent-activity/all/") == "alice"
 
 
+class TestTheParserAgreesWithABrowser:
+    """Each case was compared against a conforming URL parser before it was
+    written down. The rule is one-directional: this may refuse an address a
+    browser loads, and it may never resolve to a different page than one."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            # A backslash separates paths and nothing else, so the guard that
+            # refuses one must stop at the first `?` or `#` or it rejects the
+            # tracking parameters every shared LinkedIn link carries.
+            ("https://www.linkedin.com/in/alice?trk=foo\\bar", "alice"),
+            ("https://www.linkedin.com/in/alice#foo\\bar", "alice"),
+            # A network-path reference takes its scheme from the page it sits
+            # on, which for a LinkedIn address is always https.
+            ("//de.linkedin.com/in/alice", "alice"),
+            ("//www.linkedin.com/in/alice/recent-activity/all/", "alice"),
+            # An explicitly written default port is the same address.
+            ("https://www.linkedin.com:443/in/alice", "alice"),
+        ],
+    )
+    def test_a_form_a_browser_loads_still_resolves(self, value: str, expected: str):
+        assert normalize_person_identifier(value) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # LinkedIn answers on 443. Reading the path and dropping the port
+            # would rebuild an address the caller never named as the live page.
+            "https://www.linkedin.com:444/in/williamhgates",
+            "https://www.linkedin.com:99999/in/williamhgates",
+            "https://www.linkedin.com:foo/in/williamhgates",
+            # A browser reads this as a path on linkedin.com; anything splitting
+            # on "/" reads it as a different host entirely.
+            "https://www.linkedin.com\\evil.example/in/alice",
+        ],
+    )
+    def test_an_address_a_browser_does_not_load_is_refused(self, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize_person_identifier(value)
+
+
+class TestSluggedJobUrls:
+    """LinkedIn serves a job under both `/jobs/view/<id>/` and
+    `/jobs/view/<title>-at-<company>-<id>/`, and the slugged one is what an
+    address bar holds. Measured live, both 301 to the same destination."""
+
+    def test_the_slug_resolves_to_the_id_the_numeric_form_carries(self):
+        slugged = "https://www.linkedin.com/jobs/view/software-engineer-new-grad-at-ixl-learning-1967281839/"
+        assert normalize_job_id(slugged) == normalize_job_id("/jobs/view/1967281839/")
+        assert normalize_job_id(slugged) == "1967281839"
+
+    def test_a_bare_argument_stays_strictly_numeric(self):
+        # Outside a URL the words are not a slug LinkedIn wrote, they are a
+        # wrong value, and a page load is what it costs to learn that.
+        with pytest.raises(InvalidReferenceError):
+            normalize_job_id("software-engineer-1967281839")
+
+
 class TestNothingTidiesTheReference:
     """Each of these used to be cleaned up into a real target: the decode was
     followed by a strip, the URL parse drops control characters, and empty segments
