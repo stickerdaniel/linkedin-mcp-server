@@ -400,6 +400,28 @@ class TestDotSegmentsAnywhere:
         with pytest.raises(InvalidReferenceError):
             normalize(value)
 
+    @pytest.mark.parametrize(
+        ("normalize", "value"),
+        [
+            (normalize_person_identifier, "/in/alice/x\\..\\..\\..\\in\\bob"),
+            (normalize_company_identifier, "/company/a/x\\..\\..\\..\\company\\b"),
+            (normalize_job_id, "/jobs/view/123/x\\..\\..\\..\\..\\jobs\\view\\456"),
+            (
+                normalize_thread_id,
+                "/messaging/thread/2-a/x\\..\\..\\..\\..\\messaging\\thread\\2-b",
+            ),
+        ],
+    )
+    def test_a_backslash_cannot_smuggle_the_dot_segments_past(
+        self, normalize, value: str
+    ):
+        # The URL Standard makes a backslash a path separator for http(s), and
+        # `urlparse` does not, so splitting on "/" alone reads a path no browser
+        # navigates. Measured with a conforming parser, the first value resolves
+        # to /in/bob while this read Alice.
+        with pytest.raises(InvalidReferenceError):
+            normalize(value)
+
     def test_a_real_sub_page_still_resolves(self):
         # Only dot segments are refused; the sub-pages a profile URL carries are
         # what made reading past the identifier necessary in the first place.

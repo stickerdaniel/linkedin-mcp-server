@@ -78,11 +78,21 @@ _UNUSABLE = re.compile(r"[\s/\\?#]|[\x00-\x1f\x7f]")
 # spent a page load on a 404 that this module exists to avoid.
 _IDENTIFIER = re.compile(r"^[\w-]+$")
 
-# Control characters in the argument itself, checked before it becomes a URL.
+# Characters that have to be judged in the argument itself, before it becomes a
+# URL, because the parse below does not see them the way a browser does.
+#
 # Parsing strips tab, newline and carriage return out of a URL silently, so
 # `/in/foo\nbar/` would arrive as `foobar` and be accepted as a different person
 # than the caller named.
-_RAW_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+#
+# A backslash is a path separator in the URL Standard for http(s), and
+# `urlparse` is not: it leaves the backslash inside one segment, so splitting on
+# `/` alone reads a path the browser never navigates. Measured,
+# `/in/alice/x\..\..\..\in\bob` reads as `alice` here while a conforming
+# parser resolves it to `/in/bob`, which is the retargeting the dot-segment rule
+# below exists to stop. No supported identifier contains one, so it is refused
+# outright rather than translated.
+_RAW_REFUSED = re.compile(r"[\x00-\x1f\x7f\\]")
 
 # A `%` that begins no valid escape. LinkedIn references contain no literal one,
 # so this is always a malformed escape rather than content.
@@ -196,10 +206,10 @@ def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
         InvalidReferenceError: for an ``lnkd.in`` short link, which is a LinkedIn
             URL that only a redirect resolves.
     """
-    # Checked before the parse, which silently removes tab, newline and carriage
-    # return from a path and would hand back a different reference than the one
-    # the caller wrote.
-    if _RAW_CONTROL.search(value):
+    # Checked before the parse, which reads these differently than a browser
+    # does and would hand back a different reference than the one the caller
+    # wrote. See _RAW_REFUSED.
+    if _RAW_REFUSED.search(value):
         return None
     if _HAS_SCHEME.match(value):
         candidate = value
