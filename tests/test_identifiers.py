@@ -214,17 +214,26 @@ class TestNormalizeCompanyIdentifier:
             "https://www.linkedin.com/company/microsoft",
             "https://de.linkedin.com/company/microsoft/",
             "https://www.linkedin.com/company/microsoft/posts/",
-            "https://www.linkedin.com/showcase/microsoft",
         ],
     )
     def test_reduces_a_company_link_to_the_slug(self, value: str):
         assert normalize_company_identifier(value) == "microsoft"
 
-    def test_accepts_a_school_link(self):
-        # /company/<school-slug> 301-redirects to /school/<slug>, so reusing the
-        # slug on the company route resolves.
-        value = "https://www.linkedin.com/school/rwth-aachen-university/"
-        assert normalize_company_identifier(value) == "rwth-aachen-university"
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://www.linkedin.com/school/rwth-aachen-university/",
+            "https://www.linkedin.com/showcase/microsoft",
+        ],
+    )
+    def test_refuses_a_route_it_cannot_build(self, value: str):
+        # The slug used to be rebuilt under /company/, which 301-redirects to the
+        # organization root. Right for the root, wrong for every section the
+        # company scrape appends: /company/<school-slug>/jobs/ redirects to the
+        # school root too, and nothing checks where it landed, so root content
+        # was recorded under the requested section.
+        with pytest.raises(InvalidReferenceError):
+            normalize_company_identifier(value)
 
     @pytest.mark.parametrize(
         "value",
@@ -315,7 +324,7 @@ class TestReferencesThisServerEmits:
 
     @pytest.mark.parametrize(
         ("reference", "expected"),
-        [("/company/microsoft/", "microsoft"), ("/school/rwth-aachen/", "rwth-aachen")],
+        [("/company/microsoft/", "microsoft")],
     )
     def test_company_reference_yields_the_slug(self, reference, expected):
         assert normalize_company_identifier(reference) == expected
@@ -366,3 +375,73 @@ class TestLoneSurrogate:
     def test_it_is_refused_rather_than_crashing_the_url_builder(self, normalize):
         with pytest.raises(InvalidReferenceError):
             normalize("\ud800")
+
+
+class TestDotSegmentsAnywhere:
+    """A browser resolves dot segments across the whole path before it asks for
+    anything, so reading the route and the segment after it answers about a
+    different page than the reference names. `/in/alice/../../in/bob` is Bob to
+    a browser and was Alice here."""
+
+    @pytest.mark.parametrize(
+        ("normalize", "value"),
+        [
+            (normalize_person_identifier, "/in/alice/../../in/bob"),
+            (normalize_person_identifier, "/in/alice/%2e%2e/%2e%2e/in/bob"),
+            (normalize_company_identifier, "/company/a/../../company/b"),
+            (normalize_job_id, "/jobs/view/123/../../../jobs/view/456"),
+            (
+                normalize_thread_id,
+                "/messaging/thread/2-a/../../../messaging/thread/2-b",
+            ),
+        ],
+    )
+    def test_the_whole_path_is_judged(self, normalize, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize(value)
+
+    def test_a_real_sub_page_still_resolves(self):
+        # Only dot segments are refused; the sub-pages a profile URL carries are
+        # what made reading past the identifier necessary in the first place.
+        assert normalize_person_identifier("/in/alice/recent-activity/all/") == "alice"
+
+
+class TestNothingTidiesTheReference:
+    """Each of these used to be cleaned up into a real target: the decode was
+    followed by a strip, the URL parse drops control characters, and empty segments
+    were filtered away. LinkedIn answers 404 for the duplicate-segment path, so
+    accepting it names a page the reference does not."""
+
+    @pytest.mark.parametrize(
+        ("normalize", "value"),
+        [
+            (normalize_person_identifier, "/in/%20alice/"),
+            (normalize_person_identifier, "/in/foo\nbar/"),
+            (normalize_person_identifier, "/in/foo\tbar/"),
+            (normalize_company_identifier, "/company//microsoft/"),
+            (normalize_thread_id, "/messaging/thread/%202-abc/"),
+            (normalize_thread_id, "/messaging//thread//2-abc/"),
+        ],
+    )
+    def test_it_is_refused(self, normalize, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize(value)
+
+
+class TestIdentifierAllowlist:
+    """A public identifier is letters, digits, hyphen and underscore. The old
+    rule listed forbidden syntax instead, so a value carrying none of it passed
+    and spent a page load on a 404."""
+
+    @pytest.mark.parametrize(
+        "value", ["foo@example.com", "foo:bar", "foo!bar", "foo.bar"]
+    )
+    def test_a_value_that_cannot_be_one_is_refused(self, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize_company_identifier(value)
+
+    @pytest.mark.parametrize(
+        "value", ["williamhgates", "felix-krueckel", "андрей", "a_b"]
+    )
+    def test_a_real_one_passes(self, value: str):
+        assert normalize_person_identifier(value) == value

@@ -69,8 +69,20 @@ _SHORTENER_HOST = re.compile(r"^(?:[a-z0-9-]+\.)*lnkd\.in$")
 
 _HAS_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 
-# Path, query and whitespace syntax that no identifier carries.
+# Path, query and whitespace syntax that no reference carries.
 _UNUSABLE = re.compile(r"[\s/\\?#]|[\x00-\x1f\x7f]")
+
+# Everything a public identifier or a page slug may consist of, as an allowlist
+# rather than a list of forbidden characters. A blacklist keeps losing to inputs
+# nobody enumerated: `foo@example.com` carries no path syntax, so it passed and
+# spent a page load on a 404 that this module exists to avoid.
+_IDENTIFIER = re.compile(r"^[\w-]+$")
+
+# Control characters in the argument itself, checked before it becomes a URL.
+# Parsing strips tab, newline and carriage return out of a URL silently, so
+# `/in/foo\nbar/` would arrive as `foobar` and be accepted as a different person
+# than the caller named.
+_RAW_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 # A `%` that begins no valid escape. LinkedIn references contain no literal one,
 # so this is always a malformed escape rather than content.
@@ -84,16 +96,18 @@ _DOT_SEGMENTS = {".", ".."}
 # tool for that; reaching it through a person lookup answers about the wrong one.
 _RESERVED = {"me"}
 
-# Routes that name a person and routes that name an organization. A school slug
-# is accepted on the company side because /company/<school-slug> 301-redirects to
-# /school/<slug>, measured at the root. The section routes the company scrape
-# appends (/posts/, /people/) answer 302-to-login for a school slug rather than
-# 404, so they are recognised, but what they render needs a signed-in session to
-# establish and has not been. Accepting the slug is still better than refusing
-# it: the caller gets LinkedIn's own answer instead of a refusal Cadenza cannot
-# justify.
+# Routes that name a person and routes that name an organization.
+#
+# `/school/` and `/showcase/` were accepted here and are not any more. Nothing in
+# this module can build an address under either one, so their slug was rebuilt
+# under `/company/`, which 301-redirects to the organization root. That is right
+# for the root and wrong for everything the company scrape appends: measured,
+# `/company/<school-slug>/jobs/` redirects to the school root too, and the
+# extractor does not check where it landed, so root content was recorded under
+# the section the caller asked for. A bare slug still works, because that is the
+# caller asserting which route it belongs to.
 _PERSON_ROUTE = "in"
-_ORGANIZATION_ROUTES = {"company", "school", "showcase"}
+_ORGANIZATION_ROUTES = {"company"}
 
 # The routes this repository emits for the ids these tools take. link_metadata
 # renders every reference as a site-relative path (``/in/alice/``,
@@ -109,26 +123,41 @@ _THREAD_ROUTE = ("messaging", "thread")
 _NUMERIC_ID = re.compile(r"^[0-9]+$")
 
 
+def _decoded(value: str) -> str | None:
+    """The value with at most one layer of percent-encoding removed."""
+    if "%" not in value:
+        return value
+    if _STRAY_PERCENT.search(value):
+        return None
+    try:
+        value = unquote(value, errors="strict")
+    except UnicodeDecodeError:
+        return None
+    # A decoded reference never contains a percent. One that still does carries
+    # another encoding layer, which is how `%252e%252e` would reach `..` on a
+    # later pass through this same function.
+    return None if "%" in value else value
+
+
+def _is_dot_segment(segment: str) -> bool:
+    """Whether a path segment resolves away, in either spelling."""
+    return segment in _DOT_SEGMENTS or _decoded(segment) in _DOT_SEGMENTS
+
+
 def _usable(value: str) -> str | None:
     """The reference in the form the URL builders expect, or ``None``.
 
     Shared by the URL branch and the bare branch on purpose. A segment lifted out
     of a link gets exactly the judgement a bare argument gets, so a second
     encoding layer inside a real profile URL cannot slip past on the way through.
+
+    Nothing trims after decoding. `%20alice` has to reach the checks below as a
+    leading space and be refused, not be tidied into the real `alice`.
     """
-    if "%" in value:
-        if _STRAY_PERCENT.search(value):
-            return None
-        try:
-            value = unquote(value, errors="strict")
-        except UnicodeDecodeError:
-            return None
-        # A decoded reference never contains a percent. One that still does
-        # carries another encoding layer, which is how `%252e%252e` would reach
-        # `..` on a later pass through this same function.
-        if "%" in value:
-            return None
-    value = value.strip()
+    decoded = _decoded(value)
+    if decoded is None:
+        return None
+    value = decoded
     if not value or value in _DOT_SEGMENTS:
         return None
     # A lone surrogate survives JSON parsing and every check above, and then
@@ -140,6 +169,12 @@ def _usable(value: str) -> str | None:
     except UnicodeEncodeError:
         return None
     return None if _UNUSABLE.search(value) else value
+
+
+def _identifier(value: str) -> str | None:
+    """A public identifier or page slug, which is narrower than a usable id."""
+    usable = _usable(value)
+    return usable if usable is not None and _IDENTIFIER.match(usable) else None
 
 
 def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
@@ -161,6 +196,11 @@ def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
         InvalidReferenceError: for an ``lnkd.in`` short link, which is a LinkedIn
             URL that only a redirect resolves.
     """
+    # Checked before the parse, which silently removes tab, newline and carriage
+    # return from a path and would hand back a different reference than the one
+    # the caller wrote.
+    if _RAW_CONTROL.search(value):
+        return None
     if _HAS_SCHEME.match(value):
         candidate = value
     elif value.startswith("/"):
@@ -182,7 +222,19 @@ def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
     if not _LINKEDIN_HOST.match(host):
         return None
 
-    segments = [segment for segment in url.path.split("/") if segment]
+    raw_segments = url.path.split("/")
+    # An interior empty segment is not a formatting quirk: LinkedIn answers 404
+    # for `/company//microsoft/`, so dropping it would turn a path that names
+    # nothing into one that names the real page.
+    if any(segment == "" for segment in raw_segments[1:-1]):
+        return None
+    segments = [segment for segment in raw_segments if segment]
+    # A dot segment anywhere retargets the whole path. A browser resolves
+    # `/in/alice/../../in/bob` to `/in/bob`, while reading the route and the
+    # segment after it answers `alice`, so the tool would act on the person the
+    # reference does not name.
+    if any(_is_dot_segment(segment) for segment in segments):
+        return None
     if segments and segments[0].lower() == "mwlite":
         segments.pop(0)
         if segments and segments[0].lower() == "profile":
@@ -196,7 +248,7 @@ def _parse_linkedin_url(value: str, *, want: str) -> tuple[str, str | None] | No
     if segments is None:
         return None
     route = segments[0].lower() if segments else ""
-    return route, _usable(segments[1]) if len(segments) > 1 else None
+    return route, _identifier(segments[1]) if len(segments) > 1 else None
 
 
 def _id_after_route(value: str, route: tuple[str, ...], *, want: str) -> str | None:
@@ -241,7 +293,7 @@ def normalize_person_identifier(value: str, *, allow_self_alias: bool = False) -
                 '/in/ public identifier of a person, for example "williamhgates".'
             )
     else:
-        reference = _usable(value)
+        reference = _identifier(value)
         if reference is None:
             raise InvalidReferenceError(
                 "That is not a LinkedIn public identifier. Pass the part after "
@@ -278,7 +330,7 @@ def normalize_company_identifier(value: str) -> str:
             )
         return reference
 
-    reference = _usable(value)
+    reference = _identifier(value)
     if reference is None:
         raise InvalidReferenceError(
             "That is not a LinkedIn company slug. Pass the part after /company/ "
