@@ -55,6 +55,10 @@ _HAS_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 # are what a browser would resolve away, taking the navigation with them.
 _UNUSABLE = re.compile(r"[\s/\\?#]|[\x00-\x1f\x7f]")
 
+# A `%` that begins no valid escape. LinkedIn identifiers contain no literal one,
+# so this is always a malformed escape rather than content.
+_STRAY_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
 # `me` is LinkedIn's alias for the signed-in member. A link that spells it must
 # never collapse into that alias: reading the operator's own profile while
 # reporting someone else's is a silently wrong answer, not a visible failure.
@@ -122,6 +126,27 @@ def _usable(slug: str) -> bool:
     return bool(slug) and not _UNUSABLE.search(slug)
 
 
+def _decoded_bare(value: str) -> str | None:
+    """A bare identifier in the form the URL builder expects, or ``None``.
+
+    A caller can hand over an already-escaped segment: ``get_my_profile`` reads
+    the username straight out of ``page.url`` after the ``/in/me/`` redirect, and
+    a browser reports that path percent-encoded. Passing it on unchanged would
+    let :func:`person_profile_url` escape it a second time (``%D0`` becomes
+    ``%25D0``) and navigate to a path that is not the profile. Decoding once here
+    also catches syntax the escapes were hiding, which is the other half of why
+    the raw interpolation was unsafe.
+    """
+    if "%" not in value:
+        return value if _usable(value) else None
+    # `unquote` leaves a malformed escape untouched rather than raising, so a
+    # broken one has to be found before it silently survives into the URL.
+    if _STRAY_PERCENT.search(value):
+        return None
+    decoded = unquote(value)
+    return decoded if _usable(decoded) else None
+
+
 def normalize_person_identifier(value: str) -> str:
     """The public identifier for a person, from a link or from the identifier.
 
@@ -150,12 +175,13 @@ def normalize_person_identifier(value: str) -> str:
             )
         return slug
 
-    if not _usable(value):
+    bare = _decoded_bare(value)
+    if bare is None:
         raise LinkedInScraperException(
             f"{_echo(value)} is not a LinkedIn public identifier. Pass the part "
             'after /in/ in a profile URL, for example "williamhgates".'
         )
-    return value
+    return bare
 
 
 def normalize_company_identifier(value: str) -> str:
@@ -179,12 +205,13 @@ def normalize_company_identifier(value: str) -> str:
             )
         return slug
 
-    if not _usable(value):
+    bare = _decoded_bare(value)
+    if bare is None:
         raise LinkedInScraperException(
             f"{_echo(value)} is not a LinkedIn company slug. Pass the part after "
             '/company/ in a company URL, for example "microsoft".'
         )
-    return value
+    return bare
 
 
 def person_profile_url(identifier: str, suffix: str = "") -> str:

@@ -63,6 +63,30 @@ class TestNormalizePersonIdentifier:
         value = "https://ru.linkedin.com/in/%D0%B0%D0%BD%D0%B4%D1%80%D0%B5%D0%B9"
         assert normalize_person_identifier(value) == "андрей"
 
+    def test_decodes_a_bare_percent_encoded_username(self):
+        # get_my_profile reads the username out of page.url after the /in/me/
+        # redirect, and a browser reports that path encoded. Returning it as-is
+        # would let the URL builder escape it again into %25D0, a path that is
+        # not the profile.
+        assert (
+            normalize_person_identifier("%D0%B0%D0%BD%D0%B4%D1%80%D0%B5%D0%B9")
+            == "андрей"
+        )
+
+    @pytest.mark.parametrize("value", ["%ZZ", "felix%", "felix%2", "%"])
+    def test_refuses_a_malformed_escape(self, value: str):
+        # unquote leaves a broken escape untouched instead of raising, so it
+        # would otherwise survive into the URL.
+        with pytest.raises(LinkedInScraperException):
+            normalize_person_identifier(value)
+
+    @pytest.mark.parametrize(
+        "value", ["felix%2Ffoo", "felix%20foo", "felix%2E%2E%2Ffeed"]
+    )
+    def test_refuses_syntax_the_escapes_were_hiding(self, value: str):
+        with pytest.raises(LinkedInScraperException):
+            normalize_person_identifier(value)
+
     def test_preserves_case(self):
         # A share link from the app can carry a case-sensitive profile id where
         # the public identifier normally sits.

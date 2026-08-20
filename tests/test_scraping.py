@@ -649,6 +649,42 @@ class TestScrapePersonUrls:
                 await extractor.scrape_person("testuser/../../feed", {"main_profile"})
         mock_extract.assert_not_called()
 
+    async def test_an_already_encoded_username_is_not_encoded_twice(self, mock_page):
+        """get_my_profile hands over the username exactly this way.
+
+        It reads the segment out of page.url after the /in/me/ redirect, and a
+        browser reports that path percent-encoded. Escaping it again turns %D0
+        into %25D0, which is a different profile path, so the own-profile scrape
+        of any member with a non-ASCII vanity would navigate somewhere else.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("profile text"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.scrape_person(
+                "%D0%B0%D0%BD%D0%B4%D1%80%D0%B5%D0%B9", {"main_profile"}
+            )
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert urls == [
+            "https://www.linkedin.com/in/%D0%B0%D0%BD%D0%B4%D1%80%D0%B5%D0%B9/"
+        ]
+
     async def test_a_pasted_company_link_reaches_the_canonical_company_url(
         self, mock_page
     ):
