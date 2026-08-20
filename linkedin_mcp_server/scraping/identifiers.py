@@ -163,10 +163,17 @@ def _parse_linkedin_url(value: str, *, want: str) -> tuple[str, str | None] | No
     return route, _usable(segments[1]) if len(segments) > 1 else None
 
 
-def normalize_person_identifier(value: str) -> str:
+def normalize_person_identifier(value: str, *, allow_self_alias: bool = False) -> str:
     """The public identifier for a person, from a link or from the identifier.
 
     Idempotent, so applying it twice along a call chain is harmless.
+
+    Args:
+        allow_self_alias: let ``me`` through. Only ``get_my_profile`` sets this,
+            and only for its own fallback: it navigates to ``/in/me/`` and reads
+            the identifier back out of the redirect, so an unresolved redirect
+            leaves it holding the alias. Refusing there would answer the tool
+            that owns the alias with an instruction to call itself.
 
     Raises:
         InvalidReferenceError: when the value cannot name a person, with the
@@ -195,7 +202,7 @@ def normalize_person_identifier(value: str) -> str:
                 '/in/ in a profile URL, for example "williamhgates".'
             )
 
-    if reference.lower() in _RESERVED:
+    if not allow_self_alias and reference.lower() in _RESERVED:
         raise InvalidReferenceError(
             f'"{reference}" is LinkedIn\'s alias for the signed-in member, not a '
             "person you can look up. Call get_my_profile for the authenticated "

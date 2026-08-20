@@ -6103,6 +6103,60 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         assert excinfo.value.__cause__ is None
 
 
+def _no_signals() -> ActionSignals:
+    """Every structural signal absent, which is all these tests need."""
+    return ActionSignals(
+        has_invite_anchor=False,
+        has_compose_anchor_in_action_root=False,
+        has_edit_intro_anchor=False,
+        has_labeled_action_button=False,
+        has_labeled_action_anchor=False,
+        has_incoming_action_row=False,
+    )
+
+
+class TestGetMyProfileAlias:
+    async def test_survives_a_redirect_that_never_resolves_the_alias(self, mock_page):
+        """The one caller allowed to hold "me".
+
+        get_my_profile navigates to /in/me/ and reads the identifier back out of
+        the redirect. When the redirect has not happened it still holds the
+        alias, and refusing there would answer the tool that owns the alias with
+        an instruction to call itself.
+        """
+        mock_page.url = "https://www.linkedin.com/in/me/"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("profile text"),
+            ) as mock_extract,
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_my_profile()
+
+        # The alias survives normalization, and because the page is already on
+        # it, the scrape reuses the loaded document instead of navigating again.
+        assert result["url"] == "https://www.linkedin.com/in/me/"
+        assert "main_profile" in result["sections"]
+        mock_extract.assert_not_called()
+
+    async def test_refuses_the_alias_from_an_ordinary_caller(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor, "extract_page", new_callable=AsyncMock
+        ) as mock_extract:
+            with pytest.raises(InvalidReferenceError):
+                await extractor.scrape_person("me", {"main_profile"})
+        mock_extract.assert_not_called()
+
+
 class TestEveryNormalizedEntryPoint:
     """Each method that was rewired, refusing a value that redirects the path.
 
@@ -6118,6 +6172,39 @@ class TestEveryNormalizedEntryPoint:
             patch.object(extractor, "extract_page", new_callable=AsyncMock),
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
         )
+
+    async def test_connect_with_person_normalizes_before_its_own_downstream_use(
+        self, mock_page
+    ):
+        """The traversal case cannot see this one.
+
+        scrape_person normalizes too, so removing connect_with_person's own call
+        still raises on "../../feed". A full URL is what separates them: the
+        scrape would succeed while the invite deeplink and the action-signal
+        selectors kept receiving the URL where they expect the vanity.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        seen: list[str] = []
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                new_callable=AsyncMock,
+                return_value={"sections": {"main_profile": "text"}},
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=lambda username: seen.append(username) or _no_signals(),
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+        ):
+            await extractor.connect_with_person(
+                "https://de.linkedin.com/in/williamhgates"
+            )
+
+        assert seen == ["williamhgates"]
 
     @pytest.mark.parametrize(
         "method,args,kwargs",

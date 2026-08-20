@@ -79,6 +79,14 @@ class TestNormalizePersonIdentifier:
             == "андрей"
         )
 
+    def test_raises_the_dedicated_invalid_reference_type(self):
+        # The type is what keeps error_handler from attaching an issue-report
+        # template to a caller mistake, so the base class is not enough here.
+        with pytest.raises(InvalidReferenceError):
+            normalize_person_identifier("https://www.linkedin.com/feed/")
+        with pytest.raises(InvalidReferenceError):
+            normalize_company_identifier("https://www.linkedin.com/in/williamhgates")
+
     @pytest.mark.parametrize("value", ["%ZZ", "felix%", "felix%2", "%"])
     def test_refuses_a_malformed_escape(self, value: str):
         # unquote leaves a broken escape untouched instead of raising, so it

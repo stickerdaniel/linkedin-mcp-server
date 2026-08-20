@@ -1746,6 +1746,7 @@ class LinkedInExtractor:
         max_scrolls: int | None = None,
         *,
         main_profile_already_loaded: bool = False,
+        allow_self_alias: bool = False,
     ) -> dict[str, Any]:
         """Scrape a person profile with configurable sections.
 
@@ -1760,7 +1761,9 @@ class LinkedInExtractor:
             {url, sections: {name: text}, profile_urn?: str}
         """
         requested = requested | {"main_profile"}
-        username = normalize_person_identifier(username)
+        username = normalize_person_identifier(
+            username, allow_self_alias=allow_self_alias
+        )
         base_url = person_profile_url(username)
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
@@ -1912,6 +1915,10 @@ class LinkedInExtractor:
             callbacks=callbacks,
             max_scrolls=max_scrolls,
             main_profile_already_loaded=True,
+            # The redirect is what resolves the alias. When it has not, this is
+            # still the tool the user asked for, so "me" stays usable here and
+            # nowhere else.
+            allow_self_alias=True,
         )
 
     async def _read_action_signals(self, username: str) -> ActionSignals:
