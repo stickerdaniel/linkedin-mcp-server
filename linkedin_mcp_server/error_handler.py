@@ -13,6 +13,7 @@ from fastmcp.exceptions import ToolError
 
 from linkedin_mcp_server.core.proxy_errors import redacted_copy
 from linkedin_mcp_server.core.exceptions import (
+    InvalidReferenceError,
     AuthenticationError,
     ElementNotFoundError,
     LinkedInScraperException,
@@ -252,6 +253,13 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             "Scraping failed. LinkedIn page structure may have changed.",
             context=context,
         )
+
+    # Ahead of the catch-all, which it subclasses. No issue diagnostics: a
+    # reference the caller can correct is not a bug worth reporting, and an
+    # issue template appended to it buries the correction it already names.
+    elif isinstance(exception, InvalidReferenceError):
+        logger.info("Invalid reference%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, (LinkedInScraperException, LinkedInMCPError)):
         # Catch-all for base exception types and any future subclasses

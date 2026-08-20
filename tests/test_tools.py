@@ -489,6 +489,45 @@ class TestCompanyTools:
         assert "about" in result["sections"]
         assert "pages_visited" not in result
 
+    async def test_get_company_posts_normalizes_a_pasted_link(self, mock_context):
+        """get_company_posts builds its URL in the tool, not in the extractor.
+
+        That makes it the one wiring point the extractor tests cannot reach, and
+        the only place a pasted company link would still become
+        /company/https://de.linkedin.com/company/testcorp/posts/.
+        """
+        mock_extractor = _make_mock_extractor({})
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_company_posts")
+        result = await tool_fn(
+            "https://de.linkedin.com/company/testcorp/",
+            mock_context,
+            extractor=mock_extractor,
+        )
+        assert result["url"] == "https://www.linkedin.com/company/testcorp/posts/"
+        assert (
+            mock_extractor.extract_page.call_args.args[0]
+            == "https://www.linkedin.com/company/testcorp/posts/"
+        )
+
+    async def test_get_company_posts_refuses_a_traversal_value(self, mock_context):
+        mock_extractor = _make_mock_extractor({})
+
+        from linkedin_mcp_server.tools.company import register_company_tools
+
+        mcp = FastMCP("test")
+        register_company_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_company_posts")
+        with pytest.raises(Exception):
+            await tool_fn("../../feed", mock_context, extractor=mock_extractor)
+        mock_extractor.extract_page.assert_not_called()
+
     async def test_get_company_profile_passes_callbacks(self, mock_context):
         """Verify tool wires MCPContextProgressCallback to the extractor."""
         expected = {

@@ -9,10 +9,16 @@ from urllib.parse import urlparse
 
 import pytest
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import (
+    InvalidReferenceError,
+    LinkedInScraperException,
+)
 from linkedin_mcp_server.scraping.identifiers import (
     company_page_url,
+    job_view_url,
+    messaging_thread_url,
     normalize_company_identifier,
+    normalize_opaque_id,
     normalize_person_identifier,
     person_profile_url,
 )
@@ -101,6 +107,47 @@ class TestNormalizePersonIdentifier:
         with pytest.raises(LinkedInScraperException):
             normalize_person_identifier("williamhgates/../../feed")
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # Escaping cannot save these: a period is unreserved, so quote leaves
+            # it alone and /in/../ still walks up a level.
+            "..",
+            ".",
+            "https://www.linkedin.com/in/..",
+            "https://www.linkedin.com/in/%2e%2e",
+            # A second encoding layer would reach `..` on the next pass through
+            # the normalizer, which connect_with_person performs.
+            "%252e%252e",
+            "https://www.linkedin.com/in/%252e%252e",
+        ],
+    )
+    def test_refuses_an_exact_dot_segment(self, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize_person_identifier(value)
+
+    @pytest.mark.parametrize("value", ["me", "ME", "%6d%65"])
+    def test_refuses_the_signed_in_alias_in_every_form(self, value: str):
+        # LinkedIn resolves /in/me/ to the authenticated member, so a lookup that
+        # meant somebody else answers about the operator instead.
+        with pytest.raises(InvalidReferenceError, match="get_my_profile"):
+            normalize_person_identifier(value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # unquote leaves %ZZ intact and turns %FF into a replacement
+            # character, so tolerating either rewrites the destination rather
+            # than refusing the reference.
+            "https://www.linkedin.com/in/%ZZ",
+            "https://www.linkedin.com/in/%FF",
+            "https://www.linkedin.com/in/a%2Fb",
+        ],
+    )
+    def test_refuses_a_malformed_escape_inside_a_full_url(self, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize_person_identifier(value)
+
     def test_never_collapses_a_link_into_the_signed_in_alias(self):
         # /in/me is LinkedIn's alias for the operator's own profile. Resolving a
         # link into it answers confidently about the wrong person.
@@ -183,6 +230,34 @@ class TestNormalizeCompanyIdentifier:
             normalize_company_identifier(value)
 
 
+class TestNormalizeOpaqueId:
+    def test_passes_an_ordinary_id_through(self):
+        assert normalize_opaque_id("4021126051", field="job_id") == "4021126051"
+
+    @pytest.mark.parametrize("value", ["../../feed", "..", "a/b", "a b", "%ZZ", ""])
+    def test_refuses_anything_that_could_redirect_the_path(self, value: str):
+        # job_id="../../feed" builds /jobs/view/../../feed/, which a browser
+        # resolves to /feed/ before it asks for anything.
+        with pytest.raises(InvalidReferenceError):
+            normalize_opaque_id(value, field="job_id")
+
+    def test_names_the_field_it_was_given(self):
+        with pytest.raises(InvalidReferenceError, match="thread_id"):
+            normalize_opaque_id("../x", field="thread_id")
+
+
+class TestShortLinkMessage:
+    def test_asks_a_company_tool_for_a_company_slug(self):
+        # A shared message told every caller to supply a personal profile URL,
+        # which fails a second time in the company normalizer.
+        with pytest.raises(InvalidReferenceError, match="/company/ slug"):
+            normalize_company_identifier("https://lnkd.in/eXaMpLe1")
+
+    def test_asks_a_person_tool_for_a_public_identifier(self):
+        with pytest.raises(InvalidReferenceError, match="/in/ public identifier"):
+            normalize_person_identifier("https://lnkd.in/eXaMpLe1")
+
+
 class TestUrlBuilders:
     def test_escapes_the_identifier_as_a_single_path_segment(self):
         url = person_profile_url("андрей", "/")
@@ -192,6 +267,13 @@ class TestUrlBuilders:
         # safe="" is the point: nothing the identifier carries may become path.
         assert person_profile_url("a/b") == "https://www.linkedin.com/in/a%2Fb"
         assert company_page_url("a/b") == "https://www.linkedin.com/company/a%2Fb"
+
+    def test_escapes_a_job_and_thread_id_as_one_segment(self):
+        assert job_view_url("a b", "/") == "https://www.linkedin.com/jobs/view/a%20b/"
+        assert (
+            messaging_thread_url("a/b")
+            == "https://www.linkedin.com/messaging/thread/a%2Fb"
+        )
 
     def test_builds_the_documented_profile_and_company_urls(self):
         assert (

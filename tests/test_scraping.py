@@ -7,6 +7,7 @@ import pytest
 from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
+    InvalidReferenceError,
     LinkedInScraperException,
     ProxyConnectionError,
 )
@@ -706,6 +707,7 @@ class TestScrapePersonUrls:
             )
 
         urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert urls
         assert all(
             u.startswith("https://www.linkedin.com/company/testco") for u in urls
         )
@@ -6099,3 +6101,45 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         # The raw error must not survive as a cause either: the handlers
         # downstream print the whole chain.
         assert excinfo.value.__cause__ is None
+
+
+class TestEveryNormalizedEntryPoint:
+    """Each method that was rewired, refusing a value that redirects the path.
+
+    Without this, removing normalization from one method leaves every other test
+    untouched: the bare-identifier assertions build the same URL either way. The
+    traversal value is the one input whose result differs, and it has to fail
+    before any navigation rather than after one.
+    """
+
+    @staticmethod
+    def _calls(extractor: LinkedInExtractor):
+        return (
+            patch.object(extractor, "extract_page", new_callable=AsyncMock),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+        )
+
+    @pytest.mark.parametrize(
+        "method,args,kwargs",
+        [
+            ("scrape_person", ("../../feed", {"main_profile"}), {}),
+            ("connect_with_person", ("../../feed",), {}),
+            ("get_sidebar_profiles", ("../../feed",), {}),
+            ("_open_conversation_by_username", ("../../feed",), {}),
+            ("send_message", ("../../feed", "hi"), {"confirm_send": False}),
+            ("scrape_company", ("../../feed", {"about"}), {}),
+            ("get_company_employees", ("../../feed",), {}),
+            ("scrape_job", ("../../feed",), {}),
+            ("get_conversation", (), {"thread_id": "../../feed"}),
+        ],
+    )
+    async def test_refuses_a_traversal_value_before_navigating(
+        self, mock_page, method: str, args: tuple, kwargs: dict
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        extract_patch, navigate_patch = self._calls(extractor)
+        with extract_patch as mock_extract, navigate_patch as mock_navigate:
+            with pytest.raises(InvalidReferenceError):
+                await getattr(extractor, method)(*args, **kwargs)
+        mock_extract.assert_not_called()
+        mock_navigate.assert_not_called()

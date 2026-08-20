@@ -36,7 +36,10 @@ from linkedin_mcp_server.core.utils import (
 from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.identifiers import (
     company_page_url,
+    job_view_url,
+    messaging_thread_url,
     normalize_company_identifier,
+    normalize_opaque_id,
     normalize_person_identifier,
     person_profile_url,
 )
@@ -3040,7 +3043,8 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {name: text}}
         """
-        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        job_id = normalize_opaque_id(job_id, field="job_id")
+        url = job_view_url(job_id, "/")
         extracted = await self.extract_page(url, section_name="job_posting")
 
         sections: dict[str, str] = {}
@@ -4014,9 +4018,8 @@ class LinkedInExtractor:
             )
 
         if thread_id:
-            await self._navigate_to_page(
-                f"https://www.linkedin.com/messaging/thread/{thread_id}/"
-            )
+            thread_id = normalize_opaque_id(thread_id, field="thread_id")
+            await self._navigate_to_page(messaging_thread_url(thread_id, "/"))
         else:
             await self._open_conversation_by_username(
                 linkedin_username or "", index=index
@@ -4136,7 +4139,7 @@ class LinkedInExtractor:
             compose_url: str | None = (
                 f"https://www.linkedin.com/messaging/compose/"
                 f"?profileUrn={_encoded}"
-                f"&recipient={profile_urn}"
+                f"&recipient={quote_plus(profile_urn)}"
                 f"&screenContext=NON_SELF_PROFILE_VIEW"
                 f"&interop=msgOverlay"
             )
