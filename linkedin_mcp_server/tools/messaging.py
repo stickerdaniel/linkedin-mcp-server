@@ -104,7 +104,7 @@ def register_messaging_tools(
 
         Args:
             ctx: FastMCP context for progress reporting
-            linkedin_username: LinkedIn username of the conversation participant
+            linkedin_username: LinkedIn username of the conversation participant; a full profile URL is accepted too
             thread_id: LinkedIn messaging thread ID
             index: 0-based selector for which thread to open when the
                 participant has multiple threads (e.g. an organic 1-on-1 plus
@@ -233,7 +233,7 @@ def register_messaging_tools(
         write operation when confirm_send is True.
 
         Args:
-            linkedin_username: LinkedIn username of the recipient
+            linkedin_username: LinkedIn username of the recipient; a full profile URL is accepted too
             message: The message text to send
             confirm_send: Must be True to send the message
             ctx: FastMCP context for progress reporting

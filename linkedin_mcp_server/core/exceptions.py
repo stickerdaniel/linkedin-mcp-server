@@ -7,6 +7,17 @@ class LinkedInScraperException(Exception):
     pass
 
 
+class InvalidReferenceError(LinkedInScraperException):
+    """A caller-supplied profile, company, job or thread reference is unusable.
+
+    Separate from the other scraper errors because nothing is broken: the
+    argument is wrong and the message says how to correct it. `raise_tool_error`
+    keeps it free of issue-report diagnostics for that reason.
+    """
+
+    pass
+
+
 class AuthenticationError(LinkedInScraperException):
     """Raised when authentication fails."""
 

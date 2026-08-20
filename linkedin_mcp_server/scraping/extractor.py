@@ -34,6 +34,16 @@ from linkedin_mcp_server.core.utils import (
     scroll_to_bottom,
 )
 from linkedin_mcp_server.scraping.connection import ActionSignals
+from linkedin_mcp_server.scraping.identifiers import (
+    company_page_url,
+    job_view_url,
+    messaging_thread_url,
+    normalize_company_identifier,
+    normalize_job_id,
+    normalize_thread_id,
+    normalize_person_identifier,
+    person_profile_url,
+)
 from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
     build_references,
@@ -1737,6 +1747,7 @@ class LinkedInExtractor:
         max_scrolls: int | None = None,
         *,
         main_profile_already_loaded: bool = False,
+        allow_self_alias: bool = False,
     ) -> dict[str, Any]:
         """Scrape a person profile with configurable sections.
 
@@ -1751,7 +1762,10 @@ class LinkedInExtractor:
             {url, sections: {name: text}, profile_urn?: str}
         """
         requested = requested | {"main_profile"}
-        base_url = f"https://www.linkedin.com/in/{username}"
+        username = normalize_person_identifier(
+            username, allow_self_alias=allow_self_alias
+        )
+        base_url = person_profile_url(username)
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
@@ -1779,7 +1793,7 @@ class LinkedInExtractor:
                         section_name == "main_profile"
                         and main_profile_already_loaded
                         and urlparse(self._page.url).path.rstrip("/")
-                        == f"/in/{username}"
+                        == urlparse(base_url).path.rstrip("/")
                     )
                     if can_reuse_main:
                         extracted = await self._extract_loaded_section(
@@ -1902,6 +1916,10 @@ class LinkedInExtractor:
             callbacks=callbacks,
             max_scrolls=max_scrolls,
             main_profile_already_loaded=True,
+            # The redirect is what resolves the alias. When it has not, this is
+            # still the tool the user asked for, so "me" stays usable here and
+            # nowhere else.
+            allow_self_alias=True,
         )
 
     async def _read_action_signals(self, username: str) -> ActionSignals:
@@ -2134,7 +2152,8 @@ class LinkedInExtractor:
         """
         from linkedin_mcp_server.scraping.connection import detect_connection_state
 
-        url = f"https://www.linkedin.com/in/{username}/"
+        username = normalize_person_identifier(username)
+        url = person_profile_url(username, "/")
 
         profile = await self.scrape_person(username, {"main_profile"})
         page_text = profile.get("sections", {}).get("main_profile", "")
@@ -2348,7 +2367,8 @@ class LinkedInExtractor:
             Dict with url and sidebar_profiles mapping section key to list of
             /in/username/ paths. Sections absent from the page are omitted.
         """
-        url = f"https://www.linkedin.com/in/{username}/"
+        username = normalize_person_identifier(username)
+        url = person_profile_url(username, "/")
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
@@ -2858,7 +2878,8 @@ class LinkedInExtractor:
         if index < 0:
             raise LinkedInScraperException(f"index must be non-negative (got {index}).")
 
-        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        linkedin_username = normalize_person_identifier(linkedin_username)
+        profile_url = person_profile_url(linkedin_username, "/")
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 
@@ -2904,7 +2925,8 @@ class LinkedInExtractor:
             {url, sections: {name: text}}
         """
         requested = requested | {"about"}
-        base_url = f"https://www.linkedin.com/company/{company_name}"
+        company_name = normalize_company_identifier(company_name)
+        base_url = company_page_url(company_name)
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
@@ -2995,7 +3017,8 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {employees: text}, references: {employees: [...]}}
         """
-        url = f"https://www.linkedin.com/company/{company_name}/people/"
+        company_name = normalize_company_identifier(company_name)
+        url = company_page_url(company_name, "/people/")
         if keywords:
             url += f"?keywords={quote_plus(keywords)}"
         extracted = await self.extract_page(url, section_name="employees")
@@ -3028,7 +3051,8 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {name: text}}
         """
-        url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        job_id = normalize_job_id(job_id)
+        url = job_view_url(job_id, "/")
         extracted = await self.extract_page(url, section_name="job_posting")
 
         sections: dict[str, str] = {}
@@ -4002,9 +4026,8 @@ class LinkedInExtractor:
             )
 
         if thread_id:
-            await self._navigate_to_page(
-                f"https://www.linkedin.com/messaging/thread/{thread_id}/"
-            )
+            thread_id = normalize_thread_id(thread_id)
+            await self._navigate_to_page(messaging_thread_url(thread_id, "/"))
         else:
             await self._open_conversation_by_username(
                 linkedin_username or "", index=index
@@ -4102,7 +4125,8 @@ class LinkedInExtractor:
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
                 compose URL directly, bypassing the Message-button lookup.
         """
-        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        linkedin_username = normalize_person_identifier(linkedin_username)
+        profile_url = person_profile_url(linkedin_username, "/")
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 
@@ -4123,7 +4147,7 @@ class LinkedInExtractor:
             compose_url: str | None = (
                 f"https://www.linkedin.com/messaging/compose/"
                 f"?profileUrn={_encoded}"
-                f"&recipient={profile_urn}"
+                f"&recipient={quote_plus(profile_urn)}"
                 f"&screenContext=NON_SELF_PROFILE_VIEW"
                 f"&interop=msgOverlay"
             )

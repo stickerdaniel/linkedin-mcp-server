@@ -7,6 +7,7 @@ import pytest
 from linkedin_mcp_server.callbacks import ProgressCallback
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
+    InvalidReferenceError,
     LinkedInScraperException,
     ProxyConnectionError,
 )
@@ -601,6 +602,116 @@ class TestScrapePersonUrls:
         assert len(urls) == 1
         assert urls[0].endswith("/in/testuser/")
         assert set(result["sections"]) == {"main_profile"}
+
+    async def test_a_pasted_profile_link_reaches_the_canonical_profile_url(
+        self, mock_page
+    ):
+        """A URL argument must be reduced before it becomes a path segment.
+
+        Without this the navigation target is
+        https://www.linkedin.com/in/https://de.linkedin.com/in/testuser, which
+        LinkedIn does not serve, and the tool reports that page as a profile.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("profile text"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person(
+                "https://de.linkedin.com/in/testuser", {"main_profile"}
+            )
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert urls == ["https://www.linkedin.com/in/testuser/"]
+        assert result["url"] == "https://www.linkedin.com/in/testuser/"
+
+    async def test_a_dot_segment_value_never_reaches_a_navigation(self, mock_page):
+        # A browser resolves ../ away before the request, so this would open the
+        # feed and return it as a profile.
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor, "extract_page", new_callable=AsyncMock
+        ) as mock_extract:
+            with pytest.raises(LinkedInScraperException):
+                await extractor.scrape_person("testuser/../../feed", {"main_profile"})
+        mock_extract.assert_not_called()
+
+    async def test_an_already_encoded_username_is_not_encoded_twice(self, mock_page):
+        """get_my_profile hands over the username exactly this way.
+
+        It reads the segment out of page.url after the /in/me/ redirect, and a
+        browser reports that path percent-encoded. Escaping it again turns %D0
+        into %25D0, which is a different profile path, so the own-profile scrape
+        of any member with a non-ASCII vanity would navigate somewhere else.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("profile text"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.scrape_person(
+                "%D0%B0%D0%BD%D0%B4%D1%80%D0%B5%D0%B9", {"main_profile"}
+            )
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert urls == [
+            "https://www.linkedin.com/in/%D0%B0%D0%BD%D0%B4%D1%80%D0%B5%D0%B9/"
+        ]
+
+    async def test_a_pasted_company_link_reaches_the_canonical_company_url(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("company text"),
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_company(
+                "https://de.linkedin.com/company/testco/posts/", {"about"}
+            )
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert urls
+        assert all(
+            u.startswith("https://www.linkedin.com/company/testco") for u in urls
+        )
+        assert result["url"] == "https://www.linkedin.com/company/testco/"
 
     async def test_scrape_person_returns_section_errors(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -5990,3 +6101,132 @@ class TestNavigationFailureCrossesTheToolBoundaryClean:
         # The raw error must not survive as a cause either: the handlers
         # downstream print the whole chain.
         assert excinfo.value.__cause__ is None
+
+
+def _no_signals() -> ActionSignals:
+    """Every structural signal absent, which is all these tests need."""
+    return ActionSignals(
+        has_invite_anchor=False,
+        has_compose_anchor_in_action_root=False,
+        has_edit_intro_anchor=False,
+        has_labeled_action_button=False,
+        has_labeled_action_anchor=False,
+        has_incoming_action_row=False,
+    )
+
+
+class TestGetMyProfileAlias:
+    async def test_survives_a_redirect_that_never_resolves_the_alias(self, mock_page):
+        """The one caller allowed to hold "me".
+
+        get_my_profile navigates to /in/me/ and reads the identifier back out of
+        the redirect. When the redirect has not happened it still holds the
+        alias, and refusing there would answer the tool that owns the alias with
+        an instruction to call itself.
+        """
+        mock_page.url = "https://www.linkedin.com/in/me/"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("profile text"),
+            ) as mock_extract,
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_my_profile()
+
+        # The alias survives normalization, and because the page is already on
+        # it, the scrape reuses the loaded document instead of navigating again.
+        assert result["url"] == "https://www.linkedin.com/in/me/"
+        assert "main_profile" in result["sections"]
+        mock_extract.assert_not_called()
+
+    async def test_refuses_the_alias_from_an_ordinary_caller(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor, "extract_page", new_callable=AsyncMock
+        ) as mock_extract:
+            with pytest.raises(InvalidReferenceError):
+                await extractor.scrape_person("me", {"main_profile"})
+        mock_extract.assert_not_called()
+
+
+class TestEveryNormalizedEntryPoint:
+    """Each method that was rewired, refusing a value that redirects the path.
+
+    Without this, removing normalization from one method leaves every other test
+    untouched: the bare-identifier assertions build the same URL either way. The
+    traversal value is the one input whose result differs, and it has to fail
+    before any navigation rather than after one.
+    """
+
+    @staticmethod
+    def _calls(extractor: LinkedInExtractor):
+        return (
+            patch.object(extractor, "extract_page", new_callable=AsyncMock),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+        )
+
+    async def test_connect_with_person_normalizes_before_its_own_downstream_use(
+        self, mock_page
+    ):
+        """The traversal case cannot see this one.
+
+        scrape_person normalizes too, so removing connect_with_person's own call
+        still raises on "../../feed". A full URL is what separates them: the
+        scrape would succeed while the invite deeplink and the action-signal
+        selectors kept receiving the URL where they expect the vanity.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        seen: list[str] = []
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                new_callable=AsyncMock,
+                return_value={"sections": {"main_profile": "text"}},
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=lambda username: seen.append(username) or _no_signals(),
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+        ):
+            await extractor.connect_with_person(
+                "https://de.linkedin.com/in/williamhgates"
+            )
+
+        assert seen == ["williamhgates"]
+
+    @pytest.mark.parametrize(
+        "method,args,kwargs",
+        [
+            ("scrape_person", ("../../feed", {"main_profile"}), {}),
+            ("connect_with_person", ("../../feed",), {}),
+            ("get_sidebar_profiles", ("../../feed",), {}),
+            ("_open_conversation_by_username", ("../../feed",), {}),
+            ("send_message", ("../../feed", "hi"), {"confirm_send": False}),
+            ("scrape_company", ("../../feed", {"about"}), {}),
+            ("get_company_employees", ("../../feed",), {}),
+            ("scrape_job", ("../../feed",), {}),
+            ("get_conversation", (), {"thread_id": "../../feed"}),
+        ],
+    )
+    async def test_refuses_a_traversal_value_before_navigating(
+        self, mock_page, method: str, args: tuple, kwargs: dict
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        extract_patch, navigate_patch = self._calls(extractor)
+        with extract_patch as mock_extract, navigate_patch as mock_navigate:
+            with pytest.raises(InvalidReferenceError):
+                await getattr(extractor, method)(*args, **kwargs)
+        mock_extract.assert_not_called()
+        mock_navigate.assert_not_called()
