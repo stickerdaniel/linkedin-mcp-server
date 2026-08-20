@@ -39,7 +39,8 @@ from linkedin_mcp_server.scraping.identifiers import (
     job_view_url,
     messaging_thread_url,
     normalize_company_identifier,
-    normalize_opaque_id,
+    normalize_job_id,
+    normalize_thread_id,
     normalize_person_identifier,
     person_profile_url,
 )
@@ -3050,7 +3051,7 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {name: text}}
         """
-        job_id = normalize_opaque_id(job_id, field="job_id")
+        job_id = normalize_job_id(job_id)
         url = job_view_url(job_id, "/")
         extracted = await self.extract_page(url, section_name="job_posting")
 
@@ -4025,7 +4026,7 @@ class LinkedInExtractor:
             )
 
         if thread_id:
-            thread_id = normalize_opaque_id(thread_id, field="thread_id")
+            thread_id = normalize_thread_id(thread_id)
             await self._navigate_to_page(messaging_thread_url(thread_id, "/"))
         else:
             await self._open_conversation_by_username(

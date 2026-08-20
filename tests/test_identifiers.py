@@ -18,8 +18,10 @@ from linkedin_mcp_server.scraping.identifiers import (
     job_view_url,
     messaging_thread_url,
     normalize_company_identifier,
+    normalize_job_id,
     normalize_opaque_id,
     normalize_person_identifier,
+    normalize_thread_id,
     person_profile_url,
 )
 
@@ -292,3 +294,75 @@ class TestUrlBuilders:
             company_page_url("microsoft", "/people/")
             == "https://www.linkedin.com/company/microsoft/people/"
         )
+
+
+class TestReferencesThisServerEmits:
+    """link_metadata renders every reference as a site-relative path, and the
+    tool descriptions send callers back through them. A reference handed
+    straight back is a caller following the instructions, so refusing one would
+    refuse this server's own output."""
+
+    @pytest.mark.parametrize(
+        ("reference", "expected"),
+        [
+            ("/in/williamhgates/", "williamhgates"),
+            ("/in/williamhgates", "williamhgates"),
+            ("/mwlite/in/williamhgates/", "williamhgates"),
+        ],
+    )
+    def test_person_reference_yields_the_identifier(self, reference, expected):
+        assert normalize_person_identifier(reference) == expected
+
+    @pytest.mark.parametrize(
+        ("reference", "expected"),
+        [("/company/microsoft/", "microsoft"), ("/school/rwth-aachen/", "rwth-aachen")],
+    )
+    def test_company_reference_yields_the_slug(self, reference, expected):
+        assert normalize_company_identifier(reference) == expected
+
+    def test_thread_reference_yields_the_id(self):
+        assert normalize_thread_id("/messaging/thread/2-abc123/") == "2-abc123"
+
+    def test_thread_id_still_passes_through(self):
+        assert normalize_thread_id("2-abc123") == "2-abc123"
+
+    def test_job_reference_yields_the_id(self):
+        assert normalize_job_id("/jobs/view/4252026496/") == "4252026496"
+
+    def test_a_relative_path_of_the_wrong_kind_is_still_refused(self):
+        with pytest.raises(InvalidReferenceError):
+            normalize_person_identifier("/company/microsoft/")
+
+    def test_dot_segments_survive_neither_form(self):
+        # The relative form is a second way into the same builder, so it has to
+        # refuse what the bare form refuses.
+        for value in ("/in/../../feed/", "/messaging/thread/../../feed/"):
+            with pytest.raises(InvalidReferenceError):
+                normalize_person_identifier(value)
+
+
+class TestJobIdIsANumber:
+    """Everything here that produces a job id extracts \\d+, and the tool
+    documents one. A word navigates to a 404 that costs a page load to learn."""
+
+    def test_a_word_is_refused(self):
+        with pytest.raises(InvalidReferenceError):
+            normalize_job_id("abc")
+
+    def test_the_number_passes(self):
+        assert normalize_job_id("4252026496") == "4252026496"
+
+
+class TestLoneSurrogate:
+    """A lone surrogate survives JSON parsing and every syntax check, then
+    raises inside `quote` while the URL is built. The caller would see an
+    unexpected tool failure carrying issue-report diagnostics instead of the
+    correction this module exists to give."""
+
+    @pytest.mark.parametrize(
+        "normalize",
+        [normalize_person_identifier, normalize_company_identifier, normalize_job_id],
+    )
+    def test_it_is_refused_rather_than_crashing_the_url_builder(self, normalize):
+        with pytest.raises(InvalidReferenceError):
+            normalize("\ud800")

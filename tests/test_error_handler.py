@@ -227,13 +227,17 @@ def test_proxy_error_skips_issue_diagnostics(monkeypatch):
 def test_invalid_reference_surfaces_the_correction_verbatim():
     # It subclasses LinkedInScraperException, so the specific branch has to come
     # first; otherwise the catch-all handles it and the correction arrives buried.
-    with pytest.raises(ToolError, match="williamhgates"):
-        raise_tool_error(
-            InvalidReferenceError(
-                "That is not a LinkedIn public identifier. Pass the part after "
-                '/in/ in a profile URL, for example "williamhgates".'
-            )
-        )
+    #
+    # Compared whole rather than searched for a substring: the catch-all keeps
+    # the message and appends to it, so `match=` passes either way and the word
+    # "verbatim" in this name would guard nothing.
+    correction = (
+        "That is not a LinkedIn public identifier. Pass the part after "
+        '/in/ in a profile URL, for example "williamhgates".'
+    )
+    with pytest.raises(ToolError) as raised:
+        raise_tool_error(InvalidReferenceError(correction))
+    assert str(raised.value) == correction
 
 
 def test_invalid_reference_skips_issue_diagnostics(monkeypatch):

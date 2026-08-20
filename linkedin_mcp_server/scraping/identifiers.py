@@ -52,8 +52,10 @@ __all__ = [
     "job_view_url",
     "messaging_thread_url",
     "normalize_company_identifier",
+    "normalize_job_id",
     "normalize_opaque_id",
     "normalize_person_identifier",
+    "normalize_thread_id",
     "person_profile_url",
 ]
 
@@ -93,6 +95,19 @@ _RESERVED = {"me"}
 _PERSON_ROUTE = "in"
 _ORGANIZATION_ROUTES = {"company", "school", "showcase"}
 
+# The routes this repository emits for the ids these tools take. link_metadata
+# renders every reference as a site-relative path (``/in/alice/``,
+# ``/messaging/thread/2-abc/``) and the tool descriptions send callers back
+# through them, so a reference handed straight back is a caller following the
+# instructions. Refusing it would refuse this server's own output.
+_JOB_ROUTE = ("jobs", "view")
+_THREAD_ROUTE = ("messaging", "thread")
+
+# A LinkedIn job id is the number in /jobs/view/<id>. Everything that produces
+# one here extracts ``\d+``, and anything else navigates to a 404 that costs a
+# page load to discover.
+_NUMERIC_ID = re.compile(r"^[0-9]+$")
+
 
 def _usable(value: str) -> str | None:
     """The reference in the form the URL builders expect, or ``None``.
@@ -116,15 +131,24 @@ def _usable(value: str) -> str | None:
     value = value.strip()
     if not value or value in _DOT_SEGMENTS:
         return None
+    # A lone surrogate survives JSON parsing and every check above, and then
+    # raises inside `quote` while the URL is being built. The caller would see an
+    # unexpected tool failure with issue-report diagnostics instead of the
+    # correction this module exists to give.
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
     return None if _UNUSABLE.search(value) else value
 
 
-def _parse_linkedin_url(value: str, *, want: str) -> tuple[str, str | None] | None:
-    """``(route, reference)`` for a LinkedIn web URL, or ``None`` if it is not one.
+def _linkedin_segments(value: str, *, want: str) -> list[str] | None:
+    """Path segments of a LinkedIn address, or ``None`` if it is not one.
 
-    Lenient on purpose: the input is whatever someone copied out of a browser, so
-    a missing scheme (``linkedin.com/in/x``), ``http``, any subdomain, tracking
-    query, hash, trailing slash and profile sub-pages
+    Lenient on purpose: the input is whatever someone copied out of a browser or
+    read back out of this server's own output, so a missing scheme
+    (``linkedin.com/in/x``), a site-relative path (``/in/x/``), ``http``, any
+    subdomain, tracking query, hash, trailing slash and profile sub-pages
     (``/in/x/recent-activity/all/``) all parse. The mobile-web-lite wrappers are
     unwrapped first. Case is preserved, because a share link from the app can
     carry a case-sensitive profile id where the public identifier normally sits.
@@ -137,7 +161,12 @@ def _parse_linkedin_url(value: str, *, want: str) -> tuple[str, str | None] | No
         InvalidReferenceError: for an ``lnkd.in`` short link, which is a LinkedIn
             URL that only a redirect resolves.
     """
-    candidate = value if _HAS_SCHEME.match(value) else f"https://{value}"
+    if _HAS_SCHEME.match(value):
+        candidate = value
+    elif value.startswith("/"):
+        candidate = f"https://www.linkedin.com{value}"
+    else:
+        candidate = f"https://{value}"
     try:
         url = urlparse(candidate)
     except ValueError:
@@ -158,9 +187,26 @@ def _parse_linkedin_url(value: str, *, want: str) -> tuple[str, str | None] | No
         segments.pop(0)
         if segments and segments[0].lower() == "profile":
             segments.pop(0)
+    return segments
 
+
+def _parse_linkedin_url(value: str, *, want: str) -> tuple[str, str | None] | None:
+    """``(route, reference)`` for a LinkedIn address, or ``None`` if it is not one."""
+    segments = _linkedin_segments(value, want=want)
+    if segments is None:
+        return None
     route = segments[0].lower() if segments else ""
     return route, _usable(segments[1]) if len(segments) > 1 else None
+
+
+def _id_after_route(value: str, route: tuple[str, ...], *, want: str) -> str | None:
+    """The id following ``route`` in a LinkedIn address, or ``None``."""
+    segments = _linkedin_segments(value, want=want)
+    if segments is None or len(segments) <= len(route):
+        return None
+    if [segment.lower() for segment in segments[: len(route)]] != list(route):
+        return None
+    return _usable(segments[len(route)])
 
 
 def normalize_person_identifier(value: str, *, allow_self_alias: bool = False) -> str:
@@ -241,16 +287,31 @@ def normalize_company_identifier(value: str) -> str:
     return reference
 
 
-def normalize_opaque_id(value: str, *, field: str) -> str:
+def normalize_opaque_id(
+    value: str,
+    *,
+    field: str,
+    route: tuple[str, ...] = (),
+    numeric: bool = False,
+) -> str:
     """An id LinkedIn issued (a job id, a conversation thread id), checked as one.
 
-    These are never links and never carry a reserved meaning, so only the syntax
-    rules apply. They earn the same treatment as a username because they reach
-    the same place: ``job_id="../../feed"`` builds ``/jobs/view/../../feed/``,
-    which a browser resolves to ``/feed/`` before it asks for anything.
+    Ids carry no reserved meaning, so mostly the syntax rules apply. They earn
+    the same treatment as a username because they reach the same place:
+    ``job_id="../../feed"`` builds ``/jobs/view/../../feed/``, which a browser
+    resolves to ``/feed/`` before it asks for anything.
+
+    Args:
+        route: the path this kind of id sits under, so the reference this server
+            prints (``/messaging/thread/2-abc/``) can be handed straight back.
+        numeric: reject anything but digits, for the ids LinkedIn issues as a
+            number. A word there is a 404 that costs a page load to learn.
     """
-    reference = _usable(value.strip())
+    value = value.strip()
+    reference = _id_after_route(value, route, want=field) if route else None
     if reference is None:
+        reference = _usable(value)
+    if reference is None or (numeric and not _NUMERIC_ID.match(reference)):
         raise InvalidReferenceError(
             f"{field} is not a LinkedIn id. Pass the id exactly as a previous "
             "result returned it, with no URL, path or query around it."
@@ -282,3 +343,13 @@ def messaging_thread_url(thread_id: str, suffix: str = "") -> str:
     return (
         f"https://www.linkedin.com/messaging/thread/{quote(thread_id, safe='')}{suffix}"
     )
+
+
+def normalize_job_id(value: str) -> str:
+    """The numeric id for a job posting, from the id or from a reference to it."""
+    return normalize_opaque_id(value, field="job_id", route=_JOB_ROUTE, numeric=True)
+
+
+def normalize_thread_id(value: str) -> str:
+    """The id for a conversation, from the id or from a reference to it."""
+    return normalize_opaque_id(value, field="thread_id", route=_THREAD_ROUTE)
