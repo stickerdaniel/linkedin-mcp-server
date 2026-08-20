@@ -34,6 +34,12 @@ from linkedin_mcp_server.core.utils import (
     scroll_to_bottom,
 )
 from linkedin_mcp_server.scraping.connection import ActionSignals
+from linkedin_mcp_server.scraping.identifiers import (
+    company_page_url,
+    normalize_company_identifier,
+    normalize_person_identifier,
+    person_profile_url,
+)
 from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
     build_references,
@@ -1751,7 +1757,8 @@ class LinkedInExtractor:
             {url, sections: {name: text}, profile_urn?: str}
         """
         requested = requested | {"main_profile"}
-        base_url = f"https://www.linkedin.com/in/{username}"
+        username = normalize_person_identifier(username)
+        base_url = person_profile_url(username)
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
@@ -1779,7 +1786,7 @@ class LinkedInExtractor:
                         section_name == "main_profile"
                         and main_profile_already_loaded
                         and urlparse(self._page.url).path.rstrip("/")
-                        == f"/in/{username}"
+                        == urlparse(base_url).path.rstrip("/")
                     )
                     if can_reuse_main:
                         extracted = await self._extract_loaded_section(
@@ -2134,7 +2141,8 @@ class LinkedInExtractor:
         """
         from linkedin_mcp_server.scraping.connection import detect_connection_state
 
-        url = f"https://www.linkedin.com/in/{username}/"
+        username = normalize_person_identifier(username)
+        url = person_profile_url(username, "/")
 
         profile = await self.scrape_person(username, {"main_profile"})
         page_text = profile.get("sections", {}).get("main_profile", "")
@@ -2348,7 +2356,8 @@ class LinkedInExtractor:
             Dict with url and sidebar_profiles mapping section key to list of
             /in/username/ paths. Sections absent from the page are omitted.
         """
-        url = f"https://www.linkedin.com/in/{username}/"
+        username = normalize_person_identifier(username)
+        url = person_profile_url(username, "/")
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
 
@@ -2858,7 +2867,8 @@ class LinkedInExtractor:
         if index < 0:
             raise LinkedInScraperException(f"index must be non-negative (got {index}).")
 
-        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        linkedin_username = normalize_person_identifier(linkedin_username)
+        profile_url = person_profile_url(linkedin_username, "/")
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 
@@ -2904,7 +2914,8 @@ class LinkedInExtractor:
             {url, sections: {name: text}}
         """
         requested = requested | {"about"}
-        base_url = f"https://www.linkedin.com/company/{company_name}"
+        company_name = normalize_company_identifier(company_name)
+        base_url = company_page_url(company_name)
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
@@ -2995,7 +3006,8 @@ class LinkedInExtractor:
         Returns:
             {url, sections: {employees: text}, references: {employees: [...]}}
         """
-        url = f"https://www.linkedin.com/company/{company_name}/people/"
+        company_name = normalize_company_identifier(company_name)
+        url = company_page_url(company_name, "/people/")
         if keywords:
             url += f"?keywords={quote_plus(keywords)}"
         extracted = await self.extract_page(url, section_name="employees")
@@ -4102,7 +4114,8 @@ class LinkedInExtractor:
             profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
                 compose URL directly, bypassing the Message-button lookup.
         """
-        profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
+        linkedin_username = normalize_person_identifier(linkedin_username)
+        profile_url = person_profile_url(linkedin_username, "/")
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
 

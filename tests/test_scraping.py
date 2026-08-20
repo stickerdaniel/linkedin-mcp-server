@@ -602,6 +602,79 @@ class TestScrapePersonUrls:
         assert urls[0].endswith("/in/testuser/")
         assert set(result["sections"]) == {"main_profile"}
 
+    async def test_a_pasted_profile_link_reaches_the_canonical_profile_url(
+        self, mock_page
+    ):
+        """A URL argument must be reduced before it becomes a path segment.
+
+        Without this the navigation target is
+        https://www.linkedin.com/in/https://de.linkedin.com/in/testuser, which
+        LinkedIn does not serve, and the tool reports that page as a profile.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("profile text"),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_overlay",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_person(
+                "https://de.linkedin.com/in/testuser", {"main_profile"}
+            )
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert urls == ["https://www.linkedin.com/in/testuser/"]
+        assert result["url"] == "https://www.linkedin.com/in/testuser/"
+
+    async def test_a_dot_segment_value_never_reaches_a_navigation(self, mock_page):
+        # A browser resolves ../ away before the request, so this would open the
+        # feed and return it as a profile.
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor, "extract_page", new_callable=AsyncMock
+        ) as mock_extract:
+            with pytest.raises(LinkedInScraperException):
+                await extractor.scrape_person("testuser/../../feed", {"main_profile"})
+        mock_extract.assert_not_called()
+
+    async def test_a_pasted_company_link_reaches_the_canonical_company_url(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("company text"),
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.scrape_company(
+                "https://de.linkedin.com/company/testco/posts/", {"about"}
+            )
+
+        urls = [call.args[0] for call in mock_extract.call_args_list]
+        assert all(
+            u.startswith("https://www.linkedin.com/company/testco") for u in urls
+        )
+        assert result["url"] == "https://www.linkedin.com/company/testco/"
+
     async def test_scrape_person_returns_section_errors(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with (
