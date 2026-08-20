@@ -2381,8 +2381,12 @@ class TestSearchJobs:
             ]
         }
 
-    async def test_pagination_uses_fixed_page_size(self, mock_page):
-        """Pages use &start= with fixed 25-per-page offset."""
+    async def test_pagination_follows_what_the_page_rendered(self, mock_page):
+        """&start= advances by the cards found, not by LinkedIn's stride.
+
+        A live search rendered 11 cards per navigation while advertising 25
+        per page, so a fixed stride skipped 13 of every 24 jobs.
+        """
         extractor = LinkedInExtractor(mock_page)
         page1_ids = ["100", "200", "300"]
         page2_ids = ["400", "500"]
@@ -2417,7 +2421,7 @@ class TestSearchJobs:
 
         assert result["job_ids"] == ["100", "200", "300", "400", "500"]
         assert len(urls_visited) == 2
-        assert "&start=25" in urls_visited[1]
+        assert "&start=3" in urls_visited[1]  # page 1 rendered three cards
 
     async def test_deduplication_across_pages(self, mock_page):
         """Duplicate job IDs across pages should be deduplicated."""
@@ -2502,11 +2506,16 @@ class TestSearchJobs:
             ]
         }
 
-    async def test_stops_at_total_pages(self, mock_page):
-        """Should stop when total_pages from pagination state is reached."""
+    async def test_stops_once_past_the_advertised_results(self, mock_page):
+        """Stop when the offset passes the last result LinkedIn advertises.
+
+        The bound is a result count, not a page count: the offset advances by
+        rendered cards, so comparing it to a page index would never trigger.
+        """
         extractor = LinkedInExtractor(mock_page)
-        # Distinct IDs per page so the no-new-IDs guard never fires
-        id_pages = iter([["100"], ["200"]])
+        # One advertised page is 25 results; the first navigation renders 30,
+        # which puts the offset past the end.
+        id_pages = iter([[str(i) for i in range(30)], ["900"]])
         with (
             patch.object(
                 extractor,
@@ -2524,7 +2533,7 @@ class TestSearchJobs:
                 extractor,
                 "_get_total_search_pages",
                 new_callable=AsyncMock,
-                return_value=2,
+                return_value=1,
             ) as mock_total_pages,
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
@@ -2533,10 +2542,43 @@ class TestSearchJobs:
         ):
             result = await extractor.search_jobs("python", max_pages=10)
 
-        # Should only visit 2 pages despite max_pages=10
-        assert mock_extract.await_count == 2
+        # One navigation despite max_pages=10
+        assert mock_extract.await_count == 1
         assert mock_total_pages.await_count == 1
-        assert result["job_ids"] == ["100", "200"]
+        assert result["job_ids"] == [str(i) for i in range(30)]
+
+    async def test_scroll_budget_is_split_over_the_pages_asked_for(self, mock_page):
+        """Ten navigations must not each get the full per-page deadline."""
+        extractor = LinkedInExtractor(mock_page)
+        seen: list[float | None] = []
+
+        async def capture(url, section_name, scroll_deadline=None, **kwargs):
+            seen.append(scroll_deadline)
+            return extracted("Job results")
+
+        with (
+            patch.object(extractor, "_extract_search_page", side_effect=capture),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["100"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await extractor.search_jobs("python", max_pages=10)
+
+        assert seen[0] == 6.0  # 60s budget over ten navigations
+        assert all(d == seen[0] for d in seen)
 
     async def test_zero_max_pages_fetches_nothing(self, mock_page):
         """max_pages=0 should fetch zero pages (validation at tool boundary)."""
