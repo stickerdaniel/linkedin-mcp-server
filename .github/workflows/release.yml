@@ -156,6 +156,41 @@ jobs:
           sed -i 's/stickerdaniel\/linkedin-mcp-server:[^ ]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' docker-compose.yml
           echo "✅ Updated manifest.json and docker-compose.yml to version $VERSION"
 
+      # server.json carries the version in three places, one of them inside an
+      # image reference. sed would leave any it failed to match untouched and
+      # exit 0, which ships a registry entry pointing at a release that is not
+      # the one just built. This edits the parsed document and fails loudly
+      # instead. `tests/test_server_json.py` pins the output format, so the
+      # rewrite is a pure version change and never a reformat.
+      - name: Update server.json version
+        run: |
+          set -e
+          python3 - "$VERSION" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          path = Path("server.json")
+          doc = json.loads(path.read_text(encoding="utf-8"))
+
+          doc["version"] = version
+          for package in doc["packages"]:
+              if package["registryType"] == "pypi":
+                  package["version"] = version
+              elif package["registryType"] == "oci":
+                  repository, _, _tag = package["identifier"].rpartition(":")
+                  package["identifier"] = f"{repository}:{version}"
+              else:
+                  raise SystemExit(
+                      f"unhandled registryType {package['registryType']!r}: "
+                      "teach this step how to version it"
+                  )
+
+          path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          PY
+          echo "✅ Updated server.json to version $VERSION"
+
       - name: Remove branch protection (temporary)
         run: |
           gh api repos/${{ github.repository }}/branches/main/protection \
@@ -168,11 +203,11 @@ jobs:
           set -e
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add manifest.json docker-compose.yml
+          git add manifest.json docker-compose.yml server.json
           if git diff --staged --quiet; then
             echo "ℹ️ No changes to commit"
           else
-            git commit -m "chore: update manifest.json and docker-compose.yml to v$VERSION [skip ci]"
+            git commit -m "chore: sync versioned files to v$VERSION [skip ci]"
             git push origin main
             echo "✅ Committed version updates"
           fi
