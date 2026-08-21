@@ -144,8 +144,12 @@ _JOB_IDS_JS = r"""() => {
 # suppressed. Measured at 6ms across ten runs, min and max alike; the window is
 # wide enough to survive a slower machine and is paid only when the scroll
 # reports that its evaluate raised.
-_URL_SETTLE_TIMEOUT = 1.0
+_URL_SETTLE_TIMEOUT = 1.5
 _URL_SETTLE_POLL = 0.01
+# How long the route has to hold still before it counts as the destination. A
+# redirect chain hops through intermediate documents, and judging one of those
+# calls a checkpoint healthy, or a healthy page a checkpoint.
+_URL_SETTLE_QUIET = 0.25
 
 # Scrolling is bounded per navigation and across a whole search, because
 # max_pages reaches 10 and tool_timeout_seconds defaults to 180.
@@ -3214,59 +3218,71 @@ class LinkedInExtractor:
             main_found = False
 
         await handle_modal_close(self._page)
-        if main_found:
-            # `scroll_job_sidebar` swallows whatever its evaluate raises, so
-            # that a rail replaced mid-flight does not cost the caller the page
-            # it is about to read. A navigation destroys that context the same
-            # way and is not the same thing: what waits to be read is then an
-            # authwall or a checkpoint, and extracting it returns login text
-            # under `search_results` with nothing beside it to say so. Before
-            # the scroll learned to survive its own errors, this raised and was
-            # diagnosed; raising here keeps that, and the pages already
-            # gathered still come back with the diagnosis attached.
-            #
-            # Host and path, and not the whole URL, because LinkedIn appends
-            # `currentJobId` to the query of a search page by itself. Measured
-            # across three live searches: the path never moved, and neither did
-            # the query. The host has to come along, or a redirect that keeps
-            # the path reads as no redirect at all: an interstitial serving
-            # `/jobs/search` would have its text returned under
-            # `search_results` with nothing beside it to say where it came
-            # from.
-            #
-            # Against the URL that was asked for, and not against the one the
-            # page held after navigating, or a redirect that finished before
-            # the scroll becomes its own baseline and passes.
-            def route(target: str) -> tuple[str, str]:
-                parsed = urlparse(target)
-                return parsed.netloc, parsed.path.rstrip("/")
 
-            before = route(url)
+        # `scroll_job_sidebar` swallows whatever its evaluate raises, so that a
+        # rail replaced mid-flight does not cost the caller the page it is
+        # about to read. A navigation destroys that context the same way and is
+        # not the same thing: what waits to be read is then an authwall or a
+        # checkpoint, and extracting it returns login text under
+        # `search_results` with nothing beside it to say so.
+        #
+        # Host and path, and not the whole URL, because LinkedIn appends
+        # `currentJobId` to the query of a search page by itself. Measured
+        # across three live searches: the path never moved, and neither did the
+        # query. The host has to come along, or a redirect that keeps the path
+        # reads as no redirect at all.
+        #
+        # Against the URL that was asked for, and not the one the page held
+        # after navigating, or a redirect finishing before the scroll becomes
+        # its own baseline and passes. Outside the `main_found` branch for the
+        # same reason: a landing page with no `<main>` extracts to nothing, and
+        # an empty section is what an exhausted search looks like.
+        def route(target: str) -> tuple[str, str]:
+            parsed = urlparse(target)
+            return parsed.netloc, parsed.path.rstrip("/")
+
+        before = route(url)
+        moved = False
+        if main_found:
             moved = await scroll_job_sidebar(self._page, deadline=scroll_deadline)
-            if moved:
-                # `page.url` lags a navigation the scroll suppressed, by 6ms
-                # in ten measured runs, so sampling it here would compare two
-                # copies of the address that was left. Waited for only when
-                # the scroll reports its evaluate raised, which is rare, and
-                # bounded so a page that merely failed to scroll costs the
-                # whole window once.
-                deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
-                while route(self._page.url) == before and time.monotonic() < deadline:
-                    await asyncio.sleep(_URL_SETTLE_POLL)
-            after = route(self._page.url)
-            if before != after:
-                # An expired session lands here as often as a layout change
-                # does, and the two need different answers. A plain error is
-                # caught by the generic handler above and returned as a
-                # section diagnostic, so the browser stays registered and no
-                # re-login is offered; the caller then repeats the search
-                # against the same barrier. Classified first, so a redirect to
-                # /login, /authwall or /checkpoint raises the auth error the
-                # recovery path listens for.
-                await self._raise_if_auth_barrier(url)
-                raise RuntimeError(
-                    f"Page navigated to {self._page.url} while scrolling {url}"
-                )
+        if moved:
+            # `page.url` lags a navigation the scroll suppressed, by 6ms in ten
+            # measured runs, so sampling it here would compare two copies of
+            # the address that was left. Waited for only when the scroll
+            # reports its evaluate raised, which is rare.
+            #
+            # Until the route holds still, and not until it differs: a redirect
+            # chain would otherwise be judged on whichever hop happened to be
+            # current, and a hop on the way to a checkpoint looks harmless.
+            deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
+            seen = route(self._page.url)
+            quiet_since = time.monotonic()
+            while time.monotonic() < deadline:
+                await asyncio.sleep(_URL_SETTLE_POLL)
+                current = route(self._page.url)
+                if current != seen:
+                    seen = current
+                    quiet_since = time.monotonic()
+                elif time.monotonic() - quiet_since >= _URL_SETTLE_QUIET:
+                    break
+
+        after = route(self._page.url)
+        if moved or before != after:
+            # Either signal is enough, and neither implies the other. A reload
+            # keeps the address, so an account picker served in place of the
+            # search page changes nothing the comparison below can see, while a
+            # redirect that completed during the navigation moves the route
+            # without the scroll ever raising.
+            await self._raise_if_auth_barrier(url)
+        if before != after:
+            # An expired session lands here as often as a layout change does,
+            # and the two need different answers. A plain error is caught by
+            # the generic handler above and returned as a section diagnostic,
+            # so the browser stays registered and no re-login is offered; the
+            # caller then repeats the search against the same barrier.
+            raise RuntimeError(
+                f"Page navigated to {self._page.url} while scrolling {url}"
+            )
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
