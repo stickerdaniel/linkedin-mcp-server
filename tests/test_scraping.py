@@ -1,6 +1,7 @@
 """Tests for the LinkedInExtractor scraping engine."""
 
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -2518,7 +2519,10 @@ class TestSearchJobs:
 
         assert result["job_ids"] == ["100", "200", "300", "400", "500"]
         assert len(urls_visited) == 2
-        assert "&start=3" in urls_visited[1]  # page 1 rendered three cards
+        # Parsed, not matched as a substring: "&start=3" also passes for
+        # start=30, which is exactly what a stride regression would produce.
+        page2 = parse_qs(urlparse(urls_visited[1]).query)
+        assert page2["start"] == ["3"]  # page 1 rendered three cards
 
     async def test_deduplication_across_pages(self, mock_page):
         """Duplicate job IDs across pages should be deduplicated."""
@@ -2610,9 +2614,11 @@ class TestSearchJobs:
         rendered cards, so comparing it to a page index would never trigger.
         """
         extractor = LinkedInExtractor(mock_page)
-        # One advertised page is 25 results; the first navigation renders 30,
-        # which puts the offset past the end.
-        id_pages = iter([[str(i) for i in range(30)], ["900"]])
+        # One advertised page is 25 results and the first navigation renders
+        # exactly 25, which is the boundary: the offset reaches the end
+        # without passing it. Rendering more would clear `>=` and `>` alike
+        # and leave the comparison untested.
+        id_pages = iter([[str(i) for i in range(25)], ["900"]])
         with (
             patch.object(
                 extractor,
@@ -2642,7 +2648,7 @@ class TestSearchJobs:
         # One navigation despite max_pages=10
         assert mock_extract.await_count == 1
         assert mock_total_pages.await_count == 1
-        assert result["job_ids"] == [str(i) for i in range(30)]
+        assert result["job_ids"] == [str(i) for i in range(25)]
 
     async def test_scroll_budget_is_split_over_the_pages_asked_for(self, mock_page):
         """Ten navigations must not each get the full per-page deadline."""
@@ -2747,6 +2753,67 @@ class TestSearchJobs:
         # Seven pages end at 142.9s; an eighth would need 163.6s.
         assert len(seen) == 7
         assert result["job_ids"] == [jid for page in pages[:7] for jid in page]
+
+    async def test_the_next_navigation_delay_is_part_of_the_prediction(self, mock_page):
+        """The guard budgets the delay before a page, not just the page.
+
+        The test above cannot see this: at a 144s budget the run stops after
+        seven pages whether or not the prediction counts ``_NAV_DELAY``, so
+        dropping it from the sum stays green. This budget is chosen to sit
+        between the two arithmetics instead. Six pages reach 122.2s; a seventh
+        costs 2s of delay plus 18.7s of navigation and would end at 142.9s,
+        past the 141s budget, while the same sum without the delay predicts
+        140.9s and admits a page the run cannot pay for.
+        """
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
+        extractor = LinkedInExtractor(mock_page)
+        seen: list[float | None] = []
+
+        async def capture(url, section_name, scroll_deadline=None, **kwargs):
+            seen.append(scroll_deadline)
+            clock.now += 18.7
+            return extracted("Job results")
+
+        async def sleep(seconds: float) -> None:
+            clock.now += seconds
+
+        pages = [[str(100 + p * 10 + i) for i in range(10)] for p in range(10)]
+
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch.object(extractor, "_extract_search_page", side_effect=capture),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=pages,
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                side_effect=sleep,
+            ),
+        ):
+            # 176.25 * _SEARCH_TIMEOUT_FRACTION is a 141s budget.
+            result = await extractor.search_jobs(
+                "python", max_pages=10, tool_timeout=176.25
+            )
+
+        assert len(seen) == 6
+        assert result["job_ids"] == [jid for page in pages[:6] for jid in page]
 
     async def test_zero_max_pages_fetches_nothing(self, mock_page):
         """max_pages=0 should fetch zero pages (validation at tool boundary)."""

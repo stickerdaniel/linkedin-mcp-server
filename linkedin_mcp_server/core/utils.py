@@ -115,10 +115,13 @@ async def scroll_job_sidebar(
 
     Each scroll waits for the next batch by polling instead of sleeping a
     fixed amount, because how long a batch takes belongs to the user's
-    connection. A round that sees nothing scrolls once more at the full
+    connection. A round that sees nothing waits once more at the full
     ``settle_timeout`` before the rail counts as exhausted: deciding that
     after a single fixed 0.5s look is what cost a measured search 4 of its
-    11 cards. A round therefore waits at most ``2 * settle_timeout``. Later
+    11 cards. It is the wait that buys those cards and not the second
+    scroll, which lands on a rail already at ``scrollHeight`` and fires no
+    event; it is kept for the case where the rail moved during the first
+    wait. A round therefore waits at most ``2 * settle_timeout``. Later
     rounds start from three times what the previous batch took, floored at
     ``min_budget``, which shortens the terminating round on a fast link.
 
@@ -199,10 +202,16 @@ async def scroll_job_sidebar(
                 return found;
             };
 
-            // Most job ids wins, ties to the first in document order, which
-            // is the rail: the detail pane holds one permalink and sits after
-            // it. Starting at two would refuse a rail that has rendered a
-            // single card so far and never scroll it into the rest.
+            // Most job ids wins. A tie goes to whichever candidate
+            // `collect` reached first, which is the innermost scrollable
+            // ancestor of the first card in document order: the rail, since
+            // the pane holds one permalink and sits after it. Measured on two
+            // live searches, at first paint and settled: two candidates, both
+            // siblings at the same depth, rail 7 ids and pane 1. A scrollable
+            // wrapper nested between a card and the rail would take the tie
+            // while the rail holds a single card, and never let it grow; that
+            // shape has not been observed. Starting at two would refuse a rail
+            // that has rendered a single card so far and never scroll it.
             const pickRail = () => {
                 let best = 0;
                 let picked = null;
@@ -240,6 +249,10 @@ async def scroll_job_sidebar(
                     rail = better;
                     return true;
                 }
+                // Growth is a larger id count or a taller rail. A
+                // virtualized rail that swapped its ids while holding both
+                // steady would read as exhausted here; LinkedIn has not been
+                // observed doing that, and no sample pins it either way.
                 return held > cardCount || rail.scrollHeight > height;
             };
             const waitForGrowth = async (cardCount, height, budgetMs) => {

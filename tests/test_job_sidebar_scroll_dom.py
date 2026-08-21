@@ -275,9 +275,10 @@ class TestSidebarScroll:
     async def test_picks_the_rail_over_a_scrollable_pane(self, dom_page):
         """The detail pane scrolls too, and comes first in document order.
 
-        ``initial=11`` is what a live search rendered before any scroll, so
-        the rail outweighs a pane holding its permalink plus a handful of
-        similar jobs. The heuristic is "most job ids", so a pane holding more
+        ``initial=11`` is what a live search held after scrolling; it
+        rendered 7 before. The larger number is used here on purpose, so the
+        rail outweighs a pane holding its permalink plus a handful of similar
+        jobs. The heuristic is "most job ids", so a pane holding more
         jobs than the rail has rendered would still win; that is documented
         in the function and has not been observed.
         """
