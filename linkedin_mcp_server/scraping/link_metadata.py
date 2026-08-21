@@ -123,7 +123,13 @@ _CONNECTIONS_FOLLOW_RE = re.compile(r"\bconnections follow this page\b", re.IGNO
 _COMPANY_PATH_RE = re.compile(r"^/company/([^/?#]+)")
 _PERSON_PATH_RE = re.compile(r"^/in/([^/?#]+)")
 _SCHOOL_PATH_RE = re.compile(r"^/school/([^/?#]+)")
-JOB_PATH_RE = re.compile(r"^/jobs/view/(\d+)")
+# LinkedIn serves a job under both /jobs/view/<id>/ and
+# /jobs/view/<title>-at-<company>-<id>/, and both 301 to the same page, so the
+# id is the trailing number of the segment rather than its start. Anchoring to
+# the start dropped the slugged form, and matched the wrong number whenever a
+# title opened with one: "2026-software-engineer-at-acme-4252026496" read as
+# job 2026. Same shape as the pattern the job-id extraction uses.
+JOB_PATH_RE = re.compile(r"^/jobs/view/(?:[^/?#]*-)?(\d+)(?=[/?#]|$)")
 _NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
 _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
