@@ -736,6 +736,22 @@ class TestClassifyLink:
             "https://www.linkedin.com/jobs/view/2026-software-engineer-at-acme-4252026496/"
         ) == ("job", "/jobs/view/4252026496/")
 
+    def test_unicode_digits_are_not_a_job_id(self):
+        """Python's ``\\d`` matches more than JavaScript's does.
+
+        Arabic-Indic digits pass ``\\d`` here and fail it in the two
+        JavaScript copies of this pattern, and ``normalize_job_id`` accepts
+        only ``[0-9]``. Classifying such a link produces a reference whose
+        very next use raises, so the digits are ASCII on purpose.
+        """
+        assert (
+            classify_link(
+                "https://www.linkedin.com/jobs/view/\u0645\u0647\u0646\u062f\u0633-"
+                "\u0664\u0662\u0665\u0662\u0660\u0662\u0666\u0664\u0669\u0666/"
+            )
+            is None
+        )
+
     def test_a_bare_job_url_is_unchanged(self):
         assert classify_link("https://www.linkedin.com/jobs/view/1967281839/") == (
             "job",
