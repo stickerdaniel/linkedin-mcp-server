@@ -11,10 +11,88 @@ from .exceptions import RateLimitError
 logger = logging.getLogger(__name__)
 
 _JOB_CARD_SELECTOR = 'a[href*="/jobs/view/"]'
-# Marks the container the scroll chose, so that job-id extraction can read that
-# rather than every job link in the document. A `data-` attribute survives
-# until LinkedIn re-renders the node, and a re-render re-picks and re-marks.
-_RAIL_ATTRIBUTE = "data-lmcp-rail"
+
+# The rule that decides which container holds the search results. Shared
+# verbatim by the scroll and by id extraction, because extraction re-runs it
+# rather than trusting a mark the scroll left behind: an attribute dies with
+# the node it sits on, a re-render between the scroll returning and the ids
+# being read leaves none, and nothing then distinguishes that from a page
+# nobody scrolled. Everything outside the rail is not a search result: the
+# detail pane carries its own permalink and, once opened, a similar-jobs
+# module, and counting those advances the offset past results the rail never
+# showed. Expects `selector` in scope.
+_RAIL_PICK_JS = r"""
+            const idOf = (node) => {
+                const match = (node.getAttribute('href') || '').match(
+                    /\/jobs\/view\/(?:[^/?#]*-)?(\d+)(?=[/?#]|$)/
+                );
+                return match ? match[1] : null;
+            };
+            const idsIn = (scope) => {
+                const ids = new Set();
+                for (const node of scope.querySelectorAll(selector)) {
+                    const id = idOf(node);
+                    if (id) ids.add(id);
+                }
+                return ids.size;
+            };
+
+            // Every scrollable ancestor of every card, collected fresh on
+            // each pick because a re-render replaces the nodes. Scrollable by
+            // its own overflow style and not by whether it currently
+            // overflows: a result set short enough to fit inside the rail
+            // left the rail out of the candidates entirely, and the detail
+            // pane, which overflows on one job description, won by default.
+            // Measured live on a full page: dropping the size test adds one
+            // candidate, the pane's own parent at one job id, and nothing
+            // that holds the rail and the pane together.
+            const collect = () => {
+                const found = [];
+                for (const card of document.querySelectorAll(selector)) {
+                    let node = card.parentElement;
+                    while (node && node !== document.body) {
+                        const style = window.getComputedStyle(node);
+                        const overflowY = style.overflowY;
+                        if ((overflowY === 'auto' || overflowY === 'scroll')
+                            && !found.includes(node)) {
+                            found.push(node);
+                        }
+                        node = node.parentElement;
+                    }
+                }
+                return found;
+            };
+
+            // Most job ids wins, and a tie is not broken but kept: every
+            // candidate holding the winning count is scrolled. Picking one
+            // loses either way round, because a tie means one candidate
+            // contains the other and only the inner one appends cards.
+            // Measured on both shapes: a per-card wrapper inside a rail that
+            // has rendered a single card leaves the rail unscrolled at one
+            // card, and a scrollable container wrapping the rail leaves it
+            // unscrolled at five. Live the two candidates are siblings, rail
+            // 7 ids and pane 1, so the tie itself has not been observed;
+            // scrolling both costs one extra assignment when it happens.
+            const railGroup = () => {
+                const nodes = collect();
+                let best = 0;
+                for (const node of nodes) {
+                    best = Math.max(best, idsIn(node));
+                }
+                return best ? nodes.filter(n => idsIn(n) === best) : [];
+            };
+
+            // One node still represents the group for measuring growth: the
+            // outermost of the tied, so its id count covers every card the
+            // inner ones append.
+            const pickRail = () => {
+                let picked = null;
+                for (const node of railGroup()) {
+                    if (!picked || node.contains(picked)) picked = node;
+                }
+                return picked;
+            };
+"""
 
 
 async def detect_rate_limit(page: Page) -> None:
@@ -180,87 +258,10 @@ async def scroll_job_sidebar(
         result = await page.evaluate(
             r"""async (opts) => {
             const {selector, settleMs, pollMs, minBudgetMs,
-                   maxScrolls, deadlineMs, railAttr} = opts;
-
-            const idOf = (node) => {
-                const match = (node.getAttribute('href') || '').match(
-                    /\/jobs\/view\/(?:[^/?#]*-)?(\d+)(?=[/?#]|$)/
-                );
-                return match ? match[1] : null;
-            };
-            const idsIn = (scope) => {
-                const ids = new Set();
-                for (const node of scope.querySelectorAll(selector)) {
-                    const id = idOf(node);
-                    if (id) ids.add(id);
-                }
-                return ids.size;
-            };
-
-            // Every scrollable ancestor of every card, collected fresh on
-            // each pick because a re-render replaces the nodes.
-            const collect = () => {
-                const found = [];
-                for (const card of document.querySelectorAll(selector)) {
-                    let node = card.parentElement;
-                    while (node && node !== document.body) {
-                        const style = window.getComputedStyle(node);
-                        const overflowY = style.overflowY;
-                        if ((overflowY === 'auto' || overflowY === 'scroll')
-                            && node.scrollHeight > node.clientHeight
-                            && !found.includes(node)) {
-                            found.push(node);
-                        }
-                        node = node.parentElement;
-                    }
-                }
-                return found;
-            };
-
-            // Most job ids wins, and a tie is not broken but kept: every
-            // candidate holding the winning count is scrolled. Picking one
-            // loses either way round, because a tie means one candidate
-            // contains the other and only the inner one appends cards.
-            // Measured on both shapes: a per-card wrapper inside a rail that
-            // has rendered a single card leaves the rail unscrolled at one
-            // card, and a scrollable container wrapping the rail leaves it
-            // unscrolled at five. Live the two candidates are siblings, rail
-            // 7 ids and pane 1, so the tie itself has not been observed;
-            // scrolling both costs one extra assignment when it happens.
-            const railGroup = () => {
-                const nodes = collect();
-                let best = 0;
-                for (const node of nodes) {
-                    best = Math.max(best, idsIn(node));
-                }
-                return best ? nodes.filter(n => idsIn(n) === best) : [];
-            };
-
-            // One node still represents the group for measuring growth: the
-            // outermost of the tied, so its id count covers every card the
-            // inner ones append.
-            // The chosen rail is marked so that id extraction can read it
-            // rather than the whole document. Everything outside it is not a
-            // search result: the detail pane carries its own permalink and,
-            // once opened, a similar-jobs module. Counting those advanced the
-            // offset past results the rail never showed, which is the same
-            // skipping this change exists to stop, arriving from the other
-            // side.
-            const mark = (node) => {
-                for (const old of document.querySelectorAll('[' + railAttr + ']')) {
-                    if (old !== node) old.removeAttribute(railAttr);
-                }
-                if (node) node.setAttribute(railAttr, '1');
-                return node;
-            };
-
-            const pickRail = () => {
-                let picked = null;
-                for (const node of railGroup()) {
-                    if (!picked || node.contains(picked)) picked = node;
-                }
-                return mark(picked);
-            };
+                   maxScrolls, deadlineMs} = opts;
+"""
+            + _RAIL_PICK_JS
+            + r"""
 
             const scrollGroup = () => {
                 // Recollected per scroll: a re-render replaces the nodes, and
@@ -385,7 +386,6 @@ async def scroll_job_sidebar(
                 "minBudgetMs": min_budget * 1000,
                 "maxScrolls": max_scrolls,
                 "deadlineMs": remaining * 1000,
-                "railAttr": _RAIL_ATTRIBUTE,
             },
         )
     except Exception as exc:

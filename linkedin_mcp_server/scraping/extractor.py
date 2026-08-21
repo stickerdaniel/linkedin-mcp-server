@@ -30,7 +30,8 @@ from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
-    _RAIL_ATTRIBUTE,
+    _JOB_CARD_SELECTOR,
+    _RAIL_PICK_JS,
     detect_rate_limit,
     handle_modal_close,
     scroll_job_sidebar,
@@ -125,14 +126,22 @@ _RESULTS_PER_LINKEDIN_PAGE = 25
 # The authenticated pages this server visits serve bare ids today (measured
 # across job search, collections and a French search: 0 slugs in 27 anchors),
 # so this branch is defensive on both counts.
-# Reads the container the sidebar scroll marked, and the whole document only
-# when there is none, which is what a page nobody scrolled looks like. The
-# detail pane holds its own permalink and, once opened, a similar-jobs module;
-# counting those as rendered results advanced the offset past results the rail
-# never showed.
-_JOB_IDS_JS = r"""(railAttr) => {
-    const scope = document.querySelector('[' + railAttr + ']') || document;
-    const links = scope.querySelectorAll('a[href*="/jobs/view/"]');
+# `scoped` runs the sidebar's own rule again and reads only the container it
+# names, because everything outside it is not a search result: the detail pane
+# holds its own permalink and, once opened, a similar-jobs module, and counting
+# those as rendered results advances the offset past results the rail never
+# showed. Re-run rather than remembered, so a rail replaced between the scroll
+# and this call is followed instead of silently widening the scope back to the
+# document. `get_saved_jobs` reads the document, having no sidebar to scroll
+# and no second list to be confused with.
+_JOB_IDS_JS = (
+    r"""(opts) => {
+    const {selector, scoped} = opts;
+"""
+    + _RAIL_PICK_JS
+    + r"""
+    const scope = (scoped && pickRail()) || document;
+    const links = scope.querySelectorAll(selector);
     const seen = new Set();
     const ids = [];
     for (const a of links) {
@@ -146,6 +155,7 @@ _JOB_IDS_JS = r"""(railAttr) => {
     }
     return ids;
 }"""
+)
 
 # How long to let `page.url` catch up with a navigation the sidebar scroll
 # suppressed. The lag itself measured 6ms across ten runs, min and max alike;
@@ -3153,13 +3163,19 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
-    async def _extract_job_ids(self) -> list[str]:
+    async def _extract_job_ids(self, *, scoped: bool = False) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
 
         Finds all `a[href*="/jobs/view/"]` links and extracts the numeric
         job ID from each href. Returns deduplicated IDs in DOM order.
+
+        Args:
+            scoped: Read only the results rail, chosen by the same rule the
+                sidebar scroll uses. Off for lists that have no rail.
         """
-        return await self._page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE)
+        return await self._page.evaluate(
+            _JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "scoped": scoped}
+        )
 
     async def _extract_search_page(
         self,
@@ -3443,10 +3459,14 @@ class LinkedInExtractor:
         total_pages: int | None = None
         total_pages_queried = False
 
-        # Split the search-wide scroll budget over the navigations asked for.
-        scroll_deadline = min(
-            _SCROLL_DEADLINE_MAX, _SCROLL_BUDGET_TOTAL / max(1, max_pages)
-        )
+        # The search-wide scroll budget is spent as it goes rather than
+        # divided up front, because dividing it charges every navigation for
+        # navigations that may never run. At max_pages=10 each page got 6s,
+        # and a first card that takes 4.5s leaves no room for the batch behind
+        # it, so asking for more pages returned fewer jobs than asking for
+        # three. Each page now takes the per-page cap or what is left,
+        # whichever is smaller, and the total is the same 60s.
+        scroll_budget_left = _SCROLL_BUDGET_TOTAL
         # The offset follows what the pages actually rendered. LinkedIn's own
         # stride would skip every result it renders beyond it.
         offset = 0
@@ -3494,6 +3514,7 @@ class LinkedInExtractor:
             page_started = time.monotonic()
 
             url = base_url if offset == 0 else f"{base_url}&start={offset}"
+            scroll_deadline = min(_SCROLL_DEADLINE_MAX, scroll_budget_left)
 
             try:
                 extracted = await self._extract_search_page(
@@ -3501,7 +3522,14 @@ class LinkedInExtractor:
                     section_name="search_results",
                     scroll_deadline=scroll_deadline,
                 )
-                slowest_page = max(slowest_page, time.monotonic() - page_started)
+                page_elapsed = time.monotonic() - page_started
+                slowest_page = max(slowest_page, page_elapsed)
+                # The scroll cannot have taken longer than its deadline, nor
+                # longer than the page it sat inside. Charging the whole page
+                # would charge navigation to a budget that is for scrolling.
+                scroll_budget_left = max(
+                    0.0, scroll_budget_left - min(scroll_deadline, page_elapsed)
+                )
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
                     # Rate limit first: it is the more specific diagnosis, and a
@@ -3552,7 +3580,7 @@ class LinkedInExtractor:
                     # beside it is what an exhausted search looks like.
                     await self._raise_if_auth_barrier(self._page.url)
                     raise RuntimeError(f"Search navigation ended on {self._page.url}")
-                page_ids = await self._extract_job_ids()
+                page_ids = await self._extract_job_ids(scoped=True)
                 # Advance by what this navigation rendered, duplicates
                 # included: the next unseen result sits right behind them.
                 #
