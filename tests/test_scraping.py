@@ -399,6 +399,102 @@ class TestExtractPage:
                 section_name="search_results",
             )
 
+    async def test_a_redirect_while_scrolling_is_diagnosed_not_returned(
+        self, mock_page
+    ):
+        """A checkpoint reached mid-scroll must not come back as job results.
+
+        The scroll suppresses every error its evaluate raises, and a
+        navigation destroying the execution context is one of them. The
+        extraction that follows then reads the replacement document and hands
+        its text back under `search_results` with no `section_errors` beside
+        it, which no client can tell from a search that found those words.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Let's do a quick security check\nStart puzzle",
+                "references": [],
+            }
+        )
+
+        async def navigate_away(page, **kwargs):
+            page.url = "https://www.linkedin.com/checkpoint/challenge/"
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                side_effect=navigate_away,
+            ),
+        ):
+            result = await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
+        assert result.text == ""
+        assert result.error is not None
+        assert "security check" not in str(result.error)
+
+    async def test_currentjobid_alone_does_not_count_as_a_redirect(self, mock_page):
+        """LinkedIn moves the query of a search page by itself, mid-scroll.
+
+        The guard above compares paths for this reason. Comparing whole URLs
+        would refuse every second search page and diagnose a healthy one.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Python Developer\nAcme\nBerlin",
+                "references": [],
+            }
+        )
+
+        async def add_current_job(page, **kwargs):
+            page.url = (
+                "https://www.linkedin.com/jobs/search?keywords=test&currentJobId=1"
+            )
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                side_effect=add_current_job,
+            ),
+        ):
+            result = await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
+        assert "Python Developer" in result.text
+        assert result.error is None
+
 
 class TestNavigationDiagnostics:
     async def test_goto_with_auth_checks_clicks_remember_me_and_retries(
