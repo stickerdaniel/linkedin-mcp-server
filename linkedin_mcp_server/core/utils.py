@@ -235,9 +235,19 @@ async def scroll_job_sidebar(
             one of ``max_pages`` navigations.
     """
     started = time.monotonic()
+    if deadline <= 0:
+        logger.debug("No scroll budget left for %s, skipping sidebar scroll", page.url)
+        return False
+
     try:
+        # Never zero: Patchright reads a zero timeout as no timeout at all
+        # ("Pass `0` to disable timeout", `wait_for_selector` in the installed
+        # 1.61.2 API), so a spent budget would wait on a page with no job card
+        # until the tool is cancelled and every page gathered so far is thrown
+        # away with it. A sub-millisecond deadline truncates to zero the same
+        # way, which the guard above does not catch.
         await page.wait_for_selector(
-            _JOB_CARD_SELECTOR, timeout=min(5000, int(deadline * 1000))
+            _JOB_CARD_SELECTOR, timeout=max(1, min(5000, int(deadline * 1000)))
         )
     except PlaywrightTimeoutError:
         logger.debug("No job card links found, skipping sidebar scroll")
