@@ -182,7 +182,12 @@ gt submit                        # merge PR to trigger release workflow
 
 The CI release workflow automatically updates `manifest.json` and `docker-compose.yml` with the new version — do not update them manually.
 
-After the workflow completes, file a PR in the MCP registry to update the version.
+The workflow also keeps `server.json` in step with the bump. That file is the
+MCP Registry entry, and nothing in the release publishes it: this server has
+never been listed at `registry.modelcontextprotocol.io`. Publishing there is a
+maintainer decision rather than a release step, and taking it is one
+`mcp-publisher login github && mcp-publisher publish` against the file. There is
+no PR to file: the registry is a service, not a repository.
 
 ## Commit Messages
 
