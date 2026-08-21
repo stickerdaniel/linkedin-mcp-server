@@ -4873,6 +4873,74 @@ class TestGetSavedJobs:
         # Stops on the repeat page rather than exhausting max_pages
         assert mock_extract.await_count == 2
 
+    async def test_a_picker_without_main_is_an_auth_error(self, mock_page):
+        """The picker keeps the list's address, so the route guard clears it.
+
+        Served in place of the list it carries that page's URL and its title,
+        and the guard below compares exactly those. Missing `<main>` is what
+        is left, and an emptied list has none either, so the barrier check has
+        to decide it.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs-tracker/"
+        mock_page.wait_for_selector = AsyncMock(
+            side_effect=PlaywrightTimeoutError("no main")
+        )
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value="account picker: #rememberme-div",
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor.get_saved_jobs(max_pages=1)
+
+    async def test_a_redirect_while_scrolling_the_list_is_an_auth_error(
+        self, mock_page
+    ):
+        """A navigation destroys the scroll's context, and that error is generic.
+
+        Turned straight into a section diagnostic it hands the caller an empty
+        list, leaves the browser registered and offers no relogin, so the next
+        call meets the same checkpoint.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs-tracker/"
+
+        async def redirect(page, **kwargs):
+            mock_page.url = "https://www.linkedin.com/checkpoint/challenge/"
+            raise RuntimeError("Execution context was destroyed")
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                side_effect=redirect,
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor.get_saved_jobs(max_pages=1)
+
     async def test_a_dropped_offset_stops_the_list(self, mock_page):
         """The redirect keeps the path and loses the query.
 
