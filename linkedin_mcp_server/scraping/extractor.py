@@ -104,12 +104,32 @@ def rate_limited_section_error() -> dict[str, str]:
     }
 
 
-# LinkedIn shows 25 results per page
 # LinkedIn's offset stride in the search URL. It is NOT how many cards a
 # page renders: a live search served 11 per navigation while advertising 25
 # per page, so paging by this number skipped 13 of every 24 jobs. Only the
 # "are we past the last page" check may use it.
 _RESULTS_PER_LINKEDIN_PAGE = 25
+
+# The id is the trailing run of digits, and LinkedIn serves the same job under
+# both `/jobs/view/1967281839/` and `/jobs/view/<title>-at-<company>-1967281839/`.
+# Anchoring the digits to the front of the segment loses the slugged form
+# entirely, and reads `2026` out of a title that opens with a year.
+_JOB_IDS_JS = r"""() => {
+    const links = document.querySelectorAll('a[href*="/jobs/view/"]');
+    const seen = new Set();
+    const ids = [];
+    for (const a of links) {
+        const match = (a.href || '').match(
+            /\/jobs\/view\/(?:[\w-]*-)?(\d+)(?=[/?#]|$)/
+        );
+        if (match && !seen.has(match[1])) {
+            seen.add(match[1]);
+            ids.push(match[1]);
+        }
+    }
+    return ids;
+}"""
+
 # Scrolling is bounded per navigation and across a whole search, because
 # max_pages reaches 10 and tool_timeout_seconds defaults to 180.
 _SCROLL_DEADLINE_MAX = 12.0
@@ -3091,21 +3111,7 @@ class LinkedInExtractor:
         Finds all `a[href*="/jobs/view/"]` links and extracts the numeric
         job ID from each href. Returns deduplicated IDs in DOM order.
         """
-        return await self._page.evaluate(
-            """() => {
-                const links = document.querySelectorAll('a[href*="/jobs/view/"]');
-                const seen = new Set();
-                const ids = [];
-                for (const a of links) {
-                    const match = a.href.match(/\\/jobs\\/view\\/(\\d+)/);
-                    if (match && !seen.has(match[1])) {
-                        seen.add(match[1]);
-                        ids.push(match[1]);
-                    }
-                }
-                return ids;
-            }"""
-        )
+        return await self._page.evaluate(_JOB_IDS_JS)
 
     async def _extract_search_page(
         self,
@@ -3383,6 +3389,14 @@ class LinkedInExtractor:
                 page_ids = await self._extract_job_ids()
                 # Advance by what this navigation rendered, duplicates
                 # included: the next unseen result sits right behind them.
+                #
+                # This counts the whole document because everything the page
+                # holds also sits in the rail. That is only true while the
+                # next URL is built from `base_url`. LinkedIn appends
+                # `currentJobId` to `self._page.url` after a navigation, and
+                # carrying that forward opens a detail pane for a job the
+                # rail has not reached, whose permalink is then counted as a
+                # result and skips one. Keep paging from `base_url`.
                 offset += len(page_ids)
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 

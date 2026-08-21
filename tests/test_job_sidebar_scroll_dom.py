@@ -18,6 +18,7 @@ import pytest
 from patchright.async_api import async_playwright
 
 from linkedin_mcp_server.core.utils import scroll_job_sidebar
+from linkedin_mcp_server.scraping.extractor import _JOB_IDS_JS
 
 pytestmark = pytest.mark.browser_dom
 
@@ -221,17 +222,21 @@ class TestSidebarScroll:
         assert "(deadline)" in caplog.text
         assert elapsed < 5.0
 
-    async def test_returns_when_the_list_is_exhausted(self, dom_page):
+    async def test_returns_when_the_list_is_exhausted(self, dom_page, caplog):
         """The last search page holds fewer cards than the page size.
 
-        A loop that never concludes the list is done would hang here rather
-        than fail an assertion, which is what this covers.
+        A loop that never concludes the list is done reaches 16 cards too,
+        by running into the deadline or the cap. Which exit ran is the
+        assertion; the count alone cannot tell them apart.
         """
         await dom_page.set_content(sidebar(total=16, batch=5, delays=[30]))
 
-        await scroll_job_sidebar(dom_page, settle_timeout=0.6)
+        with caplog.at_level(logging.DEBUG, logger="linkedin_mcp_server.core.utils"):
+            await scroll_job_sidebar(dom_page, settle_timeout=0.6)
 
         assert await cards(dom_page) == 16
+        assert "(deadline)" not in caplog.text
+        assert "scroll cap reached" not in caplog.text
 
     async def test_no_scrollable_container(self, dom_page, caplog):
         """Card counts alone cannot fail here, so assert which branch ran."""
@@ -250,17 +255,22 @@ class TestSidebarScroll:
 
         assert "skipping sidebar scroll" in caplog.text
 
-    async def test_counts_jobs_not_links(self, dom_page):
-        """A card with two links to one job must not count twice."""
+    async def test_counts_jobs_not_links(self, dom_page, caplog):
+        """A card with two links to one job must not count twice.
+
+        The anchor count cannot fail here: growth ends the loop either way,
+        so both a job counter and a link counter finish the list. The number
+        the algorithm actually held is only visible in the log line.
+        """
         await dom_page.set_content(
-            # Slow enough that one batch lands per round, so a loop
-            # counting links instead of jobs visibly stops at half a page.
             sidebar(total=25, batch=5, delays=[300], links_per_card=2)
         )
 
-        await scroll_job_sidebar(dom_page, settle_timeout=0.6)
+        with caplog.at_level(logging.DEBUG, logger="linkedin_mcp_server.core.utils"):
+            await scroll_job_sidebar(dom_page, settle_timeout=0.6)
 
         assert await rail_cards(dom_page) == 50  # 25 jobs, two links each
+        assert "holds 25 cards" in caplog.text
 
     async def test_picks_the_rail_over_a_scrollable_pane(self, dom_page):
         """The detail pane scrolls too, and comes first in document order.
@@ -334,6 +344,8 @@ class TestSidebarScroll:
             await scroll_job_sidebar(dom_page, max_scrolls=3)
 
         assert "scroll cap reached" in caplog.text
+        # A cap that fires before scrolling logs the same words at 0 scrolls.
+        assert "from 3 scrolls" in caplog.text
 
     async def test_a_closed_page_does_not_raise(self, dom_page, caplog):
         """Scrolling is best effort and must never end the caller's search."""
@@ -346,7 +358,12 @@ class TestSidebarScroll:
         assert "scroll failed" in caplog.text
 
     async def test_reads_ids_from_slugged_hrefs(self, dom_page):
-        """LinkedIn also serves /jobs/view/<slug>-<id>; the id is the target."""
+        """LinkedIn also serves /jobs/view/<slug>-<id>; the id is the target.
+
+        The scroll and the extractor have to agree, because the offset now
+        advances by the number of ids the extractor returned. Running only
+        the scroll here left the consumer free to disagree, and it did.
+        """
         await dom_page.set_content(
             sidebar(total=25, batch=5, delays=[30], slugged=True)
         )
@@ -354,3 +371,52 @@ class TestSidebarScroll:
         await scroll_job_sidebar(dom_page)
 
         assert await rail_cards(dom_page) == 25
+        assert await dom_page.evaluate(_JOB_IDS_JS) == [
+            str(1000 + n) for n in range(1, 26)
+        ]
+
+    async def test_a_slug_opening_with_a_year_is_not_the_id(self, dom_page):
+        """`/jobs/view/2026-...-4252026496/` is job 4252026496, not job 2026."""
+        await dom_page.set_content(
+            '<body><a href="/jobs/view/2026-software-engineer-at-acme-4252026496/">A</a>'
+            '<a href="/jobs/view/senior-engineer-at-acme-4252026497/">B</a>'
+            '<a href="/jobs/view/4252026498/?refId=x">C</a></body>'
+        )
+
+        assert await dom_page.evaluate(_JOB_IDS_JS) == [
+            "4252026496",
+            "4252026497",
+            "4252026498",
+        ]
+
+    async def test_finds_the_rail_when_one_card_has_rendered(self, dom_page):
+        """A slow first paint shows one card, and the rail is still the rail.
+
+        ``wait_for_selector`` returns on that first link, so a pick that
+        demands two jobs gives up here and never scrolls the rest in.
+        """
+        await dom_page.set_content(sidebar(total=25, batch=5, delays=[30], initial=1))
+
+        await scroll_job_sidebar(dom_page, settle_timeout=0.6)
+
+        assert await rail_cards(dom_page) == 25
+
+    async def test_the_deadline_covers_the_wait_for_the_first_card(self, dom_page):
+        """A slow first paint spends the budget, it does not extend it."""
+        await dom_page.set_content(
+            "<body><div id='rail' style='height:60px;overflow-y:scroll'>"
+            "<div id='list'></div><div style='height:600px'></div></div>"
+            "<script>setTimeout(() => {"
+            "const a = document.createElement('a');"
+            "a.href = '/jobs/view/1001/';"
+            "a.style.cssText = 'display:block;height:40px';"
+            "document.getElementById('list').appendChild(a);"
+            "}, 900);</script></body>"
+        )
+
+        started = time.monotonic()
+        await scroll_job_sidebar(dom_page, deadline=1.0, settle_timeout=5.0)
+        elapsed = time.monotonic() - started
+
+        # 0.9s of it went on the selector wait, leaving 0.1s to scroll in.
+        assert elapsed < 1.5
