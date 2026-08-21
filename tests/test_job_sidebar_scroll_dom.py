@@ -389,6 +389,47 @@ class TestSidebarScroll:
             "4252026498",
         ]
 
+    async def test_reads_ids_from_a_localized_slug(self, dom_page, caplog):
+        r"""An accented title arrives percent-encoded, and still carries an id.
+
+        Both readers are exercised at once, because they read different
+        strings: the extractor takes `a.href`, which the browser serializes
+        with the non-ASCII escaped, while the scroll takes the raw attribute.
+        JS `\w` is ASCII and consumes neither, so a rail of localized cards
+        counts zero ids and loses the pick to the two-link detail pane.
+
+        The three hrefs are live samples from the French guest search.
+        """
+        await dom_page.set_content(
+            "<body>"
+            "<div id='rail' style='height:60px;overflow-y:scroll'>"
+            '<a href="/jobs/view/d%C3%A9veloppeur-d%C3%A9veloppeuse-full-stack-at-pix-4449125172/"'
+            " style='display:block;height:40px'>A</a>"
+            '<a href="/jobs/view/société-des-grands-projets-4365799661/"'
+            " style='display:block;height:40px'>B</a>"
+            '<a href="/jobs/view/tricefal%C2%AE%EF%B8%8F-4444869211/"'
+            " style='display:block;height:40px'>C</a>"
+            "<div style='height:600px'></div></div>"
+            "<div id='pane' style='height:60px;overflow-y:scroll'>"
+            '<a href="/jobs/view/4400000001/" style="display:block;height:40px">D</a>'
+            '<a href="/jobs/view/4400000002/" style="display:block;height:40px">E</a>'
+            "<div style='height:600px'></div></div>"
+            "</body>"
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="linkedin_mcp_server.core.utils"):
+            await scroll_job_sidebar(dom_page, settle_timeout=0.6)
+
+        # Three beats the pane's two only while the accented ids are read.
+        assert "holds 3 cards" in caplog.text
+        assert await dom_page.evaluate(_JOB_IDS_JS) == [
+            "4449125172",
+            "4365799661",
+            "4444869211",
+            "4400000001",
+            "4400000002",
+        ]
+
     async def test_finds_the_rail_when_one_card_has_rendered(self, dom_page):
         """A slow first paint shows one card, and the rail is still the rail.
 

@@ -162,7 +162,7 @@ async def scroll_job_sidebar(
 
             const idOf = (node) => {
                 const match = (node.getAttribute('href') || '').match(
-                    /\/jobs\/view\/(?:[\w-]*-)?(\d+)(?=[/?#]|$)/
+                    /\/jobs\/view\/(?:[^/?#]*-)?(\d+)(?=[/?#]|$)/
                 );
                 return match ? match[1] : null;
             };

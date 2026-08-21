@@ -136,6 +136,8 @@ def register_job_tools(
                 work_type=work_type,
                 easy_apply=easy_apply,
                 sort_by=sort_by,
+                # The same figure FastMCP cancels this call on.
+                tool_timeout=tool_timeout,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
