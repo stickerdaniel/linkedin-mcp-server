@@ -4194,7 +4194,16 @@ class LinkedInExtractor:
                                 "LinkedIn reports %d saved-jobs pages", total_pages
                             )
 
-                if "/my-items/saved-jobs" not in self._page.url:
+                # Host and parsed path, like the job-search guard: a
+                # substring test accepts any origin that happens to serve
+                # this path, and an interstitial carrying a single
+                # /jobs/view/ anchor would come back as the account's saved
+                # jobs with no diagnostic beside it.
+                parsed_url = urlparse(self._page.url)
+                if (
+                    parsed_url.netloc != "www.linkedin.com"
+                    or parsed_url.path.rstrip("/") != "/my-items/saved-jobs"
+                ):
                     logger.debug(
                         "Unexpected page URL after saved-jobs extraction: %s — "
                         "skipping job ID extraction",
