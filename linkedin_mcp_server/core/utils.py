@@ -132,7 +132,11 @@ async def scroll_job_sidebar(
         min_budget: Smallest wait a fast connection may shrink to (seconds)
         max_scrolls: Backstop on scroll attempts; ``deadline`` is the real bound
         deadline: Wall-clock bound for the whole call, the wait for the
-            first card included (seconds)
+            first card included (seconds). That wait is separately capped at
+            5s, so a longer deadline buys scrolling and not patience: a search
+            page still holding no card after 5s is throttled or empty, and
+            waiting the full deadline for it would cost that again on every
+            one of ``max_pages`` navigations.
     """
     started = time.monotonic()
     try:
@@ -147,7 +151,7 @@ async def scroll_job_sidebar(
         return
 
     # The wait above is part of the deadline, not extra time on top of it. A
-    # slow link can spend the whole budget before the first card appears, and
+    # slow link can spend it down to nothing before the first card appears, and
     # the caller sized this deadline to fit a whole search inside one tool call.
     remaining = deadline - (time.monotonic() - started)
     if remaining <= 0:

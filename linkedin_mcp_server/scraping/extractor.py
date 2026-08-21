@@ -146,10 +146,19 @@ _SCROLL_DEADLINE_MAX = 12.0
 _SCROLL_BUDGET_TOTAL = 60.0
 
 # A cancelled tool returns nothing, so the search stops itself while there is
-# still time to hand back what it has. The margin covers the extraction and
-# assembly that follow the last navigation. Measured: ten navigations of a
-# Paris developer search take 83s in total, 6.5s each, so this leaves the
-# normal case untouched and only catches a run that is genuinely running out.
+# still time to hand back what it has. Measured: ten navigations of a Paris
+# developer search take 83s in total, 6.5s each, so this leaves the normal case
+# untouched and only catches a run that is genuinely running out.
+#
+# This predicts, it does not guarantee. Only the decision to *start* a page is
+# bounded; once started, a page runs to its own timeouts, and `goto` alone
+# allows 30s. The reserve is what covers that gap, and it has three claims on
+# it: the extraction and assembly after the last navigation, a page slower than
+# every page before it, and the browser startup inside `get_ready_extractor`,
+# which FastMCP is already timing before this budget begins. A page that
+# overruns the reserve is still cancelled and still loses every page gathered.
+# Bounding that too means handing the remaining budget down into navigation,
+# scrolling and the rate-limit retry; see #754 rather than the margin.
 #
 # The timeout arrives as an argument because `get_config()` parses `sys.argv`
 # on its first call, and a scraping path is the wrong place to discover that.
@@ -3379,9 +3388,15 @@ class LinkedInExtractor:
                 )
                 break
 
-            page_started = time.monotonic()
             if page_num > 0:
                 await asyncio.sleep(_NAV_DELAY)
+
+            # Started after the delay, because the prediction above adds
+            # `_NAV_DELAY` to `slowest_page` itself. Timing from before the
+            # sleep folds it into every page after the first and then charges
+            # it a second time, which stops a page early for every two seconds
+            # of delay the run has already paid for.
+            page_started = time.monotonic()
 
             url = base_url if offset == 0 else f"{base_url}&start={offset}"
 
