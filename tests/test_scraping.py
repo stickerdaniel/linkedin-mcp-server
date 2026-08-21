@@ -4672,6 +4672,45 @@ class TestGetSavedJobs:
         assert "saved_jobs" in result["sections"]
         assert result["url"] == "https://www.linkedin.com/my-items/saved-jobs/"
 
+    async def test_a_foreign_host_is_not_the_saved_jobs_list(self, mock_page):
+        """A substring test accepts any origin serving this path.
+
+        An interstitial or captive portal carrying a single `/jobs/view/`
+        anchor would then come back as the account's saved jobs, with no
+        `section_errors` to say otherwise, which is a stranger's page
+        presented as the user's own list.
+        """
+        mock_page.url = "https://interstitial.example/my-items/saved-jobs/"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_saved_jobs_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Captive portal"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["999"],
+            ) as ids,
+            patch.object(
+                extractor,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_saved_jobs(max_pages=1)
+
+        assert result["job_ids"] == []
+        ids.assert_not_called()
+
     async def test_returns_references(self, mock_page):
         """References are keyed by the section name, per the return contract."""
         extractor = LinkedInExtractor(mock_page)
