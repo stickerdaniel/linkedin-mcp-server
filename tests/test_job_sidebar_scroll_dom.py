@@ -21,9 +21,12 @@ from linkedin_mcp_server.core.utils import _JOB_CARD_SELECTOR, scroll_job_sideba
 from linkedin_mcp_server.scraping.extractor import _JOB_IDS_JS
 
 
-def ids_opts(*, scoped: bool = False) -> dict[str, object]:
-    """The argument `_extract_job_ids` passes, so the tests read what it reads."""
-    return {"selector": _JOB_CARD_SELECTOR, "scoped": scoped}
+async def job_ids(page, *, scoped: bool = False) -> list[str]:
+    """What `_extract_job_ids` reads, argument and return shape alike."""
+    result = await page.evaluate(
+        _JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "scoped": scoped}
+    )
+    return result["ids"]
 
 
 pytestmark = pytest.mark.browser_dom
@@ -491,7 +494,7 @@ class TestSidebarScroll:
         await scroll_job_sidebar(dom_page)
 
         assert await rail_cards(dom_page) == 25
-        assert await dom_page.evaluate(_JOB_IDS_JS, ids_opts(scoped=True)) == [
+        assert await job_ids(dom_page, scoped=True) == [
             str(1000 + n) for n in range(1, 26)
         ]
 
@@ -519,7 +522,7 @@ class TestSidebarScroll:
 
         await scroll_job_sidebar(dom_page, settle_timeout=0.4)
 
-        ids = await dom_page.evaluate(_JOB_IDS_JS, ids_opts(scoped=True))
+        ids = await job_ids(dom_page, scoped=True)
         assert ids == ["1001", "1002", "1003"]
 
     async def test_a_rail_replaced_after_the_scroll_is_followed(self, dom_page):
@@ -546,7 +549,7 @@ class TestSidebarScroll:
             }
         """)
 
-        ids = await dom_page.evaluate(_JOB_IDS_JS, ids_opts(scoped=True))
+        ids = await job_ids(dom_page, scoped=True)
         assert ids == [str(1000 + n) for n in range(1, 7)]
 
     async def test_ids_come_from_the_rail_and_not_the_document(self, dom_page):
@@ -564,7 +567,7 @@ class TestSidebarScroll:
 
         await scroll_job_sidebar(dom_page, settle_timeout=0.6)
 
-        ids = await dom_page.evaluate(_JOB_IDS_JS, ids_opts(scoped=True))
+        ids = await job_ids(dom_page, scoped=True)
         assert ids == [str(1000 + n) for n in range(1, 11)]
         assert not [i for i in ids if i.startswith("9000")]
 
@@ -579,7 +582,7 @@ class TestSidebarScroll:
             '<a href="/jobs/view/4400000002/">B</a></body>'
         )
 
-        assert await dom_page.evaluate(_JOB_IDS_JS, ids_opts()) == [
+        assert await job_ids(dom_page) == [
             "4400000001",
             "4400000002",
         ]
@@ -592,7 +595,7 @@ class TestSidebarScroll:
             '<a href="/jobs/view/4252026498/?refId=x">C</a></body>'
         )
 
-        assert await dom_page.evaluate(_JOB_IDS_JS, ids_opts()) == [
+        assert await job_ids(dom_page) == [
             "4252026496",
             "4252026497",
             "4252026498",
@@ -634,7 +637,7 @@ class TestSidebarScroll:
         # The rail's three and not the pane's two: extraction picks the rail
         # by the same rule the scroll does, so the offset advances by what
         # the search rendered rather than by every job link on the page.
-        assert await dom_page.evaluate(_JOB_IDS_JS, ids_opts(scoped=True)) == [
+        assert await job_ids(dom_page, scoped=True) == [
             "4449125172",
             "4365799661",
             "4444869211",

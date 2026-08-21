@@ -2797,6 +2797,26 @@ class TestSearchJobs:
     def _set_search_url(self, mock_page):
         mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=python"
 
+    @staticmethod
+    def _navigating(mock_page, texts, *, lands_on=None, clock=None, cost=0.0):
+        """A page double that moves `page.url` the way a navigation does.
+
+        Left fixed, `page.url` keeps the offset of whichever page the test set
+        up last, so the loop reads its own `start` back unchanged and every
+        multi-page assertion holds for a reason the browser does not supply.
+        `lands_on` is the address LinkedIn answers with, for a navigation that
+        does not keep the offset.
+        """
+        supply = iter(texts) if not callable(texts) else None
+
+        async def navigate(url, *args, **kwargs):
+            mock_page.url = lands_on or url
+            if clock is not None:
+                clock.now += cost
+            return texts(url) if supply is None else next(supply)
+
+        return navigate
+
     async def test_returns_job_ids(self, mock_page):
         """search_jobs should return a job_ids list extracted from hrefs."""
         extractor = LinkedInExtractor(mock_page)
@@ -2957,9 +2977,11 @@ class TestSearchJobs:
         text_pages = iter(["Page 1 text", "Page 2 text"])
         urls_visited: list[str] = []
 
+        navigate = self._navigating(mock_page, lambda _url: extracted(next(text_pages)))
+
         async def mock_extract(url, *args, **kwargs):
             urls_visited.append(url)
-            return extracted(next(text_pages))
+            return await navigate(url)
 
         with (
             patch.object(extractor, "_extract_search_page", side_effect=mock_extract),
@@ -2997,8 +3019,7 @@ class TestSearchJobs:
             patch.object(
                 extractor,
                 "_extract_search_page",
-                new_callable=AsyncMock,
-                return_value=extracted("text"),
+                side_effect=self._navigating(mock_page, [extracted("text")] * 2),
             ) as mock_extract,
             patch.object(
                 extractor,
@@ -3022,6 +3043,67 @@ class TestSearchJobs:
         assert result["job_ids"] == ["100", "200", "300"]
         assert mock_extract.await_count == 2
 
+    async def test_a_missing_rail_is_reported_not_silent(self, mock_page, caplog):
+        """Reading the document is the fallback, and it has to be audible.
+
+        With no rail there is nothing to separate results from the detail
+        pane, so this is the one path where the offset can count something
+        the search never rendered. Live a search page has two scrollable
+        candidates, so it has not been observed.
+        """
+        mock_page.evaluate = AsyncMock(
+            return_value={"ids": ["101", "999"], "scoped": False}
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        with caplog.at_level("WARNING"):
+            assert await extractor._extract_job_ids(scoped=True) == ["101", "999"]
+
+        assert "No results rail" in caplog.text
+
+    async def test_a_dropped_search_offset_stops_the_loop(self, mock_page):
+        """The route can be right while the offset is gone.
+
+        A navigation canonicalised back to the bare search URL serves the
+        first page again. Host and path both pass, so the loop reads it a
+        second time, appends its text to itself under `search_results`, and
+        stops on the repeated ids with nothing to say why. The saved list
+        does exactly this since LinkedIn moved it.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("the first page")] * 3,
+                    lands_on="https://www.linkedin.com/jobs/search/?keywords=python",
+                ),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["101", "102"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=3)
+
+        assert result["job_ids"] == ["101", "102"]
+        assert result["sections"]["search_results"] == "the first page"
+        assert mock_extract.await_count == 2
+
     async def test_early_stop_no_new_ids(self, mock_page):
         """Should stop early when a page yields no new job IDs."""
         extractor = LinkedInExtractor(mock_page)
@@ -3029,8 +3111,11 @@ class TestSearchJobs:
         id_pages = iter([["100", "200"], ["100", "200"]])
         extract_call_count = 0
 
+        navigate = self._navigating(mock_page, lambda _url: None)
+
         async def mock_extract(url, *args, **kwargs):
             nonlocal extract_call_count
+            await navigate(url)
             extract_call_count += 1
             if extract_call_count == 1:
                 return extracted(
@@ -3138,7 +3223,12 @@ class TestSearchJobs:
 
         async def capture(url, section_name, scroll_deadline=None, **kwargs):
             seen.append(scroll_deadline)
+            mock_page.url = url
+            # A real page reports what its scroll spent, and only that. Twelve
+            # seconds of navigation with no scrolling would leave the budget
+            # untouched, which is the case this replaced.
             clock.now += 12.0
+            extractor._scroll_seconds += 12.0
             return extracted("Job results")
 
         async def sleep(seconds: float) -> None:
@@ -3175,6 +3265,61 @@ class TestSearchJobs:
         assert seen == [12.0] * 5 + [0.0] * 5  # 60s, spent five pages in
         assert sum(seen) <= 60.0
 
+    async def test_a_slow_navigation_does_not_spend_the_scroll_budget(self, mock_page):
+        """The budget bounds scrolling, so only scrolling may spend it.
+
+        Charging the page charged navigation and waiting for `<main>` too, so
+        five slow navigations whose rails scrolled instantly still left every
+        page behind them with nothing.
+        """
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
+        extractor = LinkedInExtractor(mock_page)
+        seen: list[float | None] = []
+
+        async def capture(url, section_name, scroll_deadline=None, **kwargs):
+            seen.append(scroll_deadline)
+            mock_page.url = url
+            # All navigation, no scrolling.
+            clock.now += 12.0
+            return extracted("Job results")
+
+        async def sleep(seconds: float) -> None:
+            clock.now += seconds
+
+        pages = [[str(100 + p * 10 + i) for i in range(10)] for p in range(10)]
+
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch.object(extractor, "_extract_search_page", side_effect=capture),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=pages,
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                side_effect=sleep,
+            ),
+        ):
+            await extractor.search_jobs("python", max_pages=10, tool_timeout=100000)
+
+        assert seen == [12.0] * 10
+
     async def test_a_slow_search_stops_before_the_tool_timeout(self, mock_page):
         """A cancelled tool returns nothing, so the loop has to stop itself.
 
@@ -3205,6 +3350,7 @@ class TestSearchJobs:
 
         async def capture(url, section_name, scroll_deadline=None, **kwargs):
             seen.append(scroll_deadline)
+            mock_page.url = url
             clock.now += 18.7
             return extracted("Job results")
 
@@ -3265,6 +3411,7 @@ class TestSearchJobs:
 
         async def capture(url, section_name, scroll_deadline=None, **kwargs):
             seen.append(scroll_deadline)
+            mock_page.url = url
             clock.now += 18.7
             return extracted("Job results")
 
@@ -3387,7 +3534,9 @@ class TestSearchJobs:
                 extractor,
                 "_extract_search_page",
                 new_callable=AsyncMock,
-                side_effect=lambda url, *args, **kwargs: extracted(next(text_pages)),
+                side_effect=self._navigating(
+                    mock_page, lambda _url: extracted(next(text_pages))
+                ),
             ) as mock_extract,
             patch.object(
                 extractor,

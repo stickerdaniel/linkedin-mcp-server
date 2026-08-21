@@ -140,7 +140,8 @@ _JOB_IDS_JS = (
 """
     + _RAIL_PICK_JS
     + r"""
-    const scope = (scoped && pickRail()) || document;
+    const picked = scoped ? pickRail() : null;
+    const scope = picked || document;
     const links = scope.querySelectorAll(selector);
     const seen = new Set();
     const ids = [];
@@ -153,7 +154,7 @@ _JOB_IDS_JS = (
             ids.push(match[1]);
         }
     }
-    return ids;
+    return {ids: ids, scoped: Boolean(picked)};
 }"""
 )
 
@@ -840,6 +841,9 @@ class LinkedInExtractor:
 
     def __init__(self, page: Page):
         self._page = page
+        # What the sidebar scroll spent on the page being read, so that a
+        # multi-page search charges its scroll budget for scrolling alone.
+        self._scroll_seconds = 0.0
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -3173,9 +3177,21 @@ class LinkedInExtractor:
             scoped: Read only the results rail, chosen by the same rule the
                 sidebar scroll uses. Off for lists that have no rail.
         """
-        return await self._page.evaluate(
+        result = await self._page.evaluate(
             _JOB_IDS_JS, {"selector": _JOB_CARD_SELECTOR, "scoped": scoped}
         )
+        if scoped and not result["scoped"]:
+            # The whole document, because a page with nothing scrollable
+            # rendered everything it has and returning no ids at all would
+            # lose the results along with the detail pane's links. Said out
+            # loud, because it is the one path where the offset can count
+            # something the rail never showed, and it has not been observed:
+            # live a search page has two scrollable candidates.
+            logger.warning(
+                "No results rail on %s, reading job ids from the whole document",
+                self._page.url,
+            )
+        return result["ids"]
 
     async def _extract_search_page(
         self,
@@ -3268,7 +3284,16 @@ class LinkedInExtractor:
         before = route(url)
         moved = False
         if main_found:
-            moved = await scroll_job_sidebar(self._page, deadline=scroll_deadline)
+            scroll_started = time.monotonic()
+            try:
+                moved = await scroll_job_sidebar(self._page, deadline=scroll_deadline)
+            finally:
+                # Only what the scroll spent. Charging the whole page charged
+                # navigation and extraction to a budget that exists to bound
+                # scrolling, so five slow navigations that scrolled instantly
+                # still left the pages behind them with nothing. Accumulated,
+                # because a retry scrolls a second time.
+                self._scroll_seconds += time.monotonic() - scroll_started
         if moved or before != route(self._page.url):
             # `page.url` lags a navigation the scroll suppressed, by 6ms in ten
             # measured runs, so sampling it here would compare two copies of
@@ -3467,6 +3492,7 @@ class LinkedInExtractor:
         # three. Each page now takes the per-page cap or what is left,
         # whichever is smaller, and the total is the same 60s.
         scroll_budget_left = _SCROLL_BUDGET_TOTAL
+        self._scroll_seconds = 0.0
         # The offset follows what the pages actually rendered. LinkedIn's own
         # stride would skip every result it renders beyond it.
         offset = 0
@@ -3515,6 +3541,7 @@ class LinkedInExtractor:
 
             url = base_url if offset == 0 else f"{base_url}&start={offset}"
             scroll_deadline = min(_SCROLL_DEADLINE_MAX, scroll_budget_left)
+            self._scroll_seconds = 0.0
 
             try:
                 extracted = await self._extract_search_page(
@@ -3522,14 +3549,8 @@ class LinkedInExtractor:
                     section_name="search_results",
                     scroll_deadline=scroll_deadline,
                 )
-                page_elapsed = time.monotonic() - page_started
-                slowest_page = max(slowest_page, page_elapsed)
-                # The scroll cannot have taken longer than its deadline, nor
-                # longer than the page it sat inside. Charging the whole page
-                # would charge navigation to a budget that is for scrolling.
-                scroll_budget_left = max(
-                    0.0, scroll_budget_left - min(scroll_deadline, page_elapsed)
-                )
+                slowest_page = max(slowest_page, time.monotonic() - page_started)
+                scroll_budget_left = max(0.0, scroll_budget_left - self._scroll_seconds)
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
                     # Rate limit first: it is the more specific diagnosis, and a
@@ -3580,6 +3601,27 @@ class LinkedInExtractor:
                     # beside it is what an exhausted search looks like.
                     await self._raise_if_auth_barrier(self._page.url)
                     raise RuntimeError(f"Search navigation ended on {self._page.url}")
+
+                # The offset has to have survived as well as the route. A
+                # navigation canonicalised back to the bare search URL serves
+                # the first page again, and the loop then reads it a second
+                # time, appends its text to itself under `search_results`, and
+                # stops on the repeated ids with no error to say so. The
+                # saved list does exactly this since LinkedIn moved it, so
+                # this is not hypothetical; job search was measured honouring
+                # `start` at 0, 10 and 21, which is why the mismatch stops the
+                # loop rather than raising. Only `start` is compared, because
+                # LinkedIn appends `currentJobId` to the query by itself.
+                landed_start = parse_qs(parsed_url.query).get("start", ["0"])[0]
+                if landed_start != str(offset):
+                    logger.debug(
+                        "Search offset %d did not survive navigation "
+                        "(landed on %s), stopping",
+                        offset,
+                        self._page.url,
+                    )
+                    break
+
                 page_ids = await self._extract_job_ids(scoped=True)
                 # Advance by what this navigation rendered, duplicates
                 # included: the next unseen result sits right behind them.
