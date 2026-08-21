@@ -494,6 +494,54 @@ class TestExtractPage:
         assert result.error is not None
         assert "Some other page" not in str(result.error)
 
+    async def test_a_foreign_host_with_the_same_path_is_a_redirect(self, mock_page):
+        """The path alone cannot tell a search page from an interstitial.
+
+        A proxy or a captive portal serving its own `/jobs/search` keeps the
+        path across the navigation, so comparing paths alone reads it as the
+        page never having moved. Its text would then come back under
+        `search_results` with no `section_errors`, which is the failure this
+        whole check exists to prevent, arriving through the front door.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Proxy interstitial",
+                "references": [],
+            }
+        )
+
+        async def navigate_away(page, **kwargs):
+            page.url = "https://interstitial.example/jobs/search?keywords=test"
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                side_effect=navigate_away,
+            ),
+        ):
+            result = await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
+        assert result.text == ""
+        assert result.error is not None
+        assert "Proxy interstitial" not in str(result.error)
+
     async def test_currentjobid_alone_does_not_count_as_a_redirect(self, mock_page):
         """LinkedIn moves the query of a search page by itself, mid-scroll.
 
