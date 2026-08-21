@@ -3460,8 +3460,19 @@ class LinkedInExtractor:
                             logger.debug("LinkedIn reports %d total pages", total_pages)
 
                 # Extract job IDs from hrefs (page is already loaded)
-                if not self._page.url.startswith(
-                    "https://www.linkedin.com/jobs/search/"
+                #
+                # The parsed path, like the redirect check above, and not a
+                # prefix: `/jobs/search?keywords=x` is the same route, and the
+                # `?` sits where a prefix test wants the slash. That page is
+                # healthy, passes the redirect check, and yields its text,
+                # while this guard skipped extraction and ended pagination,
+                # so the search returned `job_ids: []` with nothing to say
+                # why. LinkedIn was not observed serving the slashless form,
+                # but a same-document `replaceState` can produce it.
+                parsed_url = urlparse(self._page.url)
+                if (
+                    parsed_url.netloc != "www.linkedin.com"
+                    or parsed_url.path.rstrip("/") != "/jobs/search"
                 ):
                     logger.debug(
                         "Unexpected page URL after extraction: %s — "
