@@ -103,10 +103,11 @@ async def scroll_job_sidebar(
     not the main page body. Finding it means looking at every scrollable
     ancestor of every card: the job detail pane scrolls on its own, and a
     card may sit in a scrollable wrapper of its own. The rail is the
-    candidate holding the most distinct job ids, and it is the only one
-    scrolled, so the pane's "similar jobs" module is never pulled into the
-    page. Measured on a live search: the rail held 7 ids before scrolling
-    and 11 after, the pane held 1 throughout.
+    candidate holding the most distinct job ids, so the pane's "similar
+    jobs" module is not pulled into the page. Measured on a live search:
+    the rail held 7 ids before scrolling and 11 after, the pane held 1
+    throughout. A tie is scrolled rather than resolved, because the tied
+    candidates are then nested and only the inner one appends cards.
 
     There is no target count. How many cards a page yields belongs to
     LinkedIn, and assuming a number is what this function used to get wrong
@@ -202,27 +203,42 @@ async def scroll_job_sidebar(
                 return found;
             };
 
-            // Most job ids wins. A tie goes to whichever candidate
-            // `collect` reached first, which is the innermost scrollable
-            // ancestor of the first card in document order: the rail, since
-            // the pane holds one permalink and sits after it. Measured on two
-            // live searches, at first paint and settled: two candidates, both
-            // siblings at the same depth, rail 7 ids and pane 1. A scrollable
-            // wrapper nested between a card and the rail would take the tie
-            // while the rail holds a single card, and never let it grow; that
-            // shape has not been observed. Starting at two would refuse a rail
-            // that has rendered a single card so far and never scroll it.
-            const pickRail = () => {
+            // Most job ids wins, and a tie is not broken but kept: every
+            // candidate holding the winning count is scrolled. Picking one
+            // loses either way round, because a tie means one candidate
+            // contains the other and only the inner one appends cards.
+            // Measured on both shapes: a per-card wrapper inside a rail that
+            // has rendered a single card leaves the rail unscrolled at one
+            // card, and a scrollable container wrapping the rail leaves it
+            // unscrolled at five. Live the two candidates are siblings, rail
+            // 7 ids and pane 1, so the tie itself has not been observed;
+            // scrolling both costs one extra assignment when it happens.
+            const railGroup = () => {
+                const nodes = collect();
                 let best = 0;
+                for (const node of nodes) {
+                    best = Math.max(best, idsIn(node));
+                }
+                return best ? nodes.filter(n => idsIn(n) === best) : [];
+            };
+
+            // One node still represents the group for measuring growth: the
+            // outermost of the tied, so its id count covers every card the
+            // inner ones append.
+            const pickRail = () => {
                 let picked = null;
-                for (const node of collect()) {
-                    const held = idsIn(node);
-                    if (held > best) {
-                        best = held;
-                        picked = node;
-                    }
+                for (const node of railGroup()) {
+                    if (!picked || node.contains(picked)) picked = node;
                 }
                 return picked;
+            };
+
+            const scrollGroup = () => {
+                // Recollected per scroll: a re-render replaces the nodes, and
+                // a batch can add a candidate that was not scrollable before.
+                for (const node of railGroup()) {
+                    node.scrollTop = node.scrollHeight;
+                }
             };
 
             if (!document.querySelectorAll(selector).length) {
@@ -278,14 +294,14 @@ async def scroll_job_sidebar(
                 const beforeHeight = rail.scrollHeight;
                 const started = Date.now();
 
-                rail.scrollTop = rail.scrollHeight;
+                scrollGroup();
                 let grew = await waitForGrowth(
                     beforeCards, beforeHeight, budgetMs
                 );
                 if (!grew) {
                     // One confirmation round at the full budget: a batch
                     // slower than the shrunken budget is not an empty rail.
-                    rail.scrollTop = rail.scrollHeight;
+                    scrollGroup();
                     grew = await waitForGrowth(
                         beforeCards, beforeHeight, settleMs
                     );
