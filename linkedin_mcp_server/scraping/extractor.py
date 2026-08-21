@@ -4038,6 +4038,12 @@ class LinkedInExtractor:
             raise
         except Exception as e:
             logger.warning("Failed to extract saved jobs page %s: %s", url, e)
+            # A navigation destroys the scroll's execution context, and what
+            # waits behind it is a checkpoint as often as a layout change.
+            # Turning that into a section diagnostic hands the caller an empty
+            # list, leaves the browser registered and offers no relogin, so
+            # the next call meets the same barrier.
+            await self._raise_if_auth_barrier(self._page.url, navigation_error=e)
             return ExtractedSection(
                 text="",
                 references=[],
@@ -4071,6 +4077,13 @@ class LinkedInExtractor:
         await handle_modal_close(self._page)
         if main_found:
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+        else:
+            # A picker served in place of the list keeps the list's address
+            # and its title, so the route guard below sees an allowed page and
+            # the body fallback returns the picker under `saved_jobs`. Missing
+            # `<main>` is what is left, and an emptied list has none either,
+            # which is why the check decides it rather than the absence.
+            await self._raise_if_auth_barrier(self._page.url)
 
         # A picker served by a reload keeps this page's address and this
         # page's title, so the route guard reads it as the list. Nothing else
