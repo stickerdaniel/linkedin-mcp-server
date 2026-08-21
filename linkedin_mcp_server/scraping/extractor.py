@@ -3218,13 +3218,21 @@ class LinkedInExtractor:
             # diagnosed; raising here keeps that, and the pages already
             # gathered still come back with the diagnosis attached.
             #
-            # The path and not the URL, because LinkedIn appends
+            # Host and path, and not the whole URL, because LinkedIn appends
             # `currentJobId` to the query of a search page by itself. Measured
             # across three live searches: the path never moved, and neither did
-            # the query.
-            before = urlparse(self._page.url).path.rstrip("/")
+            # the query. The host has to come along, or a redirect that keeps
+            # the path reads as no redirect at all: an interstitial serving
+            # `/jobs/search` would have its text returned under
+            # `search_results` with nothing beside it to say where it came
+            # from.
+            def route() -> tuple[str, str]:
+                parsed = urlparse(self._page.url)
+                return parsed.netloc, parsed.path.rstrip("/")
+
+            before = route()
             await scroll_job_sidebar(self._page, deadline=scroll_deadline)
-            after = urlparse(self._page.url).path.rstrip("/")
+            after = route()
             if before != after:
                 # An expired session lands here as often as a layout change
                 # does, and the two need different answers. A plain error is
