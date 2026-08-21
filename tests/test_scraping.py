@@ -2967,7 +2967,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                side_effect=lambda: next(id_pages),
+                side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
                 extractor,
@@ -3004,7 +3004,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                side_effect=lambda: next(id_pages),
+                side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
                 extractor,
@@ -3048,7 +3048,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                side_effect=lambda: next(id_pages),
+                side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
                 extractor,
@@ -3095,7 +3095,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                side_effect=lambda: next(id_pages),
+                side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
                 extractor,
@@ -3115,20 +3115,41 @@ class TestSearchJobs:
         assert mock_total_pages.await_count == 1
         assert result["job_ids"] == [str(i) for i in range(25)]
 
-    async def test_scroll_budget_is_split_over_the_pages_asked_for(self, mock_page):
-        """Ten navigations must not each get the full per-page deadline."""
+    async def test_the_scroll_budget_is_spent_and_not_divided(self, mock_page):
+        """Asking for more pages must not shorten the first one.
+
+        Divided up front, ten navigations got 6s each and a page whose first
+        card takes 4.5s had nothing left for the batch behind it, so the
+        larger request came back with fewer jobs than the smaller one. Each
+        page now takes the per-page cap or the remainder, whichever is
+        smaller, and the total is unchanged.
+        """
+
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
         extractor = LinkedInExtractor(mock_page)
         seen: list[float | None] = []
 
         async def capture(url, section_name, scroll_deadline=None, **kwargs):
             seen.append(scroll_deadline)
+            clock.now += 12.0
             return extracted("Job results")
 
+        async def sleep(seconds: float) -> None:
+            clock.now += seconds
+
         # Fresh ids every call, or the search stops after two navigations and
-        # the budget is never divided over the ten this is named for.
+        # the budget is never spent over the ten this is named for.
         pages = [[str(100 + p * 10 + i) for i in range(10)] for p in range(10)]
 
         with (
+            patch.object(extractor_module, "time", clock),
             patch.object(extractor, "_extract_search_page", side_effect=capture),
             patch.object(
                 extractor,
@@ -3144,14 +3165,14 @@ class TestSearchJobs:
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                new_callable=AsyncMock,
+                side_effect=sleep,
             ),
         ):
-            await extractor.search_jobs("python", max_pages=10)
+            await extractor.search_jobs("python", max_pages=10, tool_timeout=100000)
 
         assert len(seen) == 10
-        assert seen[0] == 6.0  # 60s budget over ten navigations
-        assert all(d == seen[0] for d in seen)
+        assert seen[0] == 12.0  # the per-page cap, whatever max_pages says
+        assert seen == [12.0] * 5 + [0.0] * 5  # 60s, spent five pages in
         assert sum(seen) <= 60.0
 
     async def test_a_slow_search_stops_before_the_tool_timeout(self, mock_page):
@@ -3372,7 +3393,7 @@ class TestSearchJobs:
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                side_effect=lambda: next(id_pages),
+                side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
                 extractor,
@@ -3748,7 +3769,7 @@ class TestGetSavedJobs:
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                side_effect=lambda: next(id_pages),
+                side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
                 extractor,
@@ -3783,7 +3804,7 @@ class TestGetSavedJobs:
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                side_effect=lambda: next(id_pages),
+                side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
                 extractor,
@@ -3819,7 +3840,7 @@ class TestGetSavedJobs:
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                side_effect=lambda: next(id_pages),
+                side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
                 extractor,
@@ -3853,7 +3874,7 @@ class TestGetSavedJobs:
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                side_effect=lambda: next(id_pages),
+                side_effect=lambda **kw: next(id_pages),
             ),
             patch.object(
                 extractor,

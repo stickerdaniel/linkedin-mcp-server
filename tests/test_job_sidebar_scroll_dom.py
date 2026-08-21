@@ -17,8 +17,14 @@ import time
 import pytest
 from patchright.async_api import async_playwright
 
-from linkedin_mcp_server.core.utils import _RAIL_ATTRIBUTE, scroll_job_sidebar
+from linkedin_mcp_server.core.utils import _JOB_CARD_SELECTOR, scroll_job_sidebar
 from linkedin_mcp_server.scraping.extractor import _JOB_IDS_JS
+
+
+def ids_opts(*, scoped: bool = False) -> dict[str, object]:
+    """The argument `_extract_job_ids` passes, so the tests read what it reads."""
+    return {"selector": _JOB_CARD_SELECTOR, "scoped": scoped}
+
 
 pytestmark = pytest.mark.browser_dom
 
@@ -37,6 +43,7 @@ def sidebar(
     rerender_after: int | None = None,
     clone_on_scroll: bool = False,
     slugged: bool = False,
+    short_rail: bool = False,
 ) -> str:
     """A scrollable sidebar that appends `batch` cards after each scroll.
 
@@ -54,7 +61,9 @@ def sidebar(
     through the cards, and the first job link on a real search page is a rail
     card. ``clone_on_scroll`` replaces the rail with an identical copy
     shortly after every scroll, holding the same cards, which is what a
-    framework re-rendering during a slow batch looks like.
+    framework re-rendering during a slow batch looks like. ``short_rail``
+    gives the rail room for every card it will hold, so it never overflows,
+    which is what a search with few results looks like.
     """
     stray_links = "".join(
         f'<a href="/jobs/view/{900000 + i}/" style="display:block;height:40px">'
@@ -77,13 +86,15 @@ def sidebar(
     slug_js = "true" if slugged else "false"
     rerender_js = "null" if rerender_after is None else str(rerender_after)
     clone_js = "true" if clone_on_scroll else "false"
+    rail_height = 400 if short_rail else 120
+    rail_filler = "" if short_rail else '<div style="height:600px"></div>'
     return f"""
     <body style="margin:0">
       {"" if strays_after else outside}
       {rail_open}
-      <div id="rail" style="height:120px; overflow-y:scroll">
+      <div id="rail" style="height:{rail_height}px; overflow-y:scroll">
         <div id="list"></div>
-        <div style="height:600px"></div>
+        {rail_filler}
       </div>
       {rail_close}
       {outside if strays_after else ""}
@@ -480,9 +491,63 @@ class TestSidebarScroll:
         await scroll_job_sidebar(dom_page)
 
         assert await rail_cards(dom_page) == 25
-        assert await dom_page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE) == [
+        assert await dom_page.evaluate(_JOB_IDS_JS, ids_opts(scoped=True)) == [
             str(1000 + n) for n in range(1, 26)
         ]
+
+    async def test_a_rail_that_fits_is_still_the_rail(self, dom_page):
+        """A short result set never overflows, and a candidate set built from
+        what currently overflows leaves the rail out of it entirely.
+
+        The detail pane overflows on one job description, so it was the only
+        candidate left and extraction read it: the selected job plus whatever
+        similar jobs it had loaded, in place of the results, with the offset
+        advancing by that count.
+        """
+        await dom_page.set_content(
+            sidebar(
+                total=3,
+                batch=3,
+                delays=[30],
+                initial=3,
+                strays=2,
+                scrollable_pane=True,
+                strays_after=True,
+                short_rail=True,
+            )
+        )
+
+        await scroll_job_sidebar(dom_page, settle_timeout=0.4)
+
+        ids = await dom_page.evaluate(_JOB_IDS_JS, ids_opts(scoped=True))
+        assert ids == ["1001", "1002", "1003"]
+
+    async def test_a_rail_replaced_after_the_scroll_is_followed(self, dom_page):
+        """The scroll ends, the page re-renders, and then the ids are read.
+
+        Nothing the scroll leaves on a node survives that node, so a scope
+        remembered from the scroll would be gone and reading the document
+        instead is indistinguishable from a page nobody scrolled. The pane's
+        ids would come back as results.
+        """
+        await dom_page.set_content(
+            sidebar(total=6, batch=3, delays=[30], strays=2, scrollable_pane=True)
+        )
+
+        await scroll_job_sidebar(dom_page, settle_timeout=0.4)
+        await dom_page.evaluate("""
+            () => {
+                const old = document.getElementById('rail');
+                const fresh = document.createElement('div');
+                fresh.id = 'rail';
+                fresh.style.cssText = old.style.cssText;
+                fresh.innerHTML = old.innerHTML;
+                old.replaceWith(fresh);
+            }
+        """)
+
+        ids = await dom_page.evaluate(_JOB_IDS_JS, ids_opts(scoped=True))
+        assert ids == [str(1000 + n) for n in range(1, 7)]
 
     async def test_ids_come_from_the_rail_and_not_the_document(self, dom_page):
         """A job link outside the rail is not a rendered search result.
@@ -499,22 +564,22 @@ class TestSidebarScroll:
 
         await scroll_job_sidebar(dom_page, settle_timeout=0.6)
 
-        ids = await dom_page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE)
+        ids = await dom_page.evaluate(_JOB_IDS_JS, ids_opts(scoped=True))
         assert ids == [str(1000 + n) for n in range(1, 11)]
         assert not [i for i in ids if i.startswith("9000")]
 
-    async def test_ids_fall_back_to_the_document_without_a_scroll(self, dom_page):
-        """No mark means nobody scrolled, and every link is all there is.
+    async def test_an_unscoped_read_takes_the_whole_document(self, dom_page):
+        """`get_saved_jobs` shares this reader and has no rail to scope to.
 
-        `get_saved_jobs` shares this reader and never runs the sidebar
-        scroll, so scoping unconditionally would return nothing there.
+        Its list is the page, so a pick that found nothing there and returned
+        nothing would lose every saved job.
         """
         await dom_page.set_content(
             '<body><a href="/jobs/view/4400000001/">A</a>'
             '<a href="/jobs/view/4400000002/">B</a></body>'
         )
 
-        assert await dom_page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE) == [
+        assert await dom_page.evaluate(_JOB_IDS_JS, ids_opts()) == [
             "4400000001",
             "4400000002",
         ]
@@ -527,7 +592,7 @@ class TestSidebarScroll:
             '<a href="/jobs/view/4252026498/?refId=x">C</a></body>'
         )
 
-        assert await dom_page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE) == [
+        assert await dom_page.evaluate(_JOB_IDS_JS, ids_opts()) == [
             "4252026496",
             "4252026497",
             "4252026498",
@@ -566,10 +631,10 @@ class TestSidebarScroll:
 
         # Three beats the pane's two only while the accented ids are read.
         assert "holds 3 cards" in caplog.text
-        # The rail's three and not the pane's two: extraction reads the
-        # container the scroll marked, so the offset advances by what the
-        # search rendered rather than by every job link on the page.
-        assert await dom_page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE) == [
+        # The rail's three and not the pane's two: extraction picks the rail
+        # by the same rule the scroll does, so the offset advances by what
+        # the search rendered rather than by every job link on the page.
+        assert await dom_page.evaluate(_JOB_IDS_JS, ids_opts(scoped=True)) == [
             "4449125172",
             "4365799661",
             "4444869211",
