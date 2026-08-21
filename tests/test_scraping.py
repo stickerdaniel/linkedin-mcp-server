@@ -4643,6 +4643,22 @@ class TestGetSavedJobs:
     def _set_saved_jobs_url(self, mock_page):
         mock_page.url = "https://www.linkedin.com/my-items/saved-jobs/"
 
+    @staticmethod
+    def _navigating(mock_page, texts, *, lands_on=None):
+        """A page double that moves `page.url` the way a navigation does.
+
+        Leaving it fixed makes every page look like the first one, which is
+        the very thing the offset check reads. `lands_on` is the address
+        LinkedIn answers with, for a redirect that does not keep the offset.
+        """
+        supply = iter(texts)
+
+        async def navigate(url, *args, **kwargs):
+            mock_page.url = lands_on or url
+            return next(supply)
+
+        return navigate
+
     async def test_returns_job_ids(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -4756,14 +4772,14 @@ class TestGetSavedJobs:
     async def test_page_texts_joined_with_separator(self, mock_page):
         """Multi-page text is joined so the caller can tell pages apart."""
         extractor = LinkedInExtractor(mock_page)
-        texts = iter([extracted("page one"), extracted("page two")])
         id_pages = iter([["100"], ["200"]])
         with (
             patch.object(
                 extractor,
                 "_extract_saved_jobs_page",
-                new_callable=AsyncMock,
-                side_effect=lambda *a, **kw: next(texts),
+                side_effect=self._navigating(
+                    mock_page, [extracted("page one"), extracted("page two")]
+                ),
             ),
             patch.object(
                 extractor,
@@ -4792,9 +4808,11 @@ class TestGetSavedJobs:
         id_pages = iter([["100", "200"], ["300"], ["400"]])
         urls_visited: list[str] = []
 
+        navigate = self._navigating(mock_page, [extracted("page text")] * 3)
+
         async def mock_extract(url, *args, **kwargs):
             urls_visited.append(url)
-            return extracted("page text")
+            return await navigate(url)
 
         with (
             patch.object(
@@ -4833,8 +4851,7 @@ class TestGetSavedJobs:
             patch.object(
                 extractor,
                 "_extract_saved_jobs_page",
-                new_callable=AsyncMock,
-                return_value=extracted("text"),
+                side_effect=self._navigating(mock_page, [extracted("text")] * 2),
             ) as mock_extract,
             patch.object(
                 extractor,
@@ -4859,6 +4876,49 @@ class TestGetSavedJobs:
         # Stops on the repeat page rather than exhausting max_pages
         assert mock_extract.await_count == 2
 
+    async def test_a_dropped_offset_stops_the_list(self, mock_page):
+        """The redirect keeps the path and loses the query.
+
+        Measured on 2026-08-21: `/jobs-tracker/?start=10` lands on
+        `/jobs-tracker/`, so the second request is served the first page.
+        Reading it appends the whole list to itself under `saved_jobs` before
+        the no-new-ids branch stops the loop, and every further offset costs
+        another navigation for the same page.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_saved_jobs_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("the list")] * 3,
+                    lands_on="https://www.linkedin.com/jobs-tracker/",
+                ),
+            ) as mock_extract,
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["100", "200"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_saved_jobs(max_pages=3)
+
+        assert result["job_ids"] == ["100", "200"]
+        assert result["sections"]["saved_jobs"] == "the list"
+        assert mock_extract.await_count == 2
+
     async def test_stops_at_total_pages(self, mock_page):
         """The pager's page count caps pagination below max_pages."""
         extractor = LinkedInExtractor(mock_page)
@@ -4867,8 +4927,7 @@ class TestGetSavedJobs:
             patch.object(
                 extractor,
                 "_extract_saved_jobs_page",
-                new_callable=AsyncMock,
-                return_value=extracted("text"),
+                side_effect=self._navigating(mock_page, [extracted("text")] * 3),
             ) as mock_extract,
             patch.object(
                 extractor,
