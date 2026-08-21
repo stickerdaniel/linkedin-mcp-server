@@ -4200,9 +4200,10 @@ class LinkedInExtractor:
                     or parsed_url.path.rstrip("/") not in _SAVED_JOBS_PATHS
                 ):
                     logger.debug(
-                        "Unexpected page URL after saved-jobs extraction: %s — "
-                        "skipping job ID extraction",
+                        "Unexpected page URL after saved-jobs extraction: %s "
+                        "(requested %s) — skipping job ID extraction",
                         self._page.url,
+                        url,
                     )
                     # The page is dropped whole. Keeping its text and
                     # references put a stranger's page under `saved_jobs`
@@ -4211,11 +4212,35 @@ class LinkedInExtractor:
                     # of, because an empty result with nothing beside it is
                     # what an account with nothing saved looks like.
                     # Classified first, so an expired session reaches the
-                    # relogin path instead of a diagnostic.
-                    await self._raise_if_auth_barrier(url)
+                    # relogin path instead of a diagnostic. Against the page
+                    # that answered, because that is where the barrier is; the
+                    # address that was asked for is on the line above.
+                    await self._raise_if_auth_barrier(self._page.url)
                     raise RuntimeError(
                         f"Saved jobs navigation ended on {self._page.url}"
                     )
+
+                # An offset that did not survive the navigation means this
+                # is the first page again, and reading it a second time
+                # appends the whole list to itself under `saved_jobs` before
+                # the no-new-ids branch stops the loop. Measured on
+                # 2026-08-21: `/jobs-tracker/?start=10` lands on
+                # `/jobs-tracker/`, and so does the old route, so the offset
+                # is gone from the list rather than from one address for it.
+                # Judged from where the page landed and not from that
+                # measurement, so an account still served the old route keeps
+                # paginating.
+                landed_start = parse_qs(urlparse(self._page.url).query).get(
+                    "start", ["0"]
+                )[0]
+                if landed_start != str(page_num * _SAVED_JOBS_PAGE_SIZE):
+                    logger.debug(
+                        "Saved-jobs offset %d did not survive navigation "
+                        "(landed on %s), stopping",
+                        page_num * _SAVED_JOBS_PAGE_SIZE,
+                        self._page.url,
+                    )
+                    break
 
                 page_ids = await self._extract_job_ids()
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
