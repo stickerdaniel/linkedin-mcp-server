@@ -428,6 +428,9 @@ class TestExtractPage:
 
         async def navigate_away(page, **kwargs):
             page.url = "https://www.linkedin.com/checkpoint/challenge/"
+            # The real helper reports that its evaluate raised, which a
+            # navigation destroying the execution context always makes it do.
+            return True
 
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -468,6 +471,7 @@ class TestExtractPage:
 
         async def navigate_away(page, **kwargs):
             page.url = "https://www.linkedin.com/feed/"
+            return True
 
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -496,6 +500,126 @@ class TestExtractPage:
         assert result.error is not None
         assert "Some other page" not in str(result.error)
 
+    async def test_a_reload_onto_an_account_picker_is_an_auth_error(self, mock_page):
+        """A reload keeps the address, so the route sees nothing to compare.
+
+        LinkedIn can serve the account picker at the search URL itself. The
+        route then matches at both ends and the page is accepted, so the
+        picker's text comes back under `search_results`. The scroll reporting
+        that its evaluate raised is the only signal there is.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+
+        async def reload_in_place(page, **kwargs):
+            return True
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                side_effect=reload_in_place,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value="auth barrier text: welcome back + sign in",
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
+    async def test_a_redirect_chain_is_judged_on_where_it_stops(self, mock_page):
+        """The last hop decides, not the first one to appear.
+
+        A chain passes through documents of its own. Judging the one that
+        happens to be current calls a checkpoint healthy when it arrives a
+        moment later, and the search returns a section diagnostic while the
+        browser sits on a checkpoint with no relogin offered.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+
+        async def hop_twice(page, **kwargs):
+            async def hops() -> None:
+                await asyncio.sleep(0.02)
+                page.url = "https://www.linkedin.com/feed/"
+                await asyncio.sleep(0.1)
+                page.url = "https://www.linkedin.com/checkpoint/challenge/"
+
+            asyncio.get_running_loop().create_task(hops())
+            return True
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                side_effect=hop_twice,
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
+    async def test_a_blank_foreign_page_is_diagnosed_not_reported_empty(
+        self, mock_page
+    ):
+        """No ``<main>`` used to skip the route check with it.
+
+        A landing page without one extracts to nothing, and an empty section
+        with no error is what a search that found nothing looks like. The
+        check now runs whether or not the page had a `<main>` to scroll.
+        """
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        mock_page.url = "https://interstitial.example/blank"
+        mock_page.wait_for_selector = AsyncMock(
+            side_effect=PlaywrightTimeoutError("no main")
+        )
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
+        assert result.text == ""
+        assert result.error is not None
+
     async def test_a_foreign_host_with_the_same_path_is_a_redirect(self, mock_page):
         """The path alone cannot tell a search page from an interstitial.
 
@@ -516,6 +640,7 @@ class TestExtractPage:
 
         async def navigate_away(page, **kwargs):
             page.url = "https://interstitial.example/jobs/search?keywords=test"
+            return True
 
         extractor = LinkedInExtractor(mock_page)
         with (
