@@ -32,6 +32,7 @@ def sidebar(
     links_per_card: int = 1,
     scrollable_pane: bool = False,
     wrap_cards: bool = False,
+    outer_scroller: bool = False,
     rerender_after: int | None = None,
     slugged: bool = False,
 ) -> str:
@@ -44,6 +45,9 @@ def sidebar(
     title link and an overlay link to the same job. ``scrollable_pane`` puts
     those stray links in a container that scrolls on its own, which is what
     makes "first scrollable ancestor" the wrong container to pick.
+    ``outer_scroller`` wraps the rail in a container that scrolls on its own
+    and holds no cards of its own, the mirror image of ``wrap_cards``: it ties
+    the rail's count from above rather than from below.
     """
     stray_links = "".join(
         f'<a href="/jobs/view/{900000 + i}/" style="display:block;height:40px">'
@@ -56,16 +60,24 @@ def sidebar(
         if scrollable_pane
         else stray_links
     )
+    rail_open = (
+        '<div id="outer" style="height:100px;overflow-y:scroll">'
+        if outer_scroller
+        else ""
+    )
+    rail_close = '<div style="height:900px"></div></div>' if outer_scroller else ""
     wrap_cards_js = "true" if wrap_cards else "false"
     slug_js = "true" if slugged else "false"
     rerender_js = "null" if rerender_after is None else str(rerender_after)
     return f"""
     <body style="margin:0">
       {outside}
+      {rail_open}
       <div id="rail" style="height:120px; overflow-y:scroll">
         <div id="list"></div>
         <div style="height:600px"></div>
       </div>
+      {rail_close}
       <script>
         let list = document.getElementById('list');
         let rail = document.getElementById('rail');
@@ -305,6 +317,39 @@ class TestSidebarScroll:
         """
         await dom_page.set_content(
             sidebar(total=25, batch=5, delays=[30], wrap_cards=True)
+        )
+
+        await scroll_job_sidebar(dom_page, settle_timeout=0.6)
+
+        assert await rail_cards(dom_page) == 25
+
+    async def test_scrolls_the_rail_when_one_wrapped_card_ties_it(self, dom_page):
+        """The two shapes above, combined: one card, and it is wrapped.
+
+        Each alone is covered, and neither ties: with five cards rendered the
+        rail outnumbers any one wrapper. At one card it does not, because the
+        rail holds the single id that wrapper holds. Only the rail's own
+        scroll appends more, so resolving the tie to the wrapper stops the
+        search at one result.
+        """
+        await dom_page.set_content(
+            sidebar(total=25, batch=5, delays=[30], initial=1, wrap_cards=True)
+        )
+
+        await scroll_job_sidebar(dom_page, settle_timeout=0.6)
+
+        assert await rail_cards(dom_page) == 25
+
+    async def test_scrolls_a_container_that_wraps_the_rail_too(self, dom_page):
+        """The mirror shape: the tie comes from above, not from below.
+
+        A scrollable container holding the rail and no cards of its own ties
+        the rail's count exactly, because every id it holds is the rail's.
+        Scrolling only the outer one appends nothing, so the tied set has to
+        be scrolled whole rather than resolved to one node.
+        """
+        await dom_page.set_content(
+            sidebar(total=25, batch=5, delays=[30], outer_scroller=True)
         )
 
         await scroll_job_sidebar(dom_page, settle_timeout=0.6)
