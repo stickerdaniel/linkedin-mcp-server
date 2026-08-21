@@ -81,6 +81,13 @@
     },
     {
       "type": "git",
+      "name": "rich",
+      "url": "https://github.com/Textualize/rich",
+      "branch": "main",
+      "specialNotes": "Terminal rendering. Used for the browser-install progress bar; the bar glyph is hardcoded in progress_bar.py."
+    },
+    {
+      "type": "git",
       "name": "pythonCryptography",
       "url": "https://github.com/pyca/cryptography",
       "branch": "main",

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
+from collections import deque
+from collections.abc import AsyncIterator, Callable, Iterator
+import contextlib
 from dataclasses import dataclass
 from enum import Enum
 import functools
@@ -11,11 +15,27 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import stat
 import sys
-from typing import NoReturn
+import time
+from typing import Any, NoReturn
 
 from fastmcp import Context
+from rich.console import Console
+from rich.markup import escape
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
+from rich.spinner import Spinner
+from rich.theme import Theme
 
 from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
 from linkedin_mcp_server.config import get_config
@@ -87,6 +107,101 @@ _FULL_DIR_PREFIX = "chromium-"
 _CACHE_REPORT_MARKER = ".linkedin-mcp-cache-report.json"
 _CACHE_REPORT_LOCK = ".linkedin-mcp-cache-report.lock"
 _CACHE_REPORT_SCHEMA = 1
+
+#: How much of the installer's output a failure message may quote. Patchright
+#: embeds a whole non-200 response body in one error, and retries five times, so
+#: an authenticated mirror answering with a page rather than a browser can emit
+#: arbitrarily much. The tail is what says why it failed. Bounded by characters
+#: as well as by count, because a fragment can itself be 64 KiB: two hundred of
+#: those would put 12 MiB into an exception message and into ``last_error``.
+_MAX_RETAINED_LINES = 200
+_MAX_RETAINED_CHARS = 64 * 1024
+#: Read size for the installer's pipe.
+_READ_CHUNK = 64 * 1024
+#: A run of output this long with no newline in it is emitted as one line rather
+#: than buffered further. Bounds memory for output that never terminates a line.
+_MAX_LINE_CHARS = 64 * 1024
+#: Any userinfo in a URL, not only the ``user:password`` form. Patchright prints
+#: the download URL it resolved, and ``PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST`` may
+#: carry credentials for an internal mirror. A bare ``//TOKEN@host`` is as much
+#: a secret as a pair, and so are ``//TOKEN:@host`` and ``//:TOKEN@host``, which
+#: a pattern requiring both halves lets through. Greedy to the *last* ``@``: a
+#: password may contain one, and stopping at the first leaves the rest of it in
+#: the line. Backslashes too, which Node normalises to slashes before
+#: authenticating, so ``https:\\user:pw@host`` is a working credential.
+_CREDENTIALS_IN_URL = re.compile(r"[/\\]{2}[^/\\\s]*@")
+#: The query of any URL. A mirror can carry its credential there as easily as
+#: in the userinfo, patchright pastes its download path onto whatever
+#: ``PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST`` names, and no list of parameter names
+#: is ever complete: ``?token=``, ``?auth_token=``, ``?x-api-key=`` and
+#: ``?X-Amz-Signature=`` are all in use. So the whole query goes, and the part
+#: that identifies the mirror stays. Stopping at an apostrophe as well as at
+#: whitespace, because the run would otherwise reach past the quote that closes
+#: a response body and swallow the ``'. URL: `` that ends it, which is what
+#: ``_installer_lines`` looks for. A query holding a literal apostrophe is not
+#: something patchright constructs.
+_QUERY_IN_URL = re.compile(r"(?i)(\bhttps?:[/\\]{2}[^\s?']*)\?[^\s']*")
+#: C0 and C1 controls and escape sequences. The eight-bit C1 forms do the same
+#: work as their ESC pairs on terminals that accept them, so U+009B followed by
+#: "2J" clears a screen exactly as "\x1b[2J" does. Patchright quotes a whole non-200 response
+#: body, and a body can carry the sequence that clears a terminal or renames
+#: its window. rich strips these from what it renders; the debug log writes
+#: straight to a stream and would not.
+_TERMINAL_CONTROLS = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[a-zA-Z]|[\x00-\x08\x0b-\x1f\x7f\x80-\x9f]"
+)
+#: ``Download failed: server returned code 403 body '…'. URL: …``, patchright's
+#: one message that quotes what a server sent it (``coreBundle.js``, in
+#: ``downloadFile``; every other download error carries a status code, a size
+#: or a URL). Whatever is between those two markers is a stranger's bytes on a
+#: developer's terminal, so it is dropped rather than sanitised: it is where the
+#: escape sequences, the reflected credentials, the markup and the absurd
+#: numbers all came from, and none of it says anything the status code does not.
+#: The body is not one line: ``content += chunk`` collects an HTML error page
+#: with its newlines intact, so the closing marker can arrive thousands of lines
+#: later.
+_RESPONSE_BODY_OPENS = re.compile(r"server returned code \d{1,3} body '")
+_RESPONSE_BODY_CLOSES = "'. URL: "
+#: The closing marker as patchright writes it: the marker, the download URL,
+#: end of line. Anchored, because the body between the markers is a stranger's
+#: bytes and can hold the marker itself: measured against a refusing mirror,
+#: the real closer starts a line of its own and its URL runs to the end of it,
+#: so a marker with prose behind it is the body talking and the drop stays
+#: open. This narrows the forgery to a body line that ends in a URL-shaped
+#: token; it cannot close it, because the grammar is ambiguous at the source.
+#: What the drop is *for* does not rest on that: the escape sequences are
+#: stripped, the credentials redacted, the markup disabled and the line length
+#: capped whether or not a body is recognised as one.
+_RESPONSE_BODY_CLOSED = re.compile(r"'\. URL: \S*\Z")
+#: One short of the marker, which is the most of it that a forced cut can leave
+#: on the far side of a fragment boundary.
+_CLOSER_CARRY = len(_RESPONSE_BODY_CLOSES) - 1
+_OMITTED_BODY = "<response body omitted>"
+
+#: ``|■■■■    |  30% of 187.2 MiB``: the progress line patchright writes when
+#: its stdout is a pipe, which is always the case here. The digit counts are the
+#: guard: patchright's error output carries a whole response body, and a
+#: progress-shaped line from one raised ``OverflowError`` on a 400-digit size
+#: and hit Python's 4300-digit integer limit on a long percentage. Bounded here,
+#: neither can be constructed.
+_PATCHRIGHT_PERCENT = re.compile(r"\|\s*(\d{1,3})%\s+of\s+([\d.]{1,15})\s*([KMG]i?B)")
+#: ``Downloading Chrome for Testing 149.0.7827.55 (…) from https://…``
+_PATCHRIGHT_DOWNLOAD = re.compile(r"^Downloading (.+?) from ")
+#: ``Chrome for Testing 149.0.7827.55 (…) downloaded to /…/chromium-1228``. The
+#: only completion signal there is when no percentage was ever reported.
+_PATCHRIGHT_DONE = re.compile(r" downloaded to ")
+_BINARY_UNITS = {"KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}
+#: LinkedIn's dark-mode blue, for the bar and the spinner alike. The brand blue
+#: #0A66C2 is meant for light backgrounds and reads muted on a dark terminal,
+#: which is where this runs. Only honoured where the terminal advertises
+#: truecolor; rich approximates it to the nearest ANSI colour otherwise.
+_PROGRESS_STYLE = "#70B5F9"
+#: Everything non-ASCII this draws. The bar downgrades itself to "-" wherever
+#: the console encoding is not utf (``ConsoleOptions.ascii_only``); the spinner
+#: does not, and its braille goes into ``write`` as it is. Read off the spinner
+#: rather than copied, so a rich release that redraws "dots" is measured here
+#: instead of assumed.
+_BAR_GLYPHS = "".join(Spinner("dots").frames)
 
 
 class RuntimePolicy(str, Enum):
@@ -571,12 +686,22 @@ def _start_browser_setup_task_locked() -> None:
     _state.setup_task = asyncio.create_task(_run_browser_setup(), name="browser-setup")
 
 
-async def _run_patchright_install(extra_arg: str) -> None:
+async def _run_patchright_install(
+    extra_arg: str, *, line_callback: Callable[[str], None] | None = None
+) -> None:
     """Run one ``patchright install chromium`` stage with the given flag.
 
     The patchright registry lock serializes concurrent installs, so two
     processes reaching this at once queue on the same browsers path rather than
     corrupting it.
+
+    Output is streamed line by line to ``logger.debug`` as it arrives, so a
+    download that used to run behind a blank line reports its progress under
+    ``--log-level DEBUG`` (#533). ``stderr`` is folded into ``stdout`` so the
+    two interleave in the order patchright wrote them, and the collected lines
+    become the failure message when the installer exits non-zero. A
+    *line_callback* (``print`` for the CLI modes) receives each line too, so
+    those modes show progress regardless of the log level.
     """
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
@@ -586,16 +711,664 @@ async def _run_patchright_install(extra_arg: str) -> None:
         "chromium",
         extra_arg,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
-    stdout, stderr = await proc.communicate()
+    assert proc.stdout is not None
+    lines: deque[str] = deque()
+    retained = 0
+    try:
+        async for raw in _installer_lines(proc.stdout):
+            text = raw
+            if not text:
+                continue
+            if line_callback is None:
+                # The background path has nothing else to show it in. On the
+                # CLI path the bar is the display, and logging each line too
+                # would print every percentage permanently above it.
+                logger.debug("patchright: %s", text)
+            lines.append(text)
+            retained += len(text)
+            # A running total, because summing the deque per line is quadratic
+            # in the output: measured, a multi-megabyte error body spent
+            # seconds of CPU inside this bound while the point of it was to be
+            # cheap. One line always survives, so a failure still quotes
+            # something.
+            while len(lines) > 1 and (
+                len(lines) > _MAX_RETAINED_LINES or retained > _MAX_RETAINED_CHARS
+            ):
+                retained -= len(lines.popleft())
+            if line_callback is not None:
+                line_callback(text)
+        await proc.wait()
+    except BaseException:
+        # Cancellation included, which is how shutdown and a failed peer reach
+        # here. Reaps what this call started rather than leaving a process
+        # behind for the lifetime of the server; the Node processes under it
+        # survive, which ``_stop_installer`` records and this cannot fix.
+        _stop_installer(proc)
+        raise
     if proc.returncode != 0:
-        output = "\n".join(
-            text for text in (stderr.decode().strip(), stdout.decode().strip()) if text
-        )
         raise BrowserSetupFailedError(
-            output or "Patchright Chromium browser setup failed."
+            "\n".join(lines) or "Patchright Chromium browser setup failed."
         )
+
+
+def _finish(progress: Progress, task: TaskID | None) -> None:
+    """Drive a task to completion, including one that never had a total."""
+    if task is None:
+        return
+    active = next((t for t in progress.tasks if t.id == task), None)
+    if active is None or active.finished:
+        return
+    total = active.total if active.total is not None else max(active.completed, 1)
+    progress.update(task, total=total, completed=total)
+
+
+def _parsed_total(found: re.Match[str] | None) -> int | None:
+    """The download size a progress line names, or None if it names none.
+
+    Patchright's current format always reports binary units and a plain decimal,
+    but its error output can carry anything, and this runs inside a render
+    callback where an exception costs the remaining retries. So an unknown unit
+    or an unparseable number is treated as "not a progress line" and printed.
+    """
+    if found is None:
+        return None
+    unit = _BINARY_UNITS.get(found.group(3))
+    if unit is None:
+        return None
+    try:
+        return int(float(found.group(2)) * unit)
+    except ValueError:
+        return None
+
+
+def _writes_to_the_terminal(stream: object) -> bool:
+    """Whether this stream ends up on the screen. Never raises."""
+    isatty = getattr(stream, "isatty", None)
+    if not callable(isatty):
+        return False
+    try:
+        return bool(isatty())
+    except Exception:
+        return False
+
+
+def _device_of(stream: object) -> tuple[int, int] | None:
+    """Where this stream physically writes, or None if it cannot say.
+
+    ``(0, 0)`` is *cannot say* rather than a device. Windows only fills these
+    two in for a handle on disk: ``_Py_fstat_noraise`` zeroes the struct and
+    then sets ``st_mode`` alone for ``FILE_TYPE_PIPE`` and ``FILE_TYPE_CHAR``
+    (``Python/fileutils.c``, unchanged across the supported range). Two
+    unrelated pipes would otherwise answer identically, and so would a console
+    and a pipe, which is the pairing a redirect actually produces.
+    """
+    fileno = getattr(stream, "fileno", None)
+    if not callable(fileno):
+        return None
+    try:
+        status = os.fstat(fileno())
+    except Exception:
+        return None
+    if status.st_dev == 0 and status.st_ino == 0:
+        return None
+    return (status.st_dev, status.st_ino)
+
+
+def _same_destination(one: object, other: object) -> bool:
+    """Whether two streams end up in the same place. Never raises.
+
+    The device and inode rather than the descriptor number: stdout and stderr
+    on a terminal are two descriptors on one device, and ``>log 2>&1`` is two
+    descriptors on one file. Two *different* files answer differently, which is
+    the case that must not be treated as a collision.
+
+    One identity and one unknown is *not* the same place. Falling back to the
+    terminal guess there would answer yes for a wrapper that hides its
+    descriptor while writing to a second pane. This direction is the cheap one
+    to get wrong: a false no draws a log record through the bar, a false yes
+    takes it out of the destination the operator chose.
+    """
+    if one is other:
+        return True
+    first, second = _device_of(one), _device_of(other)
+    if first is None and second is None:
+        # Neither can name a device, which in practice means an in-memory
+        # stream or a wrapper that hides the descriptor. Two streams that both
+        # claim a terminal are the same terminal often enough to keep the old
+        # answer here.
+        return _writes_to_the_terminal(one) and _writes_to_the_terminal(other)
+    # Identity against unknown is never equal, which `None` gives for free.
+    #
+    # Two *names* for one terminal are missed by this and stay missed: a
+    # handler reopened through `/dev/tty` shares the screen with the pty slave
+    # under it and carries a different inode (measured on macOS). Widening the
+    # rule to same-device-and-both-a-terminal would close that and would also
+    # merge two genuinely different ptys, which is the losing direction above.
+    return first == second
+
+
+@contextlib.contextmanager
+def _log_handlers_follow_the_live_region(
+    before: tuple[object, object],
+    destination: object,
+) -> Iterator[None]:
+    """Let stream log handlers follow the streams rich redirects.
+
+    rich swaps ``sys.stdout`` and ``sys.stderr`` for proxies while a live region
+    is up, so anything written lands above the bar instead of through it. A
+    ``StreamHandler`` built earlier holds the stream object it was given and
+    never sees the swap, so a record emitted while the bar is live is drawn into
+    the middle of it. Measured in a pty: without this the record and the bar
+    ended up on the same physical line.
+
+    *before* is what the two streams were just before the swap, which is what
+    the handlers can be holding. Comparing against ``sys.__stderr__`` instead
+    would only match when nothing else had wrapped it: and something usually
+    has: pytest captures it, and the detached owner points it at the daemon log.
+
+    *destination* is where the bar is drawn, and a handler only moves if it
+    writes there too. Asking ``isatty`` instead was wrong in both directions
+    once ``FORCE_COLOR`` or ``TTY_COMPATIBLE`` is set, which is how CI runners
+    keep colour through a redirect: rich then draws into a file, so under
+    ``>build.log 2>&1`` a handler that answers False stayed put and wrote its
+    records into the middle of a rendered frame (measured), while with
+    ``2>errors.log`` on a terminal a handler that answers True would be moved
+    and its records taken out of the file the operator chose.
+
+    Only handlers on those two streams move, so a file handler keeps its file.
+    Restored on the way out, because the proxies stop working once the live
+    region is gone.
+    """
+    old_stdout, old_stderr = before
+    moved: list[tuple[logging.StreamHandler[Any], object, object]] = []
+    for candidate in logging.getLogger().handlers:
+        if not isinstance(candidate, logging.StreamHandler):
+            continue
+        # Re-bound because the isinstance narrowing leaves the stream type
+        # unsolved, and `setStream` is declared against it.
+        handler: logging.StreamHandler[Any] = candidate
+        if handler.stream is old_stderr:
+            proxy = sys.stderr
+        elif handler.stream is old_stdout:
+            proxy = sys.stdout
+        else:
+            continue
+        # Only a handler writing where the bar is drawn can collide with it.
+        # Both proxies write through the progress console, so moving one that
+        # writes somewhere else would take its records out of the destination
+        # the operator chose and put them where the bar is.
+        if not _same_destination(handler.stream, destination):
+            continue
+        # `setStream` rather than the attribute: it takes the handler's lock
+        # and flushes what is still buffered, so a record being emitted from
+        # another thread is not split across the two streams. It answers None
+        # when there was nothing to change, which is the case where rich left
+        # the stream alone because something had already wrapped it.
+        replaced = handler.setStream(proxy)
+        if replaced is not None:
+            moved.append((handler, replaced, proxy))
+    try:
+        yield
+    finally:
+        for handler, stream, proxy in moved:
+            # Only if the handler is still where it was put. A host that
+            # reconfigured logging during the download chose the newer stream,
+            # and restoring over it would discard that choice and can leave
+            # records pointed at a stream closed along with the old config.
+            if handler.stream is proxy:
+                handler.setStream(stream)
+
+
+def _print_whatever_the_stream_takes(line: str) -> None:
+    """Print a line, replacing anything the stream cannot encode."""
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        try:
+            print(line, flush=True)
+        except UnicodeEncodeError:
+            print(line.encode(encoding, "replace").decode(encoding), flush=True)
+    except (OSError, ValueError):
+        # A closed or broken stdout is not a reason to fail an install, and the
+        # replacement attempt can meet the same closed pipe as the first.
+        # ``ValueError`` because that is what a closed ``TextIOBase`` raises:
+        # only a real pipe answers with ``BrokenPipeError``, and a stdout
+        # already closed by the host answers "I/O operation on closed file".
+        pass
+
+
+def _bar_is_encodable() -> bool:
+    """Whether the glyphs rich draws survive this stdout's encoding.
+
+    rich does not consult the encoding before rendering, and it does not fall
+    back either: the bar's U+2501 and the spinner's braille go straight into
+    ``write`` and raise ``UnicodeEncodeError`` from inside the live region.
+    That leaves the read loop, kills the installer, and reports an encoding
+    error in place of a browser. ``PYTHONIOENCODING=ascii`` on a real terminal
+    is enough to reach it, so the answer decides between the bar and the lines.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        _BAR_GLYPHS.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+class _ConsoleThatGoesQuiet(Console):
+    """A console that falls silent on a closed pipe instead of exiting.
+
+    rich's default ``on_broken_pipe`` points ``sys.stdout`` at ``os.devnull``
+    and raises ``SystemExit(1)``. Piping ``--install-browser`` into ``head``
+    reaches it whenever the bar is drawn at all, which ``FORCE_COLOR=1`` or
+    ``TTY_COMPATIBLE=1`` arranges for a redirected stdout: measured, exit code
+    1 with an empty stderr, mid-download, with the archive half unpacked. Going
+    quiet leaves the install running, which is the same answer the plain-line
+    path already gives a stream that will not take a line.
+    """
+
+    def on_broken_pipe(self) -> None:
+        self.quiet = True
+
+    def _check_buffer(self) -> None:
+        """Go quiet for the other ways a stream stops taking bytes, too.
+
+        rich catches ``BrokenPipeError`` here and nothing else, so a stdout the
+        host has closed (``ValueError``) or a pseudo-terminal whose other end
+        detached (``OSError`` EIO) raises out of the bar's own refresh:
+        measured against rich 15.0.0, both escape ``Console.print``. From there
+        it leaves the read loop, kills the installer and reports a failed
+        install for a browser already unpacked on disk. ``BrokenPipeError`` is
+        an ``OSError``, so the base class has taken it before this sees it.
+        """
+        try:
+            super()._check_buffer()
+        except (OSError, ValueError):
+            self.on_broken_pipe()
+            del self._buffer[:]
+
+
+@contextlib.contextmanager
+def _cli_progress() -> Iterator[Callable[[str], None]]:
+    """A live progress bar for a terminal, plain lines for anything else.
+
+    Patchright writes to a pipe here, so it picks its newline-delimited
+    progress: one line per ten percent, eleven lines per download. That reads
+    fine in a log and poorly on a terminal, where eleven lines are one bar drawn
+    eleven times. This reads the percentage back out and draws it once.
+
+    Only for a terminal. Redirected output keeps the lines themselves, because a
+    bar redrawn in place is noise in a file, and the background path never
+    reaches here at all: its output goes to a debug log.
+
+    Anything that does not parse as progress is printed unchanged, so a change
+    in patchright's format costs the bar and never the message.
+    """
+    try:
+        console = _ConsoleThatGoesQuiet(
+            # rich's defaults give the three fields three different colours :
+            # magenta, red, blue: which reads as noise beside a single-colour
+            # bar. TransferSpeedColumn hardcodes its style name rather than
+            # taking one, so the theme is the only place all three can be set.
+            theme=Theme(
+                {
+                    "progress.percentage": _PROGRESS_STYLE,
+                    "progress.data.speed": "grey58",
+                    "progress.remaining": "grey58",
+                }
+            )
+        )
+        there_is_a_screen = console.is_terminal and not console.is_dumb_terminal
+    except OSError:
+        # A stream whose ``isatty`` raises instead of answering, which a
+        # detached pseudo-terminal does with ``EIO``. rich guards that call for
+        # ``ValueError`` alone (measured in 15.0.0), so an ``OSError`` comes
+        # back out here. Not knowing whether there is a terminal is exactly the
+        # plain-line case; raising would take the browser install with it.
+        yield _print_whatever_the_stream_takes
+        return
+
+    if not there_is_a_screen or not _bar_is_encodable():
+        # Whether there is a terminal at all is rich's judgement rather than
+        # ``sys.stdout``'s, because where rich will not draw it does not fall
+        # back either: ``Live.refresh`` renders through ``elif not
+        # self._started``, which is to say once, on the way out. A dumb
+        # terminal (``TERM=dumb`` or ``unknown``, common on CI consoles) passes
+        # ``isatty`` and would then show nothing at all for the whole download,
+        # which is the silence this change removes. What the stream can encode
+        # is the one part rich does not decide, and it is asked separately.
+        #
+        # Not bare ``print`` on the way out: patchright draws its own bar with
+        # U+25A0, and an ascii stream raises ``UnicodeEncodeError`` on it.
+        # Raising here would leave the read loop, kill the installer, and
+        # report an encoding error in place of the download. Reporting is never
+        # worth that.
+        yield _print_whatever_the_stream_takes
+        return
+
+    progress = Progress(
+        SpinnerColumn(style=_PROGRESS_STYLE),
+        TextColumn("[white]{task.description}"),
+        BarColumn(
+            bar_width=24,
+            complete_style=_PROGRESS_STYLE,
+            finished_style=_PROGRESS_STYLE,
+            # The pulse is what shows while no percentage has arrived, which
+            # is the whole of a chunked download and the whole of a failing
+            # one. Left alone it shimmers in rich's magenta beside a blue bar.
+            pulse_style=_PROGRESS_STYLE,
+        ),
+        TaskProgressColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+        # rich's default 30s averaging window is deliberate here. Shortening it
+        # to 10s makes a stall show up sooner, and costs far more than it buys:
+        # rich drops samples older than the window before adding the next one,
+        # so once one of patchright's ten-percent steps takes longer than the
+        # window, a single sample is left, the elapsed span is zero, and both
+        # the rate and the estimate become unavailable for the whole download.
+        # Measured against the sample interval: at 6.6 MB/s a step takes 2.7s
+        # and either window works; at 1.0 MB/s it takes 17.9s and only the 30s
+        # window still reports anything. The slow connection is the one that
+        # needs an estimate most.
+        console=console,
+        # rich redirects both streams while the bar is up, so that a direct
+        # write lands above it rather than through it. Right for a stream that
+        # shares the bar's screen and wrong for one that does not: under
+        # ``2>errors.log`` rich would take a `sys.stderr.write` out of the file
+        # the operator named and print it on the terminal instead, and leave a
+        # handler built during the download pointed there afterwards. Same
+        # question as the log handlers below, asked once, before rich swaps the
+        # streams and the answer stops being available.
+        redirect_stderr=_same_destination(sys.stderr, console.file),
+    )
+    described = "Installing browser"
+    # Created before a single line arrives. Patchright can be silent for the
+    # whole download: `npm_config_loglevel=warn` suppresses its announcements
+    # and a chunked response suppresses its percentages, and it waits up to ten
+    # minutes on the registry lock without saying anything either. A bar that
+    # only appears once a line is recognised leaves all of those blank.
+    task: TaskID | None = progress.add_task(described, total=None)
+
+    def report(line: str) -> None:
+        nonlocal task, described
+        started = _PATCHRIGHT_DOWNLOAD.match(line)
+        if started:
+            # Patchright fetches ffmpeg after the browser, and retries a failed
+            # download up to five times, announcing each attempt the same way.
+            # A finished bar stays as a record; an unfinished one belonged to an
+            # attempt that died, and leaving it would spin at 40% forever
+            # beside its own retry.
+            announced = started.group(1).split(" (")[0]
+            placeholder = next(
+                (t for t in progress.tasks if t.id == task and t.completed == 0),
+                None,
+            )
+            if (
+                task is not None
+                and placeholder is not None
+                and placeholder.total is None
+            ):
+                # Still the bar this context opened with. Name it rather than
+                # stacking a second one beside it.
+                progress.update(task, description=escape(announced))
+                described = announced
+                return
+            if task is not None:
+                active = next((t for t in progress.tasks if t.id == task), None)
+                # Unfinished means the attempt died. Finished under the same
+                # name means a retry after patchright reported 100% and then
+                # failed to unpack, which it does on a corrupt archive: five of
+                # those would leave four completed bars for one browser.
+                same_artifact = active is not None and active.description == escape(
+                    announced
+                )
+                if active is not None and (not active.finished or same_artifact):
+                    with contextlib.suppress(KeyError):
+                        progress.remove_task(task)
+            # Escaped where it is used: the column renders the description as
+            # markup, so an error body announcing "Downloading [/red] from …"
+            # would raise out of the render callback and take patchright's
+            # remaining retries with it.
+            described = announced
+            # Started here rather than at the first percentage. A mirror
+            # serving the archive with ``Transfer-Encoding: chunked`` makes
+            # patchright suppress progress altogether: its reporter is guarded
+            # by ``if (!chunked && reportProgress)``: so a bar created on the
+            # first percentage would never appear, and the download would run
+            # behind the silence this change exists to remove. Without a total
+            # rich pulses, and the total is filled in if a percentage arrives.
+            task = progress.add_task(escape(described), total=None)
+            return
+
+        if _PATCHRIGHT_DONE.search(line):
+            # The archive is in place. Without percentages this is the only
+            # thing that says so, and a bar left pulsing would read as a
+            # download that never ended.
+            _finish(progress, task)
+            progress.console.print(line, highlight=False, markup=False)
+            return
+        found = _PATCHRIGHT_PERCENT.search(line)
+        total = _parsed_total(found)
+        if total is None:
+            # markup=False: the installer's text is data, not rich markup. An
+            # error body containing "[/red]" would otherwise raise MarkupError
+            # from inside the render callback, which aborts patchright's
+            # remaining retries and reports rich instead of the download.
+            progress.console.print(line, highlight=False, markup=False)
+            return
+        percent = int(found.group(1)) if found else 0
+        active = next((t for t in progress.tasks if t.id == task), None)
+        going_backwards = (
+            active is not None
+            and active.total is not None
+            and int(total * percent / 100) < active.completed
+        )
+        if (
+            going_backwards
+            and task is not None
+            and active is not None
+            and (not active.finished or active.total == total)
+        ):
+            # An unfinished bar going backwards is the same artifact starting
+            # over, which patchright does up to five times. Reuse it, or five
+            # abandoned bars pile up for one download.
+            #
+            # A *finished* one going backwards to the same total is the same
+            # thing seen without its announcements, which a raised npm log
+            # level suppresses: ``logPolitely`` is silent from "warn" up while
+            # the percentages keep coming. Patchright reports 100% before it
+            # unpacks, so a corrupt archive finishes the bar and then retries,
+            # and without this the failure ends under five completed bars. The
+            # total is what tells the two apart: a retry re-downloads the same
+            # bytes, and the next artifact is a different archive.
+            progress.reset(task, total=total, description=active.description)
+        elif task is None or going_backwards:
+            # Backwards from a finished bar with a different total is the next
+            # artifact, whose announcement never arrived for the same reason.
+            task = progress.add_task(escape(described), total=total)
+        elif task is not None:
+            progress.update(task, total=total)
+        # Bytes rather than percent, so the rate and the estimate have
+        # something to divide. Both are as coarse as the ten-percent steps
+        # patchright reports, which is honest: it is what the installer says.
+        progress.update(task, completed=int(total * percent / 100))
+
+    # Captured before entering, because that is what the handlers can be
+    # holding; inside, rich has already replaced both. The console's own file
+    # is read here for the same reason, though it unwraps the proxy either way.
+    streams_before = (sys.stdout, sys.stderr)
+    drawn_on = console.file
+    with progress, _log_handlers_follow_the_live_region(streams_before, drawn_on):
+        yield report
+        # Reached only when the caller left without raising, so the install
+        # succeeded. It can succeed in silence: patchright prints nothing at
+        # all when every browser is already on disk and only the metadata was
+        # stale, and the bar this context opens would then pulse under
+        # "Browser installed." as its last frame.
+        _finish(progress, task)
+
+
+def _stop_installer(proc: asyncio.subprocess.Process) -> None:
+    """Kill the installer process. Never raises.
+
+    This reaches ``python -m patchright`` and nothing below it. Measured: the
+    wrapper runs a Node CLI which runs a second Node process for the download,
+    and after the wrapper is killed both were still alive, still downloading,
+    and still refreshing the cache lock's heartbeat. So a cancelled install can
+    keep the lock until it finishes on its own, and an install started in the
+    meantime queues behind it.
+
+    That is what ``main`` already did, and it is left alone deliberately.
+    Reaching the whole tree means giving the installer its own session, which
+    is a session the terminal's signals no longer reach; that was tried here
+    and cost a crash on Windows, a race against the spawn, and a terminal left
+    without its cursor. Closing this properly is worth its own change.
+    """
+    with contextlib.suppress(ProcessLookupError, OSError):
+        proc.kill()
+
+
+def _safe_to_print(text: str) -> str:
+    """Text with its terminal controls and its URL credentials taken out.
+
+    Controls go first. A credential can be reassembled out of the fragments an
+    escape sequence separates, so redacting before stripping would leave
+    ``//us\x1b[0mer:pw@host`` unmatched and then hand the stripper a whole
+    credential to put back together.
+
+    What survives here is the download URL patchright echoes, with its userinfo
+    and its query replaced. A credential the operator put in the *path* of
+    ``PLAYWRIGHT_DOWNLOAD_HOST`` still prints: the path is also where the
+    browser build lives, and blanking it would take the diagnostic with it.
+    """
+    text = _TERMINAL_CONTROLS.sub("", text)
+    text = _CREDENTIALS_IN_URL.sub("//***@", text)
+    return _QUERY_IN_URL.sub(r"\1?***", text)
+
+
+async def _installer_lines(stream: asyncio.StreamReader) -> AsyncIterator[str]:
+    """The installer's lines, with any quoted response body dropped.
+
+    A body is the one part of this output a stranger writes, and patchright
+    prints it verbatim, five times, once per retry. Dropping it here rather
+    than defending against it downstream is what keeps the rest of this file
+    honest: the escape sequences, the reflected credentials, the markup that
+    would raise out of a render callback and the 400-digit sizes were all the
+    same bytes arriving through the same quotes.
+
+    Stateful across lines, because the body carries its own newlines and the
+    marker that ends it can be thousands of lines further on. While a body is
+    open every line is dropped whole, which also bounds what a mirror can make
+    this process hold.
+    """
+    eliding = False
+    carry = ""
+    async for line in _split_installer_output(stream):
+        if eliding:
+            # The cut in ``_split_installer_output`` falls wherever the cap
+            # does, including inside the marker, and half a marker on each side
+            # of it would leave this open for the rest of the install: the URL,
+            # the stack trace and every later retry dropped with the body.
+            joined = carry + line
+            found = _RESPONSE_BODY_CLOSED.search(joined)
+            if found is None:
+                carry = joined[-_CLOSER_CARRY:]
+                continue
+            eliding = False
+            carry = ""
+            # Resume at the marker: what follows it is patchright's own text.
+            # Anything the match takes from the carry is marker, not body.
+            line = joined[found.start() :]
+        kept: list[str] = []
+        # Scanning forward from ``pos`` rather than over the result: the marker
+        # stays in what is kept, so a search from the front would find the same
+        # opener again and never terminate.
+        pos = 0
+        while True:
+            opened = _RESPONSE_BODY_OPENS.search(line, pos)
+            if opened is None:
+                kept.append(line[pos:])
+                break
+            kept.append(line[pos : opened.end()])
+            kept.append(_OMITTED_BODY)
+            found = _RESPONSE_BODY_CLOSED.search(line, opened.end())
+            if found is None:
+                eliding = True
+                carry = line[-_CLOSER_CARRY:]
+                break
+            pos = found.start()
+        # Yielded even when empty, so what a caller sees is still the line
+        # structure the installer wrote.
+        yield "".join(kept)
+
+
+async def _split_installer_output(stream: asyncio.StreamReader) -> AsyncIterator[str]:
+    """The installer's output, split into lines, with no limit on line length.
+
+    Deliberately not ``async for line in stream``. That reads through
+    ``readline``, which raises ``ValueError`` once a single line passes the
+    reader's 64 KiB limit: mid-download, out of the loop, and with the child
+    still running and unreaped. Patchright puts an entire non-200 response body
+    into one error line, so a captive portal or a mirror answering with minified
+    HTML reaches that limit, and the server would report an asyncio error
+    instead of the download failure. Measured: a 70 000-byte line raises
+    ``Separator is found, but chunk is longer than limit`` and leaves the child
+    alive.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    buffer = ""
+    while True:
+        chunk = await stream.read(_READ_CHUNK)
+        if not chunk:
+            break
+        buffer += decoder.decode(chunk)
+        # Sanitised here, on the buffer, while a credential is still whole. Per
+        # fragment it would be too late: the cut below is a split point like
+        # any other, and half a URL matches no pattern. Together with the tail
+        # held back, any userinfo shorter than that tail is either redacted
+        # before anything is emitted or still sitting in the buffer when the
+        # rest of it arrives.
+        buffer = _safe_to_print(buffer)
+        while True:
+            end = buffer.find("\n")
+            if 0 <= end <= _MAX_LINE_CHARS:
+                # rstrip here, where the line genuinely ends. A forced fragment
+                # below ends where the cap fell, and trimming there would eat
+                # whitespace the installer wrote.
+                line, buffer = buffer[:end].rstrip(), buffer[end + 1 :]
+                yield line
+                continue
+            if len(buffer) <= _MAX_LINE_CHARS:
+                break
+            # Past the cap with no newline in reach: emit a bounded piece and
+            # keep going. Checking the newline first is what a size check alone
+            # got wrong: two reads under the read size could still meet as one
+            # fragment of twice the cap.
+            #
+            # A credential whole in the buffer was redacted above, before any
+            # of this. One whose "@" has not been read yet is split by the cut
+            # and prints in halves, and no window held back here changes that:
+            # the buffer is over the cap by definition, so holding the opener
+            # back only moves the same fragment one iteration later. Which no
+            # longer has an author: the only output patchright produced without
+            # newlines was the quoted response body, and that is dropped.
+            #
+            # A URL cut in half here loses its scheme with the near fragment,
+            # and the query the far one completes then matches no pattern: a
+            # token split across two reads at the cut printed whole, measured.
+            # Cutting at the last space instead would keep tokens together and
+            # cannot be done from here: the opener ends in one, so preferring a
+            # space splits *that* marker instead, systematically rather than by
+            # coincidence, and the body it opens then prints in full. Both ends
+            # want the same thing, which is a splitter that knows where the
+            # markers are, and that is its own change.
+            yield buffer[:_MAX_LINE_CHARS]
+            buffer = buffer[_MAX_LINE_CHARS:]
+    buffer += decoder.decode(b"", final=True)
+    if buffer:
+        yield buffer.rstrip()
 
 
 def _write_install_metadata(
@@ -618,7 +1391,9 @@ def _write_install_metadata(
     )
 
 
-async def _run_browser_setup() -> None:
+async def _run_browser_setup(
+    *, line_callback: Callable[[str], None] | None = None
+) -> None:
     """Install full Chrome for Testing, in one stage.
 
     The two-stage shell-first arrangement existed to make the headless path
@@ -642,10 +1417,21 @@ async def _run_browser_setup() -> None:
     browser_dir = configure_browser_environment()
     secure_mkdir(browser_dir)
 
-    await _run_patchright_install("--no-shell")
+    # Timed here, right where the download runs, rather than at the state
+    # reconciliation that flips this to READY: that reconciliation happens on
+    # the next tool or auth call, which can arrive minutes after the install
+    # actually finished, and would report the idle gap as setup time.
+    started = time.monotonic()
+    await _run_patchright_install("--no-shell", line_callback=line_callback)
     _write_install_metadata(
         browser_dir,
         {_SHELL_DIR_PREFIX: False, _FULL_DIR_PREFIX: True},
+    )
+    # After the metadata, which is what makes the browser count as installed.
+    # Before it, a failing write would follow "setup completed" with a failure.
+    logger.info(
+        "Patchright Chromium browser setup completed in %.0fs",
+        time.monotonic() - started,
     )
     # After the installer, because that is the moment a bump has just added a
     # revision beside the old one and patchright has already had its chance to
@@ -654,11 +1440,13 @@ async def _run_browser_setup() -> None:
     _schedule_retained_browser_revision_report()
 
 
-async def _ensure_browser_installed() -> None:
+async def _ensure_browser_installed(
+    *, line_callback: Callable[[str], None] | None = None
+) -> None:
     """Install the browser on demand. A no-op once it is present."""
     if browser_ready():
         return
-    await _run_browser_setup()
+    await _run_browser_setup(line_callback=line_callback)
 
 
 def ensure_browser_installed() -> None:
@@ -681,13 +1469,21 @@ def ensure_browser_installed() -> None:
     if browser_ready():
         _report_retained_browser_revisions()
         return
-    print("   Installing Patchright Chromium browser...")
+    # Through the helper, not ``print``: these three sit on the same stdout the
+    # bar does, so ``--install-browser | head`` reaches them with the pipe
+    # already gone. Measured: a *successful* install then ended in a
+    # ``BrokenPipeError`` traceback, and a failed one raised it in place of the
+    # ``BrowserSetupFailedError`` that says what went wrong. The helper also
+    # carries the encoding fallback, which the cross mark below needs on an
+    # ascii terminal for the same reason.
+    _print_whatever_the_stream_takes("   Installing Patchright Chromium browser...")
     try:
-        asyncio.run(_ensure_browser_installed())
+        with _cli_progress() as report:
+            asyncio.run(_ensure_browser_installed(line_callback=report))
     except Exception as exc:
-        print(f"   ❌ Browser installation failed: {exc}")
+        _print_whatever_the_stream_takes(f"   ❌ Browser installation failed: {exc}")
         raise
-    print("   Browser installed.")
+    _print_whatever_the_stream_takes("   Browser installed.")
 
 
 def _safe_task_done(task: asyncio.Task[None] | None) -> bool:

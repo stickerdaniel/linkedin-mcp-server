@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 
@@ -189,3 +191,46 @@ def mock_context():
     ctx = MagicMock()
     ctx.report_progress = AsyncMock()
     return ctx
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Fail a test that leaves ``sys.stdout`` or ``sys.stderr`` unusable.
+
+    A test that closes one of them breaks every test that runs after it in the
+    same process, and the traceback lands on the innocent one. The failure
+    reads as unrelated: ``uvicorn`` asks ``sys.stdout.isatty()`` while building
+    its log config, so a closed stream surfaces as ``Unable to configure
+    formatter 'default'`` in a daemon test.
+
+    Under pytest's own capturing every test gets a fresh ``sys.stdout``, which
+    repairs the damage before anything can trip over it. CI runs with ``-s``,
+    where nothing repairs it, so this class of defect passes locally and fails
+    there. The usual cause is ``capsys`` in the signature of a test that also
+    monkeypatches ``sys.stdout``: ``capsys`` installs the object that
+    ``monkeypatch`` then records as the one to restore, tears down first, and
+    closes it, so the undo reinstalls a closed stream.
+
+    Checked on the teardown report rather than in a fixture, because a fixture
+    cannot see what the teardown of another fixture did after it, and reported
+    against the test that caused it rather than raised from a hook, which would
+    abort the whole session as an internal error.
+    """
+    report = yield
+    if call.when != "teardown" or report.get_result().failed:
+        return
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        try:
+            stream.write("")
+            stream.flush()
+        except Exception as exc:  # noqa: BLE001 - any failure is the same defect
+            result = report.get_result()
+            result.outcome = "failed"
+            result.longrepr = (
+                f"{item.nodeid} left sys.{name} unusable "
+                f"({type(exc).__name__}: {exc}). Every later test in this "
+                f"process would print into it. A `capsys` argument on a test "
+                f"that also monkeypatches sys.{name} is the usual cause."
+            )
+            return
