@@ -2523,6 +2523,84 @@ class TestSearchJobs:
             ]
         }
 
+    async def test_a_slashless_search_url_still_yields_job_ids(self, mock_page):
+        """`/jobs/search?keywords=x` is the same route as `/jobs/search/`.
+
+        The `?` sits where a prefix test wants the slash, so the guard read a
+        healthy page as a redirect: it kept the page text, skipped extraction
+        and ended pagination, and the search came back with `job_ids: []` and
+        no `section_errors` to say why. The redirect check a few lines above
+        already compares parsed paths and calls the same URL healthy, so the
+        two disagreed about exactly one address.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search?keywords=python"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Job 1"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["job_ids"] == ["111"]
+
+    async def test_a_foreign_host_still_skips_job_ids(self, mock_page):
+        """Only the path is normalized; the host still has to be LinkedIn.
+
+        Comparing paths alone would accept any origin serving a
+        `/jobs/search` path, which is what an interstitial or a proxied error
+        page can look like.
+        """
+        mock_page.url = "https://example.com/jobs/search?keywords=python"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Job 1"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ) as ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=1)
+
+        assert result["job_ids"] == []
+        ids.assert_not_called()
+
     async def test_pagination_follows_what_the_page_rendered(self, mock_page):
         """&start= advances by the cards found, not by LinkedIn's stride.
 
