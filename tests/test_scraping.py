@@ -2556,13 +2556,17 @@ class TestSearchJobs:
             seen.append(scroll_deadline)
             return extracted("Job results")
 
+        # Fresh ids every call, or the search stops after two navigations and
+        # the budget is never divided over the ten this is named for.
+        pages = [[str(100 + p * 10 + i) for i in range(10)] for p in range(10)]
+
         with (
             patch.object(extractor, "_extract_search_page", side_effect=capture),
             patch.object(
                 extractor,
                 "_extract_job_ids",
                 new_callable=AsyncMock,
-                return_value=["100"],
+                side_effect=pages,
             ),
             patch.object(
                 extractor,
@@ -2577,8 +2581,10 @@ class TestSearchJobs:
         ):
             await extractor.search_jobs("python", max_pages=10)
 
+        assert len(seen) == 10
         assert seen[0] == 6.0  # 60s budget over ten navigations
         assert all(d == seen[0] for d in seen)
+        assert sum(seen) <= 60.0
 
     async def test_zero_max_pages_fetches_nothing(self, mock_page):
         """max_pages=0 should fetch zero pages (validation at tool boundary)."""

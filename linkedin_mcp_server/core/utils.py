@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
@@ -130,8 +131,10 @@ async def scroll_job_sidebar(
         poll_interval: How often to look for the batch (seconds)
         min_budget: Smallest wait a fast connection may shrink to (seconds)
         max_scrolls: Backstop on scroll attempts; ``deadline`` is the real bound
-        deadline: Wall-clock bound for the whole call (seconds)
+        deadline: Wall-clock bound for the whole call, the wait for the
+            first card included (seconds)
     """
+    started = time.monotonic()
     try:
         await page.wait_for_selector(
             _JOB_CARD_SELECTOR, timeout=min(5000, int(deadline * 1000))
@@ -141,6 +144,14 @@ async def scroll_job_sidebar(
         return
     except Exception as exc:
         logger.warning("Job sidebar scroll failed, page may be short: %s", exc)
+        return
+
+    # The wait above is part of the deadline, not extra time on top of it. A
+    # slow link can spend the whole budget before the first card appears, and
+    # the caller sized this deadline to fit a whole search inside one tool call.
+    remaining = deadline - (time.monotonic() - started)
+    if remaining <= 0:
+        logger.debug("Deadline spent waiting for the first job card, skipping scroll")
         return
 
     try:
@@ -184,10 +195,12 @@ async def scroll_job_sidebar(
                 return found;
             };
 
-            // A container has to hold at least two jobs to be the rail. The
-            // detail pane holds exactly its own permalink, measured live.
+            // Most job ids wins, ties to the first in document order, which
+            // is the rail: the detail pane holds one permalink and sits after
+            // it. Starting at two would refuse a rail that has rendered a
+            // single card so far and never scroll it into the rest.
             const pickRail = () => {
-                let best = 1;
+                let best = 0;
                 let picked = null;
                 for (const node of collect()) {
                     const held = idsIn(node);
@@ -215,7 +228,15 @@ async def scroll_job_sidebar(
                     rail = again;
                     return true;
                 }
-                return idsIn(rail) > cardCount || rail.scrollHeight > height;
+                const held = idsIn(rail);
+                const better = pickRail();
+                if (better && better !== rail && idsIn(better) > held) {
+                    // The first pick can be the detail pane, when the rail had
+                    // not rendered yet. Move once something larger exists.
+                    rail = better;
+                    return true;
+                }
+                return held > cardCount || rail.scrollHeight > height;
             };
             const waitForGrowth = async (cardCount, height, budgetMs) => {
                 const until = Math.min(Date.now() + budgetMs, hardDeadline);
@@ -279,7 +300,7 @@ async def scroll_job_sidebar(
                 "pollMs": poll_interval * 1000,
                 "minBudgetMs": min_budget * 1000,
                 "maxScrolls": max_scrolls,
-                "deadlineMs": deadline * 1000,
+                "deadlineMs": remaining * 1000,
             },
         )
     except Exception as exc:
