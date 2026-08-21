@@ -106,8 +106,10 @@ async def scroll_job_sidebar(
     candidate holding the most distinct job ids, so the pane's "similar
     jobs" module is not pulled into the page. Measured on a live search:
     the rail held 7 ids before scrolling and 11 after, the pane held 1
-    throughout. A tie is scrolled rather than resolved, because the tied
-    candidates are then nested and only the inner one appends cards.
+    throughout. Candidates tied with the pick are scrolled alongside it when
+    one contains the other, because only the inner one appends cards. Tied
+    siblings are not: those two are the rail and the pane, and scrolling the
+    pane is what loads the similar-jobs module.
 
     There is no target count. How many cards a page yields belongs to
     LinkedIn, and assuming a number is what this function used to get wrong
@@ -236,8 +238,25 @@ async def scroll_job_sidebar(
             const scrollGroup = () => {
                 // Recollected per scroll: a re-render replaces the nodes, and
                 // a batch can add a candidate that was not scrollable before.
-                for (const node of railGroup()) {
-                    node.scrollTop = node.scrollHeight;
+                const tied = railGroup();
+                let picked = null;
+                for (const node of tied) {
+                    if (!picked || node.contains(picked)) picked = node;
+                }
+                if (!picked) return;
+                // Only the tied candidates nested with the pick. Two tied
+                // siblings are the live shape, rail and detail pane, and
+                // scrolling the pane loads its similar-jobs module into the
+                // document, where the caller reads those ids as search
+                // results. Measured on a 6-to-6 tie: the pane reached 31 ids
+                // and the search returned 37, of which 31 were not results,
+                // while the rail stayed at 6 because growth was then read
+                // off the pane instead.
+                for (const node of tied) {
+                    if (node === picked
+                        || node.contains(picked) || picked.contains(node)) {
+                        node.scrollTop = node.scrollHeight;
+                    }
                 }
             };
 

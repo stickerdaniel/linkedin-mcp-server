@@ -3226,6 +3226,15 @@ class LinkedInExtractor:
             await scroll_job_sidebar(self._page, deadline=scroll_deadline)
             after = urlparse(self._page.url).path.rstrip("/")
             if before != after:
+                # An expired session lands here as often as a layout change
+                # does, and the two need different answers. A plain error is
+                # caught by the generic handler above and returned as a
+                # section diagnostic, so the browser stays registered and no
+                # re-login is offered; the caller then repeats the search
+                # against the same barrier. Classified first, so a redirect to
+                # /login, /authwall or /checkpoint raises the auth error the
+                # recovery path listens for.
+                await self._raise_if_auth_barrier(url)
                 raise RuntimeError(
                     f"Page navigated to {self._page.url} while scrolling {url}"
                 )

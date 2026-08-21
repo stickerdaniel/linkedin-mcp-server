@@ -33,6 +33,7 @@ def sidebar(
     scrollable_pane: bool = False,
     wrap_cards: bool = False,
     outer_scroller: bool = False,
+    strays_after: bool = False,
     rerender_after: int | None = None,
     slugged: bool = False,
 ) -> str:
@@ -47,7 +48,10 @@ def sidebar(
     makes "first scrollable ancestor" the wrong container to pick.
     ``outer_scroller`` wraps the rail in a container that scrolls on its own
     and holds no cards of its own, the mirror image of ``wrap_cards``: it ties
-    the rail's count from above rather than from below.
+    the rail's count from above rather than from below. ``strays_after`` puts
+    the pane after the rail, which is the live order: candidates are reached
+    through the cards, and the first job link on a real search page is a rail
+    card.
     """
     stray_links = "".join(
         f'<a href="/jobs/view/{900000 + i}/" style="display:block;height:40px">'
@@ -71,13 +75,14 @@ def sidebar(
     rerender_js = "null" if rerender_after is None else str(rerender_after)
     return f"""
     <body style="margin:0">
-      {outside}
+      {"" if strays_after else outside}
       {rail_open}
       <div id="rail" style="height:120px; overflow-y:scroll">
         <div id="list"></div>
         <div style="height:600px"></div>
       </div>
       {rail_close}
+      {outside if strays_after else ""}
       <script>
         let list = document.getElementById('list');
         let rail = document.getElementById('rail');
@@ -355,6 +360,33 @@ class TestSidebarScroll:
         await scroll_job_sidebar(dom_page, settle_timeout=0.6)
 
         assert await rail_cards(dom_page) == 25
+
+    async def test_leaves_a_tied_pane_alone(self, dom_page):
+        """Two tied siblings are the live shape, and only one may be scrolled.
+
+        Rail and detail pane are siblings, so neither contains the other and
+        the tie has no outermost candidate to resolve to. Scrolling both
+        would load the pane's similar-jobs module into the document, which
+        ``_extract_job_ids`` reads as search results: measured on a 6-to-6
+        tie, 31 of 37 returned ids were not results, and the rail stayed at
+        its first six because growth was then read off the pane.
+        """
+        await dom_page.set_content(
+            sidebar(
+                total=25,
+                batch=5,
+                delays=[30],
+                initial=6,
+                strays=6,
+                scrollable_pane=True,
+                strays_after=True,
+            )
+        )
+
+        await scroll_job_sidebar(dom_page, settle_timeout=0.6)
+
+        assert await rail_cards(dom_page) == 25
+        assert await dom_page.evaluate("document.getElementById('pane').scrollTop") == 0
 
     async def test_shrinks_the_budget_after_fast_batches(self, dom_page):
         """A fast connection must not pay the full budget to conclude.
