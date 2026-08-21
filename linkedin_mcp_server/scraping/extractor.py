@@ -4018,42 +4018,58 @@ class LinkedInExtractor:
         section_name: str,
     ) -> ExtractedSection:
         """Extract innerText from a saved-jobs page with soft rate-limit retry."""
-        try:
-            result = await self._extract_saved_jobs_page_once(url, section_name)
-            if result.text != _RATE_LIMITED_MSG:
+        with self._watching_navigations() as hops:
+            try:
+                result = await self._extract_saved_jobs_page_once(url, section_name)
+                if result.text != _RATE_LIMITED_MSG:
+                    return result
+
+                logger.info(
+                    "Retrying saved jobs page %s after %.0fs backoff",
+                    url,
+                    _RATE_LIMIT_RETRY_DELAY,
+                )
+                await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+                result = await self._extract_saved_jobs_page_once(url, section_name)
+                if result.text == _RATE_LIMITED_MSG:
+                    logger.warning(
+                        "Saved jobs page %s still rate-limited after retry", url
+                    )
                 return result
 
-            logger.info(
-                "Retrying saved jobs page %s after %.0fs backoff",
-                url,
-                _RATE_LIMIT_RETRY_DELAY,
-            )
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            result = await self._extract_saved_jobs_page_once(url, section_name)
-            if result.text == _RATE_LIMITED_MSG:
-                logger.warning("Saved jobs page %s still rate-limited after retry", url)
-            return result
-
-        except LinkedInScraperException:
-            raise
-        except Exception as e:
-            logger.warning("Failed to extract saved jobs page %s: %s", url, e)
-            # A navigation destroys the scroll's execution context, and what
-            # waits behind it is a checkpoint as often as a layout change.
-            # Turning that into a section diagnostic hands the caller an empty
-            # list, leaves the browser registered and offers no relogin, so
-            # the next call meets the same barrier.
-            await self._raise_if_auth_barrier(self._page.url, navigation_error=e)
-            return ExtractedSection(
-                text="",
-                references=[],
-                error=build_issue_diagnostics(
-                    e,
-                    context="extract_saved_jobs_page",
-                    target_url=url,
-                    section_name=section_name,
-                ),
-            )
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Failed to extract saved jobs page %s: %s", url, e)
+                # A navigation destroys the scroll's execution context, and
+                # what waits behind it is a checkpoint as often as a layout
+                # change. Turning that into a section diagnostic hands the
+                # caller an empty list, leaves the browser registered and
+                # offers no relogin, so the next call meets the same barrier.
+                #
+                # Whether one happened is the listener's answer and not the
+                # address's: this list reaches `/jobs-tracker/` by a redirect
+                # LinkedIn makes on purpose, so comparing against the URL that
+                # was asked for finds a difference on every ordinary failure
+                # and waits out a chain that is not running.
+                try:
+                    await self._settle_navigation(hops)
+                except Exception:
+                    logger.debug(
+                        "Could not settle the route after a saved-jobs failure",
+                        exc_info=True,
+                    )
+                await self._raise_if_auth_barrier(self._page.url, navigation_error=e)
+                return ExtractedSection(
+                    text="",
+                    references=[],
+                    error=build_issue_diagnostics(
+                        e,
+                        context="extract_saved_jobs_page",
+                        target_url=url,
+                        section_name=section_name,
+                    ),
+                )
 
     async def _extract_saved_jobs_page_once(
         self,
@@ -4192,24 +4208,16 @@ class LinkedInExtractor:
                     url, section_name="saved_jobs"
                 )
 
-                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
-                    if extracted.text == _RATE_LIMITED_MSG:
-                        section_errors["saved_jobs"] = rate_limited_section_error()
-                    elif extracted.error:
-                        section_errors["saved_jobs"] = extracted.error
+                # Rate limit first: it is the more specific diagnosis, and a
+                # page that was throttled may carry a generic error too. Then
+                # the extraction error, which names what actually failed and
+                # would be masked by the route guard below.
+                if extracted.text == _RATE_LIMITED_MSG:
+                    section_errors["saved_jobs"] = rate_limited_section_error()
                     break
-
-                if not total_pages_queried:
-                    total_pages_queried = True
-                    try:
-                        total_pages = await self._get_total_list_pages()
-                    except Exception as e:
-                        logger.debug("Could not read saved-jobs page count: %s", e)
-                    else:
-                        if total_pages is not None:
-                            logger.debug(
-                                "LinkedIn reports %d saved-jobs pages", total_pages
-                            )
+                if extracted.error:
+                    section_errors["saved_jobs"] = extracted.error
+                    break
 
                 # Host and parsed path, like the job-search guard: a
                 # substring test accepts any origin that happens to serve
@@ -4248,6 +4256,23 @@ class LinkedInExtractor:
                     raise RuntimeError(
                         f"Saved jobs navigation ended on {self._page.url}"
                     )
+
+                if not extracted.text:
+                    # Nothing to read, and the page is the one that was asked
+                    # for: an account with nothing saved.
+                    break
+
+                if not total_pages_queried:
+                    total_pages_queried = True
+                    try:
+                        total_pages = await self._get_total_list_pages()
+                    except Exception as e:
+                        logger.debug("Could not read saved-jobs page count: %s", e)
+                    else:
+                        if total_pages is not None:
+                            logger.debug(
+                                "LinkedIn reports %d saved-jobs pages", total_pages
+                            )
 
                 # An offset that did not survive the navigation means this
                 # is the first page again, and reading it a second time

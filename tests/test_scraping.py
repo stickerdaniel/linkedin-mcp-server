@@ -4921,7 +4921,14 @@ class TestGetSavedJobs:
         mock_page.url = "https://www.linkedin.com/jobs-tracker/"
 
         async def redirect(page, **kwargs):
-            mock_page.url = "https://www.linkedin.com/checkpoint/challenge/"
+            # The address lands after the raise, which is what `page.url` does:
+            # measured 20 times out of 20, the URL sampled the moment an
+            # evaluate is destroyed is still the page that was left.
+            async def land() -> None:
+                await asyncio.sleep(0.05)
+                navigate(mock_page, "https://www.linkedin.com/checkpoint/challenge/")
+
+            asyncio.get_running_loop().create_task(land())
             raise RuntimeError("Execution context was destroyed")
 
         extractor = LinkedInExtractor(mock_page)
@@ -4943,6 +4950,66 @@ class TestGetSavedJobs:
             pytest.raises(AuthenticationError, match="--login"),
         ):
             await extractor.get_saved_jobs(max_pages=1)
+
+    async def test_a_blank_foreign_page_is_not_an_empty_list(self, mock_page):
+        """An empty page returned before the route is judged says nothing.
+
+        A captive portal or interstitial that renders no text broke the loop
+        ahead of the guard, so the call came back with no sections, no ids and
+        no `section_errors`, which is exactly what an account with nothing
+        saved looks like.
+        """
+        mock_page.url = "https://interstitial.example/blank"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_saved_jobs_page",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_saved_jobs(max_pages=1)
+
+        assert result["job_ids"] == []
+        assert "saved_jobs" in result["section_errors"]
+
+    async def test_an_empty_list_is_still_an_empty_list(self, mock_page):
+        """An account with nothing saved renders nothing, and that is not an error."""
+        mock_page.url = "https://www.linkedin.com/jobs-tracker/"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_saved_jobs_page",
+                new_callable=AsyncMock,
+                return_value=extracted(""),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_saved_jobs(max_pages=1)
+
+        assert result["job_ids"] == []
+        assert "section_errors" not in result
 
     async def test_a_dropped_offset_stops_the_list(self, mock_page):
         """The redirect keeps the path and loses the query.
