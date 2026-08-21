@@ -15,6 +15,7 @@ from linkedin_mcp_server.scraping.connection import (
     ActionSignals,
     detect_connection_state,
 )
+from linkedin_mcp_server.scraping import extractor as extractor_module
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
     LinkedInExtractor,
@@ -2585,6 +2586,60 @@ class TestSearchJobs:
         assert seen[0] == 6.0  # 60s budget over ten navigations
         assert all(d == seen[0] for d in seen)
         assert sum(seen) <= 60.0
+
+    async def test_a_slow_search_stops_before_the_tool_timeout(self, mock_page):
+        """A cancelled tool returns nothing, so the loop has to stop itself.
+
+        Measured live, ten navigations of a Paris developer search take 83s
+        against a 180s default, so the guard never fires on a healthy run and
+        this drives it with navigations slow enough to reach the budget.
+        """
+
+        class Clock:
+            """A monotonic clock the navigations move, so the guard is testable."""
+
+            def __init__(self) -> None:
+                self.now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
+        extractor = LinkedInExtractor(mock_page)
+        seen: list[float | None] = []
+
+        async def capture(url, section_name, scroll_deadline=None, **kwargs):
+            seen.append(scroll_deadline)
+            clock.now += 20.0
+            return extracted("Job results")
+
+        pages = [[str(100 + p * 10 + i) for i in range(10)] for p in range(10)]
+
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch.object(extractor, "_extract_search_page", side_effect=capture),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=pages,
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs("python", max_pages=10)
+
+        # 144s of budget, 22s a page: the eighth would land at 162s.
+        assert len(seen) == 7
+        assert result["job_ids"] == [jid for page in pages[:7] for jid in page]
 
     async def test_zero_max_pages_fetches_nothing(self, mock_page):
         """max_pages=0 should fetch zero pages (validation at tool boundary)."""

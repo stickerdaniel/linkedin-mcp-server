@@ -7,11 +7,13 @@ from dataclasses import dataclass
 import json
 import logging
 import re
+import time
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
@@ -114,13 +116,21 @@ _RESULTS_PER_LINKEDIN_PAGE = 25
 # both `/jobs/view/1967281839/` and `/jobs/view/<title>-at-<company>-1967281839/`.
 # Anchoring the digits to the front of the segment loses the slugged form
 # entirely, and reads `2026` out of a title that opens with a year.
+#
+# The slug is anything but a separator, not `[\w-]`: JS `\w` is ASCII, and a
+# localized title reaches this as `d%C3%A9veloppeur-web-at-koul-3510216552`,
+# where the `%` ends the match and the id is lost. Measured on the guest
+# search API for `developpeur`, where 6 of 10 hrefs were percent-encoded.
+# The authenticated pages this server visits serve bare ids today (measured
+# across job search, collections and a French search: 0 slugs in 27 anchors),
+# so this branch is defensive on both counts.
 _JOB_IDS_JS = r"""() => {
     const links = document.querySelectorAll('a[href*="/jobs/view/"]');
     const seen = new Set();
     const ids = [];
     for (const a of links) {
         const match = (a.href || '').match(
-            /\/jobs\/view\/(?:[\w-]*-)?(\d+)(?=[/?#]|$)/
+            /\/jobs\/view\/(?:[^/?#]*-)?(\d+)(?=[/?#]|$)/
         );
         if (match && !seen.has(match[1])) {
             seen.add(match[1]);
@@ -134,6 +144,16 @@ _JOB_IDS_JS = r"""() => {
 # max_pages reaches 10 and tool_timeout_seconds defaults to 180.
 _SCROLL_DEADLINE_MAX = 12.0
 _SCROLL_BUDGET_TOTAL = 60.0
+
+# A cancelled tool returns nothing, so the search stops itself while there is
+# still time to hand back what it has. The margin covers the extraction and
+# assembly that follow the last navigation. Measured: ten navigations of a
+# Paris developer search take 83s in total, 6.5s each, so this leaves the
+# normal case untouched and only catches a run that is genuinely running out.
+#
+# The timeout arrives as an argument because `get_config()` parses `sys.argv`
+# on its first call, and a scraping path is the wrong place to discover that.
+_SEARCH_TIMEOUT_FRACTION = 0.8
 
 _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 
@@ -3279,6 +3299,7 @@ class LinkedInExtractor:
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Search for jobs with pagination and job ID extraction.
 
@@ -3326,6 +3347,13 @@ class LinkedInExtractor:
         # stride would skip every result it renders beyond it.
         offset = 0
 
+        # The next navigation is costed from the slowest one so far rather than
+        # a constant: the real figure is 6.5s and the `goto` timeout alone is
+        # 30s, so a fixed guess is wrong in both directions.
+        started = time.monotonic()
+        budget = tool_timeout * _SEARCH_TIMEOUT_FRACTION
+        slowest_page = 0.0
+
         for page_num in range(max_pages):
             # Stop once the offset is past the last advertised result
             if (
@@ -3339,6 +3367,19 @@ class LinkedInExtractor:
                 )
                 break
 
+            elapsed = time.monotonic() - started
+            if page_num > 0 and elapsed + _NAV_DELAY + slowest_page > budget:
+                logger.debug(
+                    "Stopping after %d pages: %.1fs spent, another page costs "
+                    "up to %.1fs and the budget is %.1fs",
+                    page_num,
+                    elapsed,
+                    _NAV_DELAY + slowest_page,
+                    budget,
+                )
+                break
+
+            page_started = time.monotonic()
             if page_num > 0:
                 await asyncio.sleep(_NAV_DELAY)
 
@@ -3350,6 +3391,7 @@ class LinkedInExtractor:
                     section_name="search_results",
                     scroll_deadline=scroll_deadline,
                 )
+                slowest_page = max(slowest_page, time.monotonic() - page_started)
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
                     # Rate limit first: it is the more specific diagnosis, and a
