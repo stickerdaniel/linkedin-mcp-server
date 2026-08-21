@@ -3208,7 +3208,27 @@ class LinkedInExtractor:
 
         await handle_modal_close(self._page)
         if main_found:
+            # `scroll_job_sidebar` swallows whatever its evaluate raises, so
+            # that a rail replaced mid-flight does not cost the caller the page
+            # it is about to read. A navigation destroys that context the same
+            # way and is not the same thing: what waits to be read is then an
+            # authwall or a checkpoint, and extracting it returns login text
+            # under `search_results` with nothing beside it to say so. Before
+            # the scroll learned to survive its own errors, this raised and was
+            # diagnosed; raising here keeps that, and the pages already
+            # gathered still come back with the diagnosis attached.
+            #
+            # The path and not the URL, because LinkedIn appends
+            # `currentJobId` to the query of a search page by itself. Measured
+            # across three live searches: the path never moved, and neither did
+            # the query.
+            before = urlparse(self._page.url).path.rstrip("/")
             await scroll_job_sidebar(self._page, deadline=scroll_deadline)
+            after = urlparse(self._page.url).path.rstrip("/")
+            if before != after:
+                raise RuntimeError(
+                    f"Page navigated to {self._page.url} while scrolling {url}"
+                )
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]
