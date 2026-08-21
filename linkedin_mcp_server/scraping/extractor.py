@@ -30,6 +30,7 @@ from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.core.utils import (
+    _RAIL_ATTRIBUTE,
     detect_rate_limit,
     handle_modal_close,
     scroll_job_sidebar,
@@ -124,8 +125,14 @@ _RESULTS_PER_LINKEDIN_PAGE = 25
 # The authenticated pages this server visits serve bare ids today (measured
 # across job search, collections and a French search: 0 slugs in 27 anchors),
 # so this branch is defensive on both counts.
-_JOB_IDS_JS = r"""() => {
-    const links = document.querySelectorAll('a[href*="/jobs/view/"]');
+# Reads the container the sidebar scroll marked, and the whole document only
+# when there is none, which is what a page nobody scrolled looks like. The
+# detail pane holds its own permalink and, once opened, a similar-jobs module;
+# counting those as rendered results advanced the offset past results the rail
+# never showed.
+_JOB_IDS_JS = r"""(railAttr) => {
+    const scope = document.querySelector('[' + railAttr + ']') || document;
+    const links = scope.querySelectorAll('a[href*="/jobs/view/"]');
     const seen = new Set();
     const ids = [];
     for (const a of links) {
@@ -3151,7 +3158,7 @@ class LinkedInExtractor:
         Finds all `a[href*="/jobs/view/"]` links and extracts the numeric
         job ID from each href. Returns deduplicated IDs in DOM order.
         """
-        return await self._page.evaluate(_JOB_IDS_JS)
+        return await self._page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE)
 
     async def _extract_search_page(
         self,

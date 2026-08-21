@@ -17,7 +17,7 @@ import time
 import pytest
 from patchright.async_api import async_playwright
 
-from linkedin_mcp_server.core.utils import scroll_job_sidebar
+from linkedin_mcp_server.core.utils import _RAIL_ATTRIBUTE, scroll_job_sidebar
 from linkedin_mcp_server.scraping.extractor import _JOB_IDS_JS
 
 pytestmark = pytest.mark.browser_dom
@@ -480,8 +480,43 @@ class TestSidebarScroll:
         await scroll_job_sidebar(dom_page)
 
         assert await rail_cards(dom_page) == 25
-        assert await dom_page.evaluate(_JOB_IDS_JS) == [
+        assert await dom_page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE) == [
             str(1000 + n) for n in range(1, 26)
+        ]
+
+    async def test_ids_come_from_the_rail_and_not_the_document(self, dom_page):
+        """A job link outside the rail is not a rendered search result.
+
+        The offset advances by how many ids extraction returned, so counting
+        the detail pane's own permalink, or the similar-jobs module it loads
+        once opened, walks the next request past results the rail never
+        showed. That is the same skipping this change exists to stop,
+        arriving from the other side.
+        """
+        await dom_page.set_content(
+            sidebar(total=10, batch=5, delays=[30], strays=4, scrollable_pane=True)
+        )
+
+        await scroll_job_sidebar(dom_page, settle_timeout=0.6)
+
+        ids = await dom_page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE)
+        assert ids == [str(1000 + n) for n in range(1, 11)]
+        assert not [i for i in ids if i.startswith("9000")]
+
+    async def test_ids_fall_back_to_the_document_without_a_scroll(self, dom_page):
+        """No mark means nobody scrolled, and every link is all there is.
+
+        `get_saved_jobs` shares this reader and never runs the sidebar
+        scroll, so scoping unconditionally would return nothing there.
+        """
+        await dom_page.set_content(
+            '<body><a href="/jobs/view/4400000001/">A</a>'
+            '<a href="/jobs/view/4400000002/">B</a></body>'
+        )
+
+        assert await dom_page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE) == [
+            "4400000001",
+            "4400000002",
         ]
 
     async def test_a_slug_opening_with_a_year_is_not_the_id(self, dom_page):
@@ -492,7 +527,7 @@ class TestSidebarScroll:
             '<a href="/jobs/view/4252026498/?refId=x">C</a></body>'
         )
 
-        assert await dom_page.evaluate(_JOB_IDS_JS) == [
+        assert await dom_page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE) == [
             "4252026496",
             "4252026497",
             "4252026498",
@@ -531,12 +566,13 @@ class TestSidebarScroll:
 
         # Three beats the pane's two only while the accented ids are read.
         assert "holds 3 cards" in caplog.text
-        assert await dom_page.evaluate(_JOB_IDS_JS) == [
+        # The rail's three and not the pane's two: extraction reads the
+        # container the scroll marked, so the offset advances by what the
+        # search rendered rather than by every job link on the page.
+        assert await dom_page.evaluate(_JOB_IDS_JS, _RAIL_ATTRIBUTE) == [
             "4449125172",
             "4365799661",
             "4444869211",
-            "4400000001",
-            "4400000002",
         ]
 
     async def test_finds_the_rail_when_one_card_has_rendered(self, dom_page):
