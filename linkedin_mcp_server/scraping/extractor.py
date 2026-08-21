@@ -170,6 +170,19 @@ _URL_SETTLE_POLL = 0.01
 # calls a checkpoint healthy, or a healthy page a checkpoint.
 _URL_SETTLE_QUIET = 0.5
 
+
+def _route(target: str) -> tuple[str, str]:
+    """Host and path, which is what identifies a LinkedIn page.
+
+    Not the whole URL: LinkedIn appends `currentJobId` to the query of a
+    search page by itself, measured across three live searches where neither
+    the path nor the rest of the query moved. The host has to come along, or
+    a redirect that keeps the path reads as no redirect at all.
+    """
+    parsed = urlparse(target)
+    return parsed.netloc, parsed.path.rstrip("/")
+
+
 # Scrolling is bounded per navigation and across a whole search, because
 # max_pages reaches 10 and tool_timeout_seconds defaults to 180.
 _SCROLL_DEADLINE_MAX = 12.0
@@ -3167,6 +3180,33 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    async def _settle_route(self) -> None:
+        """Wait until the route stops changing, or until the ceiling.
+
+        `page.url` lags a navigation that destroyed an evaluation, by 6ms in
+        ten measured runs, so reading it the moment the evaluate raises
+        compares two copies of the address that was left behind.
+
+        Until it holds still, and not until it differs: a redirect chain would
+        otherwise be judged on whichever hop happened to be current, and a hop
+        on the way to a checkpoint looks harmless. A chain that pauses longer
+        than the quiet window is still judged on the hop it paused on, which
+        costs one section diagnostic instead of one authentication error,
+        because the call after it navigates to the same address and meets the
+        barrier again.
+        """
+        deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
+        seen = _route(self._page.url)
+        quiet_since = time.monotonic()
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_URL_SETTLE_POLL)
+            current = _route(self._page.url)
+            if current != seen:
+                seen = current
+                quiet_since = time.monotonic()
+            elif time.monotonic() - quiet_since >= _URL_SETTLE_QUIET:
+                break
+
     async def _extract_job_ids(self, *, scoped: bool = False) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
 
@@ -3277,11 +3317,7 @@ class LinkedInExtractor:
         # its own baseline and passes. Outside the `main_found` branch for the
         # same reason: a landing page with no `<main>` extracts to nothing, and
         # an empty section is what an exhausted search looks like.
-        def route(target: str) -> tuple[str, str]:
-            parsed = urlparse(target)
-            return parsed.netloc, parsed.path.rstrip("/")
-
-        before = route(url)
+        before = _route(url)
         moved = False
         if main_found:
             scroll_started = time.monotonic()
@@ -3294,7 +3330,7 @@ class LinkedInExtractor:
                 # still left the pages behind them with nothing. Accumulated,
                 # because a retry scrolls a second time.
                 self._scroll_seconds += time.monotonic() - scroll_started
-        if moved or before != route(self._page.url):
+        if moved or before != _route(self._page.url):
             # `page.url` lags a navigation the scroll suppressed, by 6ms in ten
             # measured runs, so sampling it here would compare two copies of
             # the address that was left. Waited for only when the scroll
@@ -3312,19 +3348,9 @@ class LinkedInExtractor:
             # either by the moved route or by the missing `<main>`. Both
             # numbers only ever apply to a page whose scroll already raised or
             # whose route already moved, so a healthy search pays nothing.
-            deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
-            seen = route(self._page.url)
-            quiet_since = time.monotonic()
-            while time.monotonic() < deadline:
-                await asyncio.sleep(_URL_SETTLE_POLL)
-                current = route(self._page.url)
-                if current != seen:
-                    seen = current
-                    quiet_since = time.monotonic()
-                elif time.monotonic() - quiet_since >= _URL_SETTLE_QUIET:
-                    break
+            await self._settle_route()
 
-        after = route(self._page.url)
+        after = _route(self._page.url)
         if moved or not main_found or before != after:
             # Any of the three is enough, and none implies the others. A reload
             # keeps the address, so an account picker served in place of the
