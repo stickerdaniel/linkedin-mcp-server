@@ -148,15 +148,16 @@ _JOB_IDS_JS = r"""(railAttr) => {
 }"""
 
 # How long to let `page.url` catch up with a navigation the sidebar scroll
-# suppressed. Measured at 6ms across ten runs, min and max alike; the window is
-# wide enough to survive a slower machine and is paid only when the scroll
-# reports that its evaluate raised.
-_URL_SETTLE_TIMEOUT = 1.5
+# suppressed. The lag itself measured 6ms across ten runs, min and max alike;
+# the rest of the budget is for a redirect chain that is still hopping. Only a
+# page that already looks wrong pays it, so the ceiling costs a healthy
+# ten-page search nothing and a broken one 25s of its 180s tool timeout.
+_URL_SETTLE_TIMEOUT = 2.5
 _URL_SETTLE_POLL = 0.01
 # How long the route has to hold still before it counts as the destination. A
 # redirect chain hops through intermediate documents, and judging one of those
 # calls a checkpoint healthy, or a healthy page a checkpoint.
-_URL_SETTLE_QUIET = 0.25
+_URL_SETTLE_QUIET = 0.5
 
 # Scrolling is bounded per navigation and across a whole search, because
 # max_pages reaches 10 and tool_timeout_seconds defaults to 180.
@@ -3252,7 +3253,7 @@ class LinkedInExtractor:
         moved = False
         if main_found:
             moved = await scroll_job_sidebar(self._page, deadline=scroll_deadline)
-        if moved:
+        if moved or before != route(self._page.url):
             # `page.url` lags a navigation the scroll suppressed, by 6ms in ten
             # measured runs, so sampling it here would compare two copies of
             # the address that was left. Waited for only when the scroll
@@ -3261,6 +3262,15 @@ class LinkedInExtractor:
             # Until the route holds still, and not until it differs: a redirect
             # chain would otherwise be judged on whichever hop happened to be
             # current, and a hop on the way to a checkpoint looks harmless.
+            #
+            # Quiet is a guess at when a chain has stopped, and a chain that
+            # pauses longer than the window is judged on the hop it paused on.
+            # What that costs is one section diagnostic instead of one
+            # authentication error: the page after it navigates to the same
+            # search address, lands on the barrier again, and is caught there
+            # either by the moved route or by the missing `<main>`. Both
+            # numbers only ever apply to a page whose scroll already raised or
+            # whose route already moved, so a healthy search pays nothing.
             deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
             seen = route(self._page.url)
             quiet_since = time.monotonic()
@@ -3274,12 +3284,16 @@ class LinkedInExtractor:
                     break
 
         after = route(self._page.url)
-        if moved or before != after:
-            # Either signal is enough, and neither implies the other. A reload
+        if moved or not main_found or before != after:
+            # Any of the three is enough, and none implies the others. A reload
             # keeps the address, so an account picker served in place of the
-            # search page changes nothing the comparison below can see, while a
+            # search page changes nothing the comparison below can see; a
             # redirect that completed during the navigation moves the route
-            # without the scroll ever raising.
+            # without the scroll ever raising; and a barrier page carries no
+            # `<main>`, so the scroll it would have raised from never ran.
+            # That third one is the shape this check exists for and the one it
+            # missed: an exhausted search renders no `<main>` either, which is
+            # why the check has to decide it rather than the absence alone.
             await self._raise_if_auth_barrier(url)
         if before != after:
             # An expired session lands here as often as a layout change does,

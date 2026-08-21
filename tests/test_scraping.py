@@ -5,6 +5,8 @@ from urllib.parse import parse_qs, urlparse
 
 import asyncio
 
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
 import pytest
 
 from linkedin_mcp_server.callbacks import ProgressCallback
@@ -541,6 +543,90 @@ class TestExtractPage:
                 section_name="search_results",
             )
 
+    async def test_a_picker_without_main_is_an_auth_error(self, mock_page):
+        """No `<main>` skips the scroll, and skipping it skipped the check.
+
+        An account picker served at the search address has no `<main>`, so the
+        scroll never runs and `moved` stays false, and the route matches at
+        both ends because nothing navigated. Both signals the check waited for
+        are absent on exactly the page it exists to catch, and the picker's
+        text came back under `search_results`.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+        mock_page.wait_for_selector = AsyncMock(
+            side_effect=PlaywrightTimeoutError("no main")
+        )
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value="auth barrier text: welcome back + join now",
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+        scroll.assert_not_called()
+
+    async def test_a_page_without_main_is_still_extracted(self, mock_page):
+        """The check runs on every `<main>`-less page; only a barrier stops one.
+
+        A search that has run out of results renders no `<main>` either, and
+        that page is the ordinary end of pagination rather than a failure.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+        mock_page.wait_for_selector = AsyncMock(
+            side_effect=PlaywrightTimeoutError("no main")
+        )
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            result = await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+        assert result.error is None
+
     async def test_a_redirect_chain_is_judged_on_where_it_stops(self, mock_page):
         """The last hop decides, not the first one to appear.
 
@@ -576,6 +662,88 @@ class TestExtractPage:
             patch(
                 "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
                 side_effect=hop_twice,
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
+    async def test_a_chain_that_pauses_is_still_followed(self, mock_page):
+        """A hop that takes its time is not the end of the chain.
+
+        The quiet window decides when a route counts as settled, so a chain
+        that stalls longer than the window is judged on the hop it stalled on.
+        A checkpoint reached after a pause reads as a healthy feed page.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+
+        async def hop_slowly(page, **kwargs):
+            async def hops() -> None:
+                await asyncio.sleep(0.02)
+                page.url = "https://www.linkedin.com/feed/"
+                await asyncio.sleep(0.3)
+                page.url = "https://www.linkedin.com/checkpoint/challenge/"
+
+            asyncio.get_running_loop().create_task(hops())
+            return True
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                side_effect=hop_slowly,
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
+    async def test_a_chain_the_scroll_survived_is_still_followed(self, mock_page):
+        """A redirect can move the route without the scroll ever raising.
+
+        The scroll returning cleanly says its own context survived, and says
+        nothing about a navigation that started before it or lands after it.
+        Sampling the route once at that point stops the chain on its first hop.
+        """
+        mock_page.url = "https://www.linkedin.com/feed/"
+
+        async def hop_late(page, **kwargs):
+            async def hops() -> None:
+                await asyncio.sleep(0.3)
+                page.url = "https://www.linkedin.com/checkpoint/challenge/"
+
+            asyncio.get_running_loop().create_task(hops())
+            return False
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                side_effect=hop_late,
             ),
             pytest.raises(AuthenticationError, match="--login"),
         ):
