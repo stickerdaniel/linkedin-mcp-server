@@ -22,6 +22,11 @@ RUN uv pip install --python /app/.venv/bin/python --no-deps --compile-bytecode \
 # -- Stage 2: Production runtime --
 FROM python:3.13.13-slim-bookworm@sha256:355bfa66770995d7e9a0da4b3473b44d0cb451f6b56f5615ad9c39e3c4eca03f
 
+# The MCP Registry proves ownership of an image by reading this annotation
+# off the published manifest and comparing it to the name in server.json.
+# It has to be on the runtime stage: the builder's labels never ship.
+LABEL io.modelcontextprotocol.server.name="io.github.stickerdaniel/linkedin-mcp-server"
+
 RUN useradd -m -s /bin/bash pwuser
 
 WORKDIR /app

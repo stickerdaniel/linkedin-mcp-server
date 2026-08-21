@@ -1,5 +1,7 @@
 # MCP Server for LinkedIn
 
+<!-- mcp-name: io.github.stickerdaniel/linkedin-mcp-server -->
+
 <p align="left">
   <a href="https://pypi.org/project/mcp-server-linkedin/" target="_blank"><img src="https://img.shields.io/pypi/v/mcp-server-linkedin?color=blue" alt="PyPI"></a>
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/actions/workflows/ci.yml" target="_blank"><img src="https://github.com/stickerdaniel/linkedin-mcp-server/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI Status"></a>
