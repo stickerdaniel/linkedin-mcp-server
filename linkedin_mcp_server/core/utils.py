@@ -11,6 +11,10 @@ from .exceptions import RateLimitError
 logger = logging.getLogger(__name__)
 
 _JOB_CARD_SELECTOR = 'a[href*="/jobs/view/"]'
+# Marks the container the scroll chose, so that job-id extraction can read that
+# rather than every job link in the document. A `data-` attribute survives
+# until LinkedIn re-renders the node, and a re-render re-picks and re-marks.
+_RAIL_ATTRIBUTE = "data-lmcp-rail"
 
 
 async def detect_rate_limit(page: Page) -> None:
@@ -176,7 +180,7 @@ async def scroll_job_sidebar(
         result = await page.evaluate(
             r"""async (opts) => {
             const {selector, settleMs, pollMs, minBudgetMs,
-                   maxScrolls, deadlineMs} = opts;
+                   maxScrolls, deadlineMs, railAttr} = opts;
 
             const idOf = (node) => {
                 const match = (node.getAttribute('href') || '').match(
@@ -235,12 +239,27 @@ async def scroll_job_sidebar(
             // One node still represents the group for measuring growth: the
             // outermost of the tied, so its id count covers every card the
             // inner ones append.
+            // The chosen rail is marked so that id extraction can read it
+            // rather than the whole document. Everything outside it is not a
+            // search result: the detail pane carries its own permalink and,
+            // once opened, a similar-jobs module. Counting those advanced the
+            // offset past results the rail never showed, which is the same
+            // skipping this change exists to stop, arriving from the other
+            // side.
+            const mark = (node) => {
+                for (const old of document.querySelectorAll('[' + railAttr + ']')) {
+                    if (old !== node) old.removeAttribute(railAttr);
+                }
+                if (node) node.setAttribute(railAttr, '1');
+                return node;
+            };
+
             const pickRail = () => {
                 let picked = null;
                 for (const node of railGroup()) {
                     if (!picked || node.contains(picked)) picked = node;
                 }
-                return picked;
+                return mark(picked);
             };
 
             const scrollGroup = () => {
@@ -366,6 +385,7 @@ async def scroll_job_sidebar(
                 "minBudgetMs": min_budget * 1000,
                 "maxScrolls": max_scrolls,
                 "deadlineMs": remaining * 1000,
+                "railAttr": _RAIL_ATTRIBUTE,
             },
         )
     except Exception as exc:
