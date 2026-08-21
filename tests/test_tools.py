@@ -685,6 +685,32 @@ class TestJobTools:
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
 
+    async def test_search_jobs_is_bounded_by_the_registered_timeout(self, mock_context):
+        """The loop stops itself by the same figure FastMCP cancels on.
+
+        Registered with a non-default timeout and asserted exactly, because
+        dropping the argument leaves the extractor budgeting against its own
+        180s default while FastMCP still cancels at 60s. The search would then
+        be killed mid-page and every page already gathered thrown away, which
+        is the loss the bound exists to prevent.
+        """
+        mock_extractor = _make_mock_extractor(
+            {
+                "url": "https://www.linkedin.com/jobs/search/?keywords=python",
+                "sections": {"search_results": "Job 1"},
+            }
+        )
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp, tool_timeout=60.0)
+
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+        await tool_fn("python", mock_context, extractor=mock_extractor)
+
+        assert mock_extractor.search_jobs.await_args.kwargs["tool_timeout"] == 60.0
+
     async def test_get_saved_jobs(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/my-items/saved-jobs/",

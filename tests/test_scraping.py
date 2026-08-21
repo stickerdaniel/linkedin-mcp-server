@@ -2593,6 +2593,13 @@ class TestSearchJobs:
         Measured live, ten navigations of a Paris developer search take 83s
         against a 180s default, so the guard never fires on a healthy run and
         this drives it with navigations slow enough to reach the budget.
+
+        The page cost is chosen to land between the two arithmetics. Against a
+        144s budget, six pages of 18.7s plus five delays of 2s reach 122.2s, and
+        a seventh costs 20.7s and finishes at 142.9s. Charging the delay once
+        admits it; charging it twice predicts 144.9s and drops a page the run
+        had time for. The fake sleep therefore has to move the clock, or the
+        delay never enters the sum at all and neither does the defect.
         """
 
         class Clock:
@@ -2610,8 +2617,12 @@ class TestSearchJobs:
 
         async def capture(url, section_name, scroll_deadline=None, **kwargs):
             seen.append(scroll_deadline)
-            clock.now += 20.0
+            clock.now += 18.7
             return extracted("Job results")
+
+        async def sleep(seconds: float) -> None:
+            """The inter-page delay costs wall clock, the same as a navigation."""
+            clock.now += seconds
 
         pages = [[str(100 + p * 10 + i) for i in range(10)] for p in range(10)]
 
@@ -2632,12 +2643,12 @@ class TestSearchJobs:
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                new_callable=AsyncMock,
+                side_effect=sleep,
             ),
         ):
             result = await extractor.search_jobs("python", max_pages=10)
 
-        # 144s of budget, 22s a page: the eighth would land at 162s.
+        # Seven pages end at 142.9s; an eighth would need 163.6s.
         assert len(seen) == 7
         assert result["job_ids"] == [jid for page in pages[:7] for jid in page]
 
