@@ -400,9 +400,7 @@ class TestExtractPage:
                 section_name="search_results",
             )
 
-    async def test_a_redirect_while_scrolling_is_diagnosed_not_returned(
-        self, mock_page
-    ):
+    async def test_a_checkpoint_while_scrolling_raises_an_auth_error(self, mock_page):
         """A checkpoint reached mid-scroll must not come back as job results.
 
         The scroll suppresses every error its evaluate raises, and a
@@ -410,6 +408,12 @@ class TestExtractPage:
         extraction that follows then reads the replacement document and hands
         its text back under `search_results` with no `section_errors` beside
         it, which no client can tell from a search that found those words.
+
+        A diagnostic is not enough either. An expired session reaches this
+        branch as often as a layout change does, and only the auth error
+        starts the recovery the tool has: returning a section error leaves
+        the dead browser registered and offers no re-login, so the next call
+        walks into the same barrier.
         """
         mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
         mock_page.evaluate = AsyncMock(
@@ -440,6 +444,46 @@ class TestExtractPage:
                 new_callable=AsyncMock,
                 side_effect=navigate_away,
             ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
+    async def test_a_plain_redirect_while_scrolling_stays_a_diagnostic(self, mock_page):
+        """Only an auth barrier escalates; anything else is still diagnosed.
+
+        The same branch catches a layout change and a link followed by
+        accident, neither of which a re-login would repair. Raising the auth
+        error for those would send the user through an interactive sign-in to
+        fix a page that was never locked.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "Some other page", "references": []}
+        )
+
+        async def navigate_away(page, **kwargs):
+            page.url = "https://www.linkedin.com/feed/"
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                side_effect=navigate_away,
+            ),
         ):
             result = await extractor._extract_search_page(
                 "https://www.linkedin.com/jobs/search/?keywords=test",
@@ -448,7 +492,7 @@ class TestExtractPage:
 
         assert result.text == ""
         assert result.error is not None
-        assert "security check" not in str(result.error)
+        assert "Some other page" not in str(result.error)
 
     async def test_currentjobid_alone_does_not_count_as_a_redirect(self, mock_page):
         """LinkedIn moves the query of a search page by itself, mid-scroll.
