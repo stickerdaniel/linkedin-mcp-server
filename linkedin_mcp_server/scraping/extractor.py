@@ -312,6 +312,10 @@ _SCROLL_BUDGET_TOTAL = 60.0
 _SEARCH_TIMEOUT_FRACTION = 0.8
 
 _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
+# Where a saved-jobs navigation may legitimately end. LinkedIn redirects the
+# first to the second and drops the query doing so, so the tool navigates to
+# one and arrives at the other.
+_SAVED_JOBS_PATHS = frozenset({"/my-items/saved-jobs", "/jobs-tracker"})
 
 # The my-items lists page in 10s, unlike job search. Verified live: ?start=10
 # returns the 11th saved job, while ?start=25 lands past the end of a two-page
@@ -4198,21 +4202,36 @@ class LinkedInExtractor:
                 # substring test accepts any origin that happens to serve
                 # this path, and an interstitial carrying a single
                 # /jobs/view/ anchor would come back as the account's saved
-                # jobs with no diagnostic beside it.
+                # jobs.
+                #
+                # Both destinations, because LinkedIn now answers
+                # /my-items/saved-jobs/ with a redirect to /jobs-tracker/ and
+                # drops the query on the way. Measured on 2026-08-21 against
+                # an authenticated profile, for the bare URL and for
+                # ?start=10 alike. The old route is kept because the redirect
+                # is a rollout and the server still navigates to it.
                 parsed_url = urlparse(self._page.url)
                 if (
                     parsed_url.netloc != "www.linkedin.com"
-                    or parsed_url.path.rstrip("/") != "/my-items/saved-jobs"
+                    or parsed_url.path.rstrip("/") not in _SAVED_JOBS_PATHS
                 ):
                     logger.debug(
                         "Unexpected page URL after saved-jobs extraction: %s — "
                         "skipping job ID extraction",
                         self._page.url,
                     )
-                    page_texts.append(extracted.text)
-                    if extracted.references:
-                        page_references.extend(extracted.references)
-                    break
+                    # The page is dropped whole. Keeping its text and
+                    # references put a stranger's page under `saved_jobs`
+                    # with the job links it happened to carry, which reads
+                    # as the account's own list. Raised and not broken out
+                    # of, because an empty result with nothing beside it is
+                    # what an account with nothing saved looks like.
+                    # Classified first, so an expired session reaches the
+                    # relogin path instead of a diagnostic.
+                    await self._raise_if_auth_barrier(url)
+                    raise RuntimeError(
+                        f"Saved jobs navigation ended on {self._page.url}"
+                    )
 
                 page_ids = await self._extract_job_ids()
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]

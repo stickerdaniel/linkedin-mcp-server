@@ -4712,6 +4712,9 @@ class TestGetSavedJobs:
             result = await extractor.get_saved_jobs(max_pages=1)
 
         assert result["job_ids"] == []
+        assert "saved_jobs" not in result["sections"]
+        assert "references" not in result
+        assert "saved_jobs" in result["section_errors"]
         ids.assert_not_called()
 
     async def test_returns_references(self, mock_page):
@@ -4932,11 +4935,52 @@ class TestGetSavedJobs:
         assert result["sections"]["saved_jobs"] == "first page"
         assert result["section_errors"]["saved_jobs"]["error_type"] == "rate_limit"
 
-    async def test_url_redirect_skips_id_extraction(self, mock_page):
-        """A redirect away from the list captures the landing page, no IDs.
+    async def test_the_jobs_tracker_redirect_is_the_list(self, mock_page):
+        """LinkedIn answers the saved-jobs URL with a redirect now.
 
-        Mirrors ``search_jobs``: the text is kept deliberately so the caller
-        can see what LinkedIn served instead (e.g. a login wall).
+        Measured on 2026-08-21 against an authenticated profile:
+        ``/my-items/saved-jobs/`` lands on ``/jobs-tracker/``, and the query
+        is dropped on the way, for ``?start=10`` as well. Refusing that
+        destination makes every call return an empty list for every account,
+        which is indistinguishable from having nothing saved.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs-tracker/"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_saved_jobs_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Saved Job 1"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_saved_jobs(max_pages=1)
+
+        assert result["job_ids"] == ["111"]
+        assert result["sections"]["saved_jobs"] == "Saved Job 1"
+
+    async def test_a_login_redirect_raises_an_auth_error(self, mock_page):
+        """A redirect to the login wall is an expired session, not a result.
+
+        Mirrors ``search_jobs``. Returning the login page's text under
+        `saved_jobs` left the dead browser registered and offered no
+        relogin, so the next call walked into the same wall.
         """
         extractor = LinkedInExtractor(mock_page)
         mock_page.url = "https://www.linkedin.com/uas/login"
@@ -4964,12 +5008,54 @@ class TestGetSavedJobs:
                 new_callable=AsyncMock,
             ),
         ):
-            result = await extractor.get_saved_jobs(max_pages=2)
+            with pytest.raises(AuthenticationError, match="--login"):
+                await extractor.get_saved_jobs(max_pages=2)
 
         # Never mine IDs off a page that is not the saved-jobs list.
         mock_ids.assert_not_awaited()
+
+    async def test_a_plain_redirect_is_reported_not_returned(self, mock_page):
+        """Anything else that is not the list is dropped and diagnosed.
+
+        Keeping the landing page's text and its references handed a
+        stranger's page back under `saved_jobs`, carrying whatever job links
+        it happened to hold. An empty result with nothing beside it is not
+        an option either: that is what an account with nothing saved looks
+        like.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/feed/"
+        with (
+            patch.object(
+                extractor,
+                "_extract_saved_jobs_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Some other page"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["999"],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_saved_jobs(max_pages=2)
+
+        mock_ids.assert_not_awaited()
         assert result["job_ids"] == []
-        assert result["sections"]["saved_jobs"] == "Login page content"
+        assert "saved_jobs" not in result["sections"]
+        assert "references" not in result
+        assert "saved_jobs" in result["section_errors"]
 
 
 class TestSingleSectionRateLimits:
