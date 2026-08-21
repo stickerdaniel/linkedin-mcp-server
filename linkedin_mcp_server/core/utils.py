@@ -96,7 +96,7 @@ async def scroll_job_sidebar(
     min_budget: float = 0.4,
     max_scrolls: int = 10,
     deadline: float = 12.0,
-) -> None:
+) -> bool:
     """Scroll the job search sidebar until it stops producing cards.
 
     LinkedIn renders job search results in a scrollable sidebar container,
@@ -128,6 +128,14 @@ async def scroll_job_sidebar(
     rounds start from three times what the previous batch took, floored at
     ``min_budget``, which shortens the terminating round on a fast link.
 
+    Returns whether the evaluate raised, which the caller needs and cannot
+    see for itself. A navigation destroys the execution context and the
+    evaluate raises, and ``page.url`` still reports the address it left for
+    about 6ms after that, measured over ten runs at 6ms min and max alike, so
+    a caller sampling the URL right here compares two copies of the old one.
+    Awaiting the load state does not close that window: the previous document
+    is loaded already, so it returns at once.
+
     DOM dependency: scrolling requires an element reference, which innerText
     extraction cannot provide.
 
@@ -151,10 +159,10 @@ async def scroll_job_sidebar(
         )
     except PlaywrightTimeoutError:
         logger.debug("No job card links found, skipping sidebar scroll")
-        return
+        return False
     except Exception as exc:
         logger.warning("Job sidebar scroll failed, page may be short: %s", exc)
-        return
+        return True
 
     # The wait above is part of the deadline, not extra time on top of it. A
     # slow link can spend it down to nothing before the first card appears, and
@@ -162,7 +170,7 @@ async def scroll_job_sidebar(
     remaining = deadline - (time.monotonic() - started)
     if remaining <= 0:
         logger.debug("Deadline spent waiting for the first job card, skipping scroll")
-        return
+        return False
 
     try:
         result = await page.evaluate(
@@ -274,7 +282,12 @@ async def scroll_job_sidebar(
                     const again = pickRail();
                     if (!again) return false;
                     rail = again;
-                    return true;
+                    // Adopting it is not growth by itself. A framework that
+                    // re-renders the same cards would otherwise spend one of
+                    // `maxScrolls` per render and end the page while the
+                    // batch it was waiting for is still in flight.
+                    return idsIn(rail) > cardCount
+                        || rail.scrollHeight > height;
                 }
                 const held = idsIn(rail);
                 const better = pickRail();
@@ -359,7 +372,7 @@ async def scroll_job_sidebar(
         # Scrolling is best effort: a navigation or a destroyed context during
         # the evaluate must not discard the page the caller is about to read.
         logger.warning("Job sidebar scroll failed, page may be short: %s", exc)
-        return
+        return True
 
     status = result.get("status")
     if status == "gone":
@@ -378,6 +391,7 @@ async def scroll_job_sidebar(
             if result["cappedOut"]
             else "",
         )
+    return False
 
 
 async def handle_modal_close(page: Page) -> bool:
