@@ -35,6 +35,7 @@ def sidebar(
     outer_scroller: bool = False,
     strays_after: bool = False,
     rerender_after: int | None = None,
+    clone_on_scroll: bool = False,
     slugged: bool = False,
 ) -> str:
     """A scrollable sidebar that appends `batch` cards after each scroll.
@@ -51,7 +52,9 @@ def sidebar(
     the rail's count from above rather than from below. ``strays_after`` puts
     the pane after the rail, which is the live order: candidates are reached
     through the cards, and the first job link on a real search page is a rail
-    card.
+    card. ``clone_on_scroll`` replaces the rail with an identical copy
+    shortly after every scroll, holding the same cards, which is what a
+    framework re-rendering during a slow batch looks like.
     """
     stray_links = "".join(
         f'<a href="/jobs/view/{900000 + i}/" style="display:block;height:40px">'
@@ -73,6 +76,7 @@ def sidebar(
     wrap_cards_js = "true" if wrap_cards else "false"
     slug_js = "true" if slugged else "false"
     rerender_js = "null" if rerender_after is None else str(rerender_after)
+    clone_js = "true" if clone_on_scroll else "false"
     return f"""
     <body style="margin:0">
       {"" if strays_after else outside}
@@ -117,8 +121,16 @@ def sidebar(
         add({initial});
         let pending = false;
         let batches = 0;
+        function recycle() {{
+          const fresh = rail.cloneNode(true);
+          rail.replaceWith(fresh);
+          rail = fresh;
+          list = fresh.querySelector('#list');
+          mount();
+        }}
         function mount() {{
         rail.addEventListener('scroll', () => {{
+          if ({clone_js} && n < {total}) setTimeout(recycle, 20);
           if (pending || n >= {total}) return;
           pending = true;
           const delay = delays[Math.min(round, delays.length - 1)];
@@ -127,11 +139,7 @@ def sidebar(
             add({batch});
             batches++;
             if ({rerender_js} !== null && batches === {rerender_js}) {{
-              const fresh = rail.cloneNode(true);
-              rail.replaceWith(fresh);
-              rail = fresh;
-              list = fresh.querySelector('#list');
-              mount();
+              recycle();
             }}
             pending = false;
           }}, delay);
@@ -387,6 +395,29 @@ class TestSidebarScroll:
 
         assert await rail_cards(dom_page) == 25
         assert await dom_page.evaluate("document.getElementById('pane').scrollTop") == 0
+
+    async def test_a_rerender_alone_does_not_count_as_growth(self, dom_page):
+        """Adopting a replacement rail is not the same as the rail growing.
+
+        The existing replacement test swaps the rail only after a batch has
+        already landed, so every detachment it covers is also real growth.
+        A framework re-rendering while a slow batch is still in flight is
+        not: counting each swap as growth spends one of ``max_scrolls`` per
+        render and ends the page with the batch still on its way.
+        """
+        await dom_page.set_content(
+            sidebar(
+                total=6,
+                batch=5,
+                delays=[800],
+                initial=1,
+                clone_on_scroll=True,
+            )
+        )
+
+        await scroll_job_sidebar(dom_page, settle_timeout=2.0, max_scrolls=3)
+
+        assert await rail_cards(dom_page) == 6
 
     async def test_shrinks_the_budget_after_fast_batches(self, dom_page):
         """A fast connection must not pay the full budget to conclude.

@@ -140,6 +140,13 @@ _JOB_IDS_JS = r"""() => {
     return ids;
 }"""
 
+# How long to let `page.url` catch up with a navigation the sidebar scroll
+# suppressed. Measured at 6ms across ten runs, min and max alike; the window is
+# wide enough to survive a slower machine and is paid only when the scroll
+# reports that its evaluate raised.
+_URL_SETTLE_TIMEOUT = 1.0
+_URL_SETTLE_POLL = 0.01
+
 # Scrolling is bounded per navigation and across a whole search, because
 # max_pages reaches 10 and tool_timeout_seconds defaults to 180.
 _SCROLL_DEADLINE_MAX = 12.0
@@ -3226,13 +3233,27 @@ class LinkedInExtractor:
             # `/jobs/search` would have its text returned under
             # `search_results` with nothing beside it to say where it came
             # from.
-            def route() -> tuple[str, str]:
-                parsed = urlparse(self._page.url)
+            #
+            # Against the URL that was asked for, and not against the one the
+            # page held after navigating, or a redirect that finished before
+            # the scroll becomes its own baseline and passes.
+            def route(target: str) -> tuple[str, str]:
+                parsed = urlparse(target)
                 return parsed.netloc, parsed.path.rstrip("/")
 
-            before = route()
-            await scroll_job_sidebar(self._page, deadline=scroll_deadline)
-            after = route()
+            before = route(url)
+            moved = await scroll_job_sidebar(self._page, deadline=scroll_deadline)
+            if moved:
+                # `page.url` lags a navigation the scroll suppressed, by 6ms
+                # in ten measured runs, so sampling it here would compare two
+                # copies of the address that was left. Waited for only when
+                # the scroll reports its evaluate raised, which is rare, and
+                # bounded so a page that merely failed to scroll costs the
+                # whole window once.
+                deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
+                while route(self._page.url) == before and time.monotonic() < deadline:
+                    await asyncio.sleep(_URL_SETTLE_POLL)
+            after = route(self._page.url)
             if before != after:
                 # An expired session lands here as often as a layout change
                 # does, and the two need different answers. A plain error is
@@ -3487,10 +3508,13 @@ class LinkedInExtractor:
                         "skipping job ID extraction",
                         self._page.url,
                     )
-                    page_texts.append(extracted.text)
-                    if extracted.references:
-                        page_references.extend(extracted.references)
-                    break
+                    # Dropped whole. Keeping its text and references handed a
+                    # page that is not the search back under `search_results`,
+                    # carrying whatever job links it held. Raised rather than
+                    # broken out of, because a result with no ids and nothing
+                    # beside it is what an exhausted search looks like.
+                    await self._raise_if_auth_barrier(self._page.url)
+                    raise RuntimeError(f"Search navigation ended on {self._page.url}")
                 page_ids = await self._extract_job_ids()
                 # Advance by what this navigation rendered, duplicates
                 # included: the next unseen result sits right behind them.

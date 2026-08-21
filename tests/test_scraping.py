@@ -3,6 +3,8 @@
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+import asyncio
+
 import pytest
 
 from linkedin_mcp_server.callbacks import ProgressCallback
@@ -3163,8 +3165,91 @@ class TestSearchJobs:
         assert result["job_ids"] == []
         assert result["sections"]["search_results"] == "No matching jobs found"
 
-    async def test_url_redirect_skips_id_extraction(self, mock_page):
-        """Unexpected page URL should skip ID extraction but capture text."""
+    async def test_a_redirect_that_beat_the_scroll_is_still_caught(self, mock_page):
+        """The baseline is the URL that was asked for, not the one that arrived.
+
+        A redirect completing during the navigation, before any scrolling,
+        leaves the landing page as both ends of the comparison, so it reads
+        as a page that never moved and its text is returned as the search.
+        """
+        mock_page.url = "https://www.linkedin.com/feed/"
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=python",
+                section_name="search_results",
+            )
+
+        assert result.text == ""
+        assert result.error is not None
+
+    async def test_a_lagging_url_still_shows_the_redirect(self, mock_page):
+        """`page.url` reports the address it left, briefly, after a navigation.
+
+        A navigation during the scroll destroys the execution context, the
+        evaluate raises, and Patchright publishes the new URL about 6ms
+        later, measured over ten runs. Sampling it the moment the scroll
+        returns therefore compares two copies of the old address, and the
+        redirect the guard exists for passes unseen. Awaiting the load state
+        does not help: the previous document is loaded already.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=python"
+
+        async def scroll_then_publish(page, **kwargs):
+            async def publish() -> None:
+                await asyncio.sleep(0.03)
+                page.url = "https://www.linkedin.com/checkpoint/challenge/"
+
+            asyncio.get_running_loop().create_task(publish())
+            return True
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                side_effect=scroll_then_publish,
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=python",
+                section_name="search_results",
+            )
+
+    async def test_a_login_redirect_raises_an_auth_error(self, mock_page):
+        """A login wall reached mid-search is an expired session.
+
+        Its text used to come back under `search_results`, with the login
+        page's own references beside it, so the caller could not tell it from
+        a search that found those words. A section error is not enough
+        either: only the auth error starts the relogin the tool has.
+        """
         extractor = LinkedInExtractor(mock_page)
         mock_page.url = "https://www.linkedin.com/uas/login"
         with (
@@ -3194,16 +3279,55 @@ class TestSearchJobs:
                 new_callable=AsyncMock,
             ),
         ):
+            with pytest.raises(AuthenticationError, match="--login"):
+                await extractor.search_jobs("python", max_pages=2)
+
+        mock_ids.assert_not_awaited()
+
+    async def test_a_plain_redirect_is_reported_not_returned(self, mock_page):
+        """Anything else that is not the search page is dropped and diagnosed.
+
+        Keeping the landing page's text and references handed a page that is
+        not the search back under `search_results`, carrying whatever links
+        it held. An empty result with nothing beside it is not an option
+        either: that is what an exhausted search looks like.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/feed/"
+        with (
+            patch.object(
+                extractor,
+                "_extract_search_page",
+                new_callable=AsyncMock,
+                return_value=extracted(
+                    "Feed content",
+                    [{"kind": "person", "url": "/in/testuser/", "text": "Test User"}],
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_ids,
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
             result = await extractor.search_jobs("python", max_pages=2)
 
         mock_ids.assert_not_awaited()
         assert result["job_ids"] == []
-        assert result["sections"]["search_results"] == "Login page content"
-        assert result["references"] == {
-            "search_results": [
-                {"kind": "person", "url": "/in/testuser/", "text": "Test User"}
-            ]
-        }
+        assert "search_results" not in result["sections"]
+        assert "references" not in result
+        assert "search_results" in result["section_errors"]
 
     async def test_rate_limited_skips_ids_and_text(self, mock_page):
         """Rate-limited pages should yield no IDs or text."""
