@@ -4036,8 +4036,17 @@ class LinkedInExtractor:
                 # LinkedIn makes on purpose, so comparing against the URL that
                 # was asked for finds a difference on every ordinary failure
                 # and waits out a chain that is not running.
+                #
+                # No document baseline, so every hop counts. One is taken
+                # before the search scroll, where the page is already loaded
+                # and the only navigation to expect is one going wrong. Here
+                # the block opens before this page's own navigation, so a
+                # reading from the top belongs to the document that was left
+                # and would call every ordinary failure a replacement. `None`
+                # says so, and settling costs a moment on a path that has
+                # already failed.
                 try:
-                    await self._settle_navigation(hops)
+                    await self._settle_navigation(hops, None)
                 except Exception:
                     logger.debug(
                         "Could not settle the route after a saved-jobs failure",
