@@ -51,6 +51,7 @@ from linkedin_mcp_server.scraping.identifiers import (
     person_profile_url,
 )
 from linkedin_mcp_server.scraping.link_metadata import (
+    JOB_PATH_RE,
     Reference,
     build_references,
     dedupe_references,
@@ -88,6 +89,50 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 # deliberately — body text would be a per-locale guess, and this project's
 # rule is that classification never depends on text values.
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
+
+
+def _references_within(references: list[Reference], ids: list[str]) -> list[Reference]:
+    """Drop job references the rail did not render.
+
+    The ids are read from the selected rail; the references come from the
+    whole `<main>`, which also holds the detail pane. So a job the pane had
+    loaded was emitted as a search result while `job_ids` correctly left it
+    out, and a caller following the references acts on a job the search never
+    returned. Filtering rather than re-extracting, because the rail is a pick
+    made in the page and not a selector the reference reader could be given.
+
+    Only job references are judged. Everything else on the page is unrelated
+    to which rail was picked.
+    """
+    kept = set(ids)
+    out: list[Reference] = []
+    for ref in references:
+        if ref.get("kind") != "job":
+            out.append(ref)
+            continue
+        # The same pattern that produced the reference, so a form one accepts
+        # and the other does not cannot arise.
+        match = JOB_PATH_RE.match(str(ref.get("url", "")))
+        if match is None or match.group(1) in kept:
+            out.append(ref)
+    return out
+
+
+def dropped_offset_section_error(offset: int, landed: str) -> dict[str, str]:
+    """The ``section_errors`` entry for a list that cannot be paged further.
+
+    LinkedIn dropping the offset serves the first page again, so the loop
+    stops there. Stopping quietly is also what an exhausted list does, and the
+    caller cannot tell the two apart: it reads a short list as the whole list
+    and never asks again. Being told is what lets a client decide.
+    """
+    return {
+        "error_type": "pagination_stopped",
+        "error_message": (
+            f"LinkedIn did not keep offset {offset} (landed on {landed}), "
+            "so the list stops at the results already read."
+        ),
+    }
 
 
 def rate_limited_section_error() -> dict[str, str]:
@@ -175,7 +220,13 @@ _URL_SETTLE_QUIET = 0.5
 # going nowhere. Measured across 300 evaluations destroyed by a navigation:
 # 0.37ms at worst idle, 0.81ms at the 99th percentile with twenty-four
 # workers saturating the machine. Paid in full only by a failure with no
-# navigation behind it, and not at all by one that has.
+# navigation behind it, and by a page that only rewrote its own address.
+#
+# It is also the whole window: a redirect committing later than this after
+# the scroll returns is not seen here, and falls to the route comparison at
+# the end, which a reload leaves nothing for. Three hundred times the
+# measured announcement is the trade, the other side of it being the wait
+# every ordinary DOM failure pays before it can report itself.
 _URL_SETTLE_LAG = 0.3
 # How long the replacement document gets to reach `domcontentloaded`. It
 # renders after it commits, and an account picker was measured 200ms behind
@@ -212,8 +263,10 @@ _SCROLL_BUDGET_TOTAL = 60.0
 # every page before it, and the browser startup inside `get_ready_extractor`,
 # which FastMCP is already timing before this budget begins. A page that
 # overruns the reserve is still cancelled and still loses every page gathered.
-# Bounding that too means handing the remaining budget down into navigation,
-# scrolling and the rate-limit retry; see #754 rather than the margin.
+# Bounding that too means handing the remaining budget down into navigation
+# and the rate-limit retry; see #754 rather than the margin. Scrolling is
+# already handed a deadline, so it takes what is left of this budget when
+# that is less than its own cap.
 #
 # The timeout arrives as an argument because `get_config()` parses `sys.argv`
 # on its first call, and a scraping path is the wrong place to discover that.
@@ -3248,17 +3301,18 @@ class LinkedInExtractor:
 
         Three waits, and each answers a question the one before it cannot.
 
-        Whether the page navigated is answered by the listener, which fires
-        for a reload as well as for a redirect. It is dispatched over the
+        Whether the page navigated is answered by the listener and the
+        document identity together, the listener firing for a reload as well
+        as for a redirect. It is dispatched over the
         channel that also updates `page.url`, so it arrives at the same moment
         the address would have: measured across 300 destroyed evaluations,
         0.37ms at worst on an idle machine and 0.81ms with twenty-four workers
         saturating it. `_URL_SETTLE_LAG` is three hundred times that, and an
         ordinary failure with nothing behind it pays exactly that and no more.
 
-        The listener overreports, though, so `_document_origin` gates the
-        three waits below: a page rewriting its own address raises the same
-        event and leaves nothing to settle.
+        The listener overreports, so `_document_origin` decides which hop
+        counts: a page rewriting its own address raises the same event and
+        leaves nothing to settle.
 
         Where it stopped is answered by the hops falling quiet. Counting them
         rather than comparing addresses, or a chain that returns to the route
@@ -3269,19 +3323,29 @@ class LinkedInExtractor:
         200ms behind its own navigation; judging that page on arrival calls a
         barrier a loading screen.
         """
+        # A hop says something moved, not that the document was replaced, so
+        # the wait is for a replacement and not for an event. Leaving on the
+        # first same-document hop is what a page rewriting its own address
+        # would buy, and it costs the redirect arriving right behind it: the
+        # search page announces `currentJobId` the moment a card is selected,
+        # and a checkpoint committing fifty milliseconds later would then be
+        # judged by a route comparison that has not been told yet.
+        #
+        # Each hop is read at most once, so a healthy page pays one evaluate
+        # and the wait, and only a page that keeps moving pays more.
         lag_deadline = time.monotonic() + _URL_SETTLE_LAG
-        while not hops and time.monotonic() < lag_deadline:
+        judged = 0
+        replaced = False
+        while time.monotonic() < lag_deadline:
+            if len(hops) > judged:
+                judged = len(hops)
+                if origin is None or await self._document_origin() != origin:
+                    replaced = True
+                    break
             await asyncio.sleep(_URL_SETTLE_POLL)
-        if not hops:
-            return False
-
-        # A hop says something moved, not that the document was replaced. The
-        # commit that fires the event is also what installs the new document,
-        # so a reading equal to the one taken before means every hop so far
-        # was the page rewriting its own address, and there is nothing to
-        # wait out.
-        if origin is not None and await self._document_origin() == origin:
-            logger.debug("Same document after %d history change(s)", len(hops))
+        if not replaced:
+            if hops:
+                logger.debug("Same document after %d history change(s)", len(hops))
             return False
 
         deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
@@ -3657,7 +3721,18 @@ class LinkedInExtractor:
             page_started = time.monotonic()
 
             url = base_url if offset == 0 else f"{base_url}&start={offset}"
-            scroll_deadline = min(_SCROLL_DEADLINE_MAX, scroll_budget_left)
+            # Against what is left of the tool's own timeout as well. The
+            # per-page cap is twelve seconds and the whole search gets
+            # `tool_timeout` times the fraction above, so a caller passing ten
+            # seconds had the first scroll alone allowed to outlast the call
+            # and take every page gathered with it. Scrolling is the one part
+            # already told how long it may run, so it is the one part this can
+            # bound without handing the budget down into navigation.
+            scroll_deadline = min(
+                _SCROLL_DEADLINE_MAX,
+                scroll_budget_left,
+                max(0.0, budget - (time.monotonic() - started)),
+            )
             self._scroll_seconds = 0.0
 
             try:
@@ -3729,13 +3804,36 @@ class LinkedInExtractor:
                 # `start` at 0, 10 and 21, which is why the mismatch stops the
                 # loop rather than raising. Only `start` is compared, because
                 # LinkedIn appends `currentJobId` to the query by itself.
-                landed_start = parse_qs(parsed_url.query).get("start", ["0"])[0]
+                # The filters have to have survived too, and their presence
+                # is what can be checked: a redirect to the bare search page
+                # keeps the route and drops the query whole, and generic
+                # recommendations then come back as a filtered search. Not
+                # their values, because a query LinkedIn re-encodes on its way
+                # would fail a comparison every healthy call makes.
+                landed_query = parse_qs(parsed_url.query)
+                if "keywords" in parse_qs(urlparse(base_url).query) and not (
+                    landed_query.get("keywords")
+                ):
+                    logger.debug(
+                        "Search filters did not survive navigation "
+                        "(landed on %s), stopping",
+                        self._page.url,
+                    )
+                    section_errors["search_results"] = dropped_offset_section_error(
+                        offset, self._page.url
+                    )
+                    break
+
+                landed_start = landed_query.get("start", ["0"])[0]
                 if landed_start != str(offset):
                     logger.debug(
                         "Search offset %d did not survive navigation "
                         "(landed on %s), stopping",
                         offset,
                         self._page.url,
+                    )
+                    section_errors["search_results"] = dropped_offset_section_error(
+                        offset, self._page.url
                     )
                     break
 
@@ -3753,10 +3851,12 @@ class LinkedInExtractor:
                 offset += len(page_ids)
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
+                page_refs = _references_within(extracted.references, page_ids)
+
                 if not new_ids:
                     page_texts.append(extracted.text)
-                    if extracted.references:
-                        page_references.extend(extracted.references)
+                    if page_refs:
+                        page_references.extend(page_refs)
                     logger.debug("No new job IDs on page %d, stopping", page_num + 1)
                     break
 
@@ -3765,8 +3865,8 @@ class LinkedInExtractor:
                     all_job_ids.append(jid)
 
                 page_texts.append(extracted.text)
-                if extracted.references:
-                    page_references.extend(extracted.references)
+                if page_refs:
+                    page_references.extend(page_refs)
 
             except LinkedInScraperException:
                 raise
@@ -3840,6 +3940,9 @@ class LinkedInExtractor:
         """Single attempt: navigate, scroll list, and extract innerText."""
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
+        # Taken after this page's own navigation, so it belongs to the
+        # document about to be read rather than to the one that was left.
+        origin = await self._document_origin()
 
         main_found = True
         try:
@@ -3851,6 +3954,16 @@ class LinkedInExtractor:
         await handle_modal_close(self._page)
         if main_found:
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+
+        # A picker served by a reload keeps this page's address and this
+        # page's title, so the route guard reads it as the list. Nothing else
+        # notices either: the scroll pauses half a second between rounds, and
+        # a document replaced in that gap leaves no evaluation to raise, so
+        # the extraction below succeeds against the replacement and returns it
+        # under `saved_jobs` with the browser left on a barrier.
+        if origin is not None and await self._document_origin() != origin:
+            logger.debug("The saved-jobs document was replaced while scrolling")
+            await self._raise_if_auth_barrier(self._page.url)
 
         raw_result = await self._extract_root_content(["main"])
         raw = raw_result["text"]

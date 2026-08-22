@@ -6,6 +6,7 @@ import pytest
 
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.auth import (
+    _REMEMBER_ME_CONTAINER_SELECTOR,
     detect_auth_barrier,
     detect_auth_barrier_quick,
     is_logged_in,
@@ -15,14 +16,28 @@ from linkedin_mcp_server.core.auth import (
 
 
 def _barrier_page(*, picker: bool = False) -> MagicMock:
-    """A page mock whose locator answers, because the detector now asks it.
+    """A page mock whose locator answers per selector, as the real one does.
 
     `MagicMock().count()` is not awaitable, so a page left unwired sends the
     structural check down its own exception path and every assertion about the
-    text table passes for the wrong reason.
+    text table passes for the wrong reason. Answering one count for every
+    selector is the next version of that mistake: the check could be moved to
+    `main`, or to any element a LinkedIn page always carries, and the picker
+    would still be found here while a real page without the container is
+    missed.
     """
     page = MagicMock()
-    page.locator.return_value.count = AsyncMock(return_value=1 if picker else 0)
+
+    def locator(selector: str, *args: object, **kwargs: object) -> MagicMock:
+        found = MagicMock()
+        found.count = AsyncMock(
+            return_value=1
+            if picker and selector == _REMEMBER_ME_CONTAINER_SELECTOR
+            else 0
+        )
+        return found
+
+    page.locator = MagicMock(side_effect=locator)
     return page
 
 
@@ -153,17 +168,76 @@ async def test_a_localized_search_page_is_not_a_barrier():
 
 
 @pytest.mark.asyncio
-async def test_the_quick_check_does_not_ask_the_page_for_a_picker():
-    """The quick path runs on every navigation and stays URL and title only."""
+async def test_the_quick_check_asks_the_page_for_a_picker():
+    """The two signals the quick path reads are the two this page defeats.
+
+    A picker served in place of the page that was asked for carries that
+    page's address and that page's title. The quick check runs after every
+    navigation, so leaving the container to the full check let a picker in an
+    uncovered locale reach every scraping tool as page text. It costs one
+    selector count; the body read is what the quick path exists to skip.
+    """
     page = _barrier_page(picker=True)
+    page.url = "https://www.linkedin.com/feed/"
+    page.title = AsyncMock(return_value="LinkedIn Feed")
+    page.evaluate = AsyncMock(return_value="Startseite\nMein Netzwerk")
+
+    result = await detect_auth_barrier_quick(page)
+
+    assert result is not None
+    assert _REMEMBER_ME_CONTAINER_SELECTOR in result
+    page.evaluate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_login_page_is_not_linkedin_asking():
+    """The path alone says nothing about whose login this is.
+
+    A captive portal or proxy interstitial answering at `/login` was read as
+    LinkedIn asking for a sign-in, which closes a session that never expired
+    and sends the user through a relogin that cannot fix the network in front
+    of it.
+    """
+    page = _barrier_page()
+    page.url = "https://portal.example/login"
+    page.title = AsyncMock(return_value="Guest Wi-Fi")
+    page.evaluate = AsyncMock(return_value="Accept the terms to continue")
+
+    assert await detect_auth_barrier(page) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.linkedin.com/login",
+        "https://de.linkedin.com/checkpoint/challenge/",
+        "https://linkedin.com/authwall",
+    ],
+)
+async def test_linkedin_s_own_auth_routes_still_count(url: str):
+    """Every host LinkedIn serves them from, and the bare domain."""
+    page = _barrier_page()
+    page.url = url
+    page.title = AsyncMock(return_value="LinkedIn")
+    page.evaluate = AsyncMock(return_value="")
+
+    result = await detect_auth_barrier(page)
+
+    assert result is not None
+    assert "auth blocker URL" in result
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_page_costs_the_quick_check_nothing_but_the_count():
+    """The container is absent on an ordinary page, and that ends it."""
+    page = _barrier_page()
     page.url = "https://www.linkedin.com/feed/"
     page.title = AsyncMock(return_value="LinkedIn Feed")
     page.evaluate = AsyncMock(return_value="Home\nMy Network")
 
-    result = await detect_auth_barrier_quick(page)
-
-    assert result is None
-    page.locator.assert_not_called()
+    assert await detect_auth_barrier_quick(page) is None
+    page.evaluate.assert_not_awaited()
 
 
 @pytest.mark.asyncio

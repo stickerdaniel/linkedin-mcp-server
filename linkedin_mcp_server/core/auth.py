@@ -119,19 +119,26 @@ async def _detect_auth_barrier(
         if any(pattern in title for pattern in _LOGIN_TITLE_PATTERNS):
             return f"login title: {title}"
 
-        if not include_body_text:
-            return None
-
         # An id, so it says the same thing in every interface language, which
         # the picker's own words do not. The rest of the codebase already reads
         # this container as the picker; here it is the only signal that
         # survives a locale change, because the URL of an in-place picker is
         # the page that was asked for and its title is that page's title.
+        #
+        # Ahead of the quick check's exit, and not behind it, because the two
+        # signals it does read are exactly the two this page defeats. The
+        # quick check runs after every navigation, so a picker served in a
+        # locale the table below does not cover reached every scraping tool
+        # as page text. It costs one selector count, where the body read
+        # below is what the quick check exists to skip.
         try:
             if await page.locator(_REMEMBER_ME_CONTAINER_SELECTOR).count() > 0:
                 return f"account picker: {_REMEMBER_ME_CONTAINER_SELECTOR}"
         except Exception:
             logger.debug("Could not count remember-me containers", exc_info=True)
+
+        if not include_body_text:
+            return None
 
         try:
             body_text = await page.evaluate("() => document.body?.innerText || ''")
@@ -234,7 +241,19 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
 
 def _is_auth_blocker_url(url: str) -> bool:
     """Return True only for real auth routes, not arbitrary slug substrings."""
-    path = urlparse(url).path or "/"
+    parsed = urlparse(url)
+
+    # The path alone says nothing about whose login this is. A captive portal
+    # or proxy interstitial answering at `/login` was read as LinkedIn asking
+    # for a sign-in, which closes a session that never expired and sends the
+    # user through a relogin that cannot fix the network in front of it. An
+    # address with no host at all is left to the path, having no claim to
+    # judge.
+    host = parsed.netloc.lower().partition(":")[0]
+    if host and host != "linkedin.com" and not host.endswith(".linkedin.com"):
+        return False
+
+    path = parsed.path or "/"
 
     if path in _AUTH_BLOCKER_URL_PATTERNS:
         return True

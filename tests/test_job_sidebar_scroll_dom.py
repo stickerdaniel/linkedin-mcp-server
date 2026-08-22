@@ -575,16 +575,32 @@ class TestSidebarScroll:
         """`get_saved_jobs` shares this reader and has no rail to scope to.
 
         Its list is the page, so a pick that found nothing there and returned
-        nothing would lose every saved job.
+        nothing would lose every saved job. The scrollable module is what
+        makes this a contract rather than a coincidence: with nothing to pick,
+        scoped and unscoped agree whatever the reader does, and a saved list
+        that started scoping itself would quietly return the module alone.
         """
         await dom_page.set_content(
             '<body><a href="/jobs/view/4400000001/">A</a>'
-            '<a href="/jobs/view/4400000002/">B</a></body>'
+            '<a href="/jobs/view/4400000002/">B</a>'
+            '<div style="height:40px;overflow-y:scroll">'
+            '<a href="/jobs/view/4400000003/">C</a>'
+            '<a href="/jobs/view/4400000004/">D</a>'
+            '<a href="/jobs/view/4400000005/">E</a></div></body>'
         )
 
         assert await job_ids(dom_page) == [
             "4400000001",
             "4400000002",
+            "4400000003",
+            "4400000004",
+            "4400000005",
+        ]
+        # And the module is what a scoped read would pick, holding the most.
+        assert await job_ids(dom_page, scoped=True) == [
+            "4400000003",
+            "4400000004",
+            "4400000005",
         ]
 
     async def test_a_slug_opening_with_a_year_is_not_the_id(self, dom_page):
@@ -674,3 +690,7 @@ class TestSidebarScroll:
 
         # 0.9s of it went on the selector wait, leaving 0.1s to scroll in.
         assert elapsed < 1.5
+        # And the wait was real: returning on the spot also comes in under
+        # 1.5s, having seen nothing and scrolled nothing.
+        assert elapsed >= 0.9
+        assert await rail_cards(dom_page) == 1
