@@ -679,10 +679,14 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists() or lock.exists():
                 raise SystemExit(91)
+            lock.write_text("owned", encoding="utf-8")
+            # The gap real Xvfb leaves between the two names, widened so that a
+            # readiness check accepting the lock would start the server against
+            # a socket that does not exist yet.
+            time.sleep(0.5)
             server = socket.socket(socket.AF_UNIX)
             server.bind(str(path))
             server.listen()
-            lock.write_text("owned", encoding="utf-8")
             pathlib.Path({str(started_marker)!r}).write_text("started")
             time.sleep(0.3)
             server.close()
@@ -799,6 +803,10 @@ def test_the_supervisor_hands_the_server_the_containers_stdin(tmp_path: Path) ->
 
             number = sys.argv[1].removeprefix(":").split(".", 1)[0]
             path = pathlib.Path(f"/tmp/.X11-unix/X{number}")
+            # Real Xvfb 21.1.7 publishes the lock before it creates the socket.
+            # Measured by inotify inside the image; a fake that reverses it
+            # would let a readiness check that accepts the lock pass here.
+            pathlib.Path(f"/tmp/.X{number}-lock").write_text("owned")
             server = socket.socket(socket.AF_UNIX)
             server.bind(str(path))
             server.listen()
@@ -865,20 +873,24 @@ def test_the_supervisor_hands_the_server_the_containers_stdin(tmp_path: Path) ->
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
-@pytest.mark.parametrize("kind", ["closed", "directory"])
+@pytest.mark.parametrize("kind", ["closed", "directory", "write_only"])
 def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) -> None:
     """Spelling the redirection out is what stops hiding a bad descriptor.
 
     The bare ``&`` this replaces gave every mode ``/dev/null`` whether it wanted
     one or not, so nothing here noticed what a launcher may actually pass.
-    Handing it through unexamined is worse than either: a closed descriptor
-    reaches Python as ``EBADF`` on every read, and an open directory ends the
-    interpreter before argument parsing, taking down HTTP and the one-shot
-    commands over an input none of them reads.
+    Handing it through unexamined is worse than either. A closed descriptor and
+    a write-only one both reach Python as ``EBADF`` on the first read, and an
+    open directory ends the interpreter before argument parsing, taking down
+    HTTP and the one-shot commands over an input none of them reads.
 
     Asserting that the server merely started is not enough and was tried: with
     the descriptor passed through untouched it starts perfectly well, and only
-    the first read says otherwise. So the fake server reports what it was given.
+    the first read says otherwise. Neither is the name it points at enough, and
+    that was tried too: ``/dev/null`` opened for writing reads back as
+    ``/dev/null``, so a fallback of ``0>/dev/null`` satisfied every case here
+    while handing the server the same unreadable descriptor it was rescued
+    from. The access mode is the part that cannot be faked.
     """
     bash = shutil.which("bash")
     if bash is None:
@@ -890,8 +902,8 @@ def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) 
     )
     if major < 5:
         pytest.skip("wait -n -p requires the Bash 5 shipped by the image")
-    if not Path("/proc/self/fd").is_dir():
-        pytest.skip("the directory case is recognised through /dev/fd")
+    if not Path("/proc/self/fdinfo").is_dir():
+        pytest.skip("the guard recognises these through /dev/fd and /proc")
 
     display_number, socket_path, lock_path = _a_free_display(30_000)
 
@@ -907,6 +919,10 @@ def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) 
 
             number = sys.argv[1].removeprefix(":").split(".", 1)[0]
             path = pathlib.Path(f"/tmp/.X11-unix/X{number}")
+            # Real Xvfb 21.1.7 publishes the lock before it creates the socket.
+            # Measured by inotify inside the image; a fake that reverses it
+            # would let a readiness check that accepts the lock pass here.
+            pathlib.Path(f"/tmp/.X{number}-lock").write_text("owned")
             server = socket.socket(socket.AF_UNIX)
             server.bind(str(path))
             server.listen()
@@ -925,15 +941,18 @@ def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) 
         textwrap.dedent(
             f"""\
             #!/usr/bin/env python3
+            import fcntl
             import os
             import pathlib
 
             try:
-                os.fstat(0)
                 target = os.readlink("/proc/self/fd/0")
+                mode = fcntl.fcntl(0, fcntl.F_GETFL) & os.O_ACCMODE
+                readable = mode in (os.O_RDONLY, os.O_RDWR)
+                answer = f"{{target}} readable={{readable}}"
             except OSError as error:
-                target = f"errno={{error.errno}}"
-            pathlib.Path({str(seen)!r}).write_text(target)
+                answer = f"errno={{error.errno}}"
+            pathlib.Path({str(seen)!r}).write_text(answer)
             """
         ),
         encoding="utf-8",
@@ -945,14 +964,13 @@ def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) 
         "DISPLAY": f":{display_number}",
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
     }
-    handed: int | None = None
+    preexec = None
     if kind == "directory":
         handed = os.open(str(tmp_path), os.O_RDONLY)
-        stdin: int = handed
-        preexec = None
+    elif kind == "write_only":
+        handed = os.open(os.devnull, os.O_WRONLY)
     else:
         handed = os.open(os.devnull, os.O_RDONLY)
-        stdin = handed
         # Closes descriptor 0 in the child after the fork, which is the state
         # `stdin=subprocess.DEVNULL` cannot produce.
         preexec = lambda: os.close(0)  # noqa: E731
@@ -961,7 +979,7 @@ def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) 
         process = subprocess.Popen(
             [bash, str(_ENTRYPOINT_PATH), str(fake_server)],
             env=env,
-            stdin=stdin,
+            stdin=handed,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -983,8 +1001,8 @@ def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) 
         "the supervisor never started the server, so an input it does not read "
         f"takes down the container. stdout={stdout!r} stderr={stderr!r}"
     )
-    assert seen.read_text(encoding="utf-8") == os.devnull, (
+    assert seen.read_text(encoding="utf-8") == f"{os.devnull} readable=True", (
         f"the server was handed {seen.read_text(encoding='utf-8')!r} rather "
-        f"than {os.devnull}, which it cannot read. stderr={stderr!r}"
+        f"than a readable {os.devnull}. stderr={stderr!r}"
     )
     assert process.returncode == 0, (stdout, stderr)
