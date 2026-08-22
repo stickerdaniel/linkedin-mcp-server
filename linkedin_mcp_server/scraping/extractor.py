@@ -754,6 +754,9 @@ class LinkedInExtractor:
 
     def __init__(self, page: Page):
         self._page = page
+        # location name (casefolded) -> numeric geo id ("" means "did not
+        # resolve"), so a repeated region in a batch resolves once.
+        self._geo_cache: dict[str, str] = {}
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -3626,6 +3629,62 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    async def _resolve_geo_urn(self, location: str) -> str | None:
+        """Resolve a free-text location to LinkedIn's numeric geo id.
+
+        People search's location facet is ``geoUrn=["<id>"]`` (a numeric geo
+        id), not the free-text ``location=`` param, which LinkedIn accepts in
+        the URL but silently ignores -- so a plain ``location=Egypt`` returns
+        the unfiltered result set. There is no stable public endpoint to map a
+        name to a geo id (the REST typeahead is gone and the search box is now
+        an opaque server-driven-UI action), so we resolve it the way a person
+        does: drive the jobs-search location typeahead (a stable on-page
+        dropdown), pick the top suggestion, and read the ``geoId`` LinkedIn
+        itself puts in the URL. That numeric id doubles as the people-search
+        geoUrn. Works for any country/city LinkedIn's own dropdown knows.
+
+        Returns the id, or ``None`` if the dropdown offered no match. Results
+        are cached per extractor so a repeated region costs one resolution.
+        """
+        key = location.casefold()
+        if key in self._geo_cache:
+            return self._geo_cache[key] or None
+
+        page = self._page
+        await self._goto_with_auth_checks(
+            "https://www.linkedin.com/jobs/search/?keywords="
+        )
+        box = None
+        for sel in (
+            "input[id*='jobs-search-box-location']",
+            "input[aria-label='City, state, or zip code']",
+            "input[aria-label*='location' i]",
+        ):
+            box = await page.query_selector(sel)
+            if box:
+                break
+
+        geo_id: str | None = None
+        if box is not None:
+            await box.click()
+            await box.fill("")
+            # Type like a person; the dropdown resolves as we type.
+            await box.type(location, delay=80)
+            await asyncio.sleep(1.5)
+            suggestion = await page.query_selector(
+                ".basic-typeahead__selectable, [role=option]"
+            )
+            if suggestion is not None:
+                await suggestion.click()
+                await asyncio.sleep(1.0)
+                match = re.search(r"[?&]geoId=(\d+)", page.url)
+                if match:
+                    geo_id = match.group(1)
+
+        # Cache the outcome (including a miss) to avoid re-driving the dropdown.
+        self._geo_cache[key] = geo_id or ""
+        return geo_id
+
     async def search_people(
         self,
         keywords: str,
@@ -3637,7 +3696,12 @@ class LinkedInExtractor:
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
-            location: Optional location filter ("New York", "Remote").
+            location: Optional location filter, a free-text country or city name
+                ("Egypt", "United Arab Emirates", "Amsterdam"). It is resolved to
+                LinkedIn's numeric geo id via the site's own location dropdown
+                (see ``_resolve_geo_urn``); a name the dropdown does not
+                recognize raises ``FilterValidationError`` rather than silently
+                returning worldwide results.
             network: Optional connection-degree filter. Each element is one of
                 ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
                 and beyond). Example: ``["F"]`` to only return 1st-degree
@@ -3671,7 +3735,17 @@ class LinkedInExtractor:
 
         params = f"keywords={quote_plus(keywords)}"
         if location:
-            params += f"&location={quote_plus(location)}"
+            # LinkedIn ignores a free-text location=; resolve it to the numeric
+            # geoUrn its own dropdown produces, or fail loudly rather than
+            # silently returning an unfiltered (worldwide) result set.
+            geo_id = await self._resolve_geo_urn(location)
+            if not geo_id:
+                raise FilterValidationError(
+                    f"Could not resolve location {location!r} to a LinkedIn "
+                    f"region. Use a country or city name as it appears in "
+                    f"LinkedIn's location dropdown."
+                )
+            params += f"&geoUrn={_encode_list_facet([geo_id])}"
         if network:
             params += f"&network={_encode_list_facet(network)}"
         if current_company:
