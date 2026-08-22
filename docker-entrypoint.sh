@@ -54,7 +54,22 @@ if [[ ! -S "$socket_path" ]]; then
     exit 1
 fi
 
-"$@" &
+# A shell gives an asynchronous list /dev/null for stdin, but only in the
+# absence of an explicit redirection. Backgrounding the server as a bare `"$@" &`
+# therefore cut the stdio transport off from the container's stdin: it started,
+# announced the transport, read EOF from /dev/null at once and shut down without
+# ever answering. That shipped in 4.22.0 and made `docker run -i` return nothing.
+# The server has to stay a child, because `wait -n -p` below needs both children
+# to decide which death ends the container, so it gets the redirection spelled
+# out rather than being moved into the foreground.
+#
+# Docker always supplies descriptor 0, but a launcher is free to close it, and
+# then the redirection fails and takes the whole container down with it, HTTP
+# and the one-shot commands included, which never wanted stdin. Probe it in a
+# subshell, where a failure costs nothing, and give the closed case the
+# /dev/null it would have had.
+(exec 3<&0) 2>/dev/null || exec 0</dev/null
+"$@" <&0 &
 server_pid=$!
 
 terminate() {
