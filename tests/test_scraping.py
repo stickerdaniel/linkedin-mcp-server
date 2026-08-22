@@ -5053,6 +5053,11 @@ class TestGetSavedJobs:
         assert result["job_ids"] == ["100", "200"]
         assert result["sections"]["saved_jobs"] == "the list"
         assert mock_extract.await_count == 2
+        # An account with eleven saved jobs gets ten and no sign of the rest,
+        # which is exactly what an account with ten saved jobs gets.
+        assert (
+            result["section_errors"]["saved_jobs"]["error_type"] == "pagination_stopped"
+        )
 
     async def test_stops_at_total_pages(self, mock_page):
         """The pager's page count caps pagination below max_pages."""
