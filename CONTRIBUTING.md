@@ -126,7 +126,8 @@ When adding an entirely new MCP tool (e.g., `search_companies`):
 2. Create a branch: `feature/<issue-number>-<short-description>` or `fix/<issue-number>-<short-description>`
 3. Implement, test, and update docs (see checklists above)
 4. Open a PR — AI agents review first, then manual review
-5. Don't squash commits on merge
+5. PRs are squash-merged into `main`, so the PR title becomes the commit
+   subject; commits inside a PR are for review only
 
 ## Scraping Philosophy: Minimize DOM Dependence
 
