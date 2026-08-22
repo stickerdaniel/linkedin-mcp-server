@@ -3217,7 +3217,31 @@ class LinkedInExtractor:
             except Exception:
                 logger.debug("Could not remove navigation listener", exc_info=True)
 
-    async def _settle_navigation(self, hops: list[str]) -> bool:
+    async def _document_origin(self) -> float | None:
+        """A reading that is fixed when the document is created.
+
+        `framenavigated` fires for a same-document history change as readily
+        as for a replacement, and LinkedIn appends `currentJobId` to a search
+        URL that way by itself: measured locally, `pushState`, `replaceState`
+        and a bare hash change each raise the event on the main frame. Acting
+        on the event alone would make every healthy search page wait out a
+        chain that never ran.
+
+        `performance.timeOrigin` separates them, and separates them without
+        writing anything into the page. Measured against the same four
+        changes: identical across all three same-document ones, different
+        after a reload and after a navigation elsewhere.
+
+        `None` when the reading cannot be taken, which is what a context
+        destroyed by a navigation in flight looks like from here.
+        """
+        try:
+            origin = await self._page.evaluate("() => performance.timeOrigin")
+        except Exception:
+            return None
+        return origin if isinstance(origin, (int, float)) else None
+
+    async def _settle_navigation(self, hops: list[str], origin: float | None) -> bool:
         """Wait out a navigation the page is in the middle of.
 
         Returns whether one happened at all.
@@ -3232,6 +3256,10 @@ class LinkedInExtractor:
         saturating it. `_URL_SETTLE_LAG` is three hundred times that, and an
         ordinary failure with nothing behind it pays exactly that and no more.
 
+        The listener overreports, though, so `_document_origin` gates the
+        three waits below: a page rewriting its own address raises the same
+        event and leaves nothing to settle.
+
         Where it stopped is answered by the hops falling quiet. Counting them
         rather than comparing addresses, or a chain that returns to the route
         it started on reads as one that never left.
@@ -3245,6 +3273,15 @@ class LinkedInExtractor:
         while not hops and time.monotonic() < lag_deadline:
             await asyncio.sleep(_URL_SETTLE_POLL)
         if not hops:
+            return False
+
+        # A hop says something moved, not that the document was replaced. The
+        # commit that fires the event is also what installs the new document,
+        # so a reading equal to the one taken before means every hop so far
+        # was the page rewriting its own address, and there is nothing to
+        # wait out.
+        if origin is not None and await self._document_origin() == origin:
+            logger.debug("Same document after %d history change(s)", len(hops))
             return False
 
         deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
@@ -3380,6 +3417,7 @@ class LinkedInExtractor:
         before = _route(url)
         moved = False
         navigated = False
+        origin = await self._document_origin()
         with self._watching_navigations() as hops:
             if main_found:
                 scroll_started = time.monotonic()
@@ -3401,7 +3439,7 @@ class LinkedInExtractor:
             # raised, so it reports no movement, and a reload moves no route,
             # so neither of the other two says anything happened.
             if moved or hops or before != _route(self._page.url):
-                navigated = await self._settle_navigation(hops)
+                navigated = await self._settle_navigation(hops, origin)
 
         after = _route(self._page.url)
         if navigated or moved or not main_found or before != after:

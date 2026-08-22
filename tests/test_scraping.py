@@ -138,9 +138,6 @@ def mock_page():
     page.title = AsyncMock(return_value="LinkedIn")
     page.wait_for_selector = AsyncMock()
     page.wait_for_function = AsyncMock()
-    page.evaluate = AsyncMock(
-        return_value={"source": "root", "text": "Sample page text", "references": []}
-    )
     page.url = "https://www.linkedin.com/in/testuser/"
     page.locator = MagicMock()
     # Default: no modals, no CAPTCHA
@@ -169,17 +166,56 @@ def mock_page():
         )
     )
     page.listeners = listeners
+    # The document's own identity, which `performance.timeOrigin` reports and
+    # `navigate()` moves. A double answering every script with one object
+    # claims a document that is never replaced, and the code under test reads
+    # that as a page rewriting its own address.
+    page.time_origin = 1_000.0
+    page.evaluate = with_document_identity(
+        page,
+        AsyncMock(
+            return_value={
+                "source": "root",
+                "text": "Sample page text",
+                "references": [],
+            }
+        ),
+    )
     return page
 
 
-def navigate(page, url: str | None = None) -> None:
+def with_document_identity(page, evaluate):
+    """Answer the document-identity read from `page.time_origin`.
+
+    Every other script keeps going to `evaluate`. A test that replaces
+    `page.evaluate` outright loses this and reads no identity at all, which
+    leaves the production code where it was before there was one: it settles
+    on the event alone.
+    """
+
+    async def dispatch(script, *args, **kwargs):
+        if "timeOrigin" in script:
+            return page.time_origin
+        return await evaluate(script, *args, **kwargs)
+
+    return AsyncMock(side_effect=dispatch)
+
+
+def navigate(page, url: str | None = None, same_document: bool = False) -> None:
     """Move a mock page the way a navigation does: the address and the event.
 
     `url` is omitted for a reload, which replaces the document and leaves the
     address exactly as it was.
+
+    `same_document` is a `pushState`, a `replaceState` or a hash change. Each
+    raises `framenavigated` on the main frame exactly as a replacement does
+    (measured), and LinkedIn appends `currentJobId` to a search URL that way
+    on every healthy page. What separates them is the document surviving.
     """
     if url is not None:
         page.url = url
+    if not same_document:
+        page.time_origin += 1.0
     for callback in list(page.listeners.get("framenavigated", [])):
         callback(page.main_frame)
 
@@ -703,6 +739,56 @@ class TestExtractPage:
                 "https://www.linkedin.com/jobs/search/?keywords=test",
                 section_name="search_results",
             )
+
+    async def test_a_search_page_naming_its_own_job_is_not_navigating(self, mock_page):
+        """The event fires on every healthy search page, and means nothing.
+
+        LinkedIn appends `currentJobId` through `pushState`, which raises
+        `framenavigated` on the main frame exactly as a reload does. Acting on
+        it charges the ordinary page a quiet window, a document wait and the
+        body read behind the barrier check, on all of the up to ten pages a
+        search walks.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+
+        async def scroll_then_name_a_job(page, **kwargs):
+            navigate(
+                mock_page,
+                "https://www.linkedin.com/jobs/search/?keywords=test&currentJobId=1",
+                same_document=True,
+            )
+            return False
+
+        barrier = AsyncMock(return_value=None)
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                side_effect=scroll_then_name_a_job,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                barrier,
+            ),
+        ):
+            result = await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
+        assert result.text
+        assert mock_page.wait_for_load_state.await_count == 0
+        assert barrier.await_count == 0
 
     async def test_a_redirect_chain_is_judged_on_where_it_stops(self, mock_page):
         """The last hop decides, not the first one to appear.
@@ -3917,8 +4003,13 @@ class TestSettleNavigation:
             return self.now
 
     @staticmethod
-    def _sleep(clock, hops, schedule=()):
-        """Advance the clock per poll, landing each hop at its own moment."""
+    def _sleep(clock, hops, page, schedule=()):
+        """Advance the clock per poll, landing each hop at its own moment.
+
+        Each hop replaces the document, which is what a reload and a redirect
+        both do. A same-document change is spelled by leaving `time_origin`
+        alone instead.
+        """
         pending = list(schedule)
 
         async def sleep(seconds: float) -> None:
@@ -3926,6 +4017,7 @@ class TestSettleNavigation:
             while pending and pending[0] <= clock.now:
                 pending.pop(0)
                 hops.append("hop")
+                page.time_origin += 1.0
 
         return sleep
 
@@ -3946,10 +4038,12 @@ class TestSettleNavigation:
             patch.object(extractor_module, "time", clock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                side_effect=self._sleep(clock, hops),
+                side_effect=self._sleep(clock, hops, mock_page),
             ),
         ):
-            assert await extractor._settle_navigation(hops) is False
+            assert (
+                await extractor._settle_navigation(hops, mock_page.time_origin) is False
+            )
 
         assert clock.now < extractor_module._URL_SETTLE_QUIET
         assert clock.now >= extractor_module._URL_SETTLE_LAG
@@ -3968,10 +4062,12 @@ class TestSettleNavigation:
             patch.object(extractor_module, "time", clock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                side_effect=self._sleep(clock, hops, [0.05]),
+                side_effect=self._sleep(clock, hops, mock_page, [0.05]),
             ),
         ):
-            assert await extractor._settle_navigation(hops) is True
+            assert (
+                await extractor._settle_navigation(hops, mock_page.time_origin) is True
+            )
 
         assert mock_page.wait_for_load_state.await_count == 1
 
@@ -3990,13 +4086,43 @@ class TestSettleNavigation:
             patch.object(extractor_module, "time", clock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                side_effect=self._sleep(clock, hops, [0.05, 0.4]),
+                side_effect=self._sleep(clock, hops, mock_page, [0.05, 0.4]),
             ),
         ):
-            assert await extractor._settle_navigation(hops) is True
+            assert (
+                await extractor._settle_navigation(hops, mock_page.time_origin) is True
+            )
 
         assert len(hops) == 2
         assert clock.now >= 0.4 + extractor_module._URL_SETTLE_QUIET
+
+    async def test_a_history_change_is_not_a_navigation(self, mock_page):
+        """LinkedIn rewrites its own address, and the event cannot tell.
+
+        `pushState`, `replaceState` and a hash change each fire
+        `framenavigated` on the main frame, and a search page appends
+        `currentJobId` that way by itself. Settling on the event alone charges
+        every healthy page the quiet window plus a document wait plus the
+        barrier check that follows from it. The document surviving is what
+        says nothing was replaced.
+        """
+        clock = self.Clock()
+        extractor = LinkedInExtractor(mock_page)
+        origin = mock_page.time_origin
+        navigate(mock_page, same_document=True)
+        hops = ["https://www.linkedin.com/jobs/search/?currentJobId=1"]
+
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                side_effect=self._sleep(clock, hops, mock_page),
+            ),
+        ):
+            assert await extractor._settle_navigation(hops, origin) is False
+
+        assert clock.now == 0.0
+        assert mock_page.wait_for_load_state.await_count == 0
 
 
 class TestGetSavedJobs:
