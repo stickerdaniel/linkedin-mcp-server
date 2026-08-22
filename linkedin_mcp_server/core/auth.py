@@ -239,6 +239,17 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
         return False
 
 
+def is_linkedin_url(url: str) -> bool:
+    """Whether an address belongs to LinkedIn.
+
+    An address carrying no host is not judged: a relative one is resolved
+    against the page it came from, and `about:blank` names no site at all.
+    Both are LinkedIn's to serve as far as this can tell.
+    """
+    host = urlparse(url).netloc.lower().partition(":")[0]
+    return not host or host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
 def _is_auth_blocker_url(url: str) -> bool:
     """Return True only for real auth routes, not arbitrary slug substrings."""
     parsed = urlparse(url)
@@ -249,8 +260,7 @@ def _is_auth_blocker_url(url: str) -> bool:
     # user through a relogin that cannot fix the network in front of it. An
     # address with no host at all is left to the path, having no claim to
     # judge.
-    host = parsed.netloc.lower().partition(":")[0]
-    if host and host != "linkedin.com" and not host.endswith(".linkedin.com"):
+    if not is_linkedin_url(url):
         return False
 
     path = parsed.path or "/"
