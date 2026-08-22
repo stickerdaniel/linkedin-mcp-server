@@ -62,9 +62,8 @@
           "isRequired": true,
           "variables": {
             "session_dir": {
-              "description": "Directory on the host holding the session. Create it before the first run; the container writes as its own user.",
+              "description": "Absolute path on the host holding the session, such as /Users/you/.linkedin-mcp. Create it before the first run; the container writes as its own user. A leading ~ is not expanded here and Docker refuses it as a mount source.",
               "format": "filepath",
-              "default": "~/.linkedin-mcp",
               "isRequired": true
             }
           }

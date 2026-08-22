@@ -183,15 +183,52 @@ def test_the_file_never_runs_ahead_of_the_project(
 
     ``uv version --bump`` changes ``pyproject.toml`` and ``uv.lock`` and nothing
     else, and ``server.json`` catches up in the ``prepare-release`` job after
-    that PR merges. Requiring equality here therefore fails the bump PR, which
-    blocks the merge, which stops the job that would have made it equal:
-    ``manifest.json`` and ``docker-compose.yml`` are synced the same way and
-    carry no such rule for exactly this reason.
+    that PR merges. Requiring equality against ``pyproject.toml`` here therefore
+    fails the bump PR, which blocks the merge, which stops the job that would
+    have made it equal.
 
     Ahead is the state that cannot be reached honestly, because nothing writes
     this file except that job and a person.
     """
     assert Version(server["version"]) <= Version(pyproject["project"]["version"])
+
+
+def test_the_file_moves_with_the_bundle(
+    server: dict[str, Any], manifest: dict[str, Any]
+) -> None:
+    """An upper bound alone lets a missed sync sit here forever.
+
+    Behind ``pyproject.toml`` is legitimate only until the release job runs, and
+    nothing above says when that was. ``manifest.json`` does: the same job, the
+    same commit, and it is equally behind during the bump PR. So the two are
+    equal in every honest state, and a release that skipped this file alone
+    breaks that equality instead of passing quietly for the rest of the
+    project's life.
+    """
+    assert server["version"] == manifest["version"]
+
+
+def test_no_variable_defaults_to_a_path_only_a_shell_could_read(
+    server: dict[str, Any],
+) -> None:
+    """A registry client substitutes and executes; nothing expands a tilde.
+
+    The schema defines ``{variable}`` substitution and no home-directory rule,
+    and clients are told to execute directly rather than through a shell. A
+    default of ``~/.linkedin-mcp`` therefore reaches Docker verbatim, which
+    refuses it: it is neither an absolute path nor a legal volume name, so
+    every user who accepts the offered default cannot start the server at all.
+    A required variable with no default makes the client ask instead.
+    """
+    for package in server["packages"]:
+        for argument in package.get("runtimeArguments", []):
+            for name, variable in argument.get("variables", {}).items():
+                default = variable.get("default")
+                if not isinstance(default, str):
+                    continue
+                assert not default.startswith("~"), (
+                    f"{name} offers {default!r}, which only a shell expands"
+                )
 
 
 def test_oci_identifier_names_the_published_image(server: dict[str, Any]) -> None:
