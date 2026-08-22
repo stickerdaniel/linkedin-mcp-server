@@ -607,6 +607,26 @@ def test_a_host_prefixed_display_is_refused_before_xvfb_starts() -> None:
     assert "Xvfb" not in process.stderr
 
 
+def _a_free_display(base: int) -> tuple[int, Path, Path]:
+    """Pick a display number whose socket and lock nobody else owns.
+
+    These tests run the real entrypoint, which begins by removing both names.
+    Deriving the number from the PID alone keeps two tests in one process apart
+    and reserves nothing, so a concurrent run or a real X server inside the
+    range would have its socket deleted out from under it and its clients left
+    with nowhere to connect. Scan instead, and take a number that is free.
+    """
+    start = base + (os.getpid() % 10_000)
+    for offset in range(100):
+        number = base + ((start - base + offset) % 10_000)
+        socket_path = Path(f"/tmp/.X11-unix/X{number}")
+        lock_path = Path(f"/tmp/.X{number}-lock")
+        if not socket_path.exists() and not lock_path.exists():
+            socket_path.parent.mkdir(parents=True, exist_ok=True)
+            return number, socket_path, lock_path
+    pytest.fail(f"no free X display in {base}..{base + 99}")
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
 def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
     tmp_path: Path,
@@ -631,13 +651,8 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
     if major < 5:
         pytest.skip("wait -n -p requires the Bash 5 shipped by the image")
 
-    display_number = 10_000 + (os.getpid() % 10_000)
+    display_number, socket_path, lock_path = _a_free_display(10_000)
     display = f":{display_number}.0"
-    socket_path = Path(f"/tmp/.X11-unix/X{display_number}")
-    lock_path = Path(f"/tmp/.X{display_number}-lock")
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    socket_path.unlink(missing_ok=True)
-    lock_path.unlink(missing_ok=True)
     stale_socket = socket.socket(socket.AF_UNIX)
     stale_socket.bind(str(socket_path))
     stale_socket.close()
@@ -729,3 +744,210 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
 
     assert process.returncode != 0, (stdout, stderr)
     assert term_marker.read_text(encoding="utf-8") == "term"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
+def test_the_supervisor_hands_the_server_the_containers_stdin(tmp_path: Path) -> None:
+    """The stdio transport is the whole product over ``docker run -i``.
+
+    A shell assigns ``/dev/null`` to the standard input of an asynchronous list
+    in the absence of an explicit redirection, so ``"$@" &`` left the server
+    reading a descriptor the container's stdin never reached. Measured against
+    the published 4.23.0 image, a full MCP handshake produced nothing at all:
+    the server started, announced the transport, read EOF from ``/dev/null`` at
+    once and exited 0. Nothing failed, so nothing said so.
+
+    A string check would not have caught it and did not: the supervisor already
+    had tests for the display, for signal order and for child liveness, and all
+    of them passed for the two releases this shipped in. So this runs the real
+    script with a fake server that reports what it can read, which is the only
+    form of the question that has an answer.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise the Linux image entrypoint")
+    major = int(
+        subprocess.check_output(
+            [bash, "-c", 'printf "%s" "${BASH_VERSINFO[0]}"'], text=True
+        )
+    )
+    if major < 5:
+        pytest.skip("wait -n -p requires the Bash 5 shipped by the image")
+
+    display_number, socket_path, lock_path = _a_free_display(20_000)
+
+    fake_xvfb = tmp_path / "Xvfb"
+    fake_xvfb.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import pathlib
+            import socket
+            import sys
+            import time
+
+            number = sys.argv[1].removeprefix(":").split(".", 1)[0]
+            path = pathlib.Path(f"/tmp/.X11-unix/X{number}")
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(str(path))
+            server.listen()
+            time.sleep(5)
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_xvfb.chmod(0o755)
+
+    # Echoes one line back and exits, so a server that is handed /dev/null ends
+    # the run just as fast as one that is handed the pipe. The difference is
+    # what comes out, never how long the test takes.
+    fake_server = tmp_path / "server"
+    fake_server.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import sys
+
+            line = sys.stdin.readline()
+            sys.stdout.write(f"server-read:{line.strip()}\\n")
+            sys.stdout.flush()
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_server.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "DISPLAY": f":{display_number}",
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+    }
+    process = subprocess.Popen(
+        [bash, str(_ENTRYPOINT_PATH), str(fake_server)],
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        try:
+            stdout, stderr = process.communicate("a-request\n", timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+    finally:
+        socket_path.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
+
+    assert "server-read:a-request" in stdout, (
+        "the server was started without the container's stdin, so the stdio "
+        f"transport can never receive a request. stdout={stdout!r} "
+        f"stderr={stderr!r}"
+    )
+    # The reachable descriptor is half the contract. Without this the run also
+    # passes when the supervisor dies on `wait -n -p` right after the fake
+    # server has already echoed, leaving fake Xvfb alive behind a green test.
+    assert process.returncode == 0, (stdout, stderr)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
+def test_a_closed_standard_input_still_starts_the_server(tmp_path: Path) -> None:
+    """Spelling the redirection out must not make descriptor 0 mandatory.
+
+    `docker run` always supplies one, so nothing here noticed that a launcher
+    may close it instead. Then the redirection that hands stdin to the server
+    fails, `set -e` ends the supervisor before the server is ever started, and
+    HTTP and the one-shot commands go down with it over an input they never
+    wanted. The first shape of this fix did exactly that.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise the Linux image entrypoint")
+    major = int(
+        subprocess.check_output(
+            [bash, "-c", 'printf "%s" "${BASH_VERSINFO[0]}"'], text=True
+        )
+    )
+    if major < 5:
+        pytest.skip("wait -n -p requires the Bash 5 shipped by the image")
+
+    display_number, socket_path, lock_path = _a_free_display(30_000)
+
+    fake_xvfb = tmp_path / "Xvfb"
+    fake_xvfb.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import pathlib
+            import socket
+            import sys
+            import time
+
+            number = sys.argv[1].removeprefix(":").split(".", 1)[0]
+            path = pathlib.Path(f"/tmp/.X11-unix/X{number}")
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(str(path))
+            server.listen()
+            time.sleep(5)
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_xvfb.chmod(0o755)
+
+    # Records that it ran at all, which is the whole question. A supervisor that
+    # dies on the redirection never reaches this.
+    started = tmp_path / "started"
+    fake_server = tmp_path / "server"
+    fake_server.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import pathlib
+
+            pathlib.Path({str(started)!r}).write_text("started")
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_server.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "DISPLAY": f":{display_number}",
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+    }
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    try:
+        process = subprocess.Popen(
+            [bash, str(_ENTRYPOINT_PATH), str(fake_server)],
+            env=env,
+            stdin=devnull,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            # Closes descriptor 0 in the child after the fork, which is the state
+            # `stdin=subprocess.DEVNULL` cannot produce.
+            preexec_fn=lambda: os.close(0),
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+    finally:
+        os.close(devnull)
+        socket_path.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
+
+    assert started.exists(), (
+        "the supervisor never started the server, so a closed descriptor 0 "
+        f"takes down modes that never read stdin. stdout={stdout!r} "
+        f"stderr={stderr!r}"
+    )
+    assert process.returncode == 0, (stdout, stderr)
