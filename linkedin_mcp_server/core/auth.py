@@ -52,6 +52,17 @@ async def is_logged_in(page: Page) -> bool:
         if _is_auth_blocker_url(current_url):
             return False
 
+        # And on a page that is not LinkedIn's at all. The fallback below
+        # reads authenticated-only paths out of the address, and a captive
+        # portal carrying `?next=https://www.linkedin.com/feed/` satisfies it
+        # on its own text. That used to be caught by accident, the blocker
+        # check having claimed every `/login` whatever served it; it no
+        # longer does, because a relogin cannot fix the network in front of
+        # it, so the case is answered here instead.
+        if not is_linkedin_url(current_url):
+            logger.debug("Not logged in: %s is not LinkedIn", current_url)
+            return False
+
         # Step 2: Selector check (PRIMARY)
         old_selectors = '.global-nav__primary-link, [data-control-name="nav.settings"]'
         old_count = await page.locator(old_selectors).count()
@@ -245,8 +256,13 @@ def is_linkedin_url(url: str) -> bool:
     An address carrying no host is not judged: a relative one is resolved
     against the page it came from, and `about:blank` names no site at all.
     Both are LinkedIn's to serve as far as this can tell.
+
+    `hostname` and not `netloc`, which carries the userinfo as well as the
+    port: everything before the first colon of
+    `http://linkedin.com:pw@portal.example/` is `linkedin.com`, and the
+    destination is `portal.example`.
     """
-    host = urlparse(url).netloc.lower().partition(":")[0]
+    host = urlparse(url).hostname
     return not host or host == "linkedin.com" or host.endswith(".linkedin.com")
 
 

@@ -119,6 +119,25 @@ def _references_within(references: list[Reference], ids: list[str]) -> list[Refe
     return out
 
 
+def lost_keywords_section_error(asked: str, landed: str) -> dict[str, str]:
+    """The ``section_errors`` entry for a search that is not the one asked for.
+
+    Both values are named, because the one shape this cannot rule out is
+    LinkedIn re-encoding a query rather than changing it. `parse_qs` folds
+    `%20` and `+` together, so ordinary spacing differences are already gone
+    by the time they are compared; an unencoded `C++` read back as `C` and
+    two spaces is the measured exception, and naming both sides is what makes
+    that diagnosable from the response instead of from a debugger.
+    """
+    return {
+        "error_type": "search_replaced",
+        "error_message": (
+            f"LinkedIn answered a search for {landed!r} where {asked!r} was "
+            "asked for, so the results are about something else."
+        ),
+    }
+
+
 def dropped_offset_section_error(offset: int, landed: str) -> dict[str, str]:
     """The ``section_errors`` entry for a list that cannot be paged further.
 
@@ -3711,6 +3730,11 @@ class LinkedInExtractor:
         page_texts: list[str] = []
         page_references: list[Reference] = []
         section_errors: dict[str, dict[str, Any]] = {}
+        # Kept beside the errors rather than in them. A filter LinkedIn
+        # dropped describes the results that came back, and those stay in the
+        # response whatever stops the loop later, so a rate limit on page two
+        # used to hide that page one had been unfiltered all along.
+        filters_warning: dict[str, str] | None = None
         total_pages: int | None = None
         total_pages_queried = False
 
@@ -3868,29 +3892,37 @@ class LinkedInExtractor:
                 # LinkedIn merely renamed would return nothing at all.
                 landed_query = parse_qs(parsed_url.query)
                 asked = parse_qs(urlparse(base_url).query)
-                if "keywords" in asked and not landed_query.get("keywords"):
+                asked_keywords = asked.get("keywords", [""])[0]
+                landed_keywords = landed_query.get("keywords", [""])[0]
+                if asked_keywords and landed_keywords != asked_keywords:
                     logger.debug(
                         "Search keywords did not survive navigation "
-                        "(landed on %s), stopping",
+                        "(asked %r, landed %r on %s), stopping",
+                        asked_keywords,
+                        landed_keywords,
                         self._page.url,
                     )
-                    section_errors["search_results"] = dropped_offset_section_error(
-                        offset, self._page.url
+                    section_errors["search_results"] = lost_keywords_section_error(
+                        asked_keywords, landed_keywords
                     )
                     break
 
+                # Presence only for the rest, where the keywords are compared
+                # by value: LinkedIn encodes several of these itself, a
+                # location becoming a `geoUrn`, so a value comparison would
+                # fail on every healthy call that used one.
                 lost = sorted(
                     name
                     for name in asked
                     if name not in ("keywords", "start") and not landed_query.get(name)
                 )
-                if lost and "search_results" not in section_errors:
+                if lost:
                     logger.debug(
                         "Search filters %s did not survive navigation to %s",
                         lost,
                         self._page.url,
                     )
-                    section_errors["search_results"] = dropped_filters_section_error(
+                    filters_warning = dropped_filters_section_error(
                         lost, self._page.url
                     )
 
@@ -3961,6 +3993,17 @@ class LinkedInExtractor:
             result["references"] = {
                 "search_results": dedupe_references(page_references, cap=15)
             }
+        if filters_warning is not None:
+            existing = section_errors.get("search_results")
+            if existing is None:
+                section_errors["search_results"] = filters_warning
+            else:
+                # Both are true of this response, and only one slot holds
+                # them. The stop reason leads, since it explains why the list
+                # ends where it does, and the filter note follows it whole.
+                existing["error_message"] = (
+                    f"{existing['error_message']} {filters_warning['error_message']}"
+                )
         if section_errors:
             result["section_errors"] = section_errors
         return result
