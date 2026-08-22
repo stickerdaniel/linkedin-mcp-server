@@ -488,7 +488,7 @@ belongs behind something that provides it.
 
 ## 🐍 Local Setup (Develop & Contribute)
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture guidelines and checklists. Please [open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) first to discuss the feature or bug fix before submitting a PR.
+Contributions are welcome! See [CONTRIBUTING.md](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/CONTRIBUTING.md) for architecture guidelines and checklists. Please [open an issue](https://github.com/stickerdaniel/linkedin-mcp-server/issues) first to discuss the feature or bug fix before submitting a PR.
 
 **Prerequisites:** [Git](https://git-scm.com/downloads) and [uv](https://docs.astral.sh/uv/) installed
 
@@ -657,6 +657,6 @@ Use in accordance with [LinkedIn's User Agreement](https://www.linkedin.com/lega
 
 This project is licensed under the Apache 2.0 license.
 
-Building on it is welcome, including under a different license. Apache-2.0 attaches conditions to that, set out in section 4 of the [license](LICENSE). The one most often missed is that the attribution in [`NOTICE`](NOTICE) has to travel with what you ship.
+Building on it is welcome, including under a different license. Apache-2.0 attaches conditions to that, set out in section 4 of the [license](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/LICENSE). The one most often missed is that the attribution in [`NOTICE`](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/NOTICE) has to travel with what you ship.
 
 <br>
