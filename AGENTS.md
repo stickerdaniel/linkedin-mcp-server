@@ -180,14 +180,24 @@ gt create -m "chore: Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow
 ```
 
-The CI release workflow automatically updates `manifest.json` and `docker-compose.yml` with the new version — do not update them manually.
+The CI release workflow automatically updates `manifest.json`, `docker-compose.yml` and `server.json` with the new version — do not update them manually.
 
-The workflow also keeps `server.json` in step with the bump. That file is the
-MCP Registry entry, and nothing in the release publishes it: this server has
-never been listed at `registry.modelcontextprotocol.io`. Publishing there is a
-maintainer decision rather than a release step, and taking it is one
-`mcp-publisher login github && mcp-publisher publish` against the file. There is
-no PR to file: the registry is a service, not a repository.
+After the workflow completes, file a PR against
+[`docker/mcp-registry`](https://github.com/docker/mcp-registry) moving
+`servers/linkedin-mcp-server/server.yaml` to the new image tag. Docker advances
+pins only for images in its own `mcp/` namespace (`cmd/ci/update_pins.go`), and
+this entry points at `stickerdaniel/linkedin-mcp-server`, so nothing there
+updates itself. Skipping it is why that entry sat on 1.4.0 for a year.
+
+`server.json` is a different registry: the official one at
+`registry.modelcontextprotocol.io`, which is a service reached through
+`mcp-publisher` and has no PR flow. This server has never been listed there.
+Publishing is a maintainer decision rather than a release step, and it cannot
+succeed before a release that carries the `mcp-name` token in `README.md` and
+the `io.modelcontextprotocol.server.name` label in the `Dockerfile`: ownership
+is proved against the *published* PyPI description and image config, so the
+markers have to ship first and no local edit can repair an artifact already on
+PyPI.
 
 ## Commit Messages
 
