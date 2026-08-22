@@ -3,6 +3,7 @@
 from .auth import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
+    is_linkedin_url,
     is_logged_in,
     resolve_remember_me_prompt,
     wait_for_manual_login,
@@ -35,6 +36,7 @@ __all__ = [
     "BrowserManager",
     "detect_auth_barrier",
     "detect_auth_barrier_quick",
+    "is_linkedin_url",
     "ElementNotFoundError",
     "LinkedInScraperException",
     "NetworkError",

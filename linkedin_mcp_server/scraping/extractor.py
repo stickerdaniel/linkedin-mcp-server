@@ -19,6 +19,7 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
+    is_linkedin_url,
     raise_if_proxy_error,
     redact_proxy_credentials,
     redacted_copy,
@@ -131,6 +132,25 @@ def dropped_offset_section_error(offset: int, landed: str) -> dict[str, str]:
         "error_message": (
             f"LinkedIn did not keep offset {offset} (landed on {landed}), "
             "so the list stops at the results already read."
+        ),
+    }
+
+
+def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, str]:
+    """The ``section_errors`` entry for filters LinkedIn did not keep.
+
+    Reported rather than raised, and the results kept: they are broader than
+    the caller asked for and still about the same keywords, so a location or
+    a work type LinkedIn dropped costs relevance rather than correctness.
+    Saying nothing is what cannot be defended, since a search for remote
+    Python in Berlin then returns Python anywhere and reads as though Berlin
+    had none.
+    """
+    return {
+        "error_type": "filters_dropped",
+        "error_message": (
+            f"LinkedIn did not keep {', '.join(names)} (landed on {landed}), "
+            "so the results are broader than the search asked for."
         ),
     }
 
@@ -1137,6 +1157,21 @@ class LinkedInExtractor:
 
             barrier = await detect_auth_barrier_quick(self._page)
             if not barrier:
+                # A navigation asked to reach LinkedIn and ending somewhere
+                # else did not reach this page, whatever the somewhere else
+                # holds. It is not an auth barrier either, and calling it one
+                # closes a session that never expired and asks for a login
+                # that cannot fix the network in front of it. So the barrier
+                # check no longer claims a foreign `/login`, and this is what
+                # catches what it stopped claiming: a captive portal or proxy
+                # interstitial otherwise comes back as the profile, company
+                # or job posting that was asked for.
+                #
+                # Only when the target was LinkedIn's, since the connection
+                # helpers below drive the page to addresses of their own.
+                if is_linkedin_url(url) and not is_linkedin_url(self._page.url):
+                    logger.warning("Navigation to %s ended on %s", url, self._page.url)
+                    raise RuntimeError(f"Navigation to {url} ended on {self._page.url}")
                 return
 
             if allow_remember_me and await resolve_remember_me_prompt(self._page):
@@ -3449,6 +3484,11 @@ class LinkedInExtractor:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
         await self._navigate_to_page(url)
         await detect_rate_limit(self._page)
+        # Above the selector wait and the modal close, so the window this
+        # opens covers everything read from here on. Taken between them, a
+        # reload committing during either one became the baseline itself, and
+        # `main_found` then described a document that no longer existed.
+        origin = await self._document_origin()
 
         main_found = True
         try:
@@ -3481,7 +3521,6 @@ class LinkedInExtractor:
         before = _route(url)
         moved = False
         navigated = False
-        origin = await self._document_origin()
         with self._watching_navigations() as hops:
             if main_found:
                 scroll_started = time.monotonic()
@@ -3528,6 +3567,16 @@ class LinkedInExtractor:
             )
 
         raw_result = await self._extract_root_content(["main"])
+
+        # The watcher covers the scroll and nothing else, and the read sits
+        # outside it at both ends: a reload committing after the listener came
+        # off, or during the extraction itself, moves no route and raises
+        # nothing. The document says what neither the address nor the listener
+        # can, and it is asked about the text that was actually read.
+        if origin is not None and await self._document_origin() != origin:
+            logger.debug("The search document was replaced before it was read")
+            await self._raise_if_auth_barrier(url)
+
         raw = raw_result["text"]
         if raw_result["source"] == "body":
             logger.debug("No <main> at evaluation time on %s, using body fallback", url)
@@ -3810,12 +3859,18 @@ class LinkedInExtractor:
                 # recommendations then come back as a filtered search. Not
                 # their values, because a query LinkedIn re-encodes on its way
                 # would fail a comparison every healthy call makes.
+                #
+                # Losing the keywords ends the search, since what comes back
+                # is not a narrower answer to the question but an answer to a
+                # different one. Losing any other filter is reported and the
+                # results kept: they are broader than asked for and still
+                # about the same keywords, and stopping on a parameter
+                # LinkedIn merely renamed would return nothing at all.
                 landed_query = parse_qs(parsed_url.query)
-                if "keywords" in parse_qs(urlparse(base_url).query) and not (
-                    landed_query.get("keywords")
-                ):
+                asked = parse_qs(urlparse(base_url).query)
+                if "keywords" in asked and not landed_query.get("keywords"):
                     logger.debug(
-                        "Search filters did not survive navigation "
+                        "Search keywords did not survive navigation "
                         "(landed on %s), stopping",
                         self._page.url,
                     )
@@ -3823,6 +3878,21 @@ class LinkedInExtractor:
                         offset, self._page.url
                     )
                     break
+
+                lost = sorted(
+                    name
+                    for name in asked
+                    if name not in ("keywords", "start") and not landed_query.get(name)
+                )
+                if lost and "search_results" not in section_errors:
+                    logger.debug(
+                        "Search filters %s did not survive navigation to %s",
+                        lost,
+                        self._page.url,
+                    )
+                    section_errors["search_results"] = dropped_filters_section_error(
+                        lost, self._page.url
+                    )
 
                 landed_start = landed_query.get("start", ["0"])[0]
                 if landed_start != str(offset):
@@ -3959,13 +4029,16 @@ class LinkedInExtractor:
         # page's title, so the route guard reads it as the list. Nothing else
         # notices either: the scroll pauses half a second between rounds, and
         # a document replaced in that gap leaves no evaluation to raise, so
-        # the extraction below succeeds against the replacement and returns it
-        # under `saved_jobs` with the browser left on a barrier.
-        if origin is not None and await self._document_origin() != origin:
-            logger.debug("The saved-jobs document was replaced while scrolling")
-            await self._raise_if_auth_barrier(self._page.url)
-
+        # the extraction succeeds against the replacement and returns it under
+        # `saved_jobs` with the browser left on a barrier.
+        #
+        # Asked after the read rather than before it, or the gap between the
+        # two is a window of its own and the text that came back is not the
+        # text the check judged.
         raw_result = await self._extract_root_content(["main"])
+        if origin is not None and await self._document_origin() != origin:
+            logger.debug("The saved-jobs document was replaced before it was read")
+            await self._raise_if_auth_barrier(self._page.url)
         raw = raw_result["text"]
         if raw_result["source"] == "body":
             logger.debug("No <main> at evaluation time on %s, using body fallback", url)

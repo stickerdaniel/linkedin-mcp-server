@@ -1,5 +1,6 @@
+import asyncio
 from typing import Any, Callable, Coroutine, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastmcp import FastMCP
@@ -688,11 +689,16 @@ class TestJobTools:
     async def test_search_jobs_is_bounded_by_the_registered_timeout(self, mock_context):
         """The loop stops itself by the same figure FastMCP cancels on.
 
-        Registered with a non-default timeout and asserted exactly, because
-        dropping the argument leaves the extractor budgeting against its own
-        180s default while FastMCP still cancels at 60s. The search would then
-        be killed mid-page and every page already gathered thrown away, which
-        is the loss the bound exists to prevent.
+        Registered with a non-default timeout, because dropping the argument
+        leaves the extractor budgeting against its own 180s default while
+        FastMCP still cancels at 60s. The search would then be killed mid-page
+        and every page already gathered thrown away, which is the loss the
+        bound exists to prevent.
+
+        What arrives is what is left of it: FastMCP starts its clock before
+        this tool runs, and acquiring the browser is spent from the same 60s.
+        A cold start of three seconds passed on as a full sixty is the same
+        defect one layer down.
         """
         mock_extractor = _make_mock_extractor(
             {
@@ -709,7 +715,46 @@ class TestJobTools:
         tool_fn = await get_tool_fn(mcp, "search_jobs")
         await tool_fn("python", mock_context, extractor=mock_extractor)
 
-        assert mock_extractor.search_jobs.await_args.kwargs["tool_timeout"] == 60.0
+        passed = mock_extractor.search_jobs.await_args.kwargs["tool_timeout"]
+        assert passed <= 60.0
+        assert passed == pytest.approx(60.0, abs=1.0)
+
+    async def test_the_search_budget_pays_for_the_browser_it_waited_on(
+        self, mock_context
+    ):
+        """FastMCP starts its clock before this tool runs.
+
+        Acquiring the browser is spent from the same figure, so passing it on
+        whole leaves the extractor planning against time it no longer has. A
+        cold start is where this bites: warm, the wait is nothing and the
+        budget is the full timeout either way, which is why asserting the
+        figure alone cannot see the defect.
+        """
+        mock_extractor = _make_mock_extractor(
+            {
+                "url": "https://www.linkedin.com/jobs/search/?keywords=python",
+                "sections": {"search_results": "Job 1"},
+            }
+        )
+
+        async def slow_start(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return mock_extractor
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp, tool_timeout=60.0)
+
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+        with patch(
+            "linkedin_mcp_server.tools.job.get_ready_extractor",
+            side_effect=slow_start,
+        ):
+            await tool_fn("python", mock_context)
+
+        passed = mock_extractor.search_jobs.await_args.kwargs["tool_timeout"]
+        assert passed < 59.9
 
     async def test_get_saved_jobs(self, mock_context):
         expected = {
