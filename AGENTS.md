@@ -180,14 +180,22 @@ gt create -m "chore: Bump version to X.Y.Z"
 gt submit                        # merge PR to trigger release workflow
 ```
 
-The CI release workflow automatically updates `manifest.json`, `docker-compose.yml` and `server.json` with the new version — do not update them manually.
+The CI release workflow automatically updates `manifest.json`, `docker-compose.yml` and `server.json` with the new version. Do not update them manually.
 
 After the workflow completes, file a PR against
-[`docker/mcp-registry`](https://github.com/docker/mcp-registry) moving
-`servers/linkedin-mcp-server/server.yaml` to the new image tag. Docker advances
-pins only for images in its own `mcp/` namespace (`cmd/ci/update_pins.go`), and
-this entry points at `stickerdaniel/linkedin-mcp-server`, so nothing there
-updates itself. Skipping it is why that entry sat on 1.4.0 for a year.
+[`docker/mcp-registry`](https://github.com/docker/mcp-registry) updating
+`servers/linkedin-mcp-server/server.yaml`. Docker's own sweep refreshes
+`source.commit` only, and only for images in its `mcp/` namespace
+(`cmd/ci/update_pins.go`); this entry names `stickerdaniel/linkedin-mcp-server`,
+so neither its tag nor its pin ever moves on its own. Skipping it is why that
+entry sat on 1.4.0 for a year.
+
+The first such PR is more than a tag: that entry still advertises a
+`LINKEDIN_COOKIE` secret and a `USER_AGENT` field for an authentication path
+this server no longer has, and `USER_AGENT` now refuses to start
+(`config/loaders.py`). It needs the session directory as a mount instead. Docker
+validates a changed entry by pulling the image and listing its tools over stdio,
+so the tag it moves to has to be a release where that works.
 
 `server.json` is a different registry: the official one at
 `registry.modelcontextprotocol.io`, which is a service reached through

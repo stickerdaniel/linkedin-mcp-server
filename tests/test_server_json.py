@@ -1,26 +1,37 @@
 """Rules about ``server.json`` that only a reader of the registry can know.
 
-``server.json`` is the MCP Registry entry for this server. Nothing in the
-release publishes it, so nothing in the release notices when it goes wrong
-either: the file can sit in the repository for months naming a version that was
-never released, and the first sign of it is a rejected publish months later.
+``server.json`` is this server's entry for the *official* MCP Registry at
+``registry.modelcontextprotocol.io``, which is a service published to with the
+``mcp-publisher`` CLI. It is not the Docker MCP Catalog, whose entry for this
+server is a ``server.yaml`` in the ``docker/mcp-registry`` repository and is
+updated by opening a PR there. The two are routinely confused, including once
+on the branch that added this file, so the distinction is written down rather
+than assumed.
+
+Nothing in the release publishes this file, so nothing in the release notices
+when it goes wrong either: it can sit in the repository for months naming
+something that was never released, and the first sign is a rejected publish.
 
 The registry's own checks are the reason most of these rules exist. Publishing
 proves that the publisher owns each package, and it proves it differently per
 registry type. For PyPI it fetches the version's metadata and searches the
 README, which PyPI stores as the package description, for the literal token
-``mcp-name: <server name>``. For an OCI image it reads the
-``io.modelcontextprotocol.server.name`` annotation off the published manifest.
-Both compare against the ``name`` in this file, so three places have to agree
-and only one of them is JSON.
+``mcp-name: <server name>``. For an OCI image it pulls the image *config* and
+reads ``Config.Labels["io.modelcontextprotocol.server.name"]``, which is what a
+Dockerfile ``LABEL`` writes. Manifest annotations are a different surface and
+are not consulted, so a label replaced by an annotation would inspect correctly
+and still fail verification. Both compare against the ``name`` in this file, so
+three places have to agree and only one of them is JSON.
 
 The token check is boundary-anchored, which is the part that surprises people:
-``mcp-name: io.github.acme/widget`` would otherwise satisfy an ownership claim
-for ``io.github.acme/widget-pro``, so the registry requires the matched name to
-be followed by end-of-content, a character that cannot appear in a server name,
-or an HTML comment close. A token written inline and ended with a period fails
-that, and the failure arrives as an ownership error rather than a formatting
-one. Measured against ``internal/validators/registries/mcpname.go``.
+a README declaring ``mcp-name: io.github.acme/widget-pro`` would otherwise
+satisfy an ownership claim for the shorter ``io.github.acme/widget``, because
+the shorter string is a substring of the longer one. The registry therefore
+requires the matched name to be followed by end-of-content, a character that
+cannot appear in a server name, or an HTML comment close. A token written
+inline and ended with a period fails that, and the failure arrives as an
+ownership error rather than a formatting one. Measured against
+``internal/validators/registries/mcpname.go`` and ``oci.go``.
 """
 
 from __future__ import annotations
@@ -32,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from packaging.version import Version
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SERVER_JSON = _REPO_ROOT / "server.json"
@@ -129,10 +141,20 @@ def test_dockerfile_annotates_the_same_name(server: dict[str, Any]) -> None:
     """
     dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
     label = f'LABEL io.modelcontextprotocol.server.name="{server["name"]}"'
-    assert label in dockerfile
-
     runtime_stage = dockerfile.rsplit("\nFROM ", 1)[-1]
-    assert label in runtime_stage, "the label must be on the final stage"
+
+    # A substring search is satisfied by `# LABEL ...`, which writes nothing
+    # into the image. Commenting the line out while debugging would leave CI
+    # green and the proof missing, and that only surfaces after the image has
+    # shipped.
+    instructions = [
+        line
+        for line in runtime_stage.splitlines()
+        if line.strip() == label and not line.lstrip().startswith("#")
+    ]
+    assert instructions, (
+        f"the final stage must carry {label!r} as an instruction, not as a comment"
+    )
 
 
 def test_pypi_package_is_the_published_distribution(
@@ -142,19 +164,34 @@ def test_pypi_package_is_the_published_distribution(
     assert package["identifier"] == pyproject["project"]["name"]
 
 
-def test_versions_track_the_project(
-    server: dict[str, Any], pyproject: dict[str, Any]
-) -> None:
-    """All three version sites move together, or the release sync did not run.
+def test_versions_agree_inside_the_file(server: dict[str, Any]) -> None:
+    """The three version sites move together or the sync missed one.
 
-    ``uv version --bump`` touches ``pyproject.toml`` only. Everything else is
-    written by the ``prepare-release`` job, so a mismatch here means that job
-    was skipped or its edit silently missed a field.
+    ``server.json`` spells the version three times, once inside an image
+    reference. The release job rewrites all three; a hand edit reaches whichever
+    one the author was looking at.
     """
-    version = pyproject["project"]["version"]
-    assert server["version"] == version
+    version = server["version"]
     assert _package(server, "pypi")["version"] == version
     assert _package(server, "oci")["identifier"].endswith(f":{version}")
+
+
+def test_the_file_never_runs_ahead_of_the_project(
+    server: dict[str, Any], pyproject: dict[str, Any]
+) -> None:
+    """Behind is the normal state between a bump and its release commit.
+
+    ``uv version --bump`` changes ``pyproject.toml`` and ``uv.lock`` and nothing
+    else, and ``server.json`` catches up in the ``prepare-release`` job after
+    that PR merges. Requiring equality here therefore fails the bump PR, which
+    blocks the merge, which stops the job that would have made it equal:
+    ``manifest.json`` and ``docker-compose.yml`` are synced the same way and
+    carry no such rule for exactly this reason.
+
+    Ahead is the state that cannot be reached honestly, because nothing writes
+    this file except that job and a person.
+    """
+    assert Version(server["version"]) <= Version(pyproject["project"]["version"])
 
 
 def test_oci_identifier_names_the_published_image(server: dict[str, Any]) -> None:
