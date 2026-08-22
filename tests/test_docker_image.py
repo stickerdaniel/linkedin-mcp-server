@@ -23,6 +23,7 @@ not switched off, and that the constraint files still agree with each other.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -564,6 +565,39 @@ def test_the_documented_bind_mount_is_created_by_the_host_user() -> None:
     for document in (_README, _DOCKER_GUIDE):
         assert "mkdir -p ~/.linkedin-mcp" in document
         assert 'sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp' in document
+
+
+def test_no_documented_argument_array_needs_a_shell() -> None:
+    """A client executes these, so nothing in them may need expanding.
+
+    The mounts in the surrounding shell commands are written with ``~`` on
+    purpose and a shell expands them. The arrays inside an MCP client's JSON
+    config are handed to ``docker`` directly, and a literal ``~`` is neither an
+    absolute path nor a legal volume name, so Docker exits 125 before Tini, the
+    supervisor or Python ever start. The stdio transport this container exists
+    to serve is then unreachable through the configuration the docs give for it.
+    """
+    blocks = [
+        block
+        for document in (_README, _DOCKER_GUIDE)
+        for block in re.findall(r"```json\n(.*?)```", document, re.DOTALL)
+    ]
+    assert blocks, "no JSON configuration blocks found to check"
+
+    checked = 0
+    for block in blocks:
+        for server in json.loads(block).get("mcpServers", {}).values():
+            for argument in server.get("args", []):
+                checked += 1
+                assert not argument.startswith("~"), (
+                    f"{argument!r} is handed to {server.get('command')!r} "
+                    "without a shell, so nothing expands the tilde"
+                )
+                assert "$" not in argument, (
+                    f"{argument!r} is handed to {server.get('command')!r} "
+                    "without a shell, so nothing expands the variable"
+                )
+    assert checked, "no arguments found to check"
 
 
 def test_the_supervisor_stops_python_before_the_display() -> None:
