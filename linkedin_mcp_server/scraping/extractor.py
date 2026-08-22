@@ -4287,6 +4287,9 @@ class LinkedInExtractor:
                         page_num * _SAVED_JOBS_PAGE_SIZE,
                         self._page.url,
                     )
+                    section_errors["saved_jobs"] = dropped_offset_section_error(
+                        page_num * _SAVED_JOBS_PAGE_SIZE, self._page.url
+                    )
                     break
 
                 page_ids = await self._extract_job_ids()
