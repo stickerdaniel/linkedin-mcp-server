@@ -595,17 +595,50 @@ class TestFailingFast:
 
         monkeypatch.setattr(election_module.subprocess, "Popen", deaf)
 
+        # The stop is timed where it happens rather than inferred from the
+        # total, for the reason spelled out at the assertion below.
+        stopping: list[float] = []
+        stop = election_module._stop_child
+
+        def timed(child: subprocess.Popen[bytes]) -> None:
+            at = time.monotonic()
+            try:
+                stop(child)
+            finally:
+                stopping.append(time.monotonic() - at)
+
+        monkeypatch.setattr(election_module, "_stop_child", timed)
+
         began = time.monotonic()
         attempt = election_module._start_owner(auth_root, profile, config, timeout=0.5)
         elapsed = time.monotonic() - began
 
         try:
-            # Close to the budget rather than merely finite. Stopping the child
-            # happens after that budget is spent, so a grace period there is
-            # time added to a deadline the caller was promised: terminate-first
-            # turned this half-second election into five and a half against a
-            # child that ignores SIGTERM. Measured at 0.6s as it stands.
-            assert elapsed < 3, f"the spawn took {elapsed:.1f}s of a 0.5s budget"
+            # Stopping the child happens after the budget is spent, so a grace
+            # period there is time added to a deadline the caller was promised:
+            # terminate-first turned this half-second election into five and a
+            # half against a child that ignores SIGTERM.
+            #
+            # Timed around the stop itself rather than read off the total. The
+            # total also contains forking an interpreter and encoding a 10 MiB
+            # configuration, and neither is governed by this code: the whole
+            # call takes 0.55s here and every run measured is within 20ms of
+            # that, while a shared four-core runner under `-n auto --cov`
+            # stretched it to 4.1s and failed a 3s bound. There is no number
+            # that survives that and still catches a 5s grace period. The stop
+            # has one by construction — a kill the process cannot decline and a
+            # single bounded wait — so the bound is that wait plus slack, and a
+            # second wait or a grace period ahead of the kill breaks it.
+            assert stopping, "the child that could not serve was never stopped"
+            assert max(stopping) < election_module._STOP_CHILD_SECONDS + 1, (
+                f"stopping the child took {max(stopping):.1f}s, which is more "
+                f"than the one {election_module._STOP_CHILD_SECONDS}s wait it "
+                f"is allowed"
+            )
+            # And the whole election still ends. Loose on purpose: the bound
+            # above is what has teeth, and this one only says the budget did
+            # not become unbounded.
+            assert elapsed < 15, f"the spawn took {elapsed:.1f}s of a 0.5s budget"
             # Reported as a failure, not as "somebody is starting". A child that
             # never took its configuration is not coming up, and on POSIX it
             # already holds the inherited lock descriptor — so it is stopped
@@ -656,8 +689,8 @@ class TestFailingFast:
             #
             # So the property meant here is that the writer ends *promptly* once
             # the child is gone, which is what the join states and the instant
-            # read only approximated. The bound stays well under the 3s margin
-            # above, which is the assertion that carries this test's weight on
+            # read only approximated. The bound stays well under the margins
+            # above, which are the assertions that carry this test's weight on
             # POSIX and must not be masked.
             #
             # It buys nothing beyond that. A writer blocked on a full pipe
@@ -741,7 +774,14 @@ class TestFailingFast:
             # it used to hand that bound straight back: `child.stdout.close()`
             # waits on the reader thread's I/O lock, so it blocked for as long
             # as the child stayed silent — 29.27s against a 30s sleeper.
-            assert elapsed < 5, f"the bounded wait took {elapsed:.1f}s"
+            #
+            # Well above the 0.55s this measures, because the total includes
+            # forking an interpreter and a loaded runner has been seen to spend
+            # seconds on that (see the blocked-write case next door). The defect
+            # costs 29s, so the margin is free here — unlike next door, where
+            # the gap between runner noise and a 5s grace period left no number
+            # to pick and the stop had to be timed on its own.
+            assert elapsed < 15, f"the bounded wait took {elapsed:.1f}s"
         finally:
             for child in started:
                 if child.poll() is None:  # pragma: no cover - the stop worked
