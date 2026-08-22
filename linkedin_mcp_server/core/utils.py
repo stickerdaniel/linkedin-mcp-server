@@ -92,28 +92,30 @@ async def scroll_job_sidebar(
     """Scroll the job search sidebar to load all job cards.
 
     LinkedIn renders job search results in a scrollable sidebar container,
-    not the main page body. This function finds that container by locating
-    a job card link and walking up to its scrollable ancestor, then scrolls
-    it iteratively until no new content loads.
+    not the main page body. This function finds that container through a job
+    card, then scrolls it iteratively until no new content loads.
+
+    DOM dependency: scrolling requires an element reference, which
+    innerText extraction cannot provide.
 
     Args:
         page: Patchright page object
         pause_time: Time to pause between scrolls (seconds)
         max_scrolls: Maximum number of scroll attempts
     """
-    # Wait for at least one job card link to render before scrolling
+    card_selector = 'a[href*="/jobs/view/"], [componentkey^="job-card-component-ref-"]'
     try:
-        await page.wait_for_selector('a[href*="/jobs/view/"]', timeout=5000)
+        await page.wait_for_selector(card_selector, timeout=5000)
     except PlaywrightTimeoutError:
-        logger.debug("No job card links found, skipping sidebar scroll")
+        logger.debug("No job cards found, skipping sidebar scroll")
         return
 
     scrolled = await page.evaluate(
-        """async ({pauseTime, maxScrolls}) => {
-            const link = document.querySelector('a[href*="/jobs/view/"]');
-            if (!link) return -2;
+        """async ({pauseTime, maxScrolls, cardSelector}) => {
+            const card = document.querySelector(cardSelector);
+            if (!card) return -2;
 
-            let container = link.parentElement;
+            let container = card.parentElement;
             while (container && container !== document.body) {
                 const style = window.getComputedStyle(container);
                 const overflowY = style.overflowY;
@@ -138,10 +140,14 @@ async def scroll_job_sidebar(
             }
             return scrollCount;
         }""",
-        {"pauseTime": pause_time, "maxScrolls": max_scrolls},
+        {
+            "pauseTime": pause_time,
+            "maxScrolls": max_scrolls,
+            "cardSelector": card_selector,
+        },
     )
     if scrolled == -2:
-        logger.debug("Job card link disappeared before evaluate, skipping scroll")
+        logger.debug("Job card disappeared before evaluate, skipping scroll")
     elif scrolled == -1:
         logger.debug("No scrollable container found for job sidebar")
     elif scrolled:

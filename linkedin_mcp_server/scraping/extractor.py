@@ -3078,18 +3078,23 @@ class LinkedInExtractor:
         return result
 
     async def _extract_job_ids(self) -> list[str]:
-        """Extract unique job IDs from job card links on the current page.
+        """Extract unique job IDs from job cards on the current page.
 
-        Finds all `a[href*="/jobs/view/"]` links and extracts the numeric
-        job ID from each href. Returns deduplicated IDs in DOM order.
+        DOM dependency: job IDs never appear in innerText, only in
+        ``/jobs/view/`` hrefs or ``componentkey`` attributes.
         """
         return await self._page.evaluate(
             """() => {
-                const links = document.querySelectorAll('a[href*="/jobs/view/"]');
+                const cards = document.querySelectorAll(
+                    'a[href*="/jobs/view/"], [componentkey^="job-card-component-ref-"]'
+                );
                 const seen = new Set();
                 const ids = [];
-                for (const a of links) {
-                    const match = a.href.match(/\\/jobs\\/view\\/(\\d+)/);
+                for (const card of cards) {
+                    const source = card.href || card.getAttribute('componentkey') || '';
+                    const match = source.match(
+                        /(?:\\/jobs\\/view\\/|job-card-component-ref-)(\\d+)/
+                    );
                     if (match && !seen.has(match[1])) {
                         seen.add(match[1]);
                         ids.push(match[1]);
@@ -3317,6 +3322,31 @@ class LinkedInExtractor:
                 extracted = await self._extract_search_page(
                     url, section_name="search_results"
                 )
+                landed = urlparse(self._page.url)
+
+                # The redesigned route drops the location parameter, so
+                # retry once with the location folded into the keywords.
+                if (
+                    page_num == 0
+                    and location
+                    and landed.netloc == "www.linkedin.com"
+                    and landed.path.rstrip("/") == "/jobs/search-results"
+                ):
+                    base_url = self._build_job_search_url(
+                        f"{keywords} in {location}",
+                        location=location,
+                        date_posted=date_posted,
+                        job_type=job_type,
+                        experience_level=experience_level,
+                        work_type=work_type,
+                        easy_apply=easy_apply,
+                        sort_by=sort_by,
+                    )
+                    url = base_url
+                    extracted = await self._extract_search_page(
+                        url, section_name="search_results"
+                    )
+                    landed = urlparse(self._page.url)
 
                 if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
                     # Rate limit first: it is the more specific diagnosis, and a
@@ -3340,10 +3370,9 @@ class LinkedInExtractor:
                         if total_pages is not None:
                             logger.debug("LinkedIn reports %d total pages", total_pages)
 
-                # Extract job IDs from hrefs (page is already loaded)
-                if not self._page.url.startswith(
-                    "https://www.linkedin.com/jobs/search/"
-                ):
+                if landed.netloc != "www.linkedin.com" or landed.path.rstrip(
+                    "/"
+                ) not in {"/jobs/search", "/jobs/search-results"}:
                     logger.debug(
                         "Unexpected page URL after extraction: %s — "
                         "skipping job ID extraction",
