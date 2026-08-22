@@ -248,6 +248,40 @@ class TestRefusing:
             sys.stdin = stdin
             browser_module.set_headless(original)
 
+    def test_a_configuration_failure_is_logged_before_its_verdict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A frontend that receives ``failed`` owns the child only long enough to
+        # stop it. Anything logged after that verdict races the hard stop, so the
+        # order here is part of preserving the actual startup diagnosis.
+        from linkedin_mcp_server import daemon_owner
+
+        events: list[str] = []
+
+        class RecordingHandshake:
+            def __init__(self, _stream: object) -> None:
+                pass
+
+            def fail(self) -> None:
+                events.append("failed")
+
+        def reject() -> AppConfig:
+            raise ValueError("invalid handed-over configuration")
+
+        monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
+        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_read_config", reject)
+        monkeypatch.setattr(
+            daemon_owner.logger,
+            "exception",
+            lambda *_args, **_kwargs: events.append("logged"),
+        )
+
+        with pytest.raises(ValueError, match="invalid handed-over configuration"):
+            daemon_owner.main([])
+
+        assert events == ["logged", "failed"]
+
     def test_the_owner_refuses_to_start_without_a_configuration(self):
         # The owner reads its settings from standard input and must not fall
         # back to parsing its own command line: `load_config` would then see the
