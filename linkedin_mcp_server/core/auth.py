@@ -23,6 +23,10 @@ _LOGIN_TITLE_PATTERNS = (
     "linkedin login",
     "sign in | linkedin",
 )
+# English only, and knowingly so: these are the words the account picker uses,
+# and the words change with the interface language while nothing about the page
+# announces which one is in play. The structural check below carries the
+# locales this table does not, which is why it runs first.
 _AUTH_BARRIER_TEXT_MARKERS = (
     ("welcome back", "sign in using another account"),
     ("welcome back", "join now"),
@@ -46,6 +50,17 @@ async def is_logged_in(page: Page) -> bool:
 
         # Step 1: Fail-fast on auth blockers
         if _is_auth_blocker_url(current_url):
+            return False
+
+        # And on a page that is not LinkedIn's at all. The fallback below
+        # reads authenticated-only paths out of the address, and a captive
+        # portal carrying `?next=https://www.linkedin.com/feed/` satisfies it
+        # on its own text. That used to be caught by accident, the blocker
+        # check having claimed every `/login` whatever served it; it no
+        # longer does, because a relogin cannot fix the network in front of
+        # it, so the case is answered here instead.
+        if not is_linkedin_url(current_url):
+            logger.debug("Not logged in: %s is not LinkedIn", current_url)
             return False
 
         # Step 2: Selector check (PRIMARY)
@@ -114,6 +129,24 @@ async def _detect_auth_barrier(
             title = ""
         if any(pattern in title for pattern in _LOGIN_TITLE_PATTERNS):
             return f"login title: {title}"
+
+        # An id, so it says the same thing in every interface language, which
+        # the picker's own words do not. The rest of the codebase already reads
+        # this container as the picker; here it is the only signal that
+        # survives a locale change, because the URL of an in-place picker is
+        # the page that was asked for and its title is that page's title.
+        #
+        # Ahead of the quick check's exit, and not behind it, because the two
+        # signals it does read are exactly the two this page defeats. The
+        # quick check runs after every navigation, so a picker served in a
+        # locale the table below does not cover reached every scraping tool
+        # as page text. It costs one selector count, where the body read
+        # below is what the quick check exists to skip.
+        try:
+            if await page.locator(_REMEMBER_ME_CONTAINER_SELECTOR).count() > 0:
+                return f"account picker: {_REMEMBER_ME_CONTAINER_SELECTOR}"
+        except Exception:
+            logger.debug("Could not count remember-me containers", exc_info=True)
 
         if not include_body_text:
             return None
@@ -217,9 +250,36 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
         return False
 
 
+def is_linkedin_url(url: str) -> bool:
+    """Whether an address belongs to LinkedIn.
+
+    An address carrying no host is not judged: a relative one is resolved
+    against the page it came from, and `about:blank` names no site at all.
+    Both are LinkedIn's to serve as far as this can tell.
+
+    `hostname` and not `netloc`, which carries the userinfo as well as the
+    port: everything before the first colon of
+    `http://linkedin.com:pw@portal.example/` is `linkedin.com`, and the
+    destination is `portal.example`.
+    """
+    host = urlparse(url).hostname
+    return not host or host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
 def _is_auth_blocker_url(url: str) -> bool:
     """Return True only for real auth routes, not arbitrary slug substrings."""
-    path = urlparse(url).path or "/"
+    parsed = urlparse(url)
+
+    # The path alone says nothing about whose login this is. A captive portal
+    # or proxy interstitial answering at `/login` was read as LinkedIn asking
+    # for a sign-in, which closes a session that never expired and sends the
+    # user through a relogin that cannot fix the network in front of it. An
+    # address with no host at all is left to the path, having no claim to
+    # judge.
+    if not is_linkedin_url(url):
+        return False
+
+    path = parsed.path or "/"
 
     if path in _AUTH_BLOCKER_URL_PATTERNS:
         return True

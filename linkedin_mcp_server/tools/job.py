@@ -5,6 +5,7 @@ Uses innerText extraction for resilient job data capture.
 """
 
 import logging
+import time
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
@@ -112,6 +113,12 @@ def register_job_tools(
             numeric job ID strings usable with get_job_details), and optional references.
         """
         try:
+            # Before the browser, because FastMCP is already timing this call
+            # and the extractor's budget is a fraction of the same figure. A
+            # cold start that spends three of ten seconds left it planning
+            # against eight it no longer had, and the call was cancelled with
+            # every page it had gathered.
+            started = time.monotonic()
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="search_jobs"
             )
@@ -136,6 +143,8 @@ def register_job_tools(
                 work_type=work_type,
                 easy_apply=easy_apply,
                 sort_by=sort_by,
+                # What is left of the figure FastMCP cancels this call on.
+                tool_timeout=max(0.0, tool_timeout - (time.monotonic() - started)),
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")

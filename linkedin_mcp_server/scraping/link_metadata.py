@@ -123,7 +123,7 @@ _CONNECTIONS_FOLLOW_RE = re.compile(r"\bconnections follow this page\b", re.IGNO
 _COMPANY_PATH_RE = re.compile(r"^/company/([^/?#]+)")
 _PERSON_PATH_RE = re.compile(r"^/in/([^/?#]+)")
 _SCHOOL_PATH_RE = re.compile(r"^/school/([^/?#]+)")
-_JOB_PATH_RE = re.compile(r"^/jobs/view/(\d+)")
+JOB_PATH_RE = re.compile(r"^/jobs/view/(\d+)")
 _NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
 _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
@@ -288,7 +288,7 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
     if match := _SCHOOL_PATH_RE.match(path):
         return "school", f"/school/{match.group(1)}/"
 
-    if match := _JOB_PATH_RE.match(path):
+    if match := JOB_PATH_RE.match(path):
         return "job", f"/jobs/view/{match.group(1)}/"
 
     if match := _NEWSLETTER_PATH_RE.match(path):
