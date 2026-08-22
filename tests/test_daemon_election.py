@@ -554,6 +554,7 @@ class TestFailingFast:
         # And promptly: the point is recovery, not that it eventually happens.
         assert time.monotonic() - began < 10
 
+    @_POSIX_ONLY
     def test_a_child_that_never_reads_its_configuration_does_not_block_the_spawn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -575,19 +576,14 @@ class TestFailingFast:
         real = subprocess.Popen
 
         def deaf(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
-            # Ignores SIGTERM as well as never reading stdin. Both halves
-            # matter: the second is the defect, and the first is what makes the
-            # timing assertion below meaningful. A terminate-then-kill stop
-            # would spend its whole grace period here, *after* the caller's
-            # budget was already gone.
+            # Never reads its standard input, which is the defect, and takes
+            # SIGTERM at its default disposition, which is what makes the signal
+            # that ends it readable off the exit status below. An earlier
+            # version ignored SIGTERM so that a grace period would show up as
+            # elapsed time; that made the evidence a duration, and durations are
+            # the runner's to decide.
             child = real(
-                [
-                    command[0],
-                    "-c",
-                    "import signal, time\n"
-                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-                    "time.sleep(600)\n",
-                ],
+                [command[0], "-c", "import time\nwhile True:\n    time.sleep(600)\n"],
                 **kwargs,
             )
             sleepers.append(child)
@@ -595,49 +591,50 @@ class TestFailingFast:
 
         monkeypatch.setattr(election_module.subprocess, "Popen", deaf)
 
-        # The stop is timed where it happens rather than inferred from the
-        # total, for the reason spelled out at the assertion below.
-        stopping: list[float] = []
-        stop = election_module._stop_child
-
-        def timed(child: subprocess.Popen[bytes]) -> None:
-            at = time.monotonic()
-            try:
-                stop(child)
-            finally:
-                stopping.append(time.monotonic() - at)
-
-        monkeypatch.setattr(election_module, "_stop_child", timed)
-
         began = time.monotonic()
         attempt = election_module._start_owner(auth_root, profile, config, timeout=0.5)
         elapsed = time.monotonic() - began
 
         try:
-            # Stopping the child happens after the budget is spent, so a grace
-            # period there is time added to a deadline the caller was promised:
-            # terminate-first turned this half-second election into five and a
-            # half against a child that ignores SIGTERM.
+            # Killed outright, and this is the assertion that carries the
+            # test's weight. Stopping happens after the budget is spent, so a
+            # SIGTERM grace period there is time added to a deadline the caller
+            # was already promised: terminate-first turned this half-second
+            # election into five and a half against a child that declined the
+            # signal.
             #
-            # Timed around the stop itself rather than read off the total. The
-            # total also contains forking an interpreter and encoding a 10 MiB
-            # configuration, and neither is governed by this code: the whole
-            # call takes 0.55s here and every run measured is within 20ms of
-            # that, while a shared four-core runner under `-n auto --cov`
-            # stretched it to 4.1s and failed a 3s bound. There is no number
-            # that survives that and still catches a 5s grace period. The stop
-            # has one by construction — a kill the process cannot decline and a
-            # single bounded wait — so the bound is that wait plus slack, and a
-            # second wait or a grace period ahead of the kill breaks it.
-            assert stopping, "the child that could not serve was never stopped"
-            assert max(stopping) < election_module._STOP_CHILD_SECONDS + 1, (
-                f"stopping the child took {max(stopping):.1f}s, which is more "
-                f"than the one {election_module._STOP_CHILD_SECONDS}s wait it "
-                f"is allowed"
+            # Read off the signal rather than off a stopwatch, because the
+            # stopwatch was measuring the machine. The call takes 0.55s here and
+            # stayed within 20ms of that across every run of three full
+            # CI-shaped suites, while a shared four-core runner under
+            # `-n auto --cov` spent 4.1s on it and failed a 3s bound — against a
+            # defect that costs 5.5s. A threshold does fit in that 1.4s gap;
+            # what does not fit is any confidence that the gap is stable, since
+            # the total also contains forking an interpreter and encoding a
+            # 10 MiB configuration and neither is this code's to bound.
+            #
+            # The exit status has no such problem. `_stop_child` kills, so the
+            # child dies of SIGKILL; anything that asks first kills it with
+            # SIGTERM instead, whatever the grace period is set to, including
+            # none at all. That last case is the one no duration could ever have
+            # caught.
+            #
+            # It rests on the child above taking SIGTERM at its default
+            # disposition. Give that child a handler again and this goes quiet
+            # rather than red.
+            #
+            # What it does not see is delay that sends no signal — a bare sleep
+            # ahead of the kill, or a second wait after it. The total below is
+            # the only net under that, and it is a coarse one. The single-budget
+            # property itself is asserted next door, on the silent-child path,
+            # where no 10 MiB encode stands between the budget and the clock.
+            assert [child.returncode for child in sleepers] == [-signal.SIGKILL], (
+                "the child that could not serve was asked to leave rather than "
+                f"killed: {[child.returncode for child in sleepers]}"
             )
-            # And the whole election still ends. Loose on purpose: the bound
-            # above is what has teeth, and this one only says the budget did
-            # not become unbounded.
+            # And the election still ends. Loose on purpose: the assertion above
+            # is the one with teeth, and this one only says the budget did not
+            # become unbounded.
             assert elapsed < 15, f"the spawn took {elapsed:.1f}s of a 0.5s budget"
             # Reported as a failure, not as "somebody is starting". A child that
             # never took its configuration is not coming up, and on POSIX it
@@ -667,9 +664,13 @@ class TestFailingFast:
             # cross-thread close, and the writer holds only the stdin stream —
             # never a lock descriptor — so a broken pipe is enough to end it.
             #
-            # That argument is reasoned rather than measured on Windows, which
-            # is why it is asserted here: this test runs on the Windows CI job,
-            # where the reasoning would otherwise stand unchecked.
+            # That argument is reasoned rather than measured on Windows, and
+            # nothing checks it. The platform-behaviour job names five files and
+            # this is not one of them, and the skip above says why it could not
+            # be added as it stands: `_start_owner` takes the contending branch
+            # there and answers CONTENDED where this expects FAILED. Asserted
+            # anyway, because the argument is what the cleanup order rests on
+            # and it should at least be written down where the order is.
             #
             # What it does not do is prove the *ordering*. Moving the release
             # ahead of the stop leaves this green on POSIX, because `detach()`
@@ -689,9 +690,8 @@ class TestFailingFast:
             #
             # So the property meant here is that the writer ends *promptly* once
             # the child is gone, which is what the join states and the instant
-            # read only approximated. The bound stays well under the margins
-            # above, which are the assertions that carry this test's weight on
-            # POSIX and must not be masked.
+            # read only approximated. One second, and it masks nothing: both the
+            # exit status and `elapsed` are already fixed by the time it runs.
             #
             # It buys nothing beyond that. A writer blocked on a full pipe
             # survives the handshake release and ends only when the child dies,
@@ -711,6 +711,7 @@ class TestFailingFast:
                     sleeper.kill()
                     sleeper.wait(timeout=30)
 
+    @_POSIX_ONLY
     def test_a_child_that_says_nothing_does_not_keep_the_lock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -775,13 +776,13 @@ class TestFailingFast:
             # waits on the reader thread's I/O lock, so it blocked for as long
             # as the child stayed silent — 29.27s against a 30s sleeper.
             #
-            # Well above the 0.55s this measures, because the total includes
-            # forking an interpreter and a loaded runner has been seen to spend
-            # seconds on that (see the blocked-write case next door). The defect
-            # costs 29s, so the margin is free here — unlike next door, where
-            # the gap between runner noise and a 5s grace period left no number
-            # to pick and the stop had to be timed on its own.
-            assert elapsed < 15, f"the bounded wait took {elapsed:.1f}s"
+            # This one stays a duration where the blocked-write case next door
+            # gave up on being one, and the difference is the 10 MiB
+            # configuration that case has to encode inside the window it
+            # measures. Without it the budget is nearly all of the 0.55s
+            # measured here, so this is also the assertion that keeps
+            # `_spawn`'s one-budget-across-both-halves honest.
+            assert elapsed < 5, f"the bounded wait took {elapsed:.1f}s"
         finally:
             for child in started:
                 if child.poll() is None:  # pragma: no cover - the stop worked
