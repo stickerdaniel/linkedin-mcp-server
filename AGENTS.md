@@ -212,20 +212,18 @@ Docker MCP Gateway, which converts official-registry entries into its catalog.
 Neither is a reason to write the entry differently, and both are reasons not to
 promise that listing alone makes the server work everywhere.
 
-`buildSecrets` in `pkg/catalog/registry_to_catalog.go` keeps only a name and an
-environment variable, so an `isSecret` variable loses its optionality on the way
-in, and `pkg/gateway/mcpadd.go` then treats every converted secret as required.
-The three optional proxy credentials therefore read as missing for anyone who
-does not use a proxy, which is nearly everyone. Dropping `isSecret` would
-satisfy that check by declaring a password not to be one, and it would still not
-produce a working server, because of the next paragraph.
+An `isSecret` variable loses its optionality on the way in, because the catalog
+secret keeps only a name and an environment variable, and the add flow then
+treats every converted secret as required. The three optional proxy credentials
+therefore read as missing for anyone who does not use a proxy, which is nearly
+everyone.
 
-`pkg/gateway/docker_binds.go` allows host binds only under `/tmp`,
-`/private/tmp` and `/var/tmp`, and mounts anything it does allow read-only
-unless the exact source path is named in
-`MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS`. The session directory is a
-writable home-directory path, so it needs that variable set by the operator, and
-no field in `server.json` can ask for it.
+A writable host bind needs the operator to name its exact path in
+`MCP_GATEWAY_DOCKER_BIND_ALLOW_WRITABLE_PATHS`. By default the gateway allows
+binds only under the temporary directories and mounts those read-only, and a
+separate variable widens the read-only set without making anything writable. The
+session directory has to be written to, and no field in `server.json` can ask
+for that.
 
 ## Commit Messages
 

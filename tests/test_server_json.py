@@ -167,19 +167,18 @@ def test_dockerfile_labels_the_same_name(server: dict[str, Any]) -> None:
     """
     dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
     key = "io.modelcontextprotocol.server.name"
-    runtime_stage = dockerfile.rsplit("\nFROM ", 1)[-1]
+    # Instruction names are case-insensitive to Docker, so a lowercase final
+    # stage is still the one whose labels ship.
+    stages = re.split(r"(?im)^FROM\s", dockerfile)
+    runtime_stage = stages[-1]
 
-    # Every assignment of this key, wherever it sits. Three failures hide behind
-    # a substring search or a prefix match, and all three leave CI green while
-    # the image ships without the proof: `# LABEL ...` writes nothing at all, a
-    # second LABEL replaces the first, and one LABEL may carry several keys, so
-    # `LABEL maintainer="x" io.modelcontextprotocol.server.name="wrong"` sets it
-    # without starting with it. Docker takes the last write.
+    # Every assignment of this key, wherever it sits: a comment sets nothing, one
+    # LABEL may carry several keys, and Docker takes the last write.
     setters = [
         token.partition("=")[2]
         for line in _joined_instructions(runtime_stage)
-        if line.startswith("LABEL ")
-        for token in shlex.split(line.removeprefix("LABEL "))
+        if line.upper().startswith("LABEL ")
+        for token in shlex.split(line[len("LABEL ") :])
         if token.startswith(f"{key}=")
     ]
     assert setters == [server["name"]], (
@@ -239,24 +238,23 @@ def test_the_file_moves_with_the_bundle(
     assert server["version"] == manifest["version"]
 
 
-def test_every_package_type_is_one_the_release_job_can_version(
+def test_only_package_types_the_release_job_versions_are_declared(
     server: dict[str, Any],
 ) -> None:
-    """The release job refuses a type it does not know, and refuses it late.
+    """A third package type would stop the release after PyPI has published.
 
-    ``prepare-release`` runs after ``publish-pypi``, so a package type the
-    rewrite has no branch for stops the workflow with the distribution already
-    on PyPI, immutably, and with no tag, image, bundle or release to go with it.
-    Adding a package here is the moment to notice, which is this test.
+    ``prepare-release`` runs after ``publish-pypi``, so a type the rewrite has
+    no branch for ends the workflow with the distribution already immutable on
+    PyPI and with no tag, image, bundle or release beside it. Adding a package
+    here is the moment to notice, and the two the job knows are named below
+    rather than grepped out of it: searching the step for the string proves
+    only that the string is there, and a branch emptied to `pass` passed.
     """
-    step = _RELEASE_WORKFLOW.split("- name: Update server.json version", 1)[-1]
-    step = step.split("\n      - name: ", 1)[0]
-    for package in server["packages"]:
-        assert f'"{package["registryType"]}"' in step, (
-            f"{package['registryType']!r} has no branch in the release job's "
-            "server.json rewrite, which would fail the release after PyPI has "
-            "already accepted the distribution"
-        )
+    declared = {package["registryType"] for package in server["packages"]}
+    assert declared == {"pypi", "oci"}, (
+        f"{sorted(declared - {'pypi', 'oci'})} would reach a release job that "
+        "cannot version them; teach the `Update server.json version` step first"
+    )
 
 
 def test_the_mount_uses_a_flag_the_gateway_translates(server: dict[str, Any]) -> None:
@@ -275,9 +273,8 @@ def test_the_mount_uses_a_flag_the_gateway_translates(server: dict[str, Any]) ->
         for argument in _package(server, "oci").get("runtimeArguments", [])
         if "/home/pwuser/.linkedin-mcp" in argument.get("value", "")
     ]
-    # The loop this replaces judged whatever it found and said nothing when it
-    # found nothing, so deleting the mount outright passed. Such an entry starts
-    # logged out on every launch, which is what the mount is for.
+    # Exactly one, because an entry with no mount at all starts logged out on
+    # every launch, which is what the mount is for.
     assert len(mounts) == 1, (
         "the OCI package must mount the session directory exactly once, found "
         f"{len(mounts)}"

@@ -194,29 +194,18 @@ jobs:
           PY
           echo "✅ Updated server.json to version $VERSION"
 
-      # A rewrite that leaves a file unparseable is the failure the text checks
-      # below cannot see, so the real parsers go first. `--no-interpolate`
-      # because this asks whether the repository's file is well formed, not
-      # whether the runner happens to hold the operator's environment: a compose
-      # file referring to `${SESSION_DIR}` is valid and would fail without it.
-      - name: Verify the rewritten files still parse
-        run: |
-          set -e
-          python3 -c 'import json; json.load(open("manifest.json"))'
-          python3 -c 'import json; json.load(open("server.json"))'
-          docker compose -f docker-compose.yml config --no-interpolate --quiet
-          docker compose -f docker-compose.yml config --no-interpolate \
-            --format json > /tmp/compose.json
-          echo "✅ manifest.json, server.json and docker-compose.yml still parse"
-
-      # sed matches nothing and still exits 0, so a reformatted manifest.json
-      # would sail through the steps above and ship an MCPB whose own manifest
-      # still advertises the previous release. The tests notice on the next pull
-      # request; the artefacts are published before that. Ask every file that
-      # carries the version, here, once.
+      # The rewrites above are text edits that report success whatever they
+      # matched, so this asks every file that carries the version what it now
+      # says. Rendering the compose file is also what proves it still parses;
+      # a JSON load does the same for the other two, which is why there is one
+      # gate here and not two. `--no-interpolate` because this asks whether the
+      # repository's file is well formed, not whether the runner happens to
+      # hold the operator's environment.
       - name: Verify the versioned files agree
         run: |
           set -e
+          docker compose -f docker-compose.yml config --no-interpolate \
+            --format json > /tmp/compose.json
           python3 - "$VERSION" <<'PY'
           import json
           import sys
@@ -225,44 +214,54 @@ jobs:
 
           version = sys.argv[1]
           server = json.loads(Path("server.json").read_text(encoding="utf-8"))
+          manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
           project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
           name = project["project"]["name"]
+          image = next(
+              p["identifier"] for p in server["packages"]
+              if p["registryType"] == "oci"
+          )
+          repository = image.rpartition(":")[0].removeprefix("docker.io/")
+
+          def tag(reference: str) -> str:
+              return reference.rpartition(":")[2]
 
           # The resolved services rather than the file's text. A commented-out
           # image reference is matched by any regex over the source and blessed
           # a compose file whose live service named something else entirely.
+          # `docker.io/` is the same repository written out, and compose accepts
+          # both spellings.
           compose = json.loads(Path("/tmp/compose.json").read_text(encoding="utf-8"))
           images = [
               service["image"]
               for service in compose.get("services", {}).values()
-              if service.get("image", "").startswith("stickerdaniel/")
+              if service.get("image", "").removeprefix("docker.io/").startswith(
+                  repository
+              )
           ]
 
           # uv.lock carries the project's own version a second time, and `uv
           # lock --check` fails on a release built past a stale one.
           lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
-          locked = [
-              package["version"]
-              for package in lock.get("package", [])
-              if package.get("name") == name
-          ]
 
           found = {
               "pyproject.toml": [project["project"]["version"]],
-              "uv.lock": locked,
-              "manifest.json": [
-                  json.loads(Path("manifest.json").read_text(encoding="utf-8"))["version"]
+              "uv.lock": [
+                  package["version"]
+                  for package in lock.get("package", [])
+                  if package.get("name") == name
               ],
+              "manifest.json": [manifest["version"]],
               "server.json": [server["version"]],
               "server.json (pypi)": [
                   p["version"] for p in server["packages"]
                   if p["registryType"] == "pypi"
               ],
               "server.json (oci)": [
-                  p["identifier"].rpartition(":")[2] for p in server["packages"]
+                  tag(p["identifier"]) for p in server["packages"]
                   if p["registryType"] == "oci"
               ],
-              "docker-compose.yml": [i.rpartition(":")[2] for i in images],
+              "docker-compose.yml": [tag(image) for image in images],
           }
           for site, values in found.items():
               if not values:
