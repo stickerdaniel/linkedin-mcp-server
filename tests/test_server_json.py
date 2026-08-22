@@ -37,6 +37,7 @@ ownership error rather than a formatting one. Measured against
 from __future__ import annotations
 
 import json
+import shlex
 import re
 import tomllib
 from pathlib import Path
@@ -48,6 +49,9 @@ from packaging.version import Version
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SERVER_JSON = _REPO_ROOT / "server.json"
 _README = _REPO_ROOT / "README.md"
+_RELEASE_WORKFLOW = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+    encoding="utf-8"
+)
 _DOCKERFILE = _REPO_ROOT / "Dockerfile"
 
 # The GitHub namespace the registry grants after a GitHub login. It is derived
@@ -133,6 +137,28 @@ def test_readme_is_the_published_package_description(pyproject: dict[str, Any]) 
     assert pyproject["project"]["readme"] == "README.md"
 
 
+def _joined_instructions(stage: str) -> list[str]:
+    """Dockerfile instructions with continuations joined and comments dropped.
+
+    A ``LABEL`` may be wrapped across lines with a trailing backslash, and a
+    comment line may carry the same text without setting anything.
+    """
+    instructions: list[str] = []
+    pending = ""
+    for line in stage.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            pending += f"{stripped[:-1].strip()} "
+            continue
+        instructions.append(" ".join(f"{pending}{stripped}".split()))
+        pending = ""
+    if pending:
+        instructions.append(" ".join(pending.split()))
+    return instructions
+
+
 def test_dockerfile_labels_the_same_name(server: dict[str, Any]) -> None:
     """OCI ownership is proved by a label on the runtime stage.
 
@@ -143,19 +169,21 @@ def test_dockerfile_labels_the_same_name(server: dict[str, Any]) -> None:
     key = "io.modelcontextprotocol.server.name"
     runtime_stage = dockerfile.rsplit("\nFROM ", 1)[-1]
 
-    # Every instruction that sets this key, not merely the presence of a correct
-    # one. Two failures hide behind a substring search, and both leave CI green
-    # while the image ships without the proof: `# LABEL ...` writes nothing at
-    # all, and a second LABEL replaces the first, so the value the registry
-    # reads is whichever came last.
+    # Every assignment of this key, wherever it sits. Three failures hide behind
+    # a substring search or a prefix match, and all three leave CI green while
+    # the image ships without the proof: `# LABEL ...` writes nothing at all, a
+    # second LABEL replaces the first, and one LABEL may carry several keys, so
+    # `LABEL maintainer="x" io.modelcontextprotocol.server.name="wrong"` sets it
+    # without starting with it. Docker takes the last write.
     setters = [
-        line.strip()
-        for line in runtime_stage.splitlines()
-        if line.strip().startswith(f"LABEL {key}=")
+        token.partition("=")[2]
+        for line in _joined_instructions(runtime_stage)
+        if line.startswith("LABEL ")
+        for token in shlex.split(line.removeprefix("LABEL "))
+        if token.startswith(f"{key}=")
     ]
-    expected = f'LABEL {key}="{server["name"]}"'
-    assert setters == [expected], (
-        f"the final stage must set {key} exactly once, as {expected!r}, "
+    assert setters == [server["name"]], (
+        f"the final stage must set {key} exactly once, to {server['name']!r}, "
         f"as an instruction rather than a comment. Found: {setters!r}"
     )
 
@@ -211,6 +239,26 @@ def test_the_file_moves_with_the_bundle(
     assert server["version"] == manifest["version"]
 
 
+def test_every_package_type_is_one_the_release_job_can_version(
+    server: dict[str, Any],
+) -> None:
+    """The release job refuses a type it does not know, and refuses it late.
+
+    ``prepare-release`` runs after ``publish-pypi``, so a package type the
+    rewrite has no branch for stops the workflow with the distribution already
+    on PyPI, immutably, and with no tag, image, bundle or release to go with it.
+    Adding a package here is the moment to notice, which is this test.
+    """
+    step = _RELEASE_WORKFLOW.split("- name: Update server.json version", 1)[-1]
+    step = step.split("\n      - name: ", 1)[0]
+    for package in server["packages"]:
+        assert f'"{package["registryType"]}"' in step, (
+            f"{package['registryType']!r} has no branch in the release job's "
+            "server.json rewrite, which would fail the release after PyPI has "
+            "already accepted the distribution"
+        )
+
+
 def test_the_mount_uses_a_flag_the_gateway_translates(server: dict[str, Any]) -> None:
     """Docker MCP Gateway reads this entry, and it knows two spellings.
 
@@ -222,14 +270,22 @@ def test_the_mount_uses_a_flag_the_gateway_translates(server: dict[str, Any]) ->
     logged out on every launch.
     """
     translated = {"-v", "--mount"}
-    for package in server["packages"]:
-        for argument in package.get("runtimeArguments", []):
-            if "/home/pwuser/.linkedin-mcp" not in argument.get("value", ""):
-                continue
-            assert argument["name"] in translated, (
-                f"{argument['name']!r} is a valid Docker flag that the gateway "
-                f"does not translate; use one of {sorted(translated)}"
-            )
+    mounts = [
+        argument
+        for argument in _package(server, "oci").get("runtimeArguments", [])
+        if "/home/pwuser/.linkedin-mcp" in argument.get("value", "")
+    ]
+    # The loop this replaces judged whatever it found and said nothing when it
+    # found nothing, so deleting the mount outright passed. Such an entry starts
+    # logged out on every launch, which is what the mount is for.
+    assert len(mounts) == 1, (
+        "the OCI package must mount the session directory exactly once, found "
+        f"{len(mounts)}"
+    )
+    assert mounts[0]["name"] in translated, (
+        f"{mounts[0]['name']!r} is a valid Docker flag that the gateway "
+        f"does not translate; use one of {sorted(translated)}"
+    )
 
 
 def test_no_variable_defaults_to_a_path_only_a_shell_could_read(
@@ -248,9 +304,19 @@ def test_no_variable_defaults_to_a_path_only_a_shell_could_read(
         for argument in package.get("runtimeArguments", []):
             for name, variable in argument.get("variables", {}).items():
                 default = variable.get("default")
+                if variable.get("format") == "filepath" and variable.get("isRequired"):
+                    # Nothing written here is a path on the machine that will
+                    # run it, so a required one has no honest default and the
+                    # client has to ask. Rejecting only `~` let `$HOME` through,
+                    # which Docker refuses in exactly the same way.
+                    assert default is None, (
+                        f"{name} is a required host path; offering {default!r} "
+                        "puts a value there that cannot be right"
+                    )
+                    continue
                 if not isinstance(default, str):
                     continue
-                assert not default.startswith("~"), (
+                assert not default.startswith("~") and "$" not in default, (
                     f"{name} offers {default!r}, which only a shell expands"
                 )
 
