@@ -645,27 +645,35 @@ class TestFailingFast:
             # Delay that sends no signal is the other way to spend the caller's
             # deadline, and the exit status says nothing about it. A duration
             # still has to answer for that, so this one is taken around the stop
-            # alone, where it is affordable: a kill and one wait cost 2 to 10ms
-            # here, so 1.5s is a hundred-fold margin and nothing an ordinary
-            # runner does can reach it.
+            # alone, where it is affordable. A kill and one wait cost 2 to 10ms
+            # here, and 5.5ms was the worst of 200 samples taken against 48
+            # busy processes on 24 cores, so 1.5s is a measured margin of about
+            # 150 and not a limit anything guarantees: `Popen.wait` polls with
+            # sleeps capped at 50ms and cannot bound what the scheduler or a
+            # suspended VM does to the process holding it. It buys a wide gap,
+            # not an impossibility.
             #
             # 1.5 rather than `_STOP_CHILD_SECONDS + something`, which was the
             # first attempt and was wrong: an expectation derived from the
             # constant under test moves with it, and raising that constant to 5
             # then let a five-second grace period through. A literal cannot do
-            # that. It sits under the one 2s wait the stop is allowed, so a
-            # second wait breaks it too.
+            # that.
+            #
+            # Per call, not in total. Two stops of a few milliseconds each pass
+            # this, which is harmless — the second kill finds a dead child —
+            # but it is not the assertion that would notice them.
             assert stopping, "the child that could not serve was never stopped"
             assert max(stopping) < 1.5, (
                 f"stopping the child took {max(stopping):.1f}s, and a kill it "
                 f"cannot decline should cost nothing like that"
             )
 
-            # What neither reaches is a stall in `_spawn` itself, between the
-            # budget expiring and the stop being called: no signal, and outside
-            # the window above. Measured, a 13s stall there passes. The total is
-            # the only net under that and it is a coarse one, kept loose because
-            # a tight one is what flaked.
+            # What neither reaches is a stall in `_spawn` itself, anywhere
+            # outside that one call: between the budget expiring and the stop,
+            # or after it in the handshake release and the reap. No signal, and
+            # outside the window above. Measured on both sides, 13s of it
+            # passes. The total is the only net under that and it is a coarse
+            # one, kept loose because a tight one is what flaked.
             assert elapsed < 15, f"the spawn took {elapsed:.1f}s of a 0.5s budget"
             # Reported as a failure, not as "somebody is starting". A child that
             # never took its configuration is not coming up, and on POSIX it
