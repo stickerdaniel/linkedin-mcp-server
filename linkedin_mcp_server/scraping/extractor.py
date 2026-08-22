@@ -51,6 +51,11 @@ from linkedin_mcp_server.scraping.link_metadata import (
 )
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from linkedin_mcp_server.core.humanize import (
+    human_pause,
+    human_type,
+    humanize_after_nav,
+)
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -901,6 +906,9 @@ class LinkedInExtractor:
             try:
                 await self._page.goto(url, wait_until=wait_until, timeout=30000)
                 await stabilize_navigation(f"goto {url}", logger)
+                # A little cursor entropy after each load: a frozen mouse across
+                # navigations is a cheap bot tell. Best-effort, never fatal.
+                await humanize_after_nav(self._page)
                 await record_page_trace(
                     self._page,
                     "extractor-after-goto",
@@ -1625,7 +1633,7 @@ class LinkedInExtractor:
                         break
                     await target.scroll_into_view_if_needed(timeout=2000)
                     await target.click(timeout=2000)
-                    await asyncio.sleep(1.0)
+                    await human_pause(1.0)
                 except PlaywrightTimeoutError:
                     logger.debug("Show more click timed out after %d clicks", i)
                     break
@@ -1785,7 +1793,7 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+                    await human_pause(_NAV_DELAY)
 
                 url = base_url + suffix
                 try:
@@ -2460,7 +2468,7 @@ class LinkedInExtractor:
                 continue
 
             if not first_show_all:
-                await asyncio.sleep(_NAV_DELAY)
+                await human_pause(_NAV_DELAY)
             first_show_all = False
 
             try:
@@ -2660,7 +2668,7 @@ class LinkedInExtractor:
             {"candidates": normalized_candidates},
         )
         if selected:
-            await asyncio.sleep(0.75)
+            await human_pause(0.75)
         return bool(selected)
 
     async def _wait_for_message_composer(self) -> bool:
@@ -2784,7 +2792,7 @@ class LinkedInExtractor:
             return
         try:
             await self._click_first(_MESSAGING_CLOSE_SELECTOR, timeout=1500)
-            await asyncio.sleep(0.5)
+            await human_pause(0.5)
         except Exception:
             logger.debug("Could not dismiss LinkedIn messaging UI", exc_info=True)
 
@@ -2945,7 +2953,7 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+                    await human_pause(_NAV_DELAY)
 
                 url = base_url + suffix
                 try:
@@ -3305,7 +3313,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await human_pause(_NAV_DELAY)
 
             url = (
                 base_url
@@ -3536,7 +3544,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await human_pause(_NAV_DELAY)
 
             url = (
                 base_url
@@ -4272,8 +4280,10 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         await asyncio.sleep(0.1)
-        await self._page.keyboard.type(message, delay=15)
-        await asyncio.sleep(0.3)
+        # Human-like typing: jittered per-key timing with occasional
+        # typo-then-backspace, instead of a uniform 15ms cadence.
+        await human_type(self._page, message)
+        await human_pause(0.3)
 
         # patchright actionability also blocks send_button.click(). Use JS click
         # on any visible, enabled send button; fall back to Enter key which
