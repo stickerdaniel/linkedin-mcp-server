@@ -3448,12 +3448,68 @@ class TestSearchJobs:
         assert error["error_type"] == "filters_dropped"
         assert "location" in error["error_message"]
 
-    async def test_a_search_stripped_of_its_filters_stops_the_loop(self, mock_page):
+    async def test_a_dropped_filter_survives_whatever_stops_the_loop(self, mock_page):
+        """The warning describes the results, and the results are returned.
+
+        One slot holds both, so a rate limit on page two used to replace the
+        note saying page one had come back unfiltered. Those results are
+        still in the response, and a caller reading only the stop reason acts
+        on Berlin jobs that are not from Berlin.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        pages = iter(
+            [
+                extracted("python jobs"),
+                extracted(_RATE_LIMITED_MSG),
+            ]
+        )
+        urls = iter(
+            [
+                "https://www.linkedin.com/jobs/search/?keywords=python",
+                "https://www.linkedin.com/jobs/search/?keywords=python&start=1",
+            ]
+        )
+
+        async def land(url, *args, **kwargs):
+            mock_page.url = next(urls)
+            return next(pages)
+
+        with (
+            patch.object(extractor, "_extract_search_page", side_effect=land),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["901"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_jobs(
+                "python", location="Berlin", max_pages=2
+            )
+
+        assert result["job_ids"] == ["901"]
+        message = result["section_errors"]["search_results"]["error_message"]
+        assert "location" in message
+        assert _RATE_LIMITED_MSG in message
+
+    async def test_a_search_answered_for_something_else_stops_the_loop(self, mock_page):
         """The route can be right and the offset right while the query is gone.
 
         A redirect to the bare search page keeps host, path and `start=0`, so
         the first navigation passes every check and generic recommendations
-        come back as a search for Python in Berlin.
+        come back as a search for Python in Berlin. The keywords are compared
+        by value and not by presence, because the same shape covers LinkedIn
+        answering a different question rather than none.
         """
         extractor = LinkedInExtractor(mock_page)
 
@@ -3488,10 +3544,11 @@ class TestSearchJobs:
 
         assert result["job_ids"] == []
         assert mock_ids.await_count == 0
-        assert (
-            result["section_errors"]["search_results"]["error_type"]
-            == "pagination_stopped"
-        )
+        error = result["section_errors"]["search_results"]
+        assert error["error_type"] == "search_replaced"
+        # Both sides named, so a LinkedIn re-encoding rather than a different
+        # search is diagnosable from the response itself.
+        assert "python" in error["error_message"]
 
     async def test_a_pane_job_is_not_a_search_result(self, mock_page):
         """The ids come from the rail and the references from the whole page.
@@ -4089,8 +4146,12 @@ class TestSearchJobs:
             patch.object(
                 extractor,
                 "_extract_search_page",
-                new_callable=AsyncMock,
-                return_value=extracted("No matching jobs found"),
+                # Navigating, or the page keeps the fixture's `keywords=python`
+                # while the search asks for something else, and the check that
+                # the answer is about the question stops the loop.
+                side_effect=self._navigating(
+                    mock_page, [extracted("No matching jobs found")]
+                ),
             ),
             patch.object(
                 extractor,

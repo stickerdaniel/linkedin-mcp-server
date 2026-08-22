@@ -186,6 +186,28 @@ async def test_same_runtime_clicks_remember_me_during_feed_validation(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_feed_answered_off_linkedin_is_not_a_session():
+    """A feed that loaded from somewhere else proves nothing about the account.
+
+    The barrier check stopped claiming a foreign `/login`, because a relogin
+    cannot fix the network in front of it. Left to it alone, a captive portal
+    loading cleanly counts as a working session here, and the profile is
+    marked authenticated without LinkedIn having been reached at all.
+    """
+    browser = _make_mock_browser()
+    browser.page.url = "https://portal.example/login"
+
+    with patch(
+        "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+        new_callable=AsyncMock,
+        return_value=None,
+    ) as barrier:
+        assert await _feed_auth_succeeds(browser) is False
+
+    barrier.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_feed_auth_retries_feed_after_remember_me_error_recovery():
     browser = _make_mock_browser()
     browser.page.goto = AsyncMock(
