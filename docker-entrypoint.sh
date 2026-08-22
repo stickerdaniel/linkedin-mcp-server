@@ -64,19 +64,41 @@ fi
 # out rather than being moved into the foreground.
 #
 # Docker always supplies a readable descriptor 0, but a launcher need not, and
-# what it hands over then travels straight into Python. A closed one arrives as
-# EBADF on every read; an open directory kills the interpreter outright, before
+# what it hands over then travels straight into Python. Three shapes are not
+# input: a closed descriptor and a write-only one both arrive as EBADF on the
+# first read, and an open directory kills the interpreter outright, before
 # argument parsing, so `--transport streamable-http` and the one-shot commands
-# die on an input none of them reads. The bare `&` used to hide both behind its
-# /dev/null, which is the one thing it was good for.
+# die on an input none of them reads. The bare `&` used to hide all three behind
+# its /dev/null, which is the one thing it was good for.
 #
-# Both are cheap to recognise: duplicating the descriptor fails when it is
-# closed, and /dev/fd names what it points at when it is not. Ask in a subshell,
-# where a failed duplication costs nothing, and hand the unusable cases the
-# /dev/null they would have had. Without /proc there is no /dev/fd and the
-# directory test cannot answer, which leaves the descriptor as it was: the same
-# state every Docker container is in anyway.
-( exec 3<&0 && [ ! -d /dev/fd/3 ] ) 2>/dev/null || exec 0</dev/null
+# Each is cheap to recognise. Duplicating the descriptor fails when it is
+# closed, which is the one question /proc cannot answer, since a closed
+# descriptor and an absent /proc look alike from the outside. /dev/fd names what
+# an open one points at. /proc/self/fdinfo gives its open flags, whose low two
+# bits are the access mode: 1 is write-only, and `-r` cannot stand in for that,
+# because it asks about permissions on the target and answers yes for a
+# write-only /dev/null. Where /proc cannot answer, the descriptor is left as it
+# was: the state every Docker container is in anyway.
+#
+# Each test says so on its own rather than leaning on `set -e`. Inside a `&&` or
+# `||` list errexit is suspended, so a failing `exec` there stops aborting and
+# the checks after it read a descriptor that was never opened, which is how an
+# earlier shape of this guard came to pass the closed case straight through.
+stdin_is_unusable() {
+    (exec 3<&0) 2>/dev/null || return 0
+    [ ! -d /dev/fd/0 ] || return 0
+
+    local flags
+    flags=$(sed -n 's/^flags:[[:space:]]*//p' /proc/self/fdinfo/0 2>/dev/null) ||
+        return 1
+    [ -n "$flags" ] || return 1
+    (( (8#$flags & 3) == 1 ))
+}
+
+if stdin_is_unusable; then
+    exec 0</dev/null
+fi
+
 "$@" <&0 &
 server_pid=$!
 
