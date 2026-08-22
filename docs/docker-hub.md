@@ -51,13 +51,15 @@ If an older rootful Docker run left that host directory owned by root, repair it
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
-        "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-v", "/absolute/path/to/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "stickerdaniel/linkedin-mcp-server:latest"
       ]
     }
   }
 }
 ```
+
+Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount.
 
 > **Note:** Plain `--login` does not publish a viewer. Use `--login --login-viewer` only for the one-shot login container, with port 6080 published to loopback.
 >
@@ -116,7 +118,7 @@ If an older rootful Docker run left that host directory owned by root, repair it
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-v", "/absolute/path/to/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "-e", "TIMEOUT=10000",
         "-e", "TOOL_TIMEOUT=300",
         "stickerdaniel/linkedin-mcp-server"

@@ -23,6 +23,7 @@ not switched off, and that the constraint files still agree with each other.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -566,6 +567,39 @@ def test_the_documented_bind_mount_is_created_by_the_host_user() -> None:
         assert 'sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp' in document
 
 
+def test_no_documented_argument_array_needs_a_shell() -> None:
+    """A client executes these, so nothing in them may need expanding.
+
+    The mounts in the surrounding shell commands are written with ``~`` on
+    purpose and a shell expands them. The arrays inside an MCP client's JSON
+    config are handed to ``docker`` directly, and a literal ``~`` is neither an
+    absolute path nor a legal volume name, so Docker exits 125 before Tini, the
+    supervisor or Python ever start. The stdio transport this container exists
+    to serve is then unreachable through the configuration the docs give for it.
+    """
+    blocks = [
+        block
+        for document in (_README, _DOCKER_GUIDE)
+        for block in re.findall(r"```json\n(.*?)```", document, re.DOTALL)
+    ]
+    assert blocks, "no JSON configuration blocks found to check"
+
+    checked = 0
+    for block in blocks:
+        for server in json.loads(block).get("mcpServers", {}).values():
+            for argument in server.get("args", []):
+                checked += 1
+                assert not argument.startswith("~"), (
+                    f"{argument!r} is handed to {server.get('command')!r} "
+                    "without a shell, so nothing expands the tilde"
+                )
+                assert "$" not in argument, (
+                    f"{argument!r} is handed to {server.get('command')!r} "
+                    "without a shell, so nothing expands the variable"
+                )
+    assert checked, "no arguments found to check"
+
+
 def test_the_supervisor_stops_python_before_the_display() -> None:
     """Browser cleanup must retain Xvfb until Python has exited."""
     assert 'ENTRYPOINT ["tini", "-e", "143"' in _DOCKERFILE
@@ -607,6 +641,48 @@ def test_a_host_prefixed_display_is_refused_before_xvfb_starts() -> None:
     assert "Xvfb" not in process.stderr
 
 
+# A display that comes up and stays up, for the tests whose subject is the
+# descriptor rather than the display.
+_FAKE_XVFB = """\
+#!/usr/bin/env python3
+import pathlib
+import socket
+import sys
+import time
+
+number = sys.argv[1].removeprefix(":").split(".", 1)[0]
+path = pathlib.Path(f"/tmp/.X11-unix/X{number}")
+# Real Xvfb 21.1.7 publishes the lock before it creates the socket. Measured
+# by inotify inside the image; a fake that reverses it would let a readiness
+# check that accepts the lock pass here.
+pathlib.Path(f"/tmp/.X{number}-lock").write_text("owned")
+server = socket.socket(socket.AF_UNIX)
+server.bind(str(path))
+server.listen()
+time.sleep(5)
+"""
+
+
+def _a_free_display(base: int) -> tuple[int, Path, Path]:
+    """Pick a display number whose socket and lock nobody else owns.
+
+    These tests run the real entrypoint, which begins by removing both names.
+    Deriving the number from the PID alone keeps two tests in one process apart
+    and reserves nothing, so a concurrent run or a real X server inside the
+    range would have its socket deleted out from under it and its clients left
+    with nowhere to connect. Scan instead, and take a number that is free.
+    """
+    start = base + (os.getpid() % 10_000)
+    for offset in range(100):
+        number = base + ((start - base + offset) % 10_000)
+        socket_path = Path(f"/tmp/.X11-unix/X{number}")
+        lock_path = Path(f"/tmp/.X{number}-lock")
+        if not socket_path.exists() and not lock_path.exists():
+            socket_path.parent.mkdir(parents=True, exist_ok=True)
+            return number, socket_path, lock_path
+    pytest.fail(f"no free X display in {base}..{base + 99}")
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
 def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
     tmp_path: Path,
@@ -631,22 +707,22 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
     if major < 5:
         pytest.skip("wait -n -p requires the Bash 5 shipped by the image")
 
-    display_number = 10_000 + (os.getpid() % 10_000)
+    display_number, socket_path, lock_path = _a_free_display(10_000)
     display = f":{display_number}.0"
-    socket_path = Path(f"/tmp/.X11-unix/X{display_number}")
-    lock_path = Path(f"/tmp/.X{display_number}-lock")
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    socket_path.unlink(missing_ok=True)
-    lock_path.unlink(missing_ok=True)
     stale_socket = socket.socket(socket.AF_UNIX)
     stale_socket.bind(str(socket_path))
     stale_socket.close()
     lock_path.write_text("stale", encoding="utf-8")
 
+    # Records that it got past the stale names, which is the half of this the
+    # supervisor's exit status cannot show: a stale socket satisfies the
+    # readiness loop on its own, so dropping the cleanup produces the same
+    # non-zero exit and the same TERM as a display that came up and then died.
+    started_marker = tmp_path / "xvfb-started"
     fake_xvfb = tmp_path / "Xvfb"
     fake_xvfb.write_text(
         textwrap.dedent(
-            """\
+            f"""\
             #!/usr/bin/env python3
             import pathlib
             import socket
@@ -654,15 +730,20 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
             import time
 
             number = sys.argv[1].removeprefix(":").split(".", 1)[0]
-            path = pathlib.Path(f"/tmp/.X11-unix/X{number}")
-            lock = pathlib.Path(f"/tmp/.X{number}-lock")
+            path = pathlib.Path(f"/tmp/.X11-unix/X{{number}}")
+            lock = pathlib.Path(f"/tmp/.X{{number}}-lock")
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists() or lock.exists():
                 raise SystemExit(91)
+            lock.write_text("owned", encoding="utf-8")
+            # The gap real Xvfb leaves between the two names, widened so that a
+            # readiness check accepting the lock would start the server against
+            # a socket that does not exist yet.
+            time.sleep(0.5)
             server = socket.socket(socket.AF_UNIX)
             server.bind(str(path))
             server.listen()
-            lock.write_text("owned", encoding="utf-8")
+            pathlib.Path({str(started_marker)!r}).write_text("started")
             time.sleep(0.3)
             server.close()
             path.unlink(missing_ok=True)
@@ -674,6 +755,7 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
     fake_xvfb.chmod(0o755)
 
     term_marker = tmp_path / "server-received-term"
+    display_marker = tmp_path / "server-saw-display"
     fake_server = tmp_path / "server"
     fake_server.write_text(
         textwrap.dedent(
@@ -682,9 +764,27 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
             import os
             import pathlib
             import signal
+            import socket
             import time
 
             marker = pathlib.Path(os.environ["SERVER_TERM_MARKER"])
+
+            # The display is what the supervisor waited for, so a server that
+            # never touches it cannot tell readiness from a guess. Chromium
+            # connects here; this connects and nothing else.
+            display = os.environ["DISPLAY"].removeprefix(":").split(".", 1)[0]
+            probe = socket.socket(socket.AF_UNIX)
+            try:
+                probe.connect(f"/tmp/.X11-unix/X{display}")
+            except OSError as error:
+                pathlib.Path(os.environ["SERVER_DISPLAY_MARKER"]).write_text(
+                    f"unreachable: {error.errno}", encoding="utf-8"
+                )
+                raise SystemExit(90) from error
+            probe.close()
+            pathlib.Path(os.environ["SERVER_DISPLAY_MARKER"]).write_text(
+                "reachable", encoding="utf-8"
+            )
 
             def stop(*_args):
                 marker.write_text("term", encoding="utf-8")
@@ -704,6 +804,7 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
         "DISPLAY": display,
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
         "SERVER_TERM_MARKER": str(term_marker),
+        "SERVER_DISPLAY_MARKER": str(display_marker),
     }
     process = subprocess.Popen(
         [bash, str(_ENTRYPOINT_PATH), str(fake_server)],
@@ -727,5 +828,356 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
         socket_path.unlink(missing_ok=True)
         lock_path.unlink(missing_ok=True)
 
+    assert display_marker.read_text(encoding="utf-8") == "reachable", (
+        "the server was started before the display could accept a connection, "
+        "so the readiness check passed on something other than the socket. "
+        f"marker={display_marker.read_text(encoding='utf-8')!r} stdout={stdout!r}"
+    )
+    assert started_marker.exists(), (
+        "the stale socket and lock were not removed, so the display never came "
+        f"up and the container is back in its restart loop. stdout={stdout!r} "
+        f"stderr={stderr!r}"
+    )
     assert process.returncode != 0, (stdout, stderr)
     assert term_marker.read_text(encoding="utf-8") == "term"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
+def test_the_supervisor_hands_the_server_the_containers_stdin(tmp_path: Path) -> None:
+    """The stdio transport is the whole product over ``docker run -i``.
+
+    A shell assigns ``/dev/null`` to the standard input of an asynchronous list
+    in the absence of an explicit redirection, so ``"$@" &`` left the server
+    reading a descriptor the container's stdin never reached. Measured against
+    the published 4.23.0 image, a full MCP handshake produced nothing at all:
+    the server started, announced the transport, read EOF from ``/dev/null`` at
+    once and exited 0. Nothing failed, so nothing said so.
+
+    A string check would not have caught it and did not: the supervisor already
+    had tests for the display, for signal order and for child liveness, and all
+    of them passed for the two releases this shipped in. So this runs the real
+    script with a fake server that reports what it can read, which is the only
+    form of the question that has an answer.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise the Linux image entrypoint")
+    major = int(
+        subprocess.check_output(
+            [bash, "-c", 'printf "%s" "${BASH_VERSINFO[0]}"'], text=True
+        )
+    )
+    if major < 5:
+        pytest.skip("wait -n -p requires the Bash 5 shipped by the image")
+
+    display_number, socket_path, lock_path = _a_free_display(20_000)
+
+    fake_xvfb = tmp_path / "Xvfb"
+    fake_xvfb.write_text(_FAKE_XVFB, encoding="utf-8")
+    fake_xvfb.chmod(0o755)
+
+    # Echoes one line back and exits, so a server that is handed /dev/null ends
+    # the run just as fast as one that is handed the pipe. The difference is
+    # what comes out, never how long the test takes.
+    fake_server = tmp_path / "server"
+    fake_server.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import sys
+
+            line = sys.stdin.readline()
+            sys.stdout.write(f"server-read:{line.strip()}\\n")
+            sys.stdout.flush()
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_server.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "DISPLAY": f":{display_number}",
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+    }
+    process = subprocess.Popen(
+        [bash, str(_ENTRYPOINT_PATH), str(fake_server)],
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        try:
+            stdout, stderr = process.communicate("a-request\n", timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+    finally:
+        socket_path.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
+
+    assert "server-read:a-request" in stdout, (
+        "the server was started without the container's stdin, so the stdio "
+        f"transport can never receive a request. stdout={stdout!r} "
+        f"stderr={stderr!r}"
+    )
+    # The reachable descriptor is half the contract. Without this the run also
+    # passes when the supervisor dies on `wait -n -p` right after the fake
+    # server has already echoed, leaving fake Xvfb alive behind a green test.
+    assert process.returncode == 0, (stdout, stderr)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
+@pytest.mark.parametrize("kind", ["read_write_file", "socket", "read_write_null"])
+def test_a_readable_descriptor_is_handed_over_untouched(
+    tmp_path: Path, kind: str
+) -> None:
+    """The guard's false-positive direction is the one that costs the product.
+
+    Condemning a descriptor the server could have read replaces it with
+    ``/dev/null``, and the server then reads EOF and answers nothing: the exact
+    bug this change exists to remove, restored silently and with a zero exit
+    status. Every other test here hands the guard something bad and checks that
+    it notices. This hands it something good.
+
+    Access mode 2 is the gap those tests leave. The pipe behind
+    ``subprocess.PIPE`` is mode 0, so a guard rewritten to reject every non-zero
+    mode passed the entire file while turning away terminals, sockets and the
+    read-write ``/dev/null`` that plain ``docker run`` supplies.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise the Linux image entrypoint")
+    major = int(
+        subprocess.check_output(
+            [bash, "-c", 'printf "%s" "${BASH_VERSINFO[0]}"'], text=True
+        )
+    )
+    if major < 5:
+        pytest.skip("wait -n -p requires the Bash 5 shipped by the image")
+    if not Path("/proc/self/fdinfo").is_dir():
+        pytest.skip("the guard reads the access mode through /proc")
+
+    display_number, socket_path, lock_path = _a_free_display(40_000)
+    fake_xvfb = tmp_path / "Xvfb"
+    fake_xvfb.write_text(_FAKE_XVFB, encoding="utf-8")
+    fake_xvfb.chmod(0o755)
+
+    seen = tmp_path / "seen"
+    fake_server = tmp_path / "server"
+    fake_server.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import fcntl
+            import os
+            import pathlib
+            import sys
+
+            mode = fcntl.fcntl(0, fcntl.F_GETFL) & os.O_ACCMODE
+            target = os.readlink("/proc/self/fd/0")
+            first = sys.stdin.readline().strip()
+            pathlib.Path({str(seen)!r}).write_text(
+                f"{{target}} mode={{mode}} read={{first}}"
+            )
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_server.chmod(0o755)
+
+    peer: socket.socket | None = None
+    if kind == "read_write_file":
+        source = tmp_path / "request"
+        source.write_text("a-request\n", encoding="utf-8")
+        handed = os.open(str(source), os.O_RDWR)
+        expected_target, expected_read = str(source), "a-request"
+    elif kind == "socket":
+        near, peer = socket.socketpair()
+        peer.sendall(b"a-request\n")
+        handed = os.dup(near.fileno())
+        near.close()
+        expected_target, expected_read = None, "a-request"
+    else:
+        handed = os.open(os.devnull, os.O_RDWR)
+        expected_target, expected_read = os.devnull, ""
+
+    env = {
+        **os.environ,
+        "DISPLAY": f":{display_number}",
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+    }
+    try:
+        process = subprocess.Popen(
+            [bash, str(_ENTRYPOINT_PATH), str(fake_server)],
+            env=env,
+            stdin=handed,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+    finally:
+        os.close(handed)
+        if peer is not None:
+            peer.close()
+        socket_path.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
+
+    assert seen.exists(), (stdout, stderr)
+    answer = seen.read_text(encoding="utf-8")
+    # Mode 2 in the answer is the whole point: a replaced descriptor reads back
+    # as `/dev/null mode=0`, which is indistinguishable from the original by
+    # name alone in the third case.
+    assert f"mode={os.O_RDWR} read={expected_read}" in answer, (
+        f"the server was handed {answer!r} rather than the descriptor it was "
+        f"started with. stderr={stderr!r}"
+    )
+    if expected_target is not None:
+        assert answer.startswith(f"{expected_target} "), answer
+    assert process.returncode == 0, (stdout, stderr)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
+@pytest.mark.parametrize(
+    "kind", ["closed", "directory", "write_only", "no_access_mode", "path_only"]
+)
+def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) -> None:
+    """Spelling the redirection out is what stops hiding a bad descriptor.
+
+    The bare ``&`` this replaces gave every mode ``/dev/null`` whether it wanted
+    one or not, so nothing here noticed what a launcher may actually pass.
+    Handing it through unexamined is worse than either. A closed descriptor, a
+    write-only one, one opened in Linux's fourth access mode and an ``O_PATH``
+    handle all reach Python as ``EBADF`` on the first read, and an open
+    directory ends the interpreter before argument parsing, taking down HTTP and
+    the one-shot commands over an input none of them reads.
+
+    The closed case does not arrive this way in the shipped image, because Tini
+    refuses it first: it calls ``tcsetpgrp`` on descriptor 0 before executing
+    anything and treats ``EBADF`` as fatal. This runs the script directly, which
+    is how the case reaches the guard at all, and the guard keeps it for the
+    overridden-entrypoint path.
+
+    Asserting that the server merely started is not enough and was tried: with
+    the descriptor passed through untouched it starts perfectly well, and only
+    the first read says otherwise. Neither is the name it points at enough, and
+    that was tried too: ``/dev/null`` opened for writing reads back as
+    ``/dev/null``, so a fallback of ``0>/dev/null`` satisfied every case here
+    while handing the server the same unreadable descriptor it was rescued
+    from. The access mode is the part that cannot be faked.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise the Linux image entrypoint")
+    major = int(
+        subprocess.check_output(
+            [bash, "-c", 'printf "%s" "${BASH_VERSINFO[0]}"'], text=True
+        )
+    )
+    if major < 5:
+        pytest.skip("wait -n -p requires the Bash 5 shipped by the image")
+    if not Path("/proc/self/fdinfo").is_dir():
+        pytest.skip("the guard recognises these through /dev/fd and /proc")
+
+    display_number, socket_path, lock_path = _a_free_display(30_000)
+
+    fake_xvfb = tmp_path / "Xvfb"
+    fake_xvfb.write_text(_FAKE_XVFB, encoding="utf-8")
+    fake_xvfb.chmod(0o755)
+
+    # Reports the descriptor rather than using it. A real server would already
+    # be dead in the directory case, which is the point.
+    seen = tmp_path / "seen"
+    fake_server = tmp_path / "server"
+    fake_server.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import fcntl
+            import os
+            import pathlib
+
+            try:
+                target = os.readlink("/proc/self/fd/0")
+                mode = fcntl.fcntl(0, fcntl.F_GETFL) & os.O_ACCMODE
+                readable = mode in (os.O_RDONLY, os.O_RDWR)
+                answer = f"{{target}} readable={{readable}}"
+            except OSError as error:
+                answer = f"errno={{error.errno}}"
+            pathlib.Path({str(seen)!r}).write_text(answer)
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_server.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "DISPLAY": f":{display_number}",
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+    }
+    preexec = None
+    if kind == "directory":
+        handed = os.open(str(tmp_path), os.O_RDONLY)
+    elif kind == "write_only":
+        handed = os.open(os.devnull, os.O_WRONLY)
+    elif kind == "no_access_mode":
+        # Linux's fourth access mode grants neither direction. Nothing in
+        # Python's `os` names it, and rejecting only write-only let it through.
+        handed = os.open(str(tmp_path / "data"), os.O_CREAT | 3)
+    elif kind == "path_only":
+        # O_PATH names the file without opening it. Every read fails while the
+        # access-mode bits still read 0, which is the readable value.
+        (tmp_path / "data").write_text("x", encoding="utf-8")
+        # `os.O_PATH` is Linux-only and absent from the stubs this file is
+        # checked against, so the value is written out. It is the same
+        # `010000000` the entrypoint masks against.
+        handed = os.open(str(tmp_path / "data"), getattr(os, "O_PATH", 0o10000000))
+    else:
+        handed = os.open(os.devnull, os.O_RDONLY)
+        # Closes descriptor 0 in the child after the fork, which is the state
+        # `stdin=subprocess.DEVNULL` cannot produce.
+        preexec = lambda: os.close(0)  # noqa: E731
+
+    try:
+        process = subprocess.Popen(
+            [bash, str(_ENTRYPOINT_PATH), str(fake_server)],
+            env=env,
+            stdin=handed,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            preexec_fn=preexec,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+    finally:
+        os.close(handed)
+        socket_path.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
+
+    assert seen.exists(), (
+        "the supervisor never started the server, so an input it does not read "
+        f"takes down the container. stdout={stdout!r} stderr={stderr!r}"
+    )
+    assert seen.read_text(encoding="utf-8") == f"{os.devnull} readable=True", (
+        f"the server was handed {seen.read_text(encoding='utf-8')!r} rather "
+        f"than a readable {os.devnull}. stderr={stderr!r}"
+    )
+    assert process.returncode == 0, (stdout, stderr)
