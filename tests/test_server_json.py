@@ -133,27 +133,30 @@ def test_readme_is_the_published_package_description(pyproject: dict[str, Any]) 
     assert pyproject["project"]["readme"] == "README.md"
 
 
-def test_dockerfile_annotates_the_same_name(server: dict[str, Any]) -> None:
-    """OCI ownership is proved by an annotation on the runtime stage.
+def test_dockerfile_labels_the_same_name(server: dict[str, Any]) -> None:
+    """OCI ownership is proved by a label on the runtime stage.
 
     The builder stage's labels do not ship, so a label placed there passes
     review and fails verification.
     """
     dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
-    label = f'LABEL io.modelcontextprotocol.server.name="{server["name"]}"'
+    key = "io.modelcontextprotocol.server.name"
     runtime_stage = dockerfile.rsplit("\nFROM ", 1)[-1]
 
-    # A substring search is satisfied by `# LABEL ...`, which writes nothing
-    # into the image. Commenting the line out while debugging would leave CI
-    # green and the proof missing, and that only surfaces after the image has
-    # shipped.
-    instructions = [
-        line
+    # Every instruction that sets this key, not merely the presence of a correct
+    # one. Two failures hide behind a substring search, and both leave CI green
+    # while the image ships without the proof: `# LABEL ...` writes nothing at
+    # all, and a second LABEL replaces the first, so the value the registry
+    # reads is whichever came last.
+    setters = [
+        line.strip()
         for line in runtime_stage.splitlines()
-        if line.strip() == label and not line.lstrip().startswith("#")
+        if line.strip().startswith(f"LABEL {key}=")
     ]
-    assert instructions, (
-        f"the final stage must carry {label!r} as an instruction, not as a comment"
+    expected = f'LABEL {key}="{server["name"]}"'
+    assert setters == [expected], (
+        f"the final stage must set {key} exactly once, as {expected!r}, "
+        f"as an instruction rather than a comment. Found: {setters!r}"
     )
 
 
@@ -206,6 +209,27 @@ def test_the_file_moves_with_the_bundle(
     project's life.
     """
     assert server["version"] == manifest["version"]
+
+
+def test_the_mount_uses_a_flag_the_gateway_translates(server: dict[str, Any]) -> None:
+    """Docker MCP Gateway reads this entry, and it knows two spellings.
+
+    ``extractVolumesFromRuntimeArgs`` in ``pkg/catalog/registry_to_catalog.go``
+    switches on the argument name and handles ``-v`` and ``--mount``. Docker
+    itself accepts ``--volume`` as well, so the entry looks right and validates,
+    and the gateway then drops the argument while still collecting the path from
+    the user: a configured server with no mount, which starts, answers, and is
+    logged out on every launch.
+    """
+    translated = {"-v", "--mount"}
+    for package in server["packages"]:
+        for argument in package.get("runtimeArguments", []):
+            if "/home/pwuser/.linkedin-mcp" not in argument.get("value", ""):
+                continue
+            assert argument["name"] in translated, (
+                f"{argument['name']!r} is a valid Docker flag that the gateway "
+                f"does not translate; use one of {sorted(translated)}"
+            )
 
 
 def test_no_variable_defaults_to_a_path_only_a_shell_could_read(

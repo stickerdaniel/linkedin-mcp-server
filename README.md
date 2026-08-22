@@ -326,13 +326,15 @@ Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `d
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
-        "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-v", "/absolute/path/to/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "stickerdaniel/linkedin-mcp-server:latest"
       ]
     }
   }
 }
 ```
+
+Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount.
 
 > [!NOTE]
 > Sessions expire over time. When tool calls start asking for authentication, repeat the login command above, or run `uvx mcp-server-linkedin@latest --login` on the host.

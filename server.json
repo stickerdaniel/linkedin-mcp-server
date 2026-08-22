@@ -56,7 +56,7 @@
       "runtimeArguments": [
         {
           "type": "named",
-          "name": "--volume",
+          "name": "-v",
           "description": "Persist the LinkedIn session outside the container. Without this mount every run starts logged out.",
           "value": "{session_dir}:/home/pwuser/.linkedin-mcp",
           "isRequired": true,

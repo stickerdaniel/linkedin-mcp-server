@@ -191,6 +191,56 @@ jobs:
           PY
           echo "✅ Updated server.json to version $VERSION"
 
+      # sed matches nothing and still exits 0, so a reformatted manifest.json or
+      # docker-compose.yml would sail through the step above and ship an MCPB
+      # whose own manifest still advertises the previous release. The tests
+      # notice on the next pull request; the artefacts are published before
+      # that. Ask all four files what version they carry, here, once.
+      - name: Verify the versioned files agree
+        run: |
+          set -e
+          python3 - "$VERSION" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          server = json.loads(Path("server.json").read_text(encoding="utf-8"))
+          compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+          found = {
+              "pyproject.toml": re.search(
+                  r'^version = "(.+)"$',
+                  Path("pyproject.toml").read_text(encoding="utf-8"),
+                  re.MULTILINE,
+              ),
+              "manifest.json": json.loads(
+                  Path("manifest.json").read_text(encoding="utf-8")
+              )["version"],
+              "server.json": server["version"],
+              "server.json (pypi)": next(
+                  p["version"] for p in server["packages"]
+                  if p["registryType"] == "pypi"
+              ),
+              "server.json (oci)": next(
+                  p["identifier"] for p in server["packages"]
+                  if p["registryType"] == "oci"
+              ).rpartition(":")[2],
+              "docker-compose.yml": re.search(
+                  r"stickerdaniel/linkedin-mcp-server:(\S+)", compose
+              ),
+          }
+          for name, value in found.items():
+              if value is None:
+                  raise SystemExit(f"{name}: no version found; the rewrite missed it")
+              if hasattr(value, "group"):
+                  value = value.group(1)
+              if value != version:
+                  raise SystemExit(f"{name}: {value!r}, expected {version!r}")
+          PY
+          echo "✅ Every versioned file reads $VERSION"
+
       - name: Remove branch protection (temporary)
         run: |
           gh api repos/${{ github.repository }}/branches/main/protection \
