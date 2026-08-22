@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 import json
 import logging
@@ -169,12 +171,16 @@ _URL_SETTLE_POLL = 0.01
 # redirect chain hops through intermediate documents, and judging one of those
 # calls a checkpoint healthy, or a healthy page a checkpoint.
 _URL_SETTLE_QUIET = 0.5
-# How long a navigation has to show up in `page.url` before the route counts
-# as standing still. Measured at 6ms across ten local runs and 86ms on a
-# slower probe; 0.3s is three times the largest of those. Paid only on a page
-# that already failed, and paying nothing is what a page that did navigate
-# does, since it leaves the baseline on the first poll.
+# How long a navigation has to announce itself before the page counts as
+# going nowhere. Measured across 300 evaluations destroyed by a navigation:
+# 0.37ms at worst idle, 0.81ms at the 99th percentile with twenty-four
+# workers saturating the machine. Paid in full only by a failure with no
+# navigation behind it, and not at all by one that has.
 _URL_SETTLE_LAG = 0.3
+# How long the replacement document gets to reach `domcontentloaded`. It
+# renders after it commits, and an account picker was measured 200ms behind
+# its own navigation, so a page judged on arrival is judged empty.
+_DOCUMENT_READY_TIMEOUT = 5.0
 
 
 def _route(target: str) -> tuple[str, str]:
@@ -3186,49 +3192,79 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
-    async def _settle_route(self, baseline: tuple[str, str]) -> None:
-        """Wait until the route stops changing, or until the ceiling.
+    @contextlib.contextmanager
+    def _watching_navigations(self) -> Iterator[list[str]]:
+        """Record main-frame navigations for the duration of the block.
 
-        `page.url` lags a navigation that destroyed an evaluation, by 6ms
-        across ten local runs and 86ms on a slower probe, so reading it the
-        moment the evaluate raises compares two copies of the address that was
-        left behind.
-
-        Two waits, because they answer different questions. Whether anything
-        moved is answered by that lag, so a route still equal to `baseline`
-        after `_URL_SETTLE_LAG` is a page that is going nowhere: the failure
-        was ordinary, and charging it the quiet window below would spend half
-        a second on every DOM error and can lose the diagnostic to the tool
-        timeout. Where it stopped needs the quiet window, and holding still is
-        the test rather than differing, or a redirect chain is judged on
-        whichever hop happened to be current and a hop on the way to a
-        checkpoint looks harmless.
-
-        Both bounds can be wrong in the same direction, and both cost the
-        same thing. A lag longer than the window, or a chain that pauses
-        longer than the quiet period, is judged on the page it was found on:
-        one section diagnostic instead of one authentication error, and the
-        call after it navigates to the same address and meets the barrier
-        again.
+        The address is not the signal. A reload replaces the document and
+        leaves `page.url` exactly as it was, so a check that samples the URL
+        calls the replacement the same page and reads whatever it renders. The
+        browser says so directly, and this is the same listener
+        `_goto_with_auth_checks` uses.
         """
-        deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
-        lag_deadline = time.monotonic() + _URL_SETTLE_LAG
-        seen = _route(self._page.url)
-        while seen == baseline and time.monotonic() < lag_deadline:
-            await asyncio.sleep(_URL_SETTLE_POLL)
-            seen = _route(self._page.url)
-        if seen == baseline:
-            return
+        hops: list[str] = []
 
+        def record(frame: Any) -> None:
+            if frame == self._page.main_frame:
+                hops.append(self._page.url)
+
+        self._page.on("framenavigated", record)
+        try:
+            yield hops
+        finally:
+            try:
+                self._page.remove_listener("framenavigated", record)
+            except Exception:
+                logger.debug("Could not remove navigation listener", exc_info=True)
+
+    async def _settle_navigation(self, hops: list[str]) -> bool:
+        """Wait out a navigation the page is in the middle of.
+
+        Returns whether one happened at all.
+
+        Three waits, and each answers a question the one before it cannot.
+
+        Whether the page navigated is answered by the listener, which fires
+        for a reload as well as for a redirect. It is dispatched over the
+        channel that also updates `page.url`, so it arrives at the same moment
+        the address would have: measured across 300 destroyed evaluations,
+        0.37ms at worst on an idle machine and 0.81ms with twenty-four workers
+        saturating it. `_URL_SETTLE_LAG` is three hundred times that, and an
+        ordinary failure with nothing behind it pays exactly that and no more.
+
+        Where it stopped is answered by the hops falling quiet. Counting them
+        rather than comparing addresses, or a chain that returns to the route
+        it started on reads as one that never left.
+
+        What the destination holds is answered by the document being ready. A
+        replacement renders after it commits, and the account picker measured
+        200ms behind its own navigation; judging that page on arrival calls a
+        barrier a loading screen.
+        """
+        lag_deadline = time.monotonic() + _URL_SETTLE_LAG
+        while not hops and time.monotonic() < lag_deadline:
+            await asyncio.sleep(_URL_SETTLE_POLL)
+        if not hops:
+            return False
+
+        deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
+        seen = len(hops)
         quiet_since = time.monotonic()
         while time.monotonic() < deadline:
             await asyncio.sleep(_URL_SETTLE_POLL)
-            current = _route(self._page.url)
-            if current != seen:
-                seen = current
+            if len(hops) != seen:
+                seen = len(hops)
                 quiet_since = time.monotonic()
             elif time.monotonic() - quiet_since >= _URL_SETTLE_QUIET:
                 break
+
+        try:
+            await self._page.wait_for_load_state(
+                "domcontentloaded", timeout=_DOCUMENT_READY_TIMEOUT * 1000
+            )
+        except Exception:
+            logger.debug("Replacement document was not ready in time", exc_info=True)
+        return True
 
     async def _extract_job_ids(self, *, scoped: bool = False) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
@@ -3329,11 +3365,12 @@ class LinkedInExtractor:
         # checkpoint, and extracting it returns login text under
         # `search_results` with nothing beside it to say so.
         #
-        # Host and path, and not the whole URL, because LinkedIn appends
-        # `currentJobId` to the query of a search page by itself. Measured
-        # across three live searches: the path never moved, and neither did the
-        # query. The host has to come along, or a redirect that keeps the path
-        # reads as no redirect at all.
+        # The route is compared as well as watched, because a redirect can
+        # finish before the listener is registered. Host and path, and not the
+        # whole URL, because LinkedIn appends `currentJobId` to the query of a
+        # search page by itself. Measured across three live searches: the path
+        # never moved, and neither did the query. The host has to come along,
+        # or a redirect that keeps the path reads as no redirect at all.
         #
         # Against the URL that was asked for, and not the one the page held
         # after navigating, or a redirect finishing before the scroll becomes
@@ -3342,39 +3379,32 @@ class LinkedInExtractor:
         # an empty section is what an exhausted search looks like.
         before = _route(url)
         moved = False
-        if main_found:
-            scroll_started = time.monotonic()
-            try:
-                moved = await scroll_job_sidebar(self._page, deadline=scroll_deadline)
-            finally:
-                # Only what the scroll spent. Charging the whole page charged
-                # navigation and extraction to a budget that exists to bound
-                # scrolling, so five slow navigations that scrolled instantly
-                # still left the pages behind them with nothing. Accumulated,
-                # because a retry scrolls a second time.
-                self._scroll_seconds += time.monotonic() - scroll_started
-        if moved or before != _route(self._page.url):
-            # `page.url` lags a navigation the scroll suppressed, by 6ms in ten
-            # measured runs, so sampling it here would compare two copies of
-            # the address that was left. Waited for only when the scroll
-            # reports its evaluate raised, which is rare.
-            #
-            # Until the route holds still, and not until it differs: a redirect
-            # chain would otherwise be judged on whichever hop happened to be
-            # current, and a hop on the way to a checkpoint looks harmless.
-            #
-            # Quiet is a guess at when a chain has stopped, and a chain that
-            # pauses longer than the window is judged on the hop it paused on.
-            # What that costs is one section diagnostic instead of one
-            # authentication error: the page after it navigates to the same
-            # search address, lands on the barrier again, and is caught there
-            # either by the moved route or by the missing `<main>`. Both
-            # numbers only ever apply to a page whose scroll already raised or
-            # whose route already moved, so a healthy search pays nothing.
-            await self._settle_route(before)
+        navigated = False
+        with self._watching_navigations() as hops:
+            if main_found:
+                scroll_started = time.monotonic()
+                try:
+                    moved = await scroll_job_sidebar(
+                        self._page, deadline=scroll_deadline
+                    )
+                finally:
+                    # Only what the scroll spent. Charging the whole page
+                    # charged navigation and extraction to a budget that
+                    # exists to bound scrolling, so five slow navigations that
+                    # scrolled instantly still left the pages behind them with
+                    # nothing. Accumulated, because a retry scrolls a second
+                    # time.
+                    self._scroll_seconds += time.monotonic() - scroll_started
+            # `hops` is read and not waited on, so a healthy page pays
+            # nothing for it. It is what a scroll that finished cleanly leaves
+            # behind when the document was replaced anyway: the scroll never
+            # raised, so it reports no movement, and a reload moves no route,
+            # so neither of the other two says anything happened.
+            if moved or hops or before != _route(self._page.url):
+                navigated = await self._settle_navigation(hops)
 
         after = _route(self._page.url)
-        if moved or not main_found or before != after:
+        if navigated or moved or not main_found or before != after:
             # Any of the three is enough, and none implies the others. A reload
             # keeps the address, so an account picker served in place of the
             # search page changes nothing the comparison below can see; a
