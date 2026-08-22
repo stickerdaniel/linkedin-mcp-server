@@ -203,41 +203,44 @@ jobs:
           import json
           import re
           import sys
+          import tomllib
           from pathlib import Path
 
           version = sys.argv[1]
           server = json.loads(Path("server.json").read_text(encoding="utf-8"))
-          compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+          # Every occurrence, not the first: a second image reference that the
+          # rewrite missed is exactly what this step is here to catch.
+          tags = re.findall(
+              r"stickerdaniel/linkedin-mcp-server:(\S+)",
+              Path("docker-compose.yml").read_text(encoding="utf-8"),
+          )
+          if not tags:
+              raise SystemExit("docker-compose.yml: no image reference found")
 
           found = {
-              "pyproject.toml": re.search(
-                  r'^version = "(.+)"$',
-                  Path("pyproject.toml").read_text(encoding="utf-8"),
-                  re.MULTILINE,
-              ),
-              "manifest.json": json.loads(
-                  Path("manifest.json").read_text(encoding="utf-8")
-              )["version"],
-              "server.json": server["version"],
-              "server.json (pypi)": next(
+              "pyproject.toml": [project["project"]["version"]],
+              "manifest.json": [
+                  json.loads(Path("manifest.json").read_text(encoding="utf-8"))["version"]
+              ],
+              "server.json": [server["version"]],
+              "server.json (pypi)": [
                   p["version"] for p in server["packages"]
                   if p["registryType"] == "pypi"
-              ),
-              "server.json (oci)": next(
-                  p["identifier"] for p in server["packages"]
+              ],
+              "server.json (oci)": [
+                  p["identifier"].rpartition(":")[2] for p in server["packages"]
                   if p["registryType"] == "oci"
-              ).rpartition(":")[2],
-              "docker-compose.yml": re.search(
-                  r"stickerdaniel/linkedin-mcp-server:(\S+)", compose
-              ),
+              ],
+              "docker-compose.yml": tags,
           }
-          for name, value in found.items():
-              if value is None:
+          for name, values in found.items():
+              if not values:
                   raise SystemExit(f"{name}: no version found; the rewrite missed it")
-              if hasattr(value, "group"):
-                  value = value.group(1)
-              if value != version:
-                  raise SystemExit(f"{name}: {value!r}, expected {version!r}")
+              for value in values:
+                  if value != version:
+                      raise SystemExit(f"{name}: {value!r}, expected {version!r}")
           PY
           echo "✅ Every versioned file reads $VERSION"
 
