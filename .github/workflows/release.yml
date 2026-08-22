@@ -153,7 +153,10 @@ jobs:
         run: |
           set -e
           sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
-          sed -i 's/stickerdaniel\/linkedin-mcp-server:[^ ]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' docker-compose.yml
+          # Stop at a quote as well as a space. `[^ ]*` swallowed the closing
+          # quote of a quoted image reference, which YAML then rejects and this
+          # step never notices, because sed reports success either way.
+          sed -i 's|stickerdaniel/linkedin-mcp-server:[^ "'"'"']*|stickerdaniel/linkedin-mcp-server:'$VERSION'|' docker-compose.yml
           echo "✅ Updated manifest.json and docker-compose.yml to version $VERSION"
 
       # server.json carries the version in three places, one of them inside an
@@ -212,8 +215,10 @@ jobs:
 
           # Every occurrence, not the first: a second image reference that the
           # rewrite missed is exactly what this step is here to catch.
+          # The same character class the rewrite above uses. Reading past the
+          # closing quote here would report a tag no file contains.
           tags = re.findall(
-              r"stickerdaniel/linkedin-mcp-server:(\S+)",
+              r"""stickerdaniel/linkedin-mcp-server:([^\s"']+)""",
               Path("docker-compose.yml").read_text(encoding="utf-8"),
           )
           if not tags:
@@ -243,6 +248,16 @@ jobs:
                       raise SystemExit(f"{name}: {value!r}, expected {version!r}")
           PY
           echo "✅ Every versioned file reads $VERSION"
+
+      # The check above reads these files as text, so it cannot see a rewrite
+      # that left one of them structurally broken. Ask the real parsers.
+      - name: Verify the rewritten files still parse
+        run: |
+          set -e
+          python3 -c 'import json; json.load(open("manifest.json"))'
+          python3 -c 'import json; json.load(open("server.json"))'
+          docker compose -f docker-compose.yml config --quiet
+          echo "✅ manifest.json, server.json and docker-compose.yml still parse"
 
       - name: Remove branch protection (temporary)
         run: |
