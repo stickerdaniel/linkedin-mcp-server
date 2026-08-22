@@ -658,10 +658,15 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
     stale_socket.close()
     lock_path.write_text("stale", encoding="utf-8")
 
+    # Records that it got past the stale names, which is the half of this the
+    # supervisor's exit status cannot show: a stale socket satisfies the
+    # readiness loop on its own, so dropping the cleanup produces the same
+    # non-zero exit and the same TERM as a display that came up and then died.
+    started_marker = tmp_path / "xvfb-started"
     fake_xvfb = tmp_path / "Xvfb"
     fake_xvfb.write_text(
         textwrap.dedent(
-            """\
+            f"""\
             #!/usr/bin/env python3
             import pathlib
             import socket
@@ -669,8 +674,8 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
             import time
 
             number = sys.argv[1].removeprefix(":").split(".", 1)[0]
-            path = pathlib.Path(f"/tmp/.X11-unix/X{number}")
-            lock = pathlib.Path(f"/tmp/.X{number}-lock")
+            path = pathlib.Path(f"/tmp/.X11-unix/X{{number}}")
+            lock = pathlib.Path(f"/tmp/.X{{number}}-lock")
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists() or lock.exists():
                 raise SystemExit(91)
@@ -678,6 +683,7 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
             server.bind(str(path))
             server.listen()
             lock.write_text("owned", encoding="utf-8")
+            pathlib.Path({str(started_marker)!r}).write_text("started")
             time.sleep(0.3)
             server.close()
             path.unlink(missing_ok=True)
@@ -742,6 +748,11 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
         socket_path.unlink(missing_ok=True)
         lock_path.unlink(missing_ok=True)
 
+    assert started_marker.exists(), (
+        "the stale socket and lock were not removed, so the display never came "
+        f"up and the container is back in its restart loop. stdout={stdout!r} "
+        f"stderr={stderr!r}"
+    )
     assert process.returncode != 0, (stdout, stderr)
     assert term_marker.read_text(encoding="utf-8") == "term"
 
@@ -854,14 +865,20 @@ def test_the_supervisor_hands_the_server_the_containers_stdin(tmp_path: Path) ->
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
-def test_a_closed_standard_input_still_starts_the_server(tmp_path: Path) -> None:
-    """Spelling the redirection out must not make descriptor 0 mandatory.
+@pytest.mark.parametrize("kind", ["closed", "directory"])
+def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) -> None:
+    """Spelling the redirection out is what stops hiding a bad descriptor.
 
-    `docker run` always supplies one, so nothing here noticed that a launcher
-    may close it instead. Then the redirection that hands stdin to the server
-    fails, `set -e` ends the supervisor before the server is ever started, and
-    HTTP and the one-shot commands go down with it over an input they never
-    wanted. The first shape of this fix did exactly that.
+    The bare ``&`` this replaces gave every mode ``/dev/null`` whether it wanted
+    one or not, so nothing here noticed what a launcher may actually pass.
+    Handing it through unexamined is worse than either: a closed descriptor
+    reaches Python as ``EBADF`` on every read, and an open directory ends the
+    interpreter before argument parsing, taking down HTTP and the one-shot
+    commands over an input none of them reads.
+
+    Asserting that the server merely started is not enough and was tried: with
+    the descriptor passed through untouched it starts perfectly well, and only
+    the first read says otherwise. So the fake server reports what it was given.
     """
     bash = shutil.which("bash")
     if bash is None:
@@ -873,6 +890,8 @@ def test_a_closed_standard_input_still_starts_the_server(tmp_path: Path) -> None
     )
     if major < 5:
         pytest.skip("wait -n -p requires the Bash 5 shipped by the image")
+    if not Path("/proc/self/fd").is_dir():
+        pytest.skip("the directory case is recognised through /dev/fd")
 
     display_number, socket_path, lock_path = _a_free_display(30_000)
 
@@ -898,17 +917,23 @@ def test_a_closed_standard_input_still_starts_the_server(tmp_path: Path) -> None
     )
     fake_xvfb.chmod(0o755)
 
-    # Records that it ran at all, which is the whole question. A supervisor that
-    # dies on the redirection never reaches this.
-    started = tmp_path / "started"
+    # Reports the descriptor rather than using it. A real server would already
+    # be dead in the directory case, which is the point.
+    seen = tmp_path / "seen"
     fake_server = tmp_path / "server"
     fake_server.write_text(
         textwrap.dedent(
             f"""\
             #!/usr/bin/env python3
+            import os
             import pathlib
 
-            pathlib.Path({str(started)!r}).write_text("started")
+            try:
+                os.fstat(0)
+                target = os.readlink("/proc/self/fd/0")
+            except OSError as error:
+                target = f"errno={{error.errno}}"
+            pathlib.Path({str(seen)!r}).write_text(target)
             """
         ),
         encoding="utf-8",
@@ -920,19 +945,28 @@ def test_a_closed_standard_input_still_starts_the_server(tmp_path: Path) -> None
         "DISPLAY": f":{display_number}",
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
     }
-    devnull = os.open(os.devnull, os.O_RDONLY)
+    handed: int | None = None
+    if kind == "directory":
+        handed = os.open(str(tmp_path), os.O_RDONLY)
+        stdin: int = handed
+        preexec = None
+    else:
+        handed = os.open(os.devnull, os.O_RDONLY)
+        stdin = handed
+        # Closes descriptor 0 in the child after the fork, which is the state
+        # `stdin=subprocess.DEVNULL` cannot produce.
+        preexec = lambda: os.close(0)  # noqa: E731
+
     try:
         process = subprocess.Popen(
             [bash, str(_ENTRYPOINT_PATH), str(fake_server)],
             env=env,
-            stdin=devnull,
+            stdin=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=True,
-            # Closes descriptor 0 in the child after the fork, which is the state
-            # `stdin=subprocess.DEVNULL` cannot produce.
-            preexec_fn=lambda: os.close(0),
+            preexec_fn=preexec,
         )
         try:
             stdout, stderr = process.communicate(timeout=15)
@@ -941,13 +975,16 @@ def test_a_closed_standard_input_still_starts_the_server(tmp_path: Path) -> None
             process.communicate()
             raise
     finally:
-        os.close(devnull)
+        os.close(handed)
         socket_path.unlink(missing_ok=True)
         lock_path.unlink(missing_ok=True)
 
-    assert started.exists(), (
-        "the supervisor never started the server, so a closed descriptor 0 "
-        f"takes down modes that never read stdin. stdout={stdout!r} "
-        f"stderr={stderr!r}"
+    assert seen.exists(), (
+        "the supervisor never started the server, so an input it does not read "
+        f"takes down the container. stdout={stdout!r} stderr={stderr!r}"
+    )
+    assert seen.read_text(encoding="utf-8") == os.devnull, (
+        f"the server was handed {seen.read_text(encoding='utf-8')!r} rather "
+        f"than {os.devnull}, which it cannot read. stderr={stderr!r}"
     )
     assert process.returncode == 0, (stdout, stderr)

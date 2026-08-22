@@ -63,12 +63,20 @@ fi
 # to decide which death ends the container, so it gets the redirection spelled
 # out rather than being moved into the foreground.
 #
-# Docker always supplies descriptor 0, but a launcher is free to close it, and
-# then the redirection fails and takes the whole container down with it, HTTP
-# and the one-shot commands included, which never wanted stdin. Probe it in a
-# subshell, where a failure costs nothing, and give the closed case the
-# /dev/null it would have had.
-(exec 3<&0) 2>/dev/null || exec 0</dev/null
+# Docker always supplies a readable descriptor 0, but a launcher need not, and
+# what it hands over then travels straight into Python. A closed one arrives as
+# EBADF on every read; an open directory kills the interpreter outright, before
+# argument parsing, so `--transport streamable-http` and the one-shot commands
+# die on an input none of them reads. The bare `&` used to hide both behind its
+# /dev/null, which is the one thing it was good for.
+#
+# Both are cheap to recognise: duplicating the descriptor fails when it is
+# closed, and /dev/fd names what it points at when it is not. Ask in a subshell,
+# where a failed duplication costs nothing, and hand the unusable cases the
+# /dev/null they would have had. Without /proc there is no /dev/fd and the
+# directory test cannot answer, which leaves the descriptor as it was: the same
+# state every Docker container is in anyway.
+( exec 3<&0 && [ ! -d /dev/fd/3 ] ) 2>/dev/null || exec 0</dev/null
 "$@" <&0 &
 server_pid=$!
 
