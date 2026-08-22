@@ -17,6 +17,7 @@ from linkedin_mcp_server.scraping.connection import (
 )
 from linkedin_mcp_server.scraping.extractor import (
     ExtractedSection,
+    FilterValidationError,
     LinkedInExtractor,
     _CONTENT_DATE_POSTED_MAP,
     _RATE_LIMITED_MSG,
@@ -3210,11 +3211,21 @@ class TestSearchPeople:
 
     async def test_search_people_combines_all_filters(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        with patch.object(
-            extractor,
-            "extract_page",
-            new_callable=AsyncMock,
-            return_value=extracted("Jane Doe"),
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Jane Doe"),
+            ),
+            # location is resolved to a numeric geo id via the site dropdown;
+            # stub the resolver so this stays a pure URL-building test.
+            patch.object(
+                extractor,
+                "_resolve_geo_urn",
+                new_callable=AsyncMock,
+                return_value="104116203",
+            ),
         ):
             result = await extractor.search_people(
                 "engineer",
@@ -3224,9 +3235,138 @@ class TestSearchPeople:
             )
 
         assert "keywords=engineer" in result["url"]
-        assert "location=Seattle" in result["url"]
+        # location becomes a resolved geoUrn facet, not a free-text location=.
+        assert "geoUrn=%5B%22104116203%22%5D" in result["url"]
+        assert "location=Seattle" not in result["url"]
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
+
+    async def test_search_people_unresolvable_location_raises(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "_resolve_geo_urn",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            with pytest.raises(FilterValidationError, match="Could not resolve"):
+                await extractor.search_people("engineer", location="Nowhereland")
+
+    async def test_resolve_geo_urn_reads_geoid_and_caches(self, mock_page):
+        """Drives the dropdown once: types the name, clicks the top suggestion,
+        reads geoId from the URL, and caches it (second call does not re-drive)."""
+        extractor = LinkedInExtractor(mock_page)
+        suggestion = AsyncMock()
+        mock_page.query_selector = AsyncMock(return_value=suggestion)
+        mock_page.url = "https://www.linkedin.com/jobs/search/?geoId=106155005&foo=1"
+        with (
+            patch.object(
+                extractor, "_goto_with_auth_checks", new_callable=AsyncMock
+            ) as goto,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_type",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.human_pause",
+                new_callable=AsyncMock,
+            ),
+        ):
+            first = await extractor._resolve_geo_urn("Egypt")
+            assert first == "106155005"
+            assert extractor._geo_cache["egypt"] == "106155005"
+
+            # Second call (case-insensitive) is served from cache: the dropdown
+            # is not driven again, so no further navigation happens.
+            assert await extractor._resolve_geo_urn("EGYPT") == "106155005"
+            assert goto.await_count == 1
+
+
+class TestSearchPeoplePagination:
+    """``max_pages`` walks LinkedIn's ``&page=N`` facet (issue #526)."""
+
+    @staticmethod
+    def _page(n: int) -> ExtractedSection:
+        """One results page holding a single, page-unique person."""
+        return extracted(
+            f"Person {n}",
+            [{"kind": "person", "url": f"/in/person{n}/", "text": f"Person {n}"}],
+        )
+
+    async def test_default_fetches_only_first_page(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            side_effect=[self._page(1), self._page(2)],
+        ) as fetch:
+            result = await extractor.search_people("engineer")
+
+        assert fetch.await_count == 1
+        assert "&page=" not in fetch.await_args_list[0].args[0]
+        assert result["sections"]["search_results"] == "Person 1"
+
+    async def test_pages_are_joined_and_references_merged(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            side_effect=[self._page(1), self._page(2), self._page(3)],
+        ) as fetch:
+            with patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep"):
+                result = await extractor.search_people("engineer", max_pages=3)
+
+        assert fetch.await_count == 3
+        urls = [call.args[0] for call in fetch.await_args_list]
+        assert "&page=" not in urls[0]
+        assert urls[1].endswith("&page=2")
+        assert urls[2].endswith("&page=3")
+        assert (
+            result["sections"]["search_results"]
+            == "Person 1\n---\nPerson 2\n---\nPerson 3"
+        )
+        assert [r["url"] for r in result["references"]["search_results"]] == [
+            "/in/person1/",
+            "/in/person2/",
+            "/in/person3/",
+        ]
+        # Paged results collapse onto the unpaged URL, so the caller can rerun it.
+        assert "&page=" not in result["url"]
+
+    async def test_stops_when_a_page_repeats_people(self, mock_page):
+        """Running past the last page re-serves it; stop instead of looping."""
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            side_effect=[self._page(1), self._page(1), self._page(3)],
+        ) as fetch:
+            with patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep"):
+                result = await extractor.search_people("engineer", max_pages=10)
+
+        assert fetch.await_count == 2
+        # The repeated page is kept -- it is real text, just not new people.
+        assert result["sections"]["search_results"] == "Person 1\n---\nPerson 1"
+        assert [r["url"] for r in result["references"]["search_results"]] == [
+            "/in/person1/"
+        ]
+
+    async def test_rate_limit_midway_keeps_earlier_pages(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            side_effect=[self._page(1), extracted(_RATE_LIMITED_MSG)],
+        ):
+            with patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep"):
+                result = await extractor.search_people("engineer", max_pages=5)
+
+        assert result["sections"]["search_results"] == "Person 1"
+        assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
 
 
 class TestBuildContentSearchUrl:
@@ -5696,6 +5836,20 @@ class TestResolveMessageComposeBox:
 class TestSendMessageComposerInteraction:
     """Tests for the page.evaluate + keyboard.type send path (patchright workaround)."""
 
+    @pytest.fixture(autouse=True)
+    def _humanize_deterministic(self, monkeypatch):
+        # The composer now types via human_type (jittered, occasional typo).
+        # For these tests make it deterministic and instant: no real sleeps and
+        # no typos, so keyboard.type is called once per character with no
+        # Backspace corrections.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.humanize.asyncio.sleep",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.humanize._rng.random", lambda: 1.0
+        )
+
     def _patch_send_message_to_compose(self, extractor, mock_page):
         """Return a context manager that patches send_message up to the compose step."""
         return (
@@ -5784,8 +5938,10 @@ class TestSendMessageComposerInteraction:
 
         assert result["status"] == "sent"
         assert result["sent"] is True
-        # Verify keyboard.type was used (not press_sequentially)
-        mock_keyboard.type.assert_awaited_once_with("Hello!", delay=15)
+        # keyboard.type is used (not press_sequentially), now one call per
+        # character via human_type; the concatenation is the message.
+        typed = "".join(c.args[0] for c in mock_keyboard.type.await_args_list)
+        assert typed == "Hello!"
 
     async def test_compose_interact_failed_when_focus_fails(self, mock_page):
         """send_message returns compose_interact_failed when JS focus fails."""

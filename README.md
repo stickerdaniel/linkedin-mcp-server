@@ -51,10 +51,16 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter | working |
 | `search_jobs` | Search for jobs with keywords and location filters | working |
 | `get_saved_jobs` | List job postings saved by the authenticated user | working |
-| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company | [#526](https://github.com/stickerdaniel/linkedin-mcp-server/issues/526) |
+| `search_people` | Search for people by keywords, location, connection degree (1st/2nd/3rd), and current company, with `max_pages` pagination (1-10, 10 people per page) | working |
 | `get_job_details` | Get detailed information about a specific job posting | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `search_posts` | Search posts/content globally by keyword (the "Posts" tab) with an optional recency filter (past-24h/past-week/past-month) | working |
+| `start_enrichment_job` | Queue a resumable bulk profile-enrichment job from a list of usernames or profile URLs | working |
+| `run_enrichment_bunch` | Visit the next few profiles in a job, paced with randomized delays, a rolling 24h action budget and working hours; returns when to call it again | working |
+| `get_enrichment_status` | Progress and collected results for an enrichment job, or list all jobs | working |
+| `enrich_companies` | Firmographics for a list of companies, cache-first and paced; one company-search reveals ~10 companies at once, all cached. Cache TTLs are set in days via `COMPANY_FIRMOGRAPHICS_TTL_DAYS` (default 90) and `COMPANY_JOBS_TTL_DAYS` (default 14) | working |
+| `enrich_company_deep` | Deep firmographics plus live open roles for one company (About + Jobs tabs); cache-first, open roles on the shorter jobs TTL | working |
+| `get_company_cache` | Read a cached company record (with per-half freshness), or list everything cached | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 <br/>

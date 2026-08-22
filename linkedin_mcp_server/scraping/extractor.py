@@ -51,6 +51,11 @@ from linkedin_mcp_server.scraping.link_metadata import (
 )
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from linkedin_mcp_server.core.humanize import (
+    human_pause,
+    human_type,
+    humanize_after_nav,
+)
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -754,6 +759,9 @@ class LinkedInExtractor:
 
     def __init__(self, page: Page):
         self._page = page
+        # location name (casefolded) -> numeric geo id ("" means "did not
+        # resolve"), so a repeated region in a batch resolves once.
+        self._geo_cache: dict[str, str] = {}
 
     @staticmethod
     def _normalize_body_marker(value: Any) -> str:
@@ -901,6 +909,9 @@ class LinkedInExtractor:
             try:
                 await self._page.goto(url, wait_until=wait_until, timeout=30000)
                 await stabilize_navigation(f"goto {url}", logger)
+                # A little cursor entropy after each load: a frozen mouse across
+                # navigations is a cheap bot tell. Best-effort, never fatal.
+                await humanize_after_nav(self._page)
                 await record_page_trace(
                     self._page,
                     "extractor-after-goto",
@@ -1625,7 +1636,7 @@ class LinkedInExtractor:
                         break
                     await target.scroll_into_view_if_needed(timeout=2000)
                     await target.click(timeout=2000)
-                    await asyncio.sleep(1.0)
+                    await human_pause(1.0)
                 except PlaywrightTimeoutError:
                     logger.debug("Show more click timed out after %d clicks", i)
                     break
@@ -1785,7 +1796,7 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+                    await human_pause(_NAV_DELAY)
 
                 url = base_url + suffix
                 try:
@@ -2460,7 +2471,7 @@ class LinkedInExtractor:
                 continue
 
             if not first_show_all:
-                await asyncio.sleep(_NAV_DELAY)
+                await human_pause(_NAV_DELAY)
             first_show_all = False
 
             try:
@@ -2660,7 +2671,7 @@ class LinkedInExtractor:
             {"candidates": normalized_candidates},
         )
         if selected:
-            await asyncio.sleep(0.75)
+            await human_pause(0.75)
         return bool(selected)
 
     async def _wait_for_message_composer(self) -> bool:
@@ -2784,7 +2795,7 @@ class LinkedInExtractor:
             return
         try:
             await self._click_first(_MESSAGING_CLOSE_SELECTOR, timeout=1500)
-            await asyncio.sleep(0.5)
+            await human_pause(0.5)
         except Exception:
             logger.debug("Could not dismiss LinkedIn messaging UI", exc_info=True)
 
@@ -2945,7 +2956,7 @@ class LinkedInExtractor:
         try:
             for i, (section_name, suffix, is_overlay) in enumerate(requested_ordered):
                 if i > 0:
-                    await asyncio.sleep(_NAV_DELAY)
+                    await human_pause(_NAV_DELAY)
 
                 url = base_url + suffix
                 try:
@@ -3305,7 +3316,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await human_pause(_NAV_DELAY)
 
             url = (
                 base_url
@@ -3536,7 +3547,7 @@ class LinkedInExtractor:
                 break
 
             if page_num > 0:
-                await asyncio.sleep(_NAV_DELAY)
+                await human_pause(_NAV_DELAY)
 
             url = (
                 base_url
@@ -3626,18 +3637,80 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    async def _resolve_geo_urn(self, location: str) -> str | None:
+        """Resolve a free-text location to LinkedIn's numeric geo id.
+
+        People search's location facet is ``geoUrn=["<id>"]`` (a numeric geo
+        id), not the free-text ``location=`` param, which LinkedIn accepts in
+        the URL but silently ignores -- so a plain ``location=Egypt`` returns
+        the unfiltered result set. There is no stable public endpoint to map a
+        name to a geo id (the REST typeahead is gone and the search box is now
+        an opaque server-driven-UI action), so we resolve it the way a person
+        does: drive the jobs-search location typeahead (a stable on-page
+        dropdown), pick the top suggestion, and read the ``geoId`` LinkedIn
+        itself puts in the URL. That numeric id doubles as the people-search
+        geoUrn. Works for any country/city LinkedIn's own dropdown knows.
+
+        Returns the id, or ``None`` if the dropdown offered no match. Results
+        are cached per extractor so a repeated region costs one resolution.
+        """
+        key = location.casefold()
+        if key in self._geo_cache:
+            return self._geo_cache[key] or None
+
+        page = self._page
+        await self._goto_with_auth_checks(
+            "https://www.linkedin.com/jobs/search/?keywords="
+        )
+        box = None
+        for sel in (
+            "input[id*='jobs-search-box-location']",
+            "input[aria-label='City, state, or zip code']",
+            "input[aria-label*='location' i]",
+        ):
+            box = await self._page.query_selector(sel)
+            if box:
+                break
+
+        geo_id: str | None = None
+        if box is not None:
+            await box.click()
+            await box.fill("")
+            # Type it like a person; the dropdown resolves as we type.
+            await human_type(page, location)
+            await human_pause(1.5)
+            suggestion = await page.query_selector(
+                ".basic-typeahead__selectable, [role=option]"
+            )
+            if suggestion is not None:
+                await suggestion.click()
+                await human_pause(1.0)
+                match = re.search(r"[?&]geoId=(\d+)", page.url)
+                if match:
+                    geo_id = match.group(1)
+
+        # Cache the outcome (including a miss) to avoid re-driving the dropdown.
+        self._geo_cache[key] = geo_id or ""
+        return geo_id
+
     async def search_people(
         self,
         keywords: str,
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        max_pages: int = 1,
     ) -> dict[str, Any]:
-        """Search for people and extract the results page.
+        """Search for people and extract the results pages.
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
-            location: Optional location filter ("New York", "Remote").
+            location: Optional location filter, a free-text country or city name
+                ("Egypt", "United Arab Emirates", "Amsterdam"). It is resolved to
+                LinkedIn's numeric geo id via the site's own location dropdown
+                (see ``_resolve_geo_urn``); a name the dropdown does not
+                recognize raises ``FilterValidationError`` rather than silently
+                returning worldwide results.
             network: Optional connection-degree filter. Each element is one of
                 ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
                 and beyond). Example: ``["F"]`` to only return 1st-degree
@@ -3649,9 +3722,12 @@ class LinkedInExtractor:
                 unfiltered result set. Look up a company's URN via
                 ``get_company_profile`` -- it is exposed under
                 ``references["about"]``.
+            max_pages: Maximum result pages to load (LinkedIn returns 10 people
+                per page). Stops early once a page adds no new people, so
+                over-requesting is harmless. Default 1 (previous behavior).
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {search_results: text}} -- pages joined by ``\\n---\\n``
         """
         if network is not None:
             invalid = [t for t in network if t not in _NETWORK_TOKENS]
@@ -3671,33 +3747,71 @@ class LinkedInExtractor:
 
         params = f"keywords={quote_plus(keywords)}"
         if location:
-            params += f"&location={quote_plus(location)}"
+            # LinkedIn ignores a free-text location=; resolve it to the numeric
+            # geoUrn its own dropdown produces, or fail loudly rather than
+            # silently returning an unfiltered (worldwide) result set.
+            geo_id = await self._resolve_geo_urn(location)
+            if not geo_id:
+                raise FilterValidationError(
+                    f"Could not resolve location {location!r} to a LinkedIn "
+                    f"region. Use a country or city name as it appears in "
+                    f"LinkedIn's location dropdown."
+                )
+            params += f"&geoUrn={_encode_list_facet([geo_id])}"
         if network:
             params += f"&network={_encode_list_facet(network)}"
         if current_company:
             params += f"&currentCompany={_encode_list_facet([current_company])}"
 
-        url = f"https://www.linkedin.com/search/results/people/?{params}"
-        extracted = await self.extract_page(url, section_name="search_results")
+        base_url = f"https://www.linkedin.com/search/results/people/?{params}"
 
-        sections: dict[str, str] = {}
-        references: dict[str, list[Reference]] = {}
+        page_texts: list[str] = []
+        page_references: list[Reference] = []
         section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-            sections["search_results"] = extracted.text
+        seen_person_urls: set[str] = set()
+
+        for page_num in range(1, max_pages + 1):
+            if page_num > 1:
+                await human_pause(_NAV_DELAY)
+
+            url = base_url if page_num == 1 else f"{base_url}&page={page_num}"
+            extracted = await self.extract_page(url, section_name="search_results")
+
+            if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                # Rate limit first: it is the more specific diagnosis, and a
+                # page that was throttled may carry a generic error too.
+                if extracted.text == _RATE_LIMITED_MSG:
+                    section_errors["search_results"] = rate_limited_section_error()
+                elif extracted.error:
+                    section_errors["search_results"] = extracted.error
+                # Pages gathered so far are kept and returned.
+                break
+
+            page_texts.append(extracted.text)
             if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.text == _RATE_LIMITED_MSG:
-            section_errors["search_results"] = rate_limited_section_error()
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
+                page_references.extend(extracted.references)
+
+            # Running past the last page yields a results page with no people on
+            # it. Detect that by URL rather than by parsing LinkedIn's
+            # "no results" copy, which is localized.
+            new_people = {
+                ref["url"] for ref in extracted.references if ref["kind"] == "person"
+            } - seen_person_urls
+            if not new_people:
+                logger.debug("No new people on page %d, stopping", page_num)
+                break
+            seen_person_urls |= new_people
 
         result: dict[str, Any] = {
-            "url": url,
-            "sections": sections,
+            "url": base_url,
+            "sections": {"search_results": "\n---\n".join(page_texts)}
+            if page_texts
+            else {},
         }
-        if references:
-            result["references"] = references
+        if page_references:
+            result["references"] = {
+                "search_results": dedupe_references(page_references)
+            }
         if section_errors:
             result["section_errors"] = section_errors
         return result
@@ -4272,8 +4386,10 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
         await asyncio.sleep(0.1)
-        await self._page.keyboard.type(message, delay=15)
-        await asyncio.sleep(0.3)
+        # Human-like typing: jittered per-key timing with occasional
+        # typo-then-backspace, instead of a uniform 15ms cadence.
+        await human_type(self._page, message)
+        await human_pause(0.3)
 
         # patchright actionability also blocks send_button.click(). Use JS click
         # on any visible, enabled send button; fall back to Enter key which
