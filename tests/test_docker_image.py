@@ -607,6 +607,28 @@ def test_a_host_prefixed_display_is_refused_before_xvfb_starts() -> None:
     assert "Xvfb" not in process.stderr
 
 
+# A display that comes up and stays up, for the tests whose subject is the
+# descriptor rather than the display.
+_FAKE_XVFB = """\
+#!/usr/bin/env python3
+import pathlib
+import socket
+import sys
+import time
+
+number = sys.argv[1].removeprefix(":").split(".", 1)[0]
+path = pathlib.Path(f"/tmp/.X11-unix/X{number}")
+# Real Xvfb 21.1.7 publishes the lock before it creates the socket. Measured
+# by inotify inside the image; a fake that reverses it would let a readiness
+# check that accepts the lock pass here.
+pathlib.Path(f"/tmp/.X{number}-lock").write_text("owned")
+server = socket.socket(socket.AF_UNIX)
+server.bind(str(path))
+server.listen()
+time.sleep(5)
+"""
+
+
 def _a_free_display(base: int) -> tuple[int, Path, Path]:
     """Pick a display number whose socket and lock nobody else owns.
 
@@ -699,6 +721,7 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
     fake_xvfb.chmod(0o755)
 
     term_marker = tmp_path / "server-received-term"
+    display_marker = tmp_path / "server-saw-display"
     fake_server = tmp_path / "server"
     fake_server.write_text(
         textwrap.dedent(
@@ -707,9 +730,27 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
             import os
             import pathlib
             import signal
+            import socket
             import time
 
             marker = pathlib.Path(os.environ["SERVER_TERM_MARKER"])
+
+            # The display is what the supervisor waited for, so a server that
+            # never touches it cannot tell readiness from a guess. Chromium
+            # connects here; this connects and nothing else.
+            display = os.environ["DISPLAY"].removeprefix(":").split(".", 1)[0]
+            probe = socket.socket(socket.AF_UNIX)
+            try:
+                probe.connect(f"/tmp/.X11-unix/X{display}")
+            except OSError as error:
+                pathlib.Path(os.environ["SERVER_DISPLAY_MARKER"]).write_text(
+                    f"unreachable: {error.errno}", encoding="utf-8"
+                )
+                raise SystemExit(90) from error
+            probe.close()
+            pathlib.Path(os.environ["SERVER_DISPLAY_MARKER"]).write_text(
+                "reachable", encoding="utf-8"
+            )
 
             def stop(*_args):
                 marker.write_text("term", encoding="utf-8")
@@ -729,6 +770,7 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
         "DISPLAY": display,
         "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
         "SERVER_TERM_MARKER": str(term_marker),
+        "SERVER_DISPLAY_MARKER": str(display_marker),
     }
     process = subprocess.Popen(
         [bash, str(_ENTRYPOINT_PATH), str(fake_server)],
@@ -752,6 +794,11 @@ def test_stale_x11_state_is_removed_and_xvfb_dying_stops_the_server(
         socket_path.unlink(missing_ok=True)
         lock_path.unlink(missing_ok=True)
 
+    assert display_marker.read_text(encoding="utf-8") == "reachable", (
+        "the server was started before the display could accept a connection, "
+        "so the readiness check passed on something other than the socket. "
+        f"marker={display_marker.read_text(encoding='utf-8')!r} stdout={stdout!r}"
+    )
     assert started_marker.exists(), (
         "the stale socket and lock were not removed, so the display never came "
         f"up and the container is back in its restart loop. stdout={stdout!r} "
@@ -792,29 +839,7 @@ def test_the_supervisor_hands_the_server_the_containers_stdin(tmp_path: Path) ->
     display_number, socket_path, lock_path = _a_free_display(20_000)
 
     fake_xvfb = tmp_path / "Xvfb"
-    fake_xvfb.write_text(
-        textwrap.dedent(
-            """\
-            #!/usr/bin/env python3
-            import pathlib
-            import socket
-            import sys
-            import time
-
-            number = sys.argv[1].removeprefix(":").split(".", 1)[0]
-            path = pathlib.Path(f"/tmp/.X11-unix/X{number}")
-            # Real Xvfb 21.1.7 publishes the lock before it creates the socket.
-            # Measured by inotify inside the image; a fake that reverses it
-            # would let a readiness check that accepts the lock pass here.
-            pathlib.Path(f"/tmp/.X{number}-lock").write_text("owned")
-            server = socket.socket(socket.AF_UNIX)
-            server.bind(str(path))
-            server.listen()
-            time.sleep(5)
-            """
-        ),
-        encoding="utf-8",
-    )
+    fake_xvfb.write_text(_FAKE_XVFB, encoding="utf-8")
     fake_xvfb.chmod(0o755)
 
     # Echoes one line back and exits, so a server that is handed /dev/null ends
@@ -873,16 +898,142 @@ def test_the_supervisor_hands_the_server_the_containers_stdin(tmp_path: Path) ->
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
-@pytest.mark.parametrize("kind", ["closed", "directory", "write_only"])
+@pytest.mark.parametrize("kind", ["read_write_file", "socket", "read_write_null"])
+def test_a_readable_descriptor_is_handed_over_untouched(
+    tmp_path: Path, kind: str
+) -> None:
+    """The guard's false-positive direction is the one that costs the product.
+
+    Condemning a descriptor the server could have read replaces it with
+    ``/dev/null``, and the server then reads EOF and answers nothing: the exact
+    bug this change exists to remove, restored silently and with a zero exit
+    status. Every other test here hands the guard something bad and checks that
+    it notices. This hands it something good.
+
+    Access mode 2 is the gap those tests leave. The pipe behind
+    ``subprocess.PIPE`` is mode 0, so a guard rewritten to reject every non-zero
+    mode passed the entire file while turning away terminals, sockets and the
+    read-write ``/dev/null`` that plain ``docker run`` supplies.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required to exercise the Linux image entrypoint")
+    major = int(
+        subprocess.check_output(
+            [bash, "-c", 'printf "%s" "${BASH_VERSINFO[0]}"'], text=True
+        )
+    )
+    if major < 5:
+        pytest.skip("wait -n -p requires the Bash 5 shipped by the image")
+    if not Path("/proc/self/fdinfo").is_dir():
+        pytest.skip("the guard reads the access mode through /proc")
+
+    display_number, socket_path, lock_path = _a_free_display(40_000)
+    fake_xvfb = tmp_path / "Xvfb"
+    fake_xvfb.write_text(_FAKE_XVFB, encoding="utf-8")
+    fake_xvfb.chmod(0o755)
+
+    seen = tmp_path / "seen"
+    fake_server = tmp_path / "server"
+    fake_server.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import fcntl
+            import os
+            import pathlib
+            import sys
+
+            mode = fcntl.fcntl(0, fcntl.F_GETFL) & os.O_ACCMODE
+            target = os.readlink("/proc/self/fd/0")
+            first = sys.stdin.readline().strip()
+            pathlib.Path({str(seen)!r}).write_text(
+                f"{{target}} mode={{mode}} read={{first}}"
+            )
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_server.chmod(0o755)
+
+    peer: socket.socket | None = None
+    if kind == "read_write_file":
+        source = tmp_path / "request"
+        source.write_text("a-request\n", encoding="utf-8")
+        handed = os.open(str(source), os.O_RDWR)
+        expected_target, expected_read = str(source), "a-request"
+    elif kind == "socket":
+        near, peer = socket.socketpair()
+        peer.sendall(b"a-request\n")
+        handed = os.dup(near.fileno())
+        near.close()
+        expected_target, expected_read = None, "a-request"
+    else:
+        handed = os.open(os.devnull, os.O_RDWR)
+        expected_target, expected_read = os.devnull, ""
+
+    env = {
+        **os.environ,
+        "DISPLAY": f":{display_number}",
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+    }
+    try:
+        process = subprocess.Popen(
+            [bash, str(_ENTRYPOINT_PATH), str(fake_server)],
+            env=env,
+            stdin=handed,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+    finally:
+        os.close(handed)
+        if peer is not None:
+            peer.close()
+        socket_path.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
+
+    assert seen.exists(), (stdout, stderr)
+    answer = seen.read_text(encoding="utf-8")
+    # Mode 2 in the answer is the whole point: a replaced descriptor reads back
+    # as `/dev/null mode=0`, which is indistinguishable from the original by
+    # name alone in the third case.
+    assert f"mode={os.O_RDWR} read={expected_read}" in answer, (
+        f"the server was handed {answer!r} rather than the descriptor it was "
+        f"started with. stderr={stderr!r}"
+    )
+    if expected_target is not None:
+        assert answer.startswith(f"{expected_target} "), answer
+    assert process.returncode == 0, (stdout, stderr)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the image entrypoint is Bash on Linux")
+@pytest.mark.parametrize(
+    "kind", ["closed", "directory", "write_only", "no_access_mode", "path_only"]
+)
 def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) -> None:
     """Spelling the redirection out is what stops hiding a bad descriptor.
 
     The bare ``&`` this replaces gave every mode ``/dev/null`` whether it wanted
     one or not, so nothing here noticed what a launcher may actually pass.
-    Handing it through unexamined is worse than either. A closed descriptor and
-    a write-only one both reach Python as ``EBADF`` on the first read, and an
-    open directory ends the interpreter before argument parsing, taking down
-    HTTP and the one-shot commands over an input none of them reads.
+    Handing it through unexamined is worse than either. A closed descriptor, a
+    write-only one, one opened in Linux's fourth access mode and an ``O_PATH``
+    handle all reach Python as ``EBADF`` on the first read, and an open
+    directory ends the interpreter before argument parsing, taking down HTTP and
+    the one-shot commands over an input none of them reads.
+
+    The closed case does not arrive this way in the shipped image, because Tini
+    refuses it first: it calls ``tcsetpgrp`` on descriptor 0 before executing
+    anything and treats ``EBADF`` as fatal. This runs the script directly, which
+    is how the case reaches the guard at all, and the guard keeps it for the
+    overridden-entrypoint path.
 
     Asserting that the server merely started is not enough and was tried: with
     the descriptor passed through untouched it starts perfectly well, and only
@@ -908,29 +1059,7 @@ def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) 
     display_number, socket_path, lock_path = _a_free_display(30_000)
 
     fake_xvfb = tmp_path / "Xvfb"
-    fake_xvfb.write_text(
-        textwrap.dedent(
-            """\
-            #!/usr/bin/env python3
-            import pathlib
-            import socket
-            import sys
-            import time
-
-            number = sys.argv[1].removeprefix(":").split(".", 1)[0]
-            path = pathlib.Path(f"/tmp/.X11-unix/X{number}")
-            # Real Xvfb 21.1.7 publishes the lock before it creates the socket.
-            # Measured by inotify inside the image; a fake that reverses it
-            # would let a readiness check that accepts the lock pass here.
-            pathlib.Path(f"/tmp/.X{number}-lock").write_text("owned")
-            server = socket.socket(socket.AF_UNIX)
-            server.bind(str(path))
-            server.listen()
-            time.sleep(5)
-            """
-        ),
-        encoding="utf-8",
-    )
+    fake_xvfb.write_text(_FAKE_XVFB, encoding="utf-8")
     fake_xvfb.chmod(0o755)
 
     # Reports the descriptor rather than using it. A real server would already
@@ -969,6 +1098,18 @@ def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) 
         handed = os.open(str(tmp_path), os.O_RDONLY)
     elif kind == "write_only":
         handed = os.open(os.devnull, os.O_WRONLY)
+    elif kind == "no_access_mode":
+        # Linux's fourth access mode grants neither direction. Nothing in
+        # Python's `os` names it, and rejecting only write-only let it through.
+        handed = os.open(str(tmp_path / "data"), os.O_CREAT | 3)
+    elif kind == "path_only":
+        # O_PATH names the file without opening it. Every read fails while the
+        # access-mode bits still read 0, which is the readable value.
+        (tmp_path / "data").write_text("x", encoding="utf-8")
+        # `os.O_PATH` is Linux-only and absent from the stubs this file is
+        # checked against, so the value is written out. It is the same
+        # `010000000` the entrypoint masks against.
+        handed = os.open(str(tmp_path / "data"), getattr(os, "O_PATH", 0o10000000))
     else:
         handed = os.open(os.devnull, os.O_RDONLY)
         # Closes descriptor 0 in the child after the fork, which is the state

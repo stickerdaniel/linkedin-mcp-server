@@ -74,11 +74,17 @@ fi
 # Each is cheap to recognise. Duplicating the descriptor fails when it is
 # closed, which is the one question /proc cannot answer, since a closed
 # descriptor and an absent /proc look alike from the outside. /dev/fd names what
-# an open one points at. /proc/self/fdinfo gives its open flags, whose low two
-# bits are the access mode: 1 is write-only, and `-r` cannot stand in for that,
-# because it asks about permissions on the target and answers yes for a
-# write-only /dev/null. Where /proc cannot answer, the descriptor is left as it
-# was: the state every Docker container is in anyway.
+# an open one points at. /proc/self/fdinfo gives its open flags, and `-r` cannot
+# stand in for those, because it asks about permissions on the target and
+# answers yes for a write-only /dev/null. Where /proc cannot answer, the
+# descriptor is left as it was: the state every Docker container is in anyway.
+#
+# The closed case does not arrive through the image's own ENTRYPOINT. Tini calls
+# `tcsetpgrp(STDIN_FILENO, ...)` before executing anything and treats every
+# errno but ENOTTY and ENXIO as fatal (`src/tini.c`), so a closed descriptor 0
+# ends the container at Tini with `tcsetpgrp failed: Bad file descriptor` and
+# status 1. It reaches this script when the entrypoint is overridden or the
+# script is run directly, which is also how the tests reach it.
 #
 # Each test says so on its own rather than leaning on `set -e`. Inside a `&&` or
 # `||` list errexit is suspended, so a failing `exec` there stops aborting and
@@ -92,7 +98,19 @@ stdin_is_unusable() {
     flags=$(sed -n 's/^flags:[[:space:]]*//p' /proc/self/fdinfo/0 2>/dev/null) ||
         return 1
     [ -n "$flags" ] || return 1
-    (( (8#$flags & 3) == 1 ))
+
+    # O_PATH names a file without opening it. Every read fails, and the access
+    # mode bits still read 0, so the mode alone would call it readable.
+    if (( (8#$flags & 8#10000000) != 0 )); then
+        return 0
+    fi
+
+    # Two of the four access modes cannot be read: 1 is write-only, and 3 is
+    # the value Linux uses for an open that grants neither direction.
+    case $(( 8#$flags & 3 )) in
+    1 | 3) return 0 ;;
+    esac
+    return 1
 }
 
 if stdin_is_unusable; then
