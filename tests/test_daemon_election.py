@@ -591,6 +591,20 @@ class TestFailingFast:
 
         monkeypatch.setattr(election_module.subprocess, "Popen", deaf)
 
+        # Timed where it happens. The total cannot carry this: see the bound
+        # below for what it costs and what it buys.
+        stopping: list[float] = []
+        stop = election_module._stop_child
+
+        def timed(child: subprocess.Popen[bytes]) -> None:
+            at = time.monotonic()
+            try:
+                stop(child)
+            finally:
+                stopping.append(time.monotonic() - at)
+
+        monkeypatch.setattr(election_module, "_stop_child", timed)
+
         began = time.monotonic()
         attempt = election_module._start_owner(auth_root, profile, config, timeout=0.5)
         elapsed = time.monotonic() - began
@@ -623,18 +637,35 @@ class TestFailingFast:
             # disposition. Give that child a handler again and this goes quiet
             # rather than red.
             #
-            # What it does not see is delay that sends no signal — a bare sleep
-            # ahead of the kill, or a second wait after it. The total below is
-            # the only net under that, and it is a coarse one. The single-budget
-            # property itself is asserted next door, on the silent-child path,
-            # where no 10 MiB encode stands between the budget and the clock.
             assert [child.returncode for child in sleepers] == [-signal.SIGKILL], (
                 "the child that could not serve was asked to leave rather than "
                 f"killed: {[child.returncode for child in sleepers]}"
             )
-            # And the election still ends. Loose on purpose: the assertion above
-            # is the one with teeth, and this one only says the budget did not
-            # become unbounded.
+
+            # Delay that sends no signal is the other way to spend the caller's
+            # deadline, and the exit status says nothing about it. A duration
+            # still has to answer for that, so this one is taken around the stop
+            # alone, where it is affordable: a kill and one wait cost 2 to 10ms
+            # here, so 1.5s is a hundred-fold margin and nothing an ordinary
+            # runner does can reach it.
+            #
+            # 1.5 rather than `_STOP_CHILD_SECONDS + something`, which was the
+            # first attempt and was wrong: an expectation derived from the
+            # constant under test moves with it, and raising that constant to 5
+            # then let a five-second grace period through. A literal cannot do
+            # that. It sits under the one 2s wait the stop is allowed, so a
+            # second wait breaks it too.
+            assert stopping, "the child that could not serve was never stopped"
+            assert max(stopping) < 1.5, (
+                f"stopping the child took {max(stopping):.1f}s, and a kill it "
+                f"cannot decline should cost nothing like that"
+            )
+
+            # What neither reaches is a stall in `_spawn` itself, between the
+            # budget expiring and the stop being called: no signal, and outside
+            # the window above. Measured, a 13s stall there passes. The total is
+            # the only net under that and it is a coarse one, kept loose because
+            # a tight one is what flaked.
             assert elapsed < 15, f"the spawn took {elapsed:.1f}s of a 0.5s budget"
             # Reported as a failure, not as "somebody is starting". A child that
             # never took its configuration is not coming up, and on POSIX it
@@ -676,8 +707,8 @@ class TestFailingFast:
             # ahead of the stop leaves this green on POSIX, because `detach()`
             # never blocks here whatever the child is doing. On Windows the same
             # change is the difference between an end of file and a wait on a
-            # live reader, and CI is the only place that distinction is
-            # observed at all.
+            # live reader — and nothing observes that distinction, here or in
+            # CI. The paragraph above says why.
             #
             # Joined first, because nothing in production closes that
             # descriptor: the writer's own `with stream:` does, as it unwinds
@@ -776,12 +807,12 @@ class TestFailingFast:
             # waits on the reader thread's I/O lock, so it blocked for as long
             # as the child stayed silent — 29.27s against a 30s sleeper.
             #
-            # This one stays a duration where the blocked-write case next door
-            # gave up on being one, and the difference is the 10 MiB
-            # configuration that case has to encode inside the window it
-            # measures. Without it the budget is nearly all of the 0.55s
-            # measured here, so this is also the assertion that keeps
-            # `_spawn`'s one-budget-across-both-halves honest.
+            # Five, which is ten times the budget and catches only the 29s
+            # cleanup defect above. It is not a check on `_spawn`'s
+            # one-budget-across-both-halves rule, though it sits close enough to
+            # read as one: measured, handing `_await_ready` a fresh 0.5s instead
+            # of the remainder takes the call to 0.98s and passes this. Nothing
+            # covers that rule; #780 is where it is written down.
             assert elapsed < 5, f"the bounded wait took {elapsed:.1f}s"
         finally:
             for child in started:
