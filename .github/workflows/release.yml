@@ -153,8 +153,124 @@ jobs:
         run: |
           set -e
           sed -i 's/"version": ".*"/"version": "'$VERSION'"/' manifest.json
-          sed -i 's/stickerdaniel\/linkedin-mcp-server:[^ ]*/stickerdaniel\/linkedin-mcp-server:'$VERSION'/' docker-compose.yml
+          # Stop at a quote as well as a space. `[^ ]*` swallowed the closing
+          # quote of a quoted image reference, which YAML then rejects and this
+          # step never notices, because sed reports success either way.
+          sed -i 's|stickerdaniel/linkedin-mcp-server:[^ "'"'"']*|stickerdaniel/linkedin-mcp-server:'$VERSION'|' docker-compose.yml
           echo "✅ Updated manifest.json and docker-compose.yml to version $VERSION"
+
+      # server.json carries the version in three places, one of them inside an
+      # image reference. sed would leave any it failed to match untouched and
+      # exit 0, which ships a registry entry pointing at a release that is not
+      # the one just built. This edits the parsed document and fails loudly
+      # instead. `tests/test_server_json.py` pins the output format, so the
+      # rewrite is a pure version change and never a reformat.
+      - name: Update server.json version
+        run: |
+          set -e
+          python3 - "$VERSION" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          path = Path("server.json")
+          doc = json.loads(path.read_text(encoding="utf-8"))
+
+          doc["version"] = version
+          for package in doc["packages"]:
+              if package["registryType"] == "pypi":
+                  package["version"] = version
+              elif package["registryType"] == "oci":
+                  repository, _, _tag = package["identifier"].rpartition(":")
+                  package["identifier"] = f"{repository}:{version}"
+              else:
+                  raise SystemExit(
+                      f"unhandled registryType {package['registryType']!r}: "
+                      "teach this step how to version it"
+                  )
+
+          path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          PY
+          echo "✅ Updated server.json to version $VERSION"
+
+      # The rewrites above are text edits that report success whatever they
+      # matched, so this asks every file that carries the version what it now
+      # says. Rendering the compose file is also what proves it still parses;
+      # a JSON load does the same for the other two, which is why there is one
+      # gate here and not two. `--no-interpolate` because this asks whether the
+      # repository's file is well formed, not whether the runner happens to
+      # hold the operator's environment.
+      - name: Verify the versioned files agree
+        run: |
+          set -e
+          docker compose -f docker-compose.yml config --no-interpolate \
+            --format json > /tmp/compose.json
+          python3 - "$VERSION" <<'PY'
+          import json
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          version = sys.argv[1]
+          server = json.loads(Path("server.json").read_text(encoding="utf-8"))
+          manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          name = project["project"]["name"]
+          image = next(
+              p["identifier"] for p in server["packages"]
+              if p["registryType"] == "oci"
+          )
+          repository = image.rpartition(":")[0].removeprefix("docker.io/")
+
+          def tag(reference: str) -> str:
+              return reference.rpartition(":")[2]
+
+          # The resolved services rather than the file's text. A commented-out
+          # image reference is matched by any regex over the source and blessed
+          # a compose file whose live service named something else entirely.
+          # `docker.io/` is the same repository written out, and compose accepts
+          # both spellings.
+          compose = json.loads(Path("/tmp/compose.json").read_text(encoding="utf-8"))
+          images = [
+              service["image"]
+              for service in compose.get("services", {}).values()
+              if service.get("image", "").removeprefix("docker.io/").startswith(
+                  repository
+              )
+          ]
+
+          # uv.lock carries the project's own version a second time, and `uv
+          # lock --check` fails on a release built past a stale one.
+          lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
+
+          found = {
+              "pyproject.toml": [project["project"]["version"]],
+              "uv.lock": [
+                  package["version"]
+                  for package in lock.get("package", [])
+                  if package.get("name") == name
+              ],
+              "manifest.json": [manifest["version"]],
+              "server.json": [server["version"]],
+              "server.json (pypi)": [
+                  p["version"] for p in server["packages"]
+                  if p["registryType"] == "pypi"
+              ],
+              "server.json (oci)": [
+                  tag(p["identifier"]) for p in server["packages"]
+                  if p["registryType"] == "oci"
+              ],
+              "docker-compose.yml": [tag(image) for image in images],
+          }
+          for site, values in found.items():
+              if not values:
+                  raise SystemExit(f"{site}: no version found; the rewrite missed it")
+              for value in values:
+                  if value != version:
+                      raise SystemExit(f"{site}: {value!r}, expected {version!r}")
+          PY
+          echo "✅ Every versioned file reads $VERSION"
 
       - name: Remove branch protection (temporary)
         run: |
@@ -168,11 +284,11 @@ jobs:
           set -e
           git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add manifest.json docker-compose.yml
+          git add manifest.json docker-compose.yml server.json
           if git diff --staged --quiet; then
             echo "ℹ️ No changes to commit"
           else
-            git commit -m "chore: update manifest.json and docker-compose.yml to v$VERSION [skip ci]"
+            git commit -m "chore: sync versioned files to v$VERSION [skip ci]"
             git push origin main
             echo "✅ Committed version updates"
           fi

@@ -1,5 +1,7 @@
 # MCP Server for LinkedIn
 
+<!-- mcp-name: io.github.stickerdaniel/linkedin-mcp-server -->
+
 <p align="left">
   <a href="https://pypi.org/project/mcp-server-linkedin/" target="_blank"><img src="https://img.shields.io/pypi/v/mcp-server-linkedin?color=blue" alt="PyPI"></a>
   <a href="https://github.com/stickerdaniel/linkedin-mcp-server/actions/workflows/ci.yml" target="_blank"><img src="https://github.com/stickerdaniel/linkedin-mcp-server/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI Status"></a>
@@ -324,13 +326,15 @@ Keep the `-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp` mount on every later `d
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
-        "-v", "~/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
+        "-v", "/absolute/path/to/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "stickerdaniel/linkedin-mcp-server:latest"
       ]
     }
   }
 }
 ```
+
+Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount.
 
 > [!NOTE]
 > Sessions expire over time. When tool calls start asking for authentication, repeat the login command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
