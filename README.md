@@ -657,4 +657,6 @@ Use in accordance with [LinkedIn's User Agreement](https://www.linkedin.com/lega
 
 This project is licensed under the Apache 2.0 license.
 
+Building on it is welcome, including under a different license. Apache-2.0 asks that you pass on a copy of the [license](LICENSE) and keep the attribution in [`NOTICE`](NOTICE) readable somewhere in what you ship.
+
 <br>

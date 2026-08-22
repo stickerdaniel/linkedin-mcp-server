@@ -8,6 +8,11 @@ authors = [
     { name = "Daniel Sticker", email = "daniel@sticker.name" }
 ]
 license = "Apache-2.0"
+# Declared rather than left to setuptools' default globs, which happen to cover
+# NOTICE* today. Apache-2.0 §4(d) binds a derivative only to the notices this
+# project actually distributes, so whether the file reaches the wheel is the
+# whole point and not an incidental of the build backend.
+license-files = ["LICENSE", "NOTICE"]
 keywords = [
     "mcp",
     "model-context-protocol",
