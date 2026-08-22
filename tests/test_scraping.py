@@ -152,9 +152,36 @@ def mock_page():
     mock_locator.filter = MagicMock(return_value=mock_locator)
     page.locator.return_value = mock_locator
     page.main_frame = object()
-    page.on = MagicMock()
-    page.remove_listener = MagicMock()
+    page.wait_for_load_state = AsyncMock()
+    # Real listeners, so that a double can navigate the way the browser does.
+    # A reload leaves `page.url` untouched, so the event is the only thing that
+    # says the document was replaced, and a double that only assigns the URL
+    # cannot express one.
+    listeners: dict[str, list] = {}
+    page.on = MagicMock(
+        side_effect=lambda event, cb: listeners.setdefault(event, []).append(cb)
+    )
+    page.remove_listener = MagicMock(
+        side_effect=lambda event, cb: (
+            listeners.get(event, []).remove(cb)
+            if cb in listeners.get(event, [])
+            else None
+        )
+    )
+    page.listeners = listeners
     return page
+
+
+def navigate(page, url: str | None = None) -> None:
+    """Move a mock page the way a navigation does: the address and the event.
+
+    `url` is omitted for a reload, which replaces the document and leaves the
+    address exactly as it was.
+    """
+    if url is not None:
+        page.url = url
+    for callback in list(page.listeners.get("framenavigated", [])):
+        callback(page.main_frame)
 
 
 class TestExtractPage:
@@ -429,7 +456,7 @@ class TestExtractPage:
         )
 
         async def navigate_away(page, **kwargs):
-            page.url = "https://www.linkedin.com/checkpoint/challenge/"
+            navigate(page, "https://www.linkedin.com/checkpoint/challenge/")
             # The real helper reports that its evaluate raised, which a
             # navigation destroying the execution context always makes it do.
             return True
@@ -472,7 +499,7 @@ class TestExtractPage:
         )
 
         async def navigate_away(page, **kwargs):
-            page.url = "https://www.linkedin.com/feed/"
+            navigate(page, "https://www.linkedin.com/feed/")
             return True
 
         extractor = LinkedInExtractor(mock_page)
@@ -506,14 +533,23 @@ class TestExtractPage:
         """A reload keeps the address, so the route sees nothing to compare.
 
         LinkedIn can serve the account picker at the search URL itself. The
-        route then matches at both ends and the page is accepted, so the
-        picker's text comes back under `search_results`. The scroll reporting
-        that its evaluate raised is the only signal there is.
+        route matches at both ends, and the replacement renders after it
+        commits: an account picker was measured 200ms behind its own
+        navigation, so a page judged on arrival is judged empty and the
+        picker's text comes back under `search_results`. The barrier is read
+        once the replacement document is ready, and the double answers the
+        way that page does.
         """
         mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
 
         async def reload_in_place(page, **kwargs):
+            navigate(mock_page)
             return True
+
+        async def barrier(page):
+            if not mock_page.wait_for_load_state.await_count:
+                return None
+            return "auth barrier text: welcome back + sign in"
 
         extractor = LinkedInExtractor(mock_page)
         with (
@@ -533,8 +569,7 @@ class TestExtractPage:
             ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
-                new_callable=AsyncMock,
-                return_value="auth barrier text: welcome back + sign in",
+                side_effect=barrier,
             ),
             pytest.raises(AuthenticationError, match="--login"),
         ):
@@ -627,6 +662,48 @@ class TestExtractPage:
             )
         assert result.error is None
 
+    async def test_a_reload_after_a_clean_scroll_is_still_a_reload(self, mock_page):
+        """The scroll can finish and the document be replaced anyway.
+
+        Nothing else notices: the scroll never raised, so it reports no
+        movement, and a reload moves no route, so the comparison at both ends
+        matches. The listener has already fired by then, and reading it costs
+        a healthy page nothing.
+        """
+        mock_page.url = "https://www.linkedin.com/jobs/search/?keywords=test"
+
+        async def scroll_then_reload(page, **kwargs):
+            navigate(mock_page)
+            return False
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_job_sidebar",
+                side_effect=scroll_then_reload,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value="account picker: #rememberme-div",
+            ),
+            pytest.raises(AuthenticationError, match="--login"),
+        ):
+            await extractor._extract_search_page(
+                "https://www.linkedin.com/jobs/search/?keywords=test",
+                section_name="search_results",
+            )
+
     async def test_a_redirect_chain_is_judged_on_where_it_stops(self, mock_page):
         """The last hop decides, not the first one to appear.
 
@@ -640,9 +717,9 @@ class TestExtractPage:
         async def hop_twice(page, **kwargs):
             async def hops() -> None:
                 await asyncio.sleep(0.02)
-                page.url = "https://www.linkedin.com/feed/"
+                navigate(page, "https://www.linkedin.com/feed/")
                 await asyncio.sleep(0.1)
-                page.url = "https://www.linkedin.com/checkpoint/challenge/"
+                navigate(page, "https://www.linkedin.com/checkpoint/challenge/")
 
             asyncio.get_running_loop().create_task(hops())
             return True
@@ -682,9 +759,9 @@ class TestExtractPage:
         async def hop_slowly(page, **kwargs):
             async def hops() -> None:
                 await asyncio.sleep(0.02)
-                page.url = "https://www.linkedin.com/feed/"
+                navigate(page, "https://www.linkedin.com/feed/")
                 await asyncio.sleep(0.3)
-                page.url = "https://www.linkedin.com/checkpoint/challenge/"
+                navigate(page, "https://www.linkedin.com/checkpoint/challenge/")
 
             asyncio.get_running_loop().create_task(hops())
             return True
@@ -724,7 +801,7 @@ class TestExtractPage:
         async def hop_late(page, **kwargs):
             async def hops() -> None:
                 await asyncio.sleep(0.3)
-                page.url = "https://www.linkedin.com/checkpoint/challenge/"
+                navigate(page, "https://www.linkedin.com/checkpoint/challenge/")
 
             asyncio.get_running_loop().create_task(hops())
             return False
@@ -2809,13 +2886,13 @@ class TestSearchJobs:
         """
         supply = iter(texts) if not callable(texts) else None
 
-        async def navigate(url, *args, **kwargs):
-            mock_page.url = lands_on or url
+        async def navigate_page(url, *args, **kwargs):
+            navigate(mock_page, lands_on or url)
             if clock is not None:
                 clock.now += cost
             return texts(url) if supply is None else next(supply)
 
-        return navigate
+        return navigate_page
 
     async def test_returns_job_ids(self, mock_page):
         """search_jobs should return a job_ids list extracted from hrefs."""
@@ -2977,11 +3054,13 @@ class TestSearchJobs:
         text_pages = iter(["Page 1 text", "Page 2 text"])
         urls_visited: list[str] = []
 
-        navigate = self._navigating(mock_page, lambda _url: extracted(next(text_pages)))
+        navigate_page = self._navigating(
+            mock_page, lambda _url: extracted(next(text_pages))
+        )
 
         async def mock_extract(url, *args, **kwargs):
             urls_visited.append(url)
-            return await navigate(url)
+            return await navigate_page(url)
 
         with (
             patch.object(extractor, "_extract_search_page", side_effect=mock_extract),
@@ -3111,11 +3190,11 @@ class TestSearchJobs:
         id_pages = iter([["100", "200"], ["100", "200"]])
         extract_call_count = 0
 
-        navigate = self._navigating(mock_page, lambda _url: None)
+        navigate_page = self._navigating(mock_page, lambda _url: None)
 
         async def mock_extract(url, *args, **kwargs):
             nonlocal extract_call_count
-            await navigate(url)
+            await navigate_page(url)
             extract_call_count += 1
             if extract_call_count == 1:
                 return extracted(
@@ -3223,7 +3302,7 @@ class TestSearchJobs:
 
         async def capture(url, section_name, scroll_deadline=None, **kwargs):
             seen.append(scroll_deadline)
-            mock_page.url = url
+            navigate(mock_page, url)
             # A real page reports what its scroll spent, and only that. Twelve
             # seconds of navigation with no scrolling would leave the budget
             # untouched, which is the case this replaced.
@@ -3286,7 +3365,7 @@ class TestSearchJobs:
 
         async def capture(url, section_name, scroll_deadline=None, **kwargs):
             seen.append(scroll_deadline)
-            mock_page.url = url
+            navigate(mock_page, url)
             # All navigation, no scrolling.
             clock.now += 12.0
             return extracted("Job results")
@@ -3350,7 +3429,7 @@ class TestSearchJobs:
 
         async def capture(url, section_name, scroll_deadline=None, **kwargs):
             seen.append(scroll_deadline)
-            mock_page.url = url
+            navigate(mock_page, url)
             clock.now += 18.7
             return extracted("Job results")
 
@@ -3411,7 +3490,7 @@ class TestSearchJobs:
 
         async def capture(url, section_name, scroll_deadline=None, **kwargs):
             seen.append(scroll_deadline)
-            mock_page.url = url
+            navigate(mock_page, url)
             clock.now += 18.7
             return extracted("Job results")
 
@@ -3677,7 +3756,7 @@ class TestSearchJobs:
         async def scroll_then_publish(page, **kwargs):
             async def publish() -> None:
                 await asyncio.sleep(0.03)
-                page.url = "https://www.linkedin.com/checkpoint/challenge/"
+                navigate(page, "https://www.linkedin.com/checkpoint/challenge/")
 
             asyncio.get_running_loop().create_task(publish())
             return True
@@ -3827,8 +3906,8 @@ class TestSearchJobs:
         mock_ids.assert_not_awaited()
 
 
-class TestSettleRoute:
-    """The two waits answer different questions and cost different amounts."""
+class TestSettleNavigation:
+    """The listener decides whether anything happened; the URL cannot."""
 
     class Clock:
         def __init__(self) -> None:
@@ -3837,19 +3916,20 @@ class TestSettleRoute:
         def monotonic(self) -> float:
             return self.now
 
-    def _sleep(self, clock, hops=()):
+    @staticmethod
+    def _sleep(clock, hops, schedule=()):
         """Advance the clock per poll, landing each hop at its own moment."""
-        pending = list(hops)
+        pending = list(schedule)
 
         async def sleep(seconds: float) -> None:
             clock.now += seconds
-            while pending and pending[0][0] <= clock.now:
-                _, url = pending.pop(0)
-                self.page.url = url
+            while pending and pending[0] <= clock.now:
+                pending.pop(0)
+                hops.append("hop")
 
         return sleep
 
-    async def test_a_route_going_nowhere_costs_the_lag_and_not_the_quiet(
+    async def test_a_page_going_nowhere_costs_the_lag_and_not_the_quiet(
         self, mock_page
     ):
         """An ordinary failure has no navigation behind it.
@@ -3858,54 +3938,64 @@ class TestSettleRoute:
         and a call near its tool timeout loses the diagnostic it was about to
         build.
         """
-        self.page = mock_page
-        mock_page.url = "https://www.linkedin.com/jobs-tracker/"
         clock = self.Clock()
         extractor = LinkedInExtractor(mock_page)
+        hops: list[str] = []
 
         with (
             patch.object(extractor_module, "time", clock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                side_effect=self._sleep(clock),
+                side_effect=self._sleep(clock, hops),
             ),
         ):
-            await extractor._settle_route(
-                ("www.linkedin.com", "/jobs-tracker"),
-            )
+            assert await extractor._settle_navigation(hops) is False
 
         assert clock.now < extractor_module._URL_SETTLE_QUIET
         assert clock.now >= extractor_module._URL_SETTLE_LAG
 
-    async def test_a_route_that_moves_late_is_still_followed(self, mock_page):
-        """The lag window only decides whether anything moved.
+    async def test_a_reload_is_a_navigation_though_the_address_holds(self, mock_page):
+        """A reload replaces the document and leaves the address alone.
 
-        A navigation that shows up inside it hands over to the quiet window,
-        which is what judges a redirect chain on where it stopped.
+        Comparing addresses calls the replacement the same page, so a picker
+        served by a reload was read as search results. The event says so.
         """
-        self.page = mock_page
-        mock_page.url = "https://www.linkedin.com/jobs-tracker/"
         clock = self.Clock()
         extractor = LinkedInExtractor(mock_page)
+        hops: list[str] = []
 
         with (
             patch.object(extractor_module, "time", clock),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
-                side_effect=self._sleep(
-                    clock,
-                    [
-                        (0.1, "https://www.linkedin.com/feed/"),
-                        (0.4, "https://www.linkedin.com/checkpoint/challenge/"),
-                    ],
-                ),
+                side_effect=self._sleep(clock, hops, [0.05]),
             ),
         ):
-            await extractor._settle_route(
-                ("www.linkedin.com", "/jobs-tracker"),
-            )
+            assert await extractor._settle_navigation(hops) is True
 
-        assert mock_page.url.endswith("/checkpoint/challenge/")
+        assert mock_page.wait_for_load_state.await_count == 1
+
+    async def test_a_chain_is_followed_to_its_last_hop(self, mock_page):
+        """Hops are counted, not compared.
+
+        A chain that returns to the route it started on reads as one that
+        never left, and its last hop is what decides whether this is a
+        checkpoint.
+        """
+        clock = self.Clock()
+        extractor = LinkedInExtractor(mock_page)
+        hops: list[str] = []
+
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                side_effect=self._sleep(clock, hops, [0.05, 0.4]),
+            ),
+        ):
+            assert await extractor._settle_navigation(hops) is True
+
+        assert len(hops) == 2
         assert clock.now >= 0.4 + extractor_module._URL_SETTLE_QUIET
 
 
