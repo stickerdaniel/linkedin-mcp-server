@@ -169,6 +169,12 @@ _URL_SETTLE_POLL = 0.01
 # redirect chain hops through intermediate documents, and judging one of those
 # calls a checkpoint healthy, or a healthy page a checkpoint.
 _URL_SETTLE_QUIET = 0.5
+# How long a navigation has to show up in `page.url` before the route counts
+# as standing still. Measured at 6ms across ten local runs and 86ms on a
+# slower probe; 0.3s is three times the largest of those. Paid only on a page
+# that already failed, and paying nothing is what a page that did navigate
+# does, since it leaves the baseline on the first poll.
+_URL_SETTLE_LAG = 0.3
 
 
 def _route(target: str) -> tuple[str, str]:
@@ -3180,23 +3186,40 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
-    async def _settle_route(self) -> None:
+    async def _settle_route(self, baseline: tuple[str, str]) -> None:
         """Wait until the route stops changing, or until the ceiling.
 
-        `page.url` lags a navigation that destroyed an evaluation, by 6ms in
-        ten measured runs, so reading it the moment the evaluate raises
-        compares two copies of the address that was left behind.
+        `page.url` lags a navigation that destroyed an evaluation, by 6ms
+        across ten local runs and 86ms on a slower probe, so reading it the
+        moment the evaluate raises compares two copies of the address that was
+        left behind.
 
-        Until it holds still, and not until it differs: a redirect chain would
-        otherwise be judged on whichever hop happened to be current, and a hop
-        on the way to a checkpoint looks harmless. A chain that pauses longer
-        than the quiet window is still judged on the hop it paused on, which
-        costs one section diagnostic instead of one authentication error,
-        because the call after it navigates to the same address and meets the
-        barrier again.
+        Two waits, because they answer different questions. Whether anything
+        moved is answered by that lag, so a route still equal to `baseline`
+        after `_URL_SETTLE_LAG` is a page that is going nowhere: the failure
+        was ordinary, and charging it the quiet window below would spend half
+        a second on every DOM error and can lose the diagnostic to the tool
+        timeout. Where it stopped needs the quiet window, and holding still is
+        the test rather than differing, or a redirect chain is judged on
+        whichever hop happened to be current and a hop on the way to a
+        checkpoint looks harmless.
+
+        Both bounds can be wrong in the same direction, and both cost the
+        same thing. A lag longer than the window, or a chain that pauses
+        longer than the quiet period, is judged on the page it was found on:
+        one section diagnostic instead of one authentication error, and the
+        call after it navigates to the same address and meets the barrier
+        again.
         """
         deadline = time.monotonic() + _URL_SETTLE_TIMEOUT
+        lag_deadline = time.monotonic() + _URL_SETTLE_LAG
         seen = _route(self._page.url)
+        while seen == baseline and time.monotonic() < lag_deadline:
+            await asyncio.sleep(_URL_SETTLE_POLL)
+            seen = _route(self._page.url)
+        if seen == baseline:
+            return
+
         quiet_since = time.monotonic()
         while time.monotonic() < deadline:
             await asyncio.sleep(_URL_SETTLE_POLL)
@@ -3348,7 +3371,7 @@ class LinkedInExtractor:
             # either by the moved route or by the missing `<main>`. Both
             # numbers only ever apply to a page whose scroll already raised or
             # whose route already moved, so a healthy search pays nothing.
-            await self._settle_route()
+            await self._settle_route(before)
 
         after = _route(self._page.url)
         if moved or not main_found or before != after:

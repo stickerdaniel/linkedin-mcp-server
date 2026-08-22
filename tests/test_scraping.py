@@ -3827,6 +3827,88 @@ class TestSearchJobs:
         mock_ids.assert_not_awaited()
 
 
+class TestSettleRoute:
+    """The two waits answer different questions and cost different amounts."""
+
+    class Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+    def _sleep(self, clock, hops=()):
+        """Advance the clock per poll, landing each hop at its own moment."""
+        pending = list(hops)
+
+        async def sleep(seconds: float) -> None:
+            clock.now += seconds
+            while pending and pending[0][0] <= clock.now:
+                _, url = pending.pop(0)
+                self.page.url = url
+
+        return sleep
+
+    async def test_a_route_going_nowhere_costs_the_lag_and_not_the_quiet(
+        self, mock_page
+    ):
+        """An ordinary failure has no navigation behind it.
+
+        Charging it the quiet window spends half a second on every DOM error,
+        and a call near its tool timeout loses the diagnostic it was about to
+        build.
+        """
+        self.page = mock_page
+        mock_page.url = "https://www.linkedin.com/jobs-tracker/"
+        clock = self.Clock()
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                side_effect=self._sleep(clock),
+            ),
+        ):
+            await extractor._settle_route(
+                ("www.linkedin.com", "/jobs-tracker"),
+            )
+
+        assert clock.now < extractor_module._URL_SETTLE_QUIET
+        assert clock.now >= extractor_module._URL_SETTLE_LAG
+
+    async def test_a_route_that_moves_late_is_still_followed(self, mock_page):
+        """The lag window only decides whether anything moved.
+
+        A navigation that shows up inside it hands over to the quiet window,
+        which is what judges a redirect chain on where it stopped.
+        """
+        self.page = mock_page
+        mock_page.url = "https://www.linkedin.com/jobs-tracker/"
+        clock = self.Clock()
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch.object(extractor_module, "time", clock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                side_effect=self._sleep(
+                    clock,
+                    [
+                        (0.1, "https://www.linkedin.com/feed/"),
+                        (0.4, "https://www.linkedin.com/checkpoint/challenge/"),
+                    ],
+                ),
+            ),
+        ):
+            await extractor._settle_route(
+                ("www.linkedin.com", "/jobs-tracker"),
+            )
+
+        assert mock_page.url.endswith("/checkpoint/challenge/")
+        assert clock.now >= 0.4 + extractor_module._URL_SETTLE_QUIET
+
+
 class TestGetSavedJobs:
     """Tests for get_saved_jobs with job ID extraction and pagination."""
 
