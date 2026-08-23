@@ -228,11 +228,11 @@ def obtain_owner(
             return ElectionOutcome(lookup, started_owner=started)
 
         if attempt is _Attempt.FAILED:
-            # This process held the lock, started a child, and the child said it
-            # could not serve. Nobody else is coming: the lock is free again and
-            # a fresh attempt would fail the same way. Waiting out the deadline
-            # here is what turned a broken owner into a client that hangs for
-            # the better part of a minute before reporting nothing at all.
+            # This process held the lock and its child did not become an owner.
+            # `_spawn` has issued a hard stop and a bounded wait, so no descriptor
+            # will come from this attempt. If the kernel could not finish the
+            # stop, that condition was logged there; waiting here still cannot
+            # turn this failed child into an owner.
             logger.warning("The daemon could not start; see %s", _log_hint(auth_root))
             return ElectionOutcome(look(), started_owner=started)
         started = started or attempt is _Attempt.STARTED
@@ -523,8 +523,10 @@ class _Attempt(enum.Enum):
     #: process started has not answered yet and is still holding one. Wait.
     CONTENDED = "contended"
 
-    #: The child this process started said it could not serve. Nothing is
-    #: holding the lock on its behalf, so waiting on it specifically is delay.
+    #: The child this process started did not become an owner. Before this
+    #: reaches the caller, ``_spawn`` has issued a hard stop and waited for the
+    #: child. If the kernel cannot finish that stop within the bounded wait,
+    #: ``_stop_child`` logs that the profile may remain locked.
     FAILED = "failed"
 
 
@@ -700,16 +702,22 @@ def _spawn(
             # *write* blocked, which needs a configuration large enough to fill
             # a pipe; this is the same wedge reached by the ordinary route.
             #
-            # Safe for the same reason: an owner opens no browser before it
-            # answers, so nothing is interrupted mid-flight. And on POSIX the
-            # frontend still holds its own lock until this returns, so the
-            # position cannot be taken by anyone else in between.
+            # This existing timeout chooses the observed lock wedge over an
+            # unbounded wait. Publication precedes the private ready verdict, so
+            # it can race a newly attachable owner; #790 tracks the commit
+            # protocol needed to distinguish those states atomically.
             logger.warning(
                 "The daemon did not finish starting; stopping it so the lock is "
                 "not held by a process that never served"
             )
             _stop_child(child)
             return _Started.NO
+        if verdict is _Started.NO:
+            # A failure verdict is terminal. The real owner has already run its
+            # bounded shutdown before sending it; EOF means the child exited.
+            # Stop a nonconforming child that reports failure and stays alive,
+            # or its inherited descriptor keeps the profile locked forever.
+            _stop_child(child)
         return verdict
     finally:
         _release_handshake(child)
@@ -717,28 +725,30 @@ def _spawn(
 
 
 #: How long to wait for a killed child to be collected. Short by design: this
-#: follows ``SIGKILL``, which the process cannot decline, so anything but a
-#: prompt exit means the process is stuck in the kernel and no amount of waiting
-#: here will change that.
+#: follows a hard kill (``SIGKILL`` on POSIX and ``TerminateProcess`` on
+#: Windows), which the process cannot decline, so anything but a prompt exit
+#: means the process is stuck in the kernel and no amount of waiting here will
+#: change that.
 _STOP_CHILD_SECONDS = 2.0
 
 
 def _stop_child(child: subprocess.Popen[bytes]) -> None:
-    """End a child that never took its configuration, and collect it.
+    """End a child whose startup cannot produce a usable owner, and collect it.
 
-    Killed outright rather than asked politely first. The usual courtesy buys a
-    process time to clean up, and this one has nothing to clean up: it never
-    read its configuration, so it has opened no browser and holds no state
-    beyond the lock descriptor it inherited and must give back.
+    Called after a configuration timeout, an exhausted startup budget, or a
+    terminal non-ready verdict. A reported failure has already run ``_serve``'s
+    bounded endpoint shutdown, and EOF means the child already exited. The
+    timeout cases cannot be left holding the inherited lock indefinitely.
 
-    The courtesy is not free either. A ``SIGTERM`` grace period is time added
-    *after* the caller's budget is already spent, so a child that ignores the
-    signal turns a half-second election into five and a half, and the documented
-    ceiling stops being a ceiling.
+    Killed outright rather than asked politely first. A ``SIGTERM`` grace period
+    is time added *after* the caller's budget is already spent, so a child that
+    ignores the signal turns a half-second election into five and a half, and the
+    documented ceiling stops being a ceiling.
 
-    The wait is what makes "the lock is free" true before this returns: a
-    signalled process has not necessarily been reaped, and until it is, the
-    descriptor may still be open.
+    The wait normally proves process death before this returns: a signalled
+    process may still have its descriptors open until the kernel finishes the
+    exit. The bounded-wait warning is the explicit exception, and the caller must
+    not claim the lock is certainly free after it.
     """
     with contextlib.suppress(OSError):
         child.kill()
@@ -1006,14 +1016,9 @@ def _await_ready(child: subprocess.Popen[bytes], *, timeout: float) -> _Started:
     try:
         verdict = verdicts.get(timeout=max(timeout, 0.0))
     except queue.Empty:
-        # Not a failure, and the difference matters. The child said nothing and
-        # did not exit, so it is still starting and still holds the lock it
-        # adopted. Reporting this as "the child could not serve" would send the
-        # caller off to drive its own browser against the profile the child is
-        # about to open — two browsers, from a slow machine rather than a bug.
-        logger.warning(
-            "The daemon has not finished starting; leaving it to come up on its own"
-        )
+        # Kept distinct from ``NO`` so ``_spawn`` can diagnose silence at the
+        # point where it enforces the startup budget. The child has not proved it
+        # can serve, so that function still owns and stops it.
         return _Started.STILL_TRYING
 
     if verdict is None:

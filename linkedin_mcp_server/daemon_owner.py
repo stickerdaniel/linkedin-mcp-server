@@ -761,6 +761,11 @@ def main(argv: list[str] | None = None) -> int:
         # how this process logs.
         config = _read_config()
     except BaseException:
+        # A failed verdict is terminal to the frontend, which may hard-stop this
+        # process as soon as it reads one. Put the diagnosis in the daemon log
+        # before making that verdict visible rather than relying on the
+        # interpreter to print an unhandled traceback afterwards.
+        logger.exception("The daemon could not read its configuration")
         handshake.fail()
         raise
 

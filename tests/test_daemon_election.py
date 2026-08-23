@@ -6,10 +6,11 @@ stayed inside one interpreter could show the code takes the branches it means to
 and would not show the thing that matters: that exactly one browser-owning
 process exists, and that the lock dies with it.
 
-Three of these pin defects that were live in this code and found by running it:
-a failed child read as "somebody is starting" and cost a full deadline, a
-crashed owner's descriptor was handed back as attachable, and the parent's copy
-of the lock outliving the owner would have wedged every recovery.
+Four of these pin defects that were live in this code and found by running it:
+a failed child read as "somebody is starting" and cost a full deadline, a child
+that reported failure kept the inherited lock, a crashed owner's descriptor was
+handed back as attachable, and the parent's copy of the lock outliving the owner
+would have wedged every recovery.
 """
 
 from __future__ import annotations
@@ -751,6 +752,61 @@ class TestFailingFast:
                     sleeper.wait(timeout=30)
 
     @_POSIX_ONLY
+    def test_a_child_that_reports_failure_does_not_keep_the_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # This is the missing third startup failure. The child has consumed its
+        # configuration and reported that it cannot serve, but it stays alive.
+        # Removing the stop attached to the terminal ``NO`` verdict leaves its
+        # returncode unset and the lock probe below contended.
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+
+        children: list[subprocess.Popen[Any]] = []
+        real = subprocess.Popen
+
+        def reports_failure(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+            if command[1:4] != ["-I", "-m", "linkedin_mcp_server.daemon_owner"]:
+                return real(command, **kwargs)
+            child = real(
+                [
+                    command[0],
+                    "-c",
+                    "import sys, time\n"
+                    "sys.stdin.read()\n"
+                    "sys.stdout.write('failed\\n')\n"
+                    "sys.stdout.flush()\n"
+                    "time.sleep(600)\n",
+                ],
+                **kwargs,
+            )
+            children.append(child)
+            return child
+
+        monkeypatch.setattr(election_module.subprocess, "Popen", reports_failure)
+
+        try:
+            attempt = election_module._start_owner(
+                auth_root, profile, config, timeout=5.0
+            )
+            assert attempt is _Attempt.FAILED
+            assert [child.returncode for child in children] == [-signal.SIGKILL], (
+                "the child was left alive after reporting startup failure"
+            )
+
+            probe = DaemonLock(auth_root)
+            assert probe.try_acquire(), (
+                "the failed child kept the daemon lock for this profile"
+            )
+            probe.release()
+        finally:
+            for child in children:
+                if child.poll() is None:  # pragma: no cover - the stop worked
+                    child.kill()
+                    child.wait(timeout=30)
+
+    @_POSIX_ONLY
     def test_a_child_that_says_nothing_does_not_keep_the_lock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -758,13 +814,11 @@ class TestFailingFast:
         # is stopped, and the reasoning took two passes to get right.
         #
         # The first version called this "still trying" and left the child alone,
-        # on the grounds that it might yet come up and that killing it could
-        # leave the caller driving a second browser. The first half is true and
-        # the second is not: an owner opens no browser before it answers, and on
-        # POSIX the frontend holds its own lock until the spawn returns. What
-        # the leniency actually bought was a child holding the inherited lock
-        # while never serving — measured, the lock was still held afterwards,
-        # and every later election would contend against it forever.
+        # on the grounds that it might yet come up. What the leniency actually
+        # bought was a child holding the inherited lock while never serving —
+        # measured, the lock was still held afterwards, and every later election
+        # would contend against it forever. Publication is not atomic with the
+        # private verdict; #790 tracks the opposite timeout race.
         #
         # This test asserted the lenient behaviour and then killed the child in
         # its own teardown, with a comment saying the lock would otherwise be
