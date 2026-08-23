@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 import asyncio
 
+from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 import pytest
@@ -4400,6 +4401,24 @@ class TestSettleNavigation:
 
         return sleep
 
+    async def test_a_destroyed_context_reads_as_no_document(self, mock_page):
+        """A navigation in flight takes the context the reading needs with it.
+
+        The class patchright raises for that is `Error`, measured, and not a
+        `RuntimeError`. A handler narrowed to the latter would turn the
+        ordinary case this reading exists for into an unhandled exception,
+        so the double is held to the real class.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(
+            side_effect=PatchrightError(
+                "Page.evaluate: Execution context was destroyed, "
+                "most likely because of a navigation."
+            )
+        )
+
+        assert await extractor._document_origin() is None
+
     async def test_a_page_going_nowhere_costs_the_lag_and_not_the_quiet(
         self, mock_page
     ):
@@ -4926,7 +4945,13 @@ class TestGetSavedJobs:
                 navigate(mock_page, "https://www.linkedin.com/checkpoint/challenge/")
 
             asyncio.get_running_loop().create_task(land())
-            raise RuntimeError("Execution context was destroyed")
+            # The class patchright raises for this, measured: an `Error`,
+            # not a `RuntimeError`. Keeping the double on the real one stops
+            # a handler from being narrowed to a class that never arrives.
+            raise PatchrightError(
+                "Page.evaluate: Execution context was destroyed, "
+                "most likely because of a navigation."
+            )
 
         extractor = LinkedInExtractor(mock_page)
         with (
