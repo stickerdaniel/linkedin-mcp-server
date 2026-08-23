@@ -19,7 +19,6 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
-    is_linkedin_url,
     raise_if_proxy_error,
     redact_proxy_credentials,
     redacted_copy,
@@ -1176,21 +1175,6 @@ class LinkedInExtractor:
 
             barrier = await detect_auth_barrier_quick(self._page)
             if not barrier:
-                # A navigation asked to reach LinkedIn and ending somewhere
-                # else did not reach this page, whatever the somewhere else
-                # holds. It is not an auth barrier either, and calling it one
-                # closes a session that never expired and asks for a login
-                # that cannot fix the network in front of it. So the barrier
-                # check no longer claims a foreign `/login`, and this is what
-                # catches what it stopped claiming: a captive portal or proxy
-                # interstitial otherwise comes back as the profile, company
-                # or job posting that was asked for.
-                #
-                # Only when the target was LinkedIn's, since the connection
-                # helpers below drive the page to addresses of their own.
-                if is_linkedin_url(url) and not is_linkedin_url(self._page.url):
-                    logger.warning("Navigation to %s ended on %s", url, self._page.url)
-                    raise RuntimeError(f"Navigation to {url} ended on {self._page.url}")
                 return
 
             if allow_remember_me and await resolve_remember_me_prompt(self._page):

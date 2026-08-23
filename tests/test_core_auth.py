@@ -7,7 +7,6 @@ import pytest
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.auth import (
     _REMEMBER_ME_CONTAINER_SELECTOR,
-    is_linkedin_url,
     detect_auth_barrier,
     detect_auth_barrier_quick,
     is_logged_in,
@@ -188,62 +187,6 @@ async def test_the_quick_check_asks_the_page_for_a_picker():
     assert result is not None
     assert _REMEMBER_ME_CONTAINER_SELECTOR in result
     page.evaluate.assert_not_awaited()
-
-
-@pytest.mark.parametrize(
-    "url,expected",
-    [
-        ("https://www.linkedin.com/feed/", True),
-        ("https://linkedin.com/feed/", True),
-        ("https://de.linkedin.com/feed/", True),
-        ("about:blank", True),
-        ("/in/testuser/", True),
-        ("https://portal.example/feed/", False),
-        ("https://evil-linkedin.com/feed/", False),
-        ("https://linkedin.com.evil.test/feed/", False),
-        # Everything before the first colon of the authority is `linkedin.com`
-        # and the destination is `portal.example`, which is why this reads the
-        # parsed hostname rather than splitting the authority itself.
-        ("http://linkedin.com:pw@portal.example/in/testuser/", False),
-    ],
-)
-def test_a_host_is_linkedin_s_or_it_is_not(url: str, expected: bool):
-    """A hostless address is not judged; a userinfo one is not believed."""
-    assert is_linkedin_url(url) is expected
-
-
-@pytest.mark.asyncio
-async def test_a_portal_holding_the_feed_path_is_not_a_session():
-    """The login check reads authenticated-only paths out of the address.
-
-    A captive portal carrying `?next=https://www.linkedin.com/feed/` satisfies
-    that on its own text. It used to be caught by accident, the blocker check
-    having claimed every `/login` whatever served it, and that check now
-    refuses a foreign host on purpose.
-    """
-    page = _barrier_page()
-    page.url = "https://portal.example/login?next=https://www.linkedin.com/feed/"
-    page.title = AsyncMock(return_value="Guest Wi-Fi")
-    page.evaluate = AsyncMock(return_value="Accept the terms to continue")
-
-    assert await is_logged_in(page) is False
-
-
-@pytest.mark.asyncio
-async def test_a_foreign_login_page_is_not_linkedin_asking():
-    """The path alone says nothing about whose login this is.
-
-    A captive portal or proxy interstitial answering at `/login` was read as
-    LinkedIn asking for a sign-in, which closes a session that never expired
-    and sends the user through a relogin that cannot fix the network in front
-    of it.
-    """
-    page = _barrier_page()
-    page.url = "https://portal.example/login"
-    page.title = AsyncMock(return_value="Guest Wi-Fi")
-    page.evaluate = AsyncMock(return_value="Accept the terms to continue")
-
-    assert await detect_auth_barrier(page) is None
 
 
 @pytest.mark.asyncio

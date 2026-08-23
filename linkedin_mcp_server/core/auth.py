@@ -52,17 +52,6 @@ async def is_logged_in(page: Page) -> bool:
         if _is_auth_blocker_url(current_url):
             return False
 
-        # And on a page that is not LinkedIn's at all. The fallback below
-        # reads authenticated-only paths out of the address, and a captive
-        # portal carrying `?next=https://www.linkedin.com/feed/` satisfies it
-        # on its own text. That used to be caught by accident, the blocker
-        # check having claimed every `/login` whatever served it; it no
-        # longer does, because a relogin cannot fix the network in front of
-        # it, so the case is answered here instead.
-        if not is_linkedin_url(current_url):
-            logger.debug("Not logged in: %s is not LinkedIn", current_url)
-            return False
-
         # Step 2: Selector check (PRIMARY)
         old_selectors = '.global-nav__primary-link, [data-control-name="nav.settings"]'
         old_count = await page.locator(old_selectors).count()
@@ -250,36 +239,9 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
         return False
 
 
-def is_linkedin_url(url: str) -> bool:
-    """Whether an address belongs to LinkedIn.
-
-    An address carrying no host is not judged: a relative one is resolved
-    against the page it came from, and `about:blank` names no site at all.
-    Both are LinkedIn's to serve as far as this can tell.
-
-    `hostname` and not `netloc`, which carries the userinfo as well as the
-    port: everything before the first colon of
-    `http://linkedin.com:pw@portal.example/` is `linkedin.com`, and the
-    destination is `portal.example`.
-    """
-    host = urlparse(url).hostname
-    return not host or host == "linkedin.com" or host.endswith(".linkedin.com")
-
-
 def _is_auth_blocker_url(url: str) -> bool:
     """Return True only for real auth routes, not arbitrary slug substrings."""
-    parsed = urlparse(url)
-
-    # The path alone says nothing about whose login this is. A captive portal
-    # or proxy interstitial answering at `/login` was read as LinkedIn asking
-    # for a sign-in, which closes a session that never expired and sends the
-    # user through a relogin that cannot fix the network in front of it. An
-    # address with no host at all is left to the path, having no claim to
-    # judge.
-    if not is_linkedin_url(url):
-        return False
-
-    path = parsed.path or "/"
+    path = urlparse(url).path or "/"
 
     if path in _AUTH_BLOCKER_URL_PATTERNS:
         return True

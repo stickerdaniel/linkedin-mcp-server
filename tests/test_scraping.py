@@ -1,5 +1,6 @@
 """Tests for the LinkedInExtractor scraping engine."""
 
+from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -148,7 +149,11 @@ def mock_page():
     mock_locator.inner_text = AsyncMock(return_value="normal page content")
     mock_locator.filter = MagicMock(return_value=mock_locator)
     page.locator.return_value = mock_locator
-    page.main_frame = object()
+    # A real `Frame` carries the address it navigated to, and production
+    # reads it off the `framenavigated` argument rather than off the page.
+    # A bare object answers every attribute with nothing, which left hop
+    # recording looking correct here however broken it was.
+    page.main_frame = SimpleNamespace(url=page.url)
     page.wait_for_load_state = AsyncMock()
     # Real listeners, so that a double can navigate the way the browser does.
     # A reload leaves `page.url` untouched, so the event is the only thing that
@@ -216,6 +221,10 @@ def navigate(page, url: str | None = None, same_document: bool = False) -> None:
         page.url = url
     if not same_document:
         page.time_origin += 1.0
+    # The frame carries the address too, and production reads the hop off the
+    # frame rather than off the page. Leaving it behind is what let the hop
+    # recording look correct here however broken it was.
+    page.main_frame.url = page.url
     for callback in list(page.listeners.get("framenavigated", [])):
         callback(page.main_frame)
 
@@ -849,60 +858,6 @@ class TestExtractPage:
         assert seen == [7.0]
         assert extractor._scroll_seconds == 3.0
 
-    async def test_a_navigation_landing_off_linkedin_is_refused(self, mock_page):
-        """A captive portal is not LinkedIn and is not a login prompt either.
-
-        The barrier check stopped claiming a foreign `/login`, because calling
-        it one closes a session that never expired and asks for a sign-in that
-        cannot fix the network in front of it. Without this, the portal's own
-        page comes back as the profile, company or job posting that was asked
-        for, and nothing says otherwise.
-        """
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.goto = AsyncMock(
-            side_effect=lambda *a, **k: navigate(
-                mock_page, "https://portal.example/login"
-            )
-        )
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.stabilize_navigation",
-                new_callable=AsyncMock,
-            ),
-            pytest.raises(RuntimeError, match="portal.example"),
-        ):
-            await extractor._goto_with_auth_checks(
-                "https://www.linkedin.com/in/testuser/"
-            )
-
-    async def test_a_navigation_that_never_asked_for_linkedin_is_left_alone(
-        self, mock_page
-    ):
-        """The connection helpers drive the page to addresses of their own."""
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.goto = AsyncMock(
-            side_effect=lambda *a, **k: navigate(mock_page, "https://example.com/x")
-        )
-
-        with (
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier_quick",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.stabilize_navigation",
-                new_callable=AsyncMock,
-            ),
-        ):
-            await extractor._goto_with_auth_checks("https://example.com/x")
-
     async def test_a_reload_after_the_scroll_is_caught_by_the_read(self, mock_page):
         """The watcher comes off before the page is read.
 
@@ -1330,6 +1285,48 @@ class TestNavigationDiagnostics:
             trace_call.kwargs["extra"]["error"]
             == "Exception: net::ERR_TOO_MANY_REDIRECTS"
         )
+
+    async def test_a_hop_on_the_way_reaches_the_failure_log(self, mock_page):
+        """Where a failed navigation went is the diagnostic it leaves behind.
+
+        The address is read off the frame the event carries and not off the
+        page, so a double whose frame never moves records nothing while
+        looking exactly like one that works.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        checkpoint = "https://www.linkedin.com/checkpoint/challenge/"
+
+        async def goto_then_fail(*args, **kwargs):
+            navigate(mock_page, checkpoint)
+            raise Exception("net::ERR_ABORTED")
+
+        mock_page.goto = AsyncMock(side_effect=goto_then_fail)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_auth_barrier",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                extractor,
+                "_log_navigation_failure",
+                new_callable=AsyncMock,
+            ) as mock_log_failure,
+            pytest.raises(Exception, match="ERR_ABORTED"),
+        ):
+            await extractor._goto_with_auth_checks(
+                "https://www.linkedin.com/in/testuser/"
+            )
+
+        logged = mock_log_failure.await_args
+        assert logged is not None
+        assert logged.args[3] == [checkpoint]
 
     async def test_goto_with_auth_checks_logs_failure_context(self, mock_page):
         extractor = LinkedInExtractor(mock_page)

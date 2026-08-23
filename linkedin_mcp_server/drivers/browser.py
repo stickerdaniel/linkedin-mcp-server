@@ -21,7 +21,6 @@ from linkedin_mcp_server.core import (
     detect_auth_barrier_quick,
     detect_rate_limit,
     goto_reporting_proxy_errors,
-    is_linkedin_url,
     is_logged_in,
     proxy_hint,
     raise_if_proxy_configured,
@@ -207,24 +206,6 @@ async def _feed_auth_succeeds(
                     extra={"allow_remember_me": allow_remember_me},
                 )
                 return await _feed_auth_succeeds(browser, allow_remember_me=False)
-        # A feed that answered from somewhere else is not this account's feed,
-        # and the barrier check will not say so: it stopped claiming a foreign
-        # `/login`, because a relogin cannot fix the network in front of it.
-        # Left here, a captive portal loading cleanly counts as proof of a
-        # working session, and the profile is marked authenticated without
-        # LinkedIn having been reached at all.
-        if not is_linkedin_url(browser.page.url):
-            logger.warning(
-                "Feed navigation ended on %s, which is not LinkedIn",
-                browser.page.url,
-            )
-            await record_page_trace(
-                browser.page,
-                "feed-off-linkedin",
-                extra={"landed_on": browser.page.url},
-            )
-            return False
-
         barrier = await detect_auth_barrier_quick(browser.page)
         if barrier is not None:
             await record_page_trace(
