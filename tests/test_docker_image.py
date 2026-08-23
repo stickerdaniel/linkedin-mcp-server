@@ -567,36 +567,66 @@ def test_the_documented_bind_mount_is_created_by_the_host_user() -> None:
         assert 'sudo chown -R "$(id -u):$(id -g)" ~/.linkedin-mcp' in document
 
 
-def test_no_documented_argument_array_needs_a_shell() -> None:
-    """A client executes these, so nothing in them may need expanding.
-
-    The mounts in the surrounding shell commands are written with ``~`` on
-    purpose and a shell expands them. The arrays inside an MCP client's JSON
-    config are handed to ``docker`` directly, and a literal ``~`` is neither an
-    absolute path nor a legal volume name, so Docker exits 125 before Tini, the
-    supervisor or Python ever start. The stdio transport this container exists
-    to serve is then unreachable through the configuration the docs give for it.
-    """
-    blocks = [
-        block
-        for document in (_README, _DOCKER_GUIDE)
-        for block in re.findall(r"```json\n(.*?)```", document, re.DOTALL)
-    ]
-    assert blocks, "no JSON configuration blocks found to check"
-
-    checked = 0
-    for block in blocks:
+def _documented_client_mounts(document: str) -> list[str]:
+    """Every ``-v`` value an MCP client would hand to ``docker`` verbatim."""
+    mounts: list[str] = []
+    for block in re.findall(r"```json\n(.*?)```", document, re.DOTALL):
         for server in json.loads(block).get("mcpServers", {}).values():
-            for argument in server.get("args", []):
-                checked += 1
-                assert not argument.startswith("~"), (
-                    f"{argument!r} is handed to {server.get('command')!r} "
-                    "without a shell, so nothing expands the tilde"
-                )
-                assert "$" not in argument, (
-                    f"{argument!r} is handed to {server.get('command')!r} "
-                    "without a shell, so nothing expands the variable"
-                )
+            arguments = server.get("args", [])
+            mounts += [
+                value for flag, value in zip(arguments, arguments[1:]) if flag == "-v"
+            ]
+    return mounts
+
+
+def test_every_documented_mount_is_a_path_docker_accepts() -> None:
+    """A client executes these arrays, so Docker reads each path verbatim.
+
+    Docker resolves a bind source only when it is already absolute; anything
+    else is read as a volume *name*, whose character class ``~``, ``$HOME``
+    and ``%USERPROFILE%`` all fail. Docker then exits 125 before Tini, the
+    supervisor or Python ever start, and the stdio transport this container
+    exists to serve is unreachable through the configuration the docs give
+    for it. Measured against the daemon: ``%USERPROFILE%/.linkedin-mcp:...``
+    exits 125, while an absolute path is accepted whatever else it holds -- a
+    ``$`` inside one names a directory rather than a variable, because no
+    shell is involved.
+    """
+    for name, document in (
+        ("README.md", _README),
+        ("docs/docker-hub.md", _DOCKER_GUIDE),
+    ):
+        mounts = _documented_client_mounts(document)
+        written = re.findall(r'"-v",\s*"([^"]*)"', document)
+        assert mounts == written, (
+            f"{name} writes {written} but this check parsed {mounts}, so a "
+            "configuration block was never inspected"
+        )
+        assert mounts, f"{name} documents no mount to check"
+
+        for mount in mounts:
+            host, _, container = mount.rpartition(":")
+            assert re.match(r"(?:/|[A-Za-z]:/)", host), (
+                f"{name}: {host!r} is not an absolute path, so Docker reads it "
+                "as a volume name and exits 125"
+            )
+            assert container.startswith("/"), (
+                f"{name}: {container!r} is not an absolute destination"
+            )
+
+
+def test_no_documented_argument_starts_with_a_tilde() -> None:
+    """No client expands one, and every ``args`` array is executed directly."""
+    checked = 0
+    for document in (_README, _DOCKER_GUIDE):
+        for block in re.findall(r"```json\n(.*?)```", document, re.DOTALL):
+            for server in json.loads(block).get("mcpServers", {}).values():
+                for argument in server.get("args", []):
+                    checked += 1
+                    assert not argument.startswith("~"), (
+                        f"{argument!r} is handed to {server.get('command')!r} "
+                        "without a shell, so nothing expands the tilde"
+                    )
     assert checked, "no arguments found to check"
 
 
