@@ -311,6 +311,10 @@ _SCROLL_BUDGET_TOTAL = 60.0
 _SEARCH_TIMEOUT_FRACTION = 0.8
 
 _SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
+# Where a saved-jobs navigation may legitimately end. LinkedIn redirects the
+# first to the second and drops the query doing so, so the tool navigates to
+# one and arrives at the other.
+_SAVED_JOBS_PATHS = frozenset({"/my-items/saved-jobs", "/jobs-tracker"})
 
 # The my-items lists page in 10s, unlike job search. Verified live: ?start=10
 # returns the 11th saved job, while ?start=25 lands past the end of a two-page
@@ -3998,36 +4002,67 @@ class LinkedInExtractor:
         section_name: str,
     ) -> ExtractedSection:
         """Extract innerText from a saved-jobs page with soft rate-limit retry."""
-        try:
-            result = await self._extract_saved_jobs_page_once(url, section_name)
-            if result.text != _RATE_LIMITED_MSG:
+        with self._watching_navigations() as hops:
+            try:
+                result = await self._extract_saved_jobs_page_once(url, section_name)
+                if result.text != _RATE_LIMITED_MSG:
+                    return result
+
+                logger.info(
+                    "Retrying saved jobs page %s after %.0fs backoff",
+                    url,
+                    _RATE_LIMIT_RETRY_DELAY,
+                )
+                await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+                result = await self._extract_saved_jobs_page_once(url, section_name)
+                if result.text == _RATE_LIMITED_MSG:
+                    logger.warning(
+                        "Saved jobs page %s still rate-limited after retry", url
+                    )
                 return result
 
-            logger.info(
-                "Retrying saved jobs page %s after %.0fs backoff",
-                url,
-                _RATE_LIMIT_RETRY_DELAY,
-            )
-            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
-            result = await self._extract_saved_jobs_page_once(url, section_name)
-            if result.text == _RATE_LIMITED_MSG:
-                logger.warning("Saved jobs page %s still rate-limited after retry", url)
-            return result
-
-        except LinkedInScraperException:
-            raise
-        except Exception as e:
-            logger.warning("Failed to extract saved jobs page %s: %s", url, e)
-            return ExtractedSection(
-                text="",
-                references=[],
-                error=build_issue_diagnostics(
-                    e,
-                    context="extract_saved_jobs_page",
-                    target_url=url,
-                    section_name=section_name,
-                ),
-            )
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Failed to extract saved jobs page %s: %s", url, e)
+                # A navigation destroys the scroll's execution context, and
+                # what waits behind it is a checkpoint as often as a layout
+                # change. Turning that into a section diagnostic hands the
+                # caller an empty list, leaves the browser registered and
+                # offers no relogin, so the next call meets the same barrier.
+                #
+                # Whether one happened is the listener's answer and not the
+                # address's: this list reaches `/jobs-tracker/` by a redirect
+                # LinkedIn makes on purpose, so comparing against the URL that
+                # was asked for finds a difference on every ordinary failure
+                # and waits out a chain that is not running.
+                #
+                # No document baseline, so every hop counts. One is taken
+                # before the search scroll, where the page is already loaded
+                # and the only navigation to expect is one going wrong. Here
+                # the block opens before this page's own navigation, so a
+                # reading from the top belongs to the document that was left
+                # and would call every ordinary failure a replacement. `None`
+                # says so, and settling costs a moment on a path that has
+                # already failed.
+                try:
+                    await self._settle_navigation(hops, None)
+                except Exception:
+                    logger.debug(
+                        "Could not settle the route after a saved-jobs failure",
+                        exc_info=True,
+                    )
+                await self._raise_if_auth_barrier(self._page.url, navigation_error=e)
+                return ExtractedSection(
+                    text="",
+                    references=[],
+                    error=build_issue_diagnostics(
+                        e,
+                        context="extract_saved_jobs_page",
+                        target_url=url,
+                        section_name=section_name,
+                    ),
+                )
 
     async def _extract_saved_jobs_page_once(
         self,
@@ -4051,6 +4086,13 @@ class LinkedInExtractor:
         await handle_modal_close(self._page)
         if main_found:
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+        else:
+            # A picker served in place of the list keeps the list's address
+            # and its title, so the route guard below sees an allowed page and
+            # the body fallback returns the picker under `saved_jobs`. Missing
+            # `<main>` is what is left, and an emptied list has none either,
+            # which is why the check decides it rather than the absence.
+            await self._raise_if_auth_barrier(self._page.url)
 
         # A picker served by a reload keeps this page's address and this
         # page's title, so the route guard reads it as the list. Nothing else
@@ -4159,11 +4201,58 @@ class LinkedInExtractor:
                     url, section_name="saved_jobs"
                 )
 
-                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
-                    if extracted.text == _RATE_LIMITED_MSG:
-                        section_errors["saved_jobs"] = rate_limited_section_error()
-                    elif extracted.error:
-                        section_errors["saved_jobs"] = extracted.error
+                # Rate limit first: it is the more specific diagnosis, and a
+                # page that was throttled may carry a generic error too. Then
+                # the extraction error, which names what actually failed and
+                # would be masked by the route guard below.
+                if extracted.text == _RATE_LIMITED_MSG:
+                    section_errors["saved_jobs"] = rate_limited_section_error()
+                    break
+                if extracted.error:
+                    section_errors["saved_jobs"] = extracted.error
+                    break
+
+                # Host and parsed path, like the job-search guard: a
+                # substring test accepts any origin that happens to serve
+                # this path, and an interstitial carrying a single
+                # /jobs/view/ anchor would come back as the account's saved
+                # jobs.
+                #
+                # Both destinations, because LinkedIn now answers
+                # /my-items/saved-jobs/ with a redirect to /jobs-tracker/ and
+                # drops the query on the way. Measured on 2026-08-21 against
+                # an authenticated profile, for the bare URL and for
+                # ?start=10 alike. The old route is kept because the redirect
+                # is a rollout and the server still navigates to it.
+                parsed_url = urlparse(self._page.url)
+                if (
+                    parsed_url.netloc != "www.linkedin.com"
+                    or parsed_url.path.rstrip("/") not in _SAVED_JOBS_PATHS
+                ):
+                    logger.debug(
+                        "Unexpected page URL after saved-jobs extraction: %s "
+                        "(requested %s) — skipping job ID extraction",
+                        self._page.url,
+                        url,
+                    )
+                    # The page is dropped whole. Keeping its text and
+                    # references put a stranger's page under `saved_jobs`
+                    # with the job links it happened to carry, which reads
+                    # as the account's own list. Raised and not broken out
+                    # of, because an empty result with nothing beside it is
+                    # what an account with nothing saved looks like.
+                    # Classified first, so an expired session reaches the
+                    # relogin path instead of a diagnostic. Against the page
+                    # that answered, because that is where the barrier is; the
+                    # address that was asked for is on the line above.
+                    await self._raise_if_auth_barrier(self._page.url)
+                    raise RuntimeError(
+                        f"Saved jobs navigation ended on {self._page.url}"
+                    )
+
+                if not extracted.text:
+                    # Nothing to read, and the page is the one that was asked
+                    # for: an account with nothing saved.
                     break
 
                 if not total_pages_queried:
@@ -4178,15 +4267,29 @@ class LinkedInExtractor:
                                 "LinkedIn reports %d saved-jobs pages", total_pages
                             )
 
-                if "/my-items/saved-jobs" not in self._page.url:
+                # An offset that did not survive the navigation means this
+                # is the first page again, and reading it a second time
+                # appends the whole list to itself under `saved_jobs` before
+                # the no-new-ids branch stops the loop. Measured on
+                # 2026-08-21: `/jobs-tracker/?start=10` lands on
+                # `/jobs-tracker/`, and so does the old route, so the offset
+                # is gone from the list rather than from one address for it.
+                # Judged from where the page landed and not from that
+                # measurement, so an account still served the old route keeps
+                # paginating.
+                landed_start = parse_qs(urlparse(self._page.url).query).get(
+                    "start", ["0"]
+                )[0]
+                if landed_start != str(page_num * _SAVED_JOBS_PAGE_SIZE):
                     logger.debug(
-                        "Unexpected page URL after saved-jobs extraction: %s — "
-                        "skipping job ID extraction",
+                        "Saved-jobs offset %d did not survive navigation "
+                        "(landed on %s), stopping",
+                        page_num * _SAVED_JOBS_PAGE_SIZE,
                         self._page.url,
                     )
-                    page_texts.append(extracted.text)
-                    if extracted.references:
-                        page_references.extend(extracted.references)
+                    section_errors["saved_jobs"] = dropped_offset_section_error(
+                        page_num * _SAVED_JOBS_PAGE_SIZE, self._page.url
+                    )
                     break
 
                 page_ids = await self._extract_job_ids()
