@@ -23,6 +23,10 @@ _LOGIN_TITLE_PATTERNS = (
     "linkedin login",
     "sign in | linkedin",
 )
+# English only, and knowingly so: these are the words the account picker uses,
+# and the words change with the interface language while nothing about the page
+# announces which one is in play. The structural check below carries the
+# locales this table does not, which is why it runs first.
 _AUTH_BARRIER_TEXT_MARKERS = (
     ("welcome back", "sign in using another account"),
     ("welcome back", "join now"),
@@ -114,6 +118,24 @@ async def _detect_auth_barrier(
             title = ""
         if any(pattern in title for pattern in _LOGIN_TITLE_PATTERNS):
             return f"login title: {title}"
+
+        # An id, so it says the same thing in every interface language, which
+        # the picker's own words do not. The rest of the codebase already reads
+        # this container as the picker; here it is the only signal that
+        # survives a locale change, because the URL of an in-place picker is
+        # the page that was asked for and its title is that page's title.
+        #
+        # Ahead of the quick check's exit, and not behind it, because the two
+        # signals it does read are exactly the two this page defeats. The
+        # quick check runs after every navigation, so a picker served in a
+        # locale the table below does not cover reached every scraping tool
+        # as page text. It costs one selector count, where the body read
+        # below is what the quick check exists to skip.
+        try:
+            if await page.locator(_REMEMBER_ME_CONTAINER_SELECTOR).count() > 0:
+                return f"account picker: {_REMEMBER_ME_CONTAINER_SELECTOR}"
+        except Exception:
+            logger.debug("Could not count remember-me containers", exc_info=True)
 
         if not include_body_text:
             return None
