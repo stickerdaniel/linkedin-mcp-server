@@ -714,6 +714,50 @@ class TestBuildReferences:
 
 
 class TestClassifyLink:
+    def test_a_slugged_job_url_keeps_its_id(self):
+        """LinkedIn serves a job under a bare id and under a slugged path.
+
+        Both 301 to the same page, so the slugged form is just as real, and
+        anchoring the id to the front of the segment dropped it: the link
+        vanished from ``references`` entirely.
+        """
+        assert classify_link(
+            "https://www.linkedin.com/jobs/view/senior-ai-engineer-at-acme-1967281839/"
+        ) == ("job", "/jobs/view/1967281839/")
+
+    def test_a_title_opening_with_a_number_is_not_the_job_id(self):
+        """The quiet half of the same bug, and the worse one.
+
+        A title starting with a year matched the front anchor, so the link
+        was kept and pointed at a different job. A dropped reference is
+        visibly missing; this one looks like a result.
+        """
+        assert classify_link(
+            "https://www.linkedin.com/jobs/view/2026-software-engineer-at-acme-4252026496/"
+        ) == ("job", "/jobs/view/4252026496/")
+
+    def test_unicode_digits_are_not_a_job_id(self):
+        """Python's ``\\d`` matches more than JavaScript's does.
+
+        Arabic-Indic digits pass ``\\d`` here and fail it in the two
+        JavaScript copies of this pattern, and ``normalize_job_id`` accepts
+        only ``[0-9]``. Classifying such a link produces a reference whose
+        very next use raises, so the digits are ASCII on purpose.
+        """
+        assert (
+            classify_link(
+                "https://www.linkedin.com/jobs/view/\u0645\u0647\u0646\u062f\u0633-"
+                "\u0664\u0662\u0665\u0662\u0660\u0662\u0666\u0664\u0669\u0666/"
+            )
+            is None
+        )
+
+    def test_a_bare_job_url_is_unchanged(self):
+        assert classify_link("https://www.linkedin.com/jobs/view/1967281839/") == (
+            "job",
+            "/jobs/view/1967281839/",
+        )
+
     def test_messaging_thread_url(self):
         result = classify_link(
             "https://www.linkedin.com/messaging/thread/2-NjAwMDAyMDEtZWVh/"
