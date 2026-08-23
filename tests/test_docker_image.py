@@ -696,20 +696,30 @@ time.sleep(5)
 def _a_free_display(base: int) -> tuple[int, Path, Path]:
     """Pick a display number whose socket and lock nobody else owns.
 
-    These tests run the real entrypoint, which begins by removing both names.
-    Deriving the number from the PID alone keeps two tests in one process apart
-    and reserves nothing, so a concurrent run or a real X server inside the
-    range would have its socket deleted out from under it and its clients left
-    with nowhere to connect. Scan instead, and take a number that is free.
+    These tests run the real entrypoint, which begins by removing both names,
+    so a number that something else is using would have its socket deleted out
+    from under it and its clients left with nowhere to connect. Deriving the
+    number from the PID keeps two tests in one process apart and claims
+    nothing. Scan for a free number instead, and claim it by creating its lock
+    exclusively, which no second scanner can then pick.
     """
     start = base + (os.getpid() % 10_000)
     for offset in range(100):
         number = base + ((start - base + offset) % 10_000)
         socket_path = Path(f"/tmp/.X11-unix/X{number}")
         lock_path = Path(f"/tmp/.X{number}-lock")
-        if not socket_path.exists() and not lock_path.exists():
-            socket_path.parent.mkdir(parents=True, exist_ok=True)
-            return number, socket_path, lock_path
+        if socket_path.exists():
+            continue
+        socket_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # Claims the number rather than reporting it free, so a second
+            # scanner cannot pick the same one between this check and the
+            # entrypoint's removal. The entrypoint deletes the lock on start,
+            # which is the stale state these tests want anyway.
+            os.close(os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+        except FileExistsError:
+            continue
+        return number, socket_path, lock_path
     pytest.fail(f"no free X display in {base}..{base + 99}")
 
 
