@@ -59,7 +59,7 @@ If an older rootful Docker run left that host directory owned by root, repair it
 }
 ```
 
-Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount.
+Spell that first path out in full. A client runs `docker` directly rather than through a shell, so a leading `~` reaches Docker unexpanded and it refuses the mount. On Windows write it with forward slashes, `C:/Users/you/.linkedin-mcp`; a backslash opens an escape sequence in JSON and `C:\Users` is not one the client can read.
 
 > **Note:** Plain `--login` does not publish a viewer. Use `--login --login-viewer` only for the one-shot login container, with port 6080 published to loopback.
 >
