@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 import contextlib
 from dataclasses import dataclass
 from enum import Enum
@@ -16,11 +16,14 @@ import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
+import threading
 import time
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TypeVar
 
 from fastmcp import Context
 from rich.console import Console
@@ -56,6 +59,7 @@ from linkedin_mcp_server.exceptions import (
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
     DockerHostLoginRequiredError,
+    ProfileRootRefusedError,
 )
 from linkedin_mcp_server.process_protocol import new_nonce
 from linkedin_mcp_server.process_tree import (
@@ -70,9 +74,14 @@ from linkedin_mcp_server.profile_lease import (
     _release_locked_fd,
     acquire_locked_fd,
 )
-from linkedin_mcp_server.server_role import ServerRole, process_role
+from linkedin_mcp_server.server_role import (
+    ServerRole,
+    ask_this_process_to_stand_down,
+    process_role,
+)
 from linkedin_mcp_server.session_state import (
     PeerSessionInPlaceError,
+    _owned,
     auth_root_dir,
     get_runtime_id,
     load_source_state,
@@ -244,7 +253,10 @@ class BootstrapState:
     auth_started_at: str | None = None
     auth_completed_at: str | None = None
     setup_task: asyncio.Task[None] | None = None
+    setup_check_complete: asyncio.Event | None = None
+    setup_requires_stand_down: bool = False
     cache_report_task: asyncio.Task[None] | None = None
+    cache_report_attempted: bool = False
     login_task: asyncio.Task[None] | None = None
     import_task: asyncio.Task[bool] | None = None
     import_attempted: bool = False
@@ -554,13 +566,50 @@ def _report_retained_browser_revisions() -> None:
             _release_locked_fd(lock_fd)
 
 
+_ThreadResult = TypeVar("_ThreadResult")
+
+
+async def _run_in_daemon_thread(
+    function: Callable[..., _ThreadResult], *args: Any
+) -> _ThreadResult:
+    """Run blocking filesystem work without making interpreter exit wait for it."""
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[_ThreadResult] = loop.create_future()
+
+    def run() -> None:
+        try:
+            value = function(*args)
+        except BaseException as exc:  # noqa: BLE001 - delivered to the event loop
+
+            def fail(error: BaseException = exc) -> None:
+                if not result.done():
+                    result.set_exception(error)
+
+            complete = fail
+        else:
+
+            def succeed(answer: _ThreadResult = value) -> None:
+                if not result.done():
+                    result.set_result(answer)
+
+            complete = succeed
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(complete)
+
+    threading.Thread(target=run, name="browser-setup-io", daemon=True).start()
+    return await result
+
+
 def _schedule_retained_browser_revision_report() -> None:
-    """Run the cache inventory off the event loop without delaying startup."""
+    """Run the cache inventory once per process, away from the event loop."""
+    if _state.cache_report_attempted:
+        return
     task = _state.cache_report_task
     if task is not None and not task.done():
         return
+    _state.cache_report_attempted = True
     _state.cache_report_task = asyncio.create_task(
-        asyncio.to_thread(_report_retained_browser_revisions),
+        _run_in_daemon_thread(_report_retained_browser_revisions),
         name="browser-cache-report",
     )
 
@@ -579,6 +628,66 @@ def get_bootstrap_state() -> BootstrapState:
     return _state
 
 
+async def _report_retained_browser_revisions_if_ready() -> None:
+    try:
+        ready = await _run_in_daemon_thread(_owned_browser_setup_ready)
+    except ProfileRootRefusedError:
+        logger.warning(
+            "Refusing to inspect the browser cache under an unclaimed profile root"
+        )
+        return
+    if ready:
+        _state.cache_report_attempted = True
+        await _run_in_daemon_thread(_report_retained_browser_revisions)
+
+
+def report_retained_browser_revisions_if_ready() -> None:
+    """Check and report in the background without starting an installer."""
+    initialize_bootstrap()
+    if get_runtime_policy() != RuntimePolicy.MANAGED or _uses_custom_chrome():
+        return
+    if _state.cache_report_attempted:
+        return
+    task = _state.cache_report_task
+    if task is not None and not task.done():
+        return
+    _state.cache_report_task = asyncio.create_task(
+        _report_retained_browser_revisions_if_ready(),
+        name="browser-cache-report-if-ready",
+    )
+
+
+async def stop_background_browser_setup() -> None:
+    """Cancel and await the owner's setup task before its lifespan can finish."""
+    task = _state.setup_task
+    if task is None:
+        return
+    caller_cancel: asyncio.CancelledError | None = None
+    if not task.done():
+        task.cancel()
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            caller = asyncio.current_task()
+            if caller is not None and caller.cancelling():
+                caller_cancel = exc
+            elif task.done():
+                break
+    _state.setup_task = None
+    _state.setup_check_complete = None
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        _state.setup_state = SetupState.FAILED
+        _state.last_error = "Browser setup task was cancelled during shutdown"
+    except Exception as exc:
+        _state.setup_state = SetupState.FAILED
+        _state.last_error = str(exc)
+    if caller_cancel is not None:
+        raise caller_cancel
+
+
 async def start_background_browser_setup_if_needed() -> None:
     """Start shared background browser setup for managed runtimes if needed."""
     initialize_bootstrap()
@@ -590,17 +699,28 @@ async def start_background_browser_setup_if_needed() -> None:
         _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
         return
 
+    await _refresh_background_task_state()
+
     async with _lock:
-        if _browser_setup_ready():
-            _schedule_retained_browser_revision_report()
-            _state.setup_state = SetupState.READY
-            _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
-            return
-        if _state.setup_state == SetupState.READY:
-            invalidate_browser_setup()
-        if _state.setup_task is not None and not _state.setup_task.done():
-            return
-        _start_browser_setup_task_locked()
+        if _state.setup_task is None or _state.setup_task.done():
+            deadline_at = (
+                asyncio.get_running_loop().time() + _BACKGROUND_BROWSER_SETUP_SECONDS
+            )
+            _start_browser_setup_task_locked(deadline_at)
+        checked = _state.setup_check_complete
+        assert checked is not None
+
+    # The readiness phase belongs to the shared task, so a timed-out tool caller
+    # cannot abandon it or start another filesystem thread on the next retry.
+    await asyncio.shield(checked.wait())
+    task = _state.setup_task
+    if task is not None and task.done():
+        try:
+            task.result()
+        except BaseException:
+            await _refresh_background_task_state()
+            _consume_background_setup_failure()
+            raise
 
 
 def _metadata_shape_ok() -> Path | None:
@@ -663,6 +783,24 @@ def browser_ready() -> bool:
     return _has_install_for(configured, _FULL_DIR_PREFIX, revision)
 
 
+def browser_setup_in_progress() -> bool:
+    """Return whether this process is still installing the managed browser."""
+    task = _state.setup_task
+    return task is not None and not task.done()
+
+
+def browser_setup_failure_pending() -> bool:
+    """Return whether a completed setup failure still needs a client response."""
+    if _state.setup_state is SetupState.FAILED or _state.setup_requires_stand_down:
+        return True
+    task = _state.setup_task
+    if task is None or not task.done():
+        return False
+    if task.cancelled():
+        return True
+    return task.exception() is not None
+
+
 def browser_setup_ready() -> bool:
     """Return whether the browser this server launches is installed and current.
 
@@ -674,12 +812,26 @@ def browser_setup_ready() -> bool:
     return browser_ready()
 
 
-def invalidate_browser_setup() -> None:
-    """Mark browser setup as not-ready: drop install metadata and reset cached READY state."""
-    install_metadata_path().unlink(missing_ok=True)
+def _discard_browser_install_metadata() -> None:
+    profile = _owned(get_profile_dir())
+    (auth_root_dir(profile) / _BROWSER_INSTALL_METADATA).unlink(missing_ok=True)
+
+
+def _mark_browser_setup_invalid() -> None:
     if _state.setup_state == SetupState.READY:
         _state.setup_state = SetupState.IDLE
         _state.setup_completed_at = None
+
+
+def invalidate_browser_setup() -> None:
+    """Mark browser setup as not-ready and drop metadata only under an owned root."""
+    try:
+        _discard_browser_install_metadata()
+    except ProfileRootRefusedError:
+        logger.warning(
+            "Refusing to delete browser install metadata under an unclaimed profile root"
+        )
+    _mark_browser_setup_invalid()
 
 
 def _browser_setup_ready() -> bool:
@@ -687,12 +839,73 @@ def _browser_setup_ready() -> bool:
     return browser_setup_ready()
 
 
-def _start_browser_setup_task_locked() -> None:
+def _owned_browser_setup_ready() -> bool:
+    """Verify the source root before reading managed cache state beside it."""
+    _owned(get_profile_dir())
+    return _browser_setup_ready()
+
+
+_BACKGROUND_BROWSER_SETUP_SECONDS = 30 * 60.0
+
+
+def _mark_background_setup_timed_out() -> None:
+    _state.setup_requires_stand_down = process_role() is ServerRole.OWNER
+
+
+async def _run_background_browser_setup(deadline_at: float | None = None) -> None:
+    """Run managed setup with one inactivity deadline across every phase."""
+    loop = asyncio.get_running_loop()
+    if deadline_at is None:
+        deadline_at = loop.time() + _BACKGROUND_BROWSER_SETUP_SECONDS
+    checked = _state.setup_check_complete
+    if checked is None:
+        checked = asyncio.Event()
+        _state.setup_check_complete = checked
+    deadline = asyncio.timeout_at(deadline_at)
+
+    def record_installer_activity() -> None:
+        if not deadline.expired():
+            deadline.reschedule(loop.time() + _BACKGROUND_BROWSER_SETUP_SECONDS)
+
+    try:
+        async with deadline:
+            if await _run_in_daemon_thread(_owned_browser_setup_ready):
+                _schedule_retained_browser_revision_report()
+                _state.setup_state = SetupState.READY
+                _state.setup_completed_at = _state.setup_completed_at or utcnow_iso()
+                return
+            # A readiness miss is enough to start setup. Keep any existing
+            # metadata in place until a successful install replaces it; deleting
+            # here would be both unnecessary and destructive for an unclaimed
+            # programmatic profile root.
+            _mark_browser_setup_invalid()
+            checked.set()
+            await _run_browser_setup(activity_callback=record_installer_activity)
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise
+        _mark_background_setup_timed_out()
+        raise BrowserSetupFailedError(
+            "Patchright Chromium browser setup exceeded its background deadline"
+        ) from exc
+    finally:
+        checked.set()
+        if process_role() is ServerRole.OWNER:
+            from linkedin_mcp_server.daemon_liveness import get_liveness
+
+            get_liveness().background_activity_finished()
+
+
+def _start_browser_setup_task_locked(deadline_at: float) -> None:
     _state.setup_state = SetupState.RUNNING
     _state.setup_started_at = utcnow_iso()
     _state.last_error = None
     _state.setup_completed_at = None
-    _state.setup_task = asyncio.create_task(_run_browser_setup(), name="browser-setup")
+    _state.setup_requires_stand_down = False
+    _state.setup_check_complete = asyncio.Event()
+    _state.setup_task = asyncio.create_task(
+        _run_background_browser_setup(deadline_at), name="browser-setup"
+    )
 
 
 _INSTALLER_START_SECONDS = 30.0
@@ -1184,8 +1397,18 @@ def _installer_supervisor_command(worker_target: list[str]) -> list[str]:
     return [sys.executable, "-I", "-S", "-u", str(supervisor), "--", *worker_target]
 
 
+def _installer_environment(temporary_root: Path) -> dict[str, str]:
+    """Return the inherited environment with one private temporary root."""
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        environment[name] = str(temporary_root)
+    return environment
+
+
 async def _start_installer_supervisor(
     extra_arg: str,
+    environment: Mapping[str, str],
 ) -> _InstallerProcess:
     target = _installer_supervisor_command(
         [
@@ -1205,8 +1428,6 @@ async def _start_installer_supervisor(
         if windows_job is not None and gate_nonce is not None
         else target
     )
-    environment = os.environ.copy()
-    environment.pop("PYTHONPATH", None)
     # The supervisor creates no target until the `start` reply below. If this
     # await is cancelled while asyncio is still constructing its transports,
     # direct-process teardown or stdin EOF ends an empty supervisor.
@@ -1294,8 +1515,104 @@ async def _start_installer_supervisor(
     return proc
 
 
+_INSTALLER_ACTIVITY_POLL_SECONDS = 5.0
+
+
+def _installer_extraction_paths(
+    extra_arg: str, environment: Mapping[str, str]
+) -> tuple[Path, ...]:
+    """Return the cache paths this Patchright command is locked to install."""
+    targets = _patchright_install_targets() or {}
+    if extra_arg == "--no-shell":
+        prefixes = (_FULL_DIR_PREFIX,)
+    elif extra_arg == "--only-shell":
+        prefixes = (_SHELL_DIR_PREFIX,)
+    else:
+        prefixes = tuple(targets)
+    configured = Path(environment.get("PLAYWRIGHT_BROWSERS_PATH") or browsers_path())
+    return tuple(
+        configured / f"{prefix}{targets[prefix]}"
+        for prefix in prefixes
+        if prefix in targets
+    )
+
+
+def _installer_download_snapshot(
+    temporary_root: Path, extraction_paths: tuple[Path, ...]
+) -> tuple[tuple[str, int, int], ...]:
+    """Return activity markers attributable to one Patchright invocation."""
+    roots: list[Path] = []
+    try:
+        roots.extend(temporary_root.glob("playwright-download-*"))
+    except OSError:
+        pass
+    roots.extend(extraction_paths)
+
+    entries: list[tuple[str, int, int]] = []
+    for root in roots:
+        if root.is_symlink():
+            continue
+        for current, directories, files in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            try:
+                details = current_path.stat()
+            except OSError:
+                directories.clear()
+                continue
+            entries.append((current, details.st_size, details.st_mtime_ns))
+            for name in files:
+                child = current_path / name
+                try:
+                    details = child.stat()
+                except OSError:
+                    continue
+                entries.append((str(child), details.st_size, details.st_mtime_ns))
+    return tuple(sorted(entries))
+
+
+async def _watch_installer_activity(
+    callback: Callable[[], None],
+    temporary_root: Path,
+    extraction_paths: tuple[Path, ...],
+) -> None:
+    previous = await _run_in_daemon_thread(
+        _installer_download_snapshot, temporary_root, extraction_paths
+    )
+    while True:
+        await asyncio.sleep(_INSTALLER_ACTIVITY_POLL_SECONDS)
+        current = await _run_in_daemon_thread(
+            _installer_download_snapshot, temporary_root, extraction_paths
+        )
+        if current != previous:
+            callback()
+            previous = current
+
+
+def _create_installer_temporary_root() -> Path:
+    return Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-"))
+
+
+def _remove_installer_temporary_root(temporary_root: Path) -> None:
+    shutil.rmtree(temporary_root, ignore_errors=True)
+
+
+def _start_installer_temporary_root_cleanup(temporary_root: Path) -> None:
+    """Remove an installer temp root without extending its process lifetime."""
+    cleanup = threading.Thread(
+        target=_remove_installer_temporary_root,
+        args=(temporary_root,),
+        name="browser-installer-temp-cleanup",
+        daemon=True,
+    )
+    with contextlib.suppress(RuntimeError):
+        cleanup.start()
+
+
 async def _run_patchright_install(
-    extra_arg: str, *, line_callback: Callable[[str], None] | None = None
+    extra_arg: str,
+    *,
+    line_callback: Callable[[str], None] | None = None,
+    activity_callback: Callable[[], None] | None = None,
 ) -> None:
     """Run one ``patchright install chromium`` stage with the given flag.
 
@@ -1311,103 +1628,152 @@ async def _run_patchright_install(
     *line_callback* (``print`` for the CLI modes) receives each line too, so
     those modes show progress regardless of the log level.
     """
-    proc = _managed_installer(await _start_installer_supervisor(extra_arg))
-    assert proc.stdout is not None
-    lines: deque[str] = deque()
-
-    async def collect_output() -> None:
-        retained = 0
-        assert proc.stdout is not None
-        async for raw in _installer_lines(proc.stdout):
-            text = raw
-            if not text:
-                continue
-            if line_callback is None:
-                # The background path has nothing else to show it in. On the
-                # CLI path the bar is the display, and logging each line too
-                # would print every percentage permanently above it.
-                logger.debug("patchright: %s", text)
-            lines.append(text)
-            retained += len(text)
-            # A running total, because summing the deque per line is quadratic
-            # in the output: measured, a multi-megabyte error body spent
-            # seconds of CPU inside this bound while the point of it was to be
-            # cheap. One line always survives, so a failure still quotes
-            # something.
-            while len(lines) > 1 and (
-                len(lines) > _MAX_RETAINED_LINES or retained > _MAX_RETAINED_CHARS
-            ):
-                retained -= len(lines.popleft())
-            if line_callback is not None:
-                line_callback(text)
-
-    output = asyncio.create_task(collect_output(), name="browser-installer-output")
-    stderr = asyncio.create_task(
-        _drain_installer_stream(proc.stderr), name="browser-installer-control"
-    )
-    wait_for_exit = (
-        _wait_for_direct_process_exit(proc)
-        if proc.windows_job is not None and proc.assigned
-        else proc.wait()
-    )
-    waiting = asyncio.create_task(wait_for_exit, name="browser-installer-process")
-    tasks = (output, stderr, waiting)
+    temporary_root = await _run_in_daemon_thread(_create_installer_temporary_root)
+    activity: asyncio.Task[None] | None = None
     try:
-        while not waiting.done():
-            watched: set[asyncio.Task[Any]] = {waiting}
-            if not output.done():
-                watched.add(output)
-            done, _pending = await asyncio.wait(
-                watched, return_when=asyncio.FIRST_COMPLETED
-            )
-            if output in done:
-                await output
-        returncode = await waiting
-        if proc.windows_job is not None and proc.assigned:
-            # On CPython 3.12, Process.wait() registered before exit resolves only
-            # after pipe EOF. Direct returncode observation lets the Job end
-            # descendants that still hold those pipes before awaiting them.
-            deadline = asyncio.get_running_loop().time() + _INSTALLER_STOP_SECONDS
-            await asyncio.shield(_assigned_windows_cleanup(proc, deadline))
-        await output
-        await stderr
-    except BaseException as original:
-        # Request task cancellation first so no reader keeps competing for the
-        # same pipes. Start tree cleanup before awaiting task settlement: a second
-        # cancellation can interrupt either await, while _stop_installer keeps its
-        # own cleanup task shielded until the containment work is done.
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        cleanup_error: BaseException | None = None
-        cleanup_cancellation: asyncio.CancelledError | None = None
-        try:
-            await _stop_installer(proc)
-        except asyncio.CancelledError as exc:
-            cleanup_cancellation = exc
-        except BaseException as exc:
-            cleanup_error = exc
-
-        settle_cancellation = await _settle_installer_tasks(tasks)
-        if isinstance(original, asyncio.CancelledError):
-            if cleanup_error is not None:
-                logger.error(
-                    "Browser installer cleanup failed while cancellation was pending",
-                    exc_info=cleanup_error,
-                )
-            raise original
-        if cleanup_error is not None:
-            raise cleanup_error
-        if cleanup_cancellation is not None:
-            raise cleanup_cancellation
-        if settle_cancellation is not None:
-            raise settle_cancellation
-        raise
-    await _close_installer_lease(proc)
-    if returncode != 0:
-        raise BrowserSetupFailedError(
-            "\n".join(lines) or "Patchright Chromium browser setup failed."
+        environment = _installer_environment(temporary_root)
+        extraction_paths = await _run_in_daemon_thread(
+            _installer_extraction_paths, extra_arg, environment
         )
+        proc = _managed_installer(
+            await _start_installer_supervisor(extra_arg, environment)
+        )
+        assert proc.stdout is not None
+        lines: deque[str] = deque()
+
+        async def collect_output() -> None:
+            retained = 0
+            assert proc.stdout is not None
+            async for raw in _installer_lines(proc.stdout):
+                text = raw
+                if not text:
+                    continue
+                if activity_callback is not None:
+                    activity_callback()
+                if line_callback is None:
+                    # The background path has nothing else to show it in. On the
+                    # CLI path the bar is the display, and logging each line too
+                    # would print every percentage permanently above it.
+                    logger.debug("patchright: %s", text)
+                lines.append(text)
+                retained += len(text)
+                # A running total, because summing the deque per line is quadratic
+                # in the output: measured, a multi-megabyte error body spent
+                # seconds of CPU inside this bound while the point of it was to be
+                # cheap. One line always survives, so a failure still quotes
+                # something.
+                while len(lines) > 1 and (
+                    len(lines) > _MAX_RETAINED_LINES or retained > _MAX_RETAINED_CHARS
+                ):
+                    retained -= len(lines.popleft())
+                if line_callback is not None:
+                    line_callback(text)
+
+        activity = (
+            asyncio.create_task(
+                _watch_installer_activity(
+                    activity_callback, temporary_root, extraction_paths
+                ),
+                name="browser-installer-activity",
+            )
+            if activity_callback is not None
+            else None
+        )
+
+        async def wait_for_process() -> int:
+            # Give both pipe consumers one turn before a fast process is collected.
+            # Real subprocess pipes can fill before wait(), and the ordering is the
+            # same contract the streaming path already relies on.
+            await asyncio.sleep(0)
+            if proc.windows_job is not None and proc.assigned:
+                return await _wait_for_direct_process_exit(proc)
+            return await proc.wait()
+
+        output = asyncio.create_task(collect_output(), name="browser-installer-output")
+        stderr = asyncio.create_task(
+            _drain_installer_stream(proc.stderr), name="browser-installer-control"
+        )
+        waiting = asyncio.create_task(
+            wait_for_process(), name="browser-installer-process"
+        )
+        tasks = (output, stderr, waiting)
+        try:
+            while not waiting.done():
+                watched: set[asyncio.Task[Any]] = {waiting}
+                if not output.done():
+                    watched.add(output)
+                done, _pending = await asyncio.wait(
+                    watched, return_when=asyncio.FIRST_COMPLETED
+                )
+                if output in done:
+                    await output
+            returncode = await waiting
+            if proc.windows_job is not None and proc.assigned:
+                # On CPython 3.12, Process.wait() registered before exit resolves only
+                # after pipe EOF. Direct returncode observation lets the Job end
+                # descendants that still hold those pipes before awaiting them.
+                deadline = asyncio.get_running_loop().time() + _INSTALLER_STOP_SECONDS
+                await asyncio.shield(_assigned_windows_cleanup(proc, deadline))
+            await output
+            await stderr
+        except BaseException as original:
+            # Request task cancellation first so no reader keeps competing for the
+            # same pipes. Start tree cleanup before awaiting task settlement: a second
+            # cancellation can interrupt either await, while _stop_installer keeps its
+            # own cleanup task shielded until the containment work is done.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            cleanup_error: BaseException | None = None
+            cleanup_cancellation: asyncio.CancelledError | None = None
+            try:
+                await _stop_installer(proc)
+            except asyncio.CancelledError as exc:
+                cleanup_cancellation = exc
+            except BaseException as exc:
+                cleanup_error = exc
+
+            settle_cancellation = await _settle_installer_tasks(tasks)
+            if isinstance(original, asyncio.CancelledError):
+                if cleanup_error is not None:
+                    logger.error(
+                        "Browser installer cleanup failed while cancellation was pending",
+                        exc_info=cleanup_error,
+                    )
+                raise original
+            if cleanup_error is not None:
+                raise cleanup_error
+            if cleanup_cancellation is not None:
+                raise cleanup_cancellation
+            if settle_cancellation is not None:
+                raise settle_cancellation
+            raise
+        await _close_installer_lease(proc)
+        if returncode != 0:
+            raise BrowserSetupFailedError(
+                "\n".join(lines) or "Patchright Chromium browser setup failed."
+            )
+    finally:
+        try:
+            if activity is not None:
+                activity.cancel()
+                try:
+                    await activity
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
+                except Exception:
+                    # Progress monitoring is optional diagnostics for the inactivity
+                    # deadline. It must not replace the installer's own result.
+                    logger.warning(
+                        "Browser installer activity watcher failed", exc_info=True
+                    )
+        finally:
+            # The normal path has reaped the supervisor, and every exceptional
+            # path above stops its tree before reaching this point. Cleanup is
+            # best-effort and must never extend cancellation or shutdown.
+            _start_installer_temporary_root_cleanup(temporary_root)
 
 
 def _finish(progress: Progress, task: TaskID | None) -> None:
@@ -2022,14 +2388,17 @@ def _write_install_metadata(
         "patchright_version": _patchright_pkg_version(),
         "installed_targets": installed_targets,
     }
+    profile = _owned(get_profile_dir())
     secure_write_text(
-        install_metadata_path(),
+        auth_root_dir(profile) / _BROWSER_INSTALL_METADATA,
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
     )
 
 
 async def _run_browser_setup(
-    *, line_callback: Callable[[str], None] | None = None
+    *,
+    line_callback: Callable[[str], None] | None = None,
+    activity_callback: Callable[[], None] | None = None,
 ) -> None:
     """Install full Chrome for Testing, in one stage.
 
@@ -2052,15 +2421,20 @@ async def _run_browser_setup(
     anywhere user-facing means re-measuring them for the platform in question.
     """
     browser_dir = configure_browser_environment()
-    secure_mkdir(browser_dir)
+    await _run_in_daemon_thread(secure_mkdir, browser_dir)
 
     # Timed here, right where the download runs, rather than at the state
     # reconciliation that flips this to READY: that reconciliation happens on
     # the next tool or auth call, which can arrive minutes after the install
     # actually finished, and would report the idle gap as setup time.
     started = time.monotonic()
-    await _run_patchright_install("--no-shell", line_callback=line_callback)
-    _write_install_metadata(
+    await _run_patchright_install(
+        "--no-shell",
+        line_callback=line_callback,
+        activity_callback=activity_callback,
+    )
+    await _run_in_daemon_thread(
+        _write_install_metadata,
         browser_dir,
         {_SHELL_DIR_PREFIX: False, _FULL_DIR_PREFIX: True},
     )
@@ -2081,6 +2455,7 @@ async def _ensure_browser_installed(
     *, line_callback: Callable[[str], None] | None = None
 ) -> None:
     """Install the browser on demand. A no-op once it is present."""
+    _owned(get_profile_dir())
     if browser_ready():
         return
     await _run_browser_setup(line_callback=line_callback)
@@ -2103,6 +2478,7 @@ def ensure_browser_installed() -> None:
     # difference between signing in and not.
     if _uses_custom_chrome():
         return
+    _owned(get_profile_dir())
     if browser_ready():
         _report_retained_browser_revisions()
         return
@@ -2132,6 +2508,7 @@ async def _refresh_background_task_state() -> None:
         task = _state.setup_task
         assert task is not None
         _state.setup_task = None
+        _state.setup_check_complete = None
         try:
             task.result()
         except asyncio.CancelledError:
@@ -2165,12 +2542,31 @@ async def _refresh_background_task_state() -> None:
             _state.auth_completed_at = utcnow_iso()
 
 
+def _consume_background_setup_failure() -> str | None:
+    if _state.setup_state is not SetupState.FAILED:
+        return None
+    detail = _state.last_error or "Patchright Chromium browser setup failed"
+    stand_down = _state.setup_requires_stand_down
+    _state.setup_state = SetupState.IDLE
+    _state.last_error = None
+    _state.setup_requires_stand_down = False
+    if stand_down:
+        ask_this_process_to_stand_down(
+            "managed browser setup exceeded its background deadline"
+        )
+    return detail
+
+
 async def ensure_tool_ready_or_raise(
     tool_name: str, ctx: Context | None = None
 ) -> None:
     """Gate scrape/search tools on browser setup and authentication readiness."""
     initialize_bootstrap()
     await _refresh_background_task_state()
+    detail = _consume_background_setup_failure()
+    if detail is not None:
+        # Surface each completed failure before a later call is allowed to retry.
+        raise BrowserSetupFailedError(detail)
 
     # Before any branch that could reach a browser. A quiescent owner has closed
     # Chromium and is waiting for a client to sign in; every path below would open
@@ -2193,15 +2589,9 @@ async def ensure_tool_ready_or_raise(
         await _start_login_if_needed(ctx, superseded_by=current_login_generation())
         return
 
-    if _browser_setup_ready():
-        _state.setup_state = SetupState.READY
-    else:
-        if _state.setup_state == SetupState.READY:
-            invalidate_browser_setup()
-        if _state.setup_state in {SetupState.IDLE, SetupState.FAILED} and (
-            _state.setup_task is None or _state.setup_task.done()
-        ):
-            await start_background_browser_setup_if_needed()
+    await start_background_browser_setup_if_needed()
+    await _refresh_background_task_state()
+    if _state.setup_state is not SetupState.READY:
         if ctx is not None:
             await ctx.report_progress(
                 progress=5,

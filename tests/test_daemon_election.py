@@ -1021,9 +1021,11 @@ from pathlib import Path
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_election import obtain_owner
 from linkedin_mcp_server.daemon_lock import DaemonLock
+from linkedin_mcp_server.profile_claim import ensure_profile_claim
 
 profile = Path(sys.argv[1])
 auth_root = profile.parent
+ensure_profile_claim(profile, claim_anyway=True)
 config = AppConfig()
 config.browser.user_data_dir = str(profile)
 
@@ -1064,8 +1066,10 @@ from pathlib import Path
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_election import obtain_owner
+from linkedin_mcp_server.profile_claim import ensure_profile_claim
 
 profile = Path(sys.argv[1])
+ensure_profile_claim(profile, claim_anyway=True)
 config = AppConfig()
 config.browser.user_data_dir = str(profile)
 

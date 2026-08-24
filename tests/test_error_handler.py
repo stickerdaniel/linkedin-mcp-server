@@ -17,6 +17,7 @@ from linkedin_mcp_server.exceptions import (
     AuthMissingOnOwnerError,
     AuthStaleOnOwnerError,
     BrowserBinaryMissingError,
+    BrowserSetupFailedError,
     CredentialsNotFoundError,
     LinkedInMCPError,
     SessionExpiredError,
@@ -122,6 +123,15 @@ def test_raises_tool_error_for_browser_binary_missing():
                 "or restart the server to auto-install."
             )
         )
+
+
+def test_setup_failure_says_the_retry_starts_the_next_attempt():
+    with pytest.raises(ToolError) as caught:
+        raise_tool_error(BrowserSetupFailedError("the mirror refused"))
+
+    surfaced = str(caught.value)
+    assert "Retry this tool to start" in surfaced
+    assert "has started" not in surfaced
 
 
 def test_raises_tool_error_for_scraping_error():

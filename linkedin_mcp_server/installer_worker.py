@@ -89,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
             stdin=subprocess.DEVNULL,
             stdout=None,
             stderr=subprocess.STDOUT,
+            env=os.environ.copy(),
             close_fds=True,
         )
     except OSError as exc:

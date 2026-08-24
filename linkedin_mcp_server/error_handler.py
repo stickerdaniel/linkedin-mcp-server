@@ -137,7 +137,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     elif isinstance(exception, BrowserSetupFailedError):
         logger.warning("Browser setup failed%s: %s", ctx, exception)
         raise ToolError(
-            "LinkedIn browser setup was not ready. A fresh setup attempt has started in the background. Retry this tool in a few minutes."
+            "LinkedIn browser setup was not ready. Retry this tool to start a fresh background setup attempt."
         ) from exception
 
     elif isinstance(exception, AuthenticationStartedError):

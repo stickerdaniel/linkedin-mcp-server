@@ -671,12 +671,93 @@ class TestBrowserLifespan:
         monkeypatch.setattr(server_module, "initialize_bootstrap", MagicMock())
         monkeypatch.setattr(server_module, "get_runtime_policy", MagicMock())
         monkeypatch.setattr(
-            server_module, "start_background_browser_setup_if_needed", AsyncMock()
+            server_module, "report_retained_browser_revisions_if_ready", MagicMock()
         )
+        setup = AsyncMock()
+        monkeypatch.setattr(
+            server_module, "start_background_browser_setup_if_needed", setup
+        )
+        stop_setup = AsyncMock()
+        monkeypatch.setattr(server_module, "stop_background_browser_setup", stop_setup)
         monkeypatch.setattr(server_module, "watch_for_handoff_requests", watcher)
         close_browser = AsyncMock()
         monkeypatch.setattr(server_module, "close_browser", close_browser)
-        return close_browser
+        return close_browser, setup, stop_setup
+
+    async def test_a_direct_server_starts_browser_setup(self, monkeypatch):
+        from linkedin_mcp_server.server import browser_lifespan
+
+        async def watcher():
+            await asyncio.sleep(3600)
+
+        _, setup, stop_setup = self._patched(monkeypatch, watcher)
+
+        async with browser_lifespan(MagicMock()):
+            setup.assert_awaited_once()
+            stop_setup.assert_not_awaited()
+        stop_setup.assert_awaited_once()
+
+    async def test_cancelled_direct_startup_stops_shared_setup(self, monkeypatch):
+        from linkedin_mcp_server.server import browser_lifespan
+
+        started = asyncio.Event()
+
+        async def watcher():
+            pytest.fail("the handoff watcher must not start before setup readiness")
+
+        close_browser, setup, stop_setup = self._patched(monkeypatch, watcher)
+
+        async def blocked_setup() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        setup.side_effect = blocked_setup
+        lifespan = browser_lifespan(MagicMock())
+        entering = asyncio.create_task(lifespan.__aenter__())
+        await started.wait()
+        entering.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await entering
+
+        stop_setup.assert_awaited_once()
+        close_browser.assert_awaited_once()
+
+    async def test_an_owner_defers_browser_setup_until_first_use(self, monkeypatch):
+        import linkedin_mcp_server.server as server_module
+        from linkedin_mcp_server.server import browser_lifespan
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        async def watcher():
+            await asyncio.sleep(3600)
+
+        _, setup, stop_setup = self._patched(monkeypatch, watcher)
+        set_process_role(ServerRole.OWNER)
+
+        async with browser_lifespan(MagicMock()):
+            setup.assert_not_awaited()
+            stop_setup.assert_not_awaited()
+            getattr(
+                server_module.report_retained_browser_revisions_if_ready,
+                "assert_called_once",
+            )()
+        stop_setup.assert_awaited_once()
+
+    async def test_setup_cleanup_finishes_before_browser_close(self, monkeypatch):
+        from linkedin_mcp_server.server import browser_lifespan
+
+        async def watcher():
+            await asyncio.sleep(3600)
+
+        order: list[str] = []
+        close_browser, _, stop_setup = self._patched(monkeypatch, watcher)
+        stop_setup.side_effect = lambda: order.append("setup")
+        close_browser.side_effect = lambda: order.append("browser")
+
+        async with browser_lifespan(MagicMock()):
+            pass
+
+        assert order == ["setup", "browser"]
 
     async def test_poller_runs_for_the_life_of_the_server(self, monkeypatch):
         from linkedin_mcp_server.server import browser_lifespan
@@ -692,7 +773,7 @@ class TestBrowserLifespan:
                 cancelled.set()
                 raise
 
-        close_browser = self._patched(monkeypatch, watcher)
+        close_browser, _, _ = self._patched(monkeypatch, watcher)
 
         async with browser_lifespan(MagicMock()):
             await asyncio.wait_for(started.wait(), timeout=1)
@@ -715,7 +796,7 @@ class TestBrowserLifespan:
         async def watcher():
             raise RuntimeError("poller crashed")
 
-        close_browser = self._patched(monkeypatch, watcher)
+        close_browser, _, _ = self._patched(monkeypatch, watcher)
 
         async with browser_lifespan(MagicMock()):
             # Let the doomed task reach its exception before teardown.
@@ -739,7 +820,7 @@ class TestBrowserLifespan:
         async def watcher():
             raise Fatal("fatal")
 
-        close_browser = self._patched(monkeypatch, watcher)
+        close_browser, _, _ = self._patched(monkeypatch, watcher)
 
         with pytest.raises(Fatal):
             async with browser_lifespan(MagicMock()):
@@ -768,7 +849,7 @@ class TestBrowserLifespan:
                 await asyncio.sleep(0.5)
                 raise
 
-        close_browser = self._patched(monkeypatch, watcher)
+        close_browser, _, _ = self._patched(monkeypatch, watcher)
 
         async def run_server() -> None:
             # Entered and exited by hand so the cancellation lands *during*
@@ -803,7 +884,7 @@ class TestBrowserLifespan:
         async def watcher():
             await asyncio.sleep(3600)
 
-        close_browser = self._patched(monkeypatch, watcher)
+        close_browser, _, _ = self._patched(monkeypatch, watcher)
 
         with pytest.raises(RuntimeError, match="boom"):
             async with browser_lifespan(MagicMock()):

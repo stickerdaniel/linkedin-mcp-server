@@ -665,6 +665,45 @@ class TestGoingAwayWhenNobodyNeedsIt:
 
         assert await self._run_loop(idle_timeout=5.0) is True
 
+    async def test_browser_setup_in_progress_holds_the_owner_open(self):
+        from linkedin_mcp_server import bootstrap, daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+
+        async def pending_setup() -> None:
+            await asyncio.Event().wait()
+
+        setup = asyncio.create_task(pending_setup())
+        bootstrap.get_bootstrap_state().setup_task = setup
+        try:
+            assert await self._run_loop(idle_timeout=0.05, ticks=0.2) is False
+        finally:
+            setup.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await setup
+            bootstrap.get_bootstrap_state().setup_task = None
+
+    async def test_unconsumed_setup_failure_holds_the_owner_open(self):
+        from linkedin_mcp_server import bootstrap, daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+
+        async def failed_setup() -> None:
+            raise RuntimeError("install failed")
+
+        setup = asyncio.create_task(failed_setup())
+        with pytest.raises(RuntimeError, match="install failed"):
+            await setup
+        bootstrap.get_bootstrap_state().setup_task = setup
+        try:
+            assert await self._run_loop(idle_timeout=0.05, ticks=0.2) is False
+        finally:
+            bootstrap.get_bootstrap_state().setup_task = None
+
     async def test_it_does_not_exit_before_the_endpoint_is_published(self):
         # The clock has not started. An owner spends its first seconds importing
         # and launching Chromium, and a short timeout would otherwise fire
@@ -735,6 +774,19 @@ class TestGoingAwayWhenNobodyNeedsIt:
         assert quiet is not None and quiet < 1
         assert await self._run_loop(idle_timeout=5.0) is False
 
+    async def test_the_clock_restarts_when_background_activity_finishes(self):
+        from linkedin_mcp_server import daemon_liveness
+
+        liveness = daemon_liveness.get_liveness()
+        liveness.the_endpoint_is_live()
+        liveness._quiet_since = liveness._quiet_since - 60  # ty: ignore
+
+        liveness.background_activity_finished()
+
+        quiet = liveness.quiet_for()
+        assert quiet is not None and quiet < 1
+        assert await self._run_loop(idle_timeout=5.0) is False
+
     async def test_a_zero_timeout_keeps_the_owner_forever(self):
         # The documented way to switch it off, and the same value that already
         # disables the browser's own idle close.
@@ -760,8 +812,10 @@ from pathlib import Path
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_election import obtain_owner
+from linkedin_mcp_server.profile_claim import ensure_profile_claim
 
 profile = Path(sys.argv[1])
+ensure_profile_claim(profile, claim_anyway=True)
 config = AppConfig()
 config.browser.user_data_dir = str(profile)
 config.browser.browser_idle_timeout_seconds = float(sys.argv[2])

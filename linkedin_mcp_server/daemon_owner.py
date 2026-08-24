@@ -56,6 +56,10 @@ from typing import Any, NoReturn, Protocol, TextIO
 import httpx
 
 from linkedin_mcp_server import __version__, daemon_config, daemon_descriptor
+from linkedin_mcp_server.bootstrap import (
+    browser_setup_failure_pending,
+    browser_setup_in_progress,
+)
 from linkedin_mcp_server.config import set_config
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
@@ -543,7 +547,17 @@ async def _serve_until_stopped(
         # replacement, whereas deleting it here would race whoever publishes
         # next.
         quiet = liveness.quiet_for()
-        if idle_timeout > 0 and quiet is not None and quiet >= idle_timeout:
+        # First use starts setup in a detached task and then returns its
+        # in-progress response. That task is work for this owner even though no
+        # tool call remains in liveness; exiting here would cancel every install
+        # that lasts longer than the idle timeout and start it over next time.
+        if (
+            idle_timeout > 0
+            and quiet is not None
+            and quiet >= idle_timeout
+            and not browser_setup_in_progress()
+            and not browser_setup_failure_pending()
+        ):
             logger.info("Nothing has needed the browser in %.0fs; exiting", quiet)
             server.should_exit = True
             await _stop_within(serving, _STAND_DOWN_SHUTDOWN_SECONDS, lock=lock)

@@ -171,6 +171,11 @@ class CallLiveness:
         if self._in_flight == 0:
             self._quiet_since = time.monotonic()
 
+    def background_activity_finished(self) -> None:
+        """Start a fresh quiet period after detached work kept the owner active."""
+        if self._in_flight == 0:
+            self._quiet_since = time.monotonic()
+
     def the_endpoint_is_live(self) -> None:
         """Start the idle clock, once there is something to be idle *at*.
 

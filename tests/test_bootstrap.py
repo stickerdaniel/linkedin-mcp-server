@@ -1,5 +1,6 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import contextlib
 import io
 import json
 import logging
@@ -8,7 +9,7 @@ from pathlib import Path
 import sys
 import threading
 from types import SimpleNamespace
-from typing import IO, Any, cast
+from typing import IO, Any, Callable, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -86,7 +87,7 @@ async def _wait_event(event: asyncio.Event) -> None:
 
 class TestBootstrap:
     async def test_managed_startup_starts_background_setup(self, monkeypatch):
-        async def fake_setup() -> None:
+        async def fake_setup(**_kwargs: object) -> None:
             return None
 
         _patch_inline_wait(monkeypatch, 0)
@@ -105,12 +106,70 @@ class TestBootstrap:
         assert state.setup_task is not None
         await state.setup_task
 
+    async def test_owner_first_use_starts_deferred_setup(self, monkeypatch):
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        release = asyncio.Event()
+
+        async def fake_setup(**_kwargs: object) -> None:
+            await release.wait()
+
+        _patch_inline_wait(monkeypatch, 0)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.browser_setup_ready", lambda: False
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap._run_browser_setup", fake_setup
+        )
+        set_process_role(ServerRole.OWNER)
+        initialize_bootstrap("managed")
+
+        with pytest.raises(BrowserSetupInProgressError):
+            await ensure_tool_ready_or_raise("search_jobs")
+
+        state = get_bootstrap_state()
+        assert state.setup_state is SetupState.RUNNING
+        assert state.setup_task is not None
+        release.set()
+        await state.setup_task
+
+    async def test_unclaimed_managed_root_is_refused_before_readiness(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import ProfileRootRefusedError
+
+        profile = tmp_path / "unclaimed-start" / "profile"
+        metadata = profile.parent / "browser-install.json"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text("unrelated")
+        monkeypatch.setattr(bootstrap, "get_profile_dir", lambda: profile)
+        monkeypatch.setattr(
+            bootstrap,
+            "get_config",
+            lambda: SimpleNamespace(browser=SimpleNamespace(chrome_path=None)),
+        )
+        monkeypatch.setattr(
+            bootstrap,
+            "_browser_setup_ready",
+            lambda: pytest.fail("readiness ran before profile ownership was proved"),
+        )
+
+        initialize_bootstrap("managed")
+        with pytest.raises(ProfileRootRefusedError):
+            await start_background_browser_setup_if_needed()
+
+        assert metadata.read_text() == "unrelated"
+        assert get_bootstrap_state().setup_task is None
+
     async def test_setup_in_progress_raises(self, monkeypatch):
         _patch_inline_wait(monkeypatch, 0)
         initialize_bootstrap("managed")
         state = get_bootstrap_state()
         state.setup_state = SetupState.RUNNING
         state.setup_task = MagicMock(done=lambda: False)
+        state.setup_check_complete = asyncio.Event()
+        state.setup_check_complete.set()
 
         with pytest.raises(BrowserSetupInProgressError):
             await ensure_tool_ready_or_raise("search_jobs")
@@ -869,6 +928,29 @@ class TestRetainedRevisionReportCallSites:
         await report_task
 
         assert get_bootstrap_state().setup_state is SetupState.READY
+        await start_background_browser_setup_if_needed()
+        assert calls == [1]
+
+    async def test_ready_owner_reports_retained_revisions(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.server_role import ServerRole, set_process_role
+
+        _patch_targets_and_version(monkeypatch)
+        _set_headless(monkeypatch, True)
+        bdir = browsers_path()
+        _materialize_install(bdir, ["chromium-1217"])
+        _write_metadata(install_metadata_path(), bdir)
+        calls = self._record(monkeypatch)
+        set_process_role(ServerRole.OWNER)
+
+        initialize_bootstrap("managed")
+        bootstrap.report_retained_browser_revisions_if_ready()
+        report_task = get_bootstrap_state().cache_report_task
+        assert report_task is not None
+        await report_task
+
         assert calls == [1]
 
     async def test_ready_background_setup_does_not_wait_for_the_scan(
@@ -979,8 +1061,10 @@ class TestSetupGate:
         _write_metadata(install_metadata_path(), bdir)
         configure_browser_environment()
 
-        async def fake_setup() -> None:
-            return None
+        release = asyncio.Event()
+
+        async def fake_setup(**_kwargs: object) -> None:
+            await release.wait()
 
         monkeypatch.setattr(
             "linkedin_mcp_server.bootstrap._run_browser_setup", fake_setup
@@ -991,6 +1075,58 @@ class TestSetupGate:
 
         with pytest.raises(BrowserSetupInProgressError):
             await ensure_tool_ready_or_raise("get_person_profile")
+
+        task = get_bootstrap_state().setup_task
+        assert task is not None
+        release.set()
+        await task
+
+    async def test_completed_setup_failure_is_reported_before_retry(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        fail = asyncio.Event()
+        retry = asyncio.Event()
+        attempts = 0
+
+        async def setup(**_kwargs: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                await fail.wait()
+                raise BrowserSetupFailedError("the mirror refused")
+            await retry.wait()
+
+        config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup)
+        initialize_bootstrap("managed")
+
+        with pytest.raises(BrowserSetupInProgressError):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        task = get_bootstrap_state().setup_task
+        assert task is not None
+        fail.set()
+        with pytest.raises(BrowserSetupFailedError, match="the mirror refused"):
+            await task
+
+        with pytest.raises(BrowserSetupFailedError, match="the mirror refused"):
+            await ensure_tool_ready_or_raise("get_person_profile")
+
+        assert attempts == 1
+        assert get_bootstrap_state().setup_task is None
+
+        with pytest.raises(BrowserSetupInProgressError):
+            await ensure_tool_ready_or_raise("get_person_profile")
+        assert attempts == 2
+        retry.set()
+        retry_task = get_bootstrap_state().setup_task
+        assert retry_task is not None
+        await retry_task
 
     @pytest.mark.parametrize("headless", [True, False])
     async def test_full_only_releases_in_either_mode(
@@ -1039,7 +1175,7 @@ class TestChromePathShortCircuit:
         # custom executable must short-circuit straight to ready.
         called = {"value": False}
 
-        async def fail_setup() -> None:
+        async def fail_setup(**_kwargs: object) -> None:
             called["value"] = True
 
         monkeypatch.setattr(
@@ -1164,6 +1300,371 @@ class TestTwoStageInstall:
         assert state.setup_task is not None
         await state.setup_task
         assert calls == ["--no-shell"]
+
+    async def test_readiness_io_is_inside_the_setup_deadline(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+        from linkedin_mcp_server.server_role import ServerRole
+
+        blocked = threading.Event()
+        release = threading.Event()
+        stood_down: list[str] = []
+
+        def readiness() -> bool:
+            blocked.set()
+            release.wait()
+            return False
+
+        config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", readiness)
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
+        monkeypatch.setattr(bootstrap, "process_role", lambda: ServerRole.OWNER)
+        monkeypatch.setattr(
+            bootstrap,
+            "ask_this_process_to_stand_down",
+            lambda reason: stood_down.append(reason),
+        )
+
+        initialize_bootstrap("managed")
+        started = asyncio.get_running_loop().time()
+        try:
+            with pytest.raises(BrowserSetupFailedError, match="background deadline"):
+                await start_background_browser_setup_if_needed()
+        finally:
+            release.set()
+
+        assert blocked.is_set()
+        assert asyncio.get_running_loop().time() - started < 0.1
+        assert stood_down == ["managed browser setup exceeded its background deadline"]
+        assert get_bootstrap_state().setup_state is SetupState.IDLE
+
+    async def test_cancelled_first_caller_does_not_abandon_readiness(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        blocked = threading.Event()
+        release = threading.Event()
+        installed = asyncio.Event()
+
+        def readiness() -> bool:
+            blocked.set()
+            release.wait()
+            return False
+
+        async def setup(**_kwargs: object) -> None:
+            installed.set()
+
+        config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", readiness)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup)
+
+        initialize_bootstrap("managed")
+        caller = asyncio.create_task(start_background_browser_setup_if_needed())
+        while not blocked.is_set():
+            await asyncio.sleep(0)
+        shared = get_bootstrap_state().setup_task
+        assert shared is not None
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        assert get_bootstrap_state().setup_task is shared
+        release.set()
+        await shared
+        assert installed.is_set()
+
+    async def test_readiness_miss_keeps_existing_metadata_until_install_succeeds(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        release = asyncio.Event()
+        bdir = browsers_path()
+        bdir.mkdir(parents=True)
+        _write_metadata(install_metadata_path(), bdir)
+
+        async def setup(**_kwargs: object) -> None:
+            await release.wait()
+
+        config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup)
+        monkeypatch.setattr(
+            bootstrap,
+            "_discard_browser_install_metadata",
+            lambda: pytest.fail("readiness must not delete existing metadata"),
+        )
+
+        initialize_bootstrap("managed")
+        await start_background_browser_setup_if_needed()
+
+        task = get_bootstrap_state().setup_task
+        assert task is not None
+        assert install_metadata_path().exists()
+        release.set()
+        await task
+
+    async def test_installer_activity_extends_the_inactivity_deadline(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        async def progressing_setup(
+            *, activity_callback: Callable[[], None], **_kwargs: object
+        ) -> None:
+            for _ in range(3):
+                await asyncio.sleep(0.015)
+                activity_callback()
+
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", progressing_setup)
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.02)
+
+        await bootstrap._run_background_browser_setup()
+
+    async def test_owner_setup_completion_resets_the_idle_clock(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap, daemon_liveness
+        from linkedin_mcp_server.server_role import ServerRole
+
+        async def setup(**_kwargs: object) -> None:
+            return None
+
+        liveness = MagicMock()
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup)
+        monkeypatch.setattr(bootstrap, "process_role", lambda: ServerRole.OWNER)
+        monkeypatch.setattr(daemon_liveness, "get_liveness", lambda: liveness)
+
+        await bootstrap._run_background_browser_setup()
+
+        liveness.background_activity_finished.assert_called_once()
+
+    async def test_ready_owner_setup_resets_the_idle_clock(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap, daemon_liveness
+        from linkedin_mcp_server.server_role import ServerRole
+
+        liveness = MagicMock()
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: True)
+        monkeypatch.setattr(bootstrap, "process_role", lambda: ServerRole.OWNER)
+        monkeypatch.setattr(daemon_liveness, "get_liveness", lambda: liveness)
+
+        await bootstrap._run_background_browser_setup()
+
+        liveness.background_activity_finished.assert_called_once()
+
+    async def test_failed_owner_setup_resets_the_idle_clock(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap, daemon_liveness
+        from linkedin_mcp_server.server_role import ServerRole
+
+        async def setup(**_kwargs: object) -> None:
+            raise RuntimeError("install failed")
+
+        liveness = MagicMock()
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup)
+        monkeypatch.setattr(bootstrap, "process_role", lambda: ServerRole.OWNER)
+        monkeypatch.setattr(daemon_liveness, "get_liveness", lambda: liveness)
+
+        with pytest.raises(RuntimeError, match="install failed"):
+            await bootstrap._run_background_browser_setup()
+
+        liveness.background_activity_finished.assert_called_once()
+
+    async def test_background_setup_has_a_whole_operation_deadline(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+        from linkedin_mcp_server.server_role import ServerRole
+
+        stood_down: list[str] = []
+
+        async def never_finishes(**_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", never_finishes)
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
+        monkeypatch.setattr(bootstrap, "browser_setup_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "process_role", lambda: ServerRole.OWNER)
+        monkeypatch.setattr(
+            bootstrap,
+            "ask_this_process_to_stand_down",
+            lambda reason: stood_down.append(reason),
+        )
+
+        initialize_bootstrap("managed")
+        await start_background_browser_setup_if_needed()
+
+        task = get_bootstrap_state().setup_task
+        assert task is not None
+        with pytest.raises(BrowserSetupFailedError, match="background deadline"):
+            await task
+        assert not bootstrap.browser_setup_in_progress()
+        assert stood_down == []
+        with pytest.raises(BrowserSetupFailedError, match="background deadline"):
+            await ensure_tool_ready_or_raise("get_person_profile")
+        assert stood_down == ["managed browser setup exceeded its background deadline"]
+
+    async def test_inner_timeout_keeps_its_specific_failure(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        async def startup_timeout(**_kwargs: object) -> None:
+            raise TimeoutError("supervisor did not arm")
+
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", startup_timeout)
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 60.0)
+
+        with pytest.raises(TimeoutError, match="supervisor did not arm"):
+            await bootstrap._run_background_browser_setup()
+
+    async def test_slow_profile_ownership_cannot_block_the_deadline(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        blocked = threading.Event()
+        release = threading.Event()
+
+        def slow_owned(profile: Path) -> Path:
+            blocked.set()
+            release.wait()
+            return profile
+
+        async def setup_must_not_start(**_kwargs: object) -> None:
+            pytest.fail("ownership must finish before setup starts")
+
+        config = SimpleNamespace(browser=SimpleNamespace(chrome_path=None))
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_owned", slow_owned)
+        monkeypatch.setattr(bootstrap, "_browser_setup_ready", lambda: False)
+        monkeypatch.setattr(bootstrap, "_run_browser_setup", setup_must_not_start)
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
+        fallback = threading.Timer(0.2, release.set)
+        fallback.start()
+        started = asyncio.get_running_loop().time()
+        try:
+            with pytest.raises(BrowserSetupFailedError, match="background deadline"):
+                await bootstrap.start_background_browser_setup_if_needed()
+        finally:
+            release.set()
+            fallback.cancel()
+
+        assert blocked.is_set()
+        assert asyncio.get_running_loop().time() - started < 0.1
+
+    async def test_slow_cache_filesystem_cannot_block_the_deadline(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        blocked = threading.Event()
+        release = threading.Event()
+
+        def slow_mkdir(path: Path) -> None:
+            blocked.set()
+            release.wait()
+
+        async def install_must_not_start(*args: object, **kwargs: object) -> None:
+            pytest.fail("the deadline should expire during cache preparation")
+
+        monkeypatch.setattr(bootstrap, "secure_mkdir", slow_mkdir)
+        monkeypatch.setattr(
+            bootstrap, "_run_patchright_install", install_must_not_start
+        )
+        monkeypatch.setattr(bootstrap, "_BACKGROUND_BROWSER_SETUP_SECONDS", 0.01)
+
+        started = asyncio.get_running_loop().time()
+        try:
+            with pytest.raises(BrowserSetupFailedError, match="background deadline"):
+                await bootstrap._run_background_browser_setup()
+        finally:
+            release.set()
+
+        assert blocked.is_set()
+        assert asyncio.get_running_loop().time() - started < 0.1
+
+    async def test_setup_filesystem_work_uses_a_daemon_thread(self, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+
+        daemon_flags: list[bool] = []
+        real_thread = threading.Thread
+
+        def thread(*args: Any, **kwargs: Any) -> threading.Thread:
+            daemon_flags.append(bool(kwargs.get("daemon")))
+            return real_thread(*args, **kwargs)
+
+        monkeypatch.setattr(bootstrap.threading, "Thread", thread)
+
+        await bootstrap._run_in_daemon_thread(lambda: None)
+
+        assert daemon_flags == [True]
+
+    async def test_shutdown_awaits_setup_cancellation_cleanup(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        cleaned = asyncio.Event()
+
+        async def setup(**_kwargs: object) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0)
+                cleaned.set()
+                raise
+
+        task = asyncio.create_task(setup())
+        bootstrap.get_bootstrap_state().setup_task = task
+        await asyncio.sleep(0)
+
+        await bootstrap.stop_background_browser_setup()
+
+        assert cleaned.is_set()
+        assert bootstrap.get_bootstrap_state().setup_task is None
+
+    async def test_shutdown_preserves_simultaneous_caller_cancellation(
+        self, isolate_profile_dir
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        stopping: list[asyncio.Task[None]] = []
+
+        async def setup(**_kwargs: object) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                stopping[0].cancel()
+                raise
+
+        task = asyncio.create_task(setup())
+        bootstrap.get_bootstrap_state().setup_task = task
+        await asyncio.sleep(0)
+        stop = asyncio.create_task(bootstrap.stop_background_browser_setup())
+        stopping.append(stop)
+
+        with pytest.raises(asyncio.CancelledError):
+            await stop
+
+        assert bootstrap.get_bootstrap_state().setup_task is None
 
 
 class _StdoutThatIsGone(io.StringIO):
@@ -1349,8 +1850,207 @@ class TestInstallerSupervisorLaunch:
             "arg",
         ]
 
-    async def test_launches_the_internal_supervisor_and_reads_its_target(
+    async def test_silent_download_file_growth_reports_activity(self, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+
+        snapshots = iter([(), (("archive.zip", 1024, 1),)])
+        active = asyncio.Event()
+        monkeypatch.setattr(
+            bootstrap,
+            "_installer_download_snapshot",
+            lambda temporary_root, extraction_paths: next(snapshots),
+        )
+        monkeypatch.setattr(bootstrap, "_INSTALLER_ACTIVITY_POLL_SECONDS", 0.001)
+
+        watcher = asyncio.create_task(
+            bootstrap._watch_installer_activity(active.set, Path("private"), ())
+        )
+        try:
+            await asyncio.wait_for(active.wait(), timeout=1)
+        finally:
+            watcher.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await watcher
+
+    def test_real_activity_scanner_observes_private_archive_growth(self, tmp_path):
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+        archive = temporary_root / "playwright-download-current" / "archive.zip"
+        archive.parent.mkdir(parents=True)
+        archive.write_bytes(b"a")
+
+        before = bootstrap._installer_download_snapshot(temporary_root, ())
+        archive.write_bytes(b"a" * 1001)
+        after = bootstrap._installer_download_snapshot(temporary_root, ())
+
+        assert after != before
+
+    def test_unrelated_global_download_does_not_report_activity(self, tmp_path):
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+        unrelated = tmp_path / "global" / "playwright-download-other" / "archive.zip"
+        temporary_root.mkdir()
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_bytes(b"a")
+
+        before = bootstrap._installer_download_snapshot(temporary_root, ())
+        unrelated.write_bytes(b"a" * 1001)
+        after = bootstrap._installer_download_snapshot(temporary_root, ())
+
+        assert after == before
+
+    def test_only_the_locked_cache_revision_reports_activity(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+        cache = tmp_path / "cache"
+        temporary_root.mkdir()
+        cache.mkdir()
+        environment = {"PLAYWRIGHT_BROWSERS_PATH": str(cache)}
+        monkeypatch.setattr(
+            bootstrap,
+            "_patchright_install_targets",
+            lambda: {
+                bootstrap._FULL_DIR_PREFIX: "123",
+                bootstrap._SHELL_DIR_PREFIX: "123",
+            },
+        )
+        extraction_paths = bootstrap._installer_extraction_paths(
+            "--no-shell", environment
+        )
+
+        before = bootstrap._installer_download_snapshot(
+            temporary_root, extraction_paths
+        )
+        unrelated = cache / "chromium-999" / "chrome-linux" / "chrome"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_bytes(b"a")
+        after_unrelated = bootstrap._installer_download_snapshot(
+            temporary_root, extraction_paths
+        )
+        expected = cache / "chromium-123" / "chrome-linux" / "chrome"
+        expected.parent.mkdir(parents=True)
+        expected.write_bytes(b"a")
+        after_expected = bootstrap._installer_download_snapshot(
+            temporary_root, extraction_paths
+        )
+
+        assert extraction_paths == (cache / "chromium-123",)
+        assert after_unrelated == before
+        assert after_expected != after_unrelated
+
+    def test_activity_scanner_matches_patchright_temp_layout(self):
+        from importlib.metadata import distribution
+
+        source = Path(
+            str(
+                distribution("patchright").locate_file(
+                    "patchright/driver/package/lib/coreBundle.js"
+                )
+            )
+        ).read_text()
+        marker = source.index('"playwright-download-"')
+        contract = source[marker - 500 : marker + 500]
+
+        assert "mkdtemp" in contract
+        assert "tmpdir()" in contract
+        assert "zipPath" in contract
+
+    def test_patchright_cli_preserves_the_private_temp_environment(self):
+        from importlib.metadata import distribution
+
+        installed = distribution("patchright")
+        entrypoint = Path(
+            str(installed.locate_file("patchright/__main__.py"))
+        ).read_text()
+        driver = Path(
+            str(installed.locate_file("patchright/_impl/_driver.py"))
+        ).read_text()
+
+        assert "env=get_driver_env()" in entrypoint
+        assert "env = os.environ.copy()" in driver
+
+    async def test_failed_activity_watcher_does_not_replace_install_success(
+        self, monkeypatch, caplog
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        proc = _FakeProc([], 0)
+
+        async def watcher(
+            _callback: Callable[[], None],
+            _temporary_root: Path,
+            _extraction_paths: tuple[Path, ...],
+        ) -> None:
+            raise RuntimeError("watcher unavailable")
+
+        async def delayed_lines(stream: object):
+            await asyncio.sleep(0)
+            setattr(stream, "exhausted", True)
+            if False:  # pragma: no cover - makes this an async generator
+                yield ""
+
+        monkeypatch.setattr(bootstrap, "_installer_lines", delayed_lines)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+        monkeypatch.setattr(bootstrap, "_watch_installer_activity", watcher)
+
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+            await bootstrap._run_patchright_install(
+                "--no-shell", activity_callback=lambda: None
+            )
+
+        assert "activity watcher failed" in caplog.text
+
+    async def test_parent_cancellation_during_watcher_cleanup_is_preserved(
         self, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        proc = _FakeProc([], 0)
+        cleanup_started = asyncio.Event()
+
+        async def watcher(
+            _callback: Callable[[], None],
+            _temporary_root: Path,
+            _extraction_paths: tuple[Path, ...],
+        ) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleanup_started.set()
+                await asyncio.Event().wait()
+
+        async def delayed_lines(stream: object):
+            await asyncio.sleep(0)
+            setattr(stream, "exhausted", True)
+            if False:  # pragma: no cover - makes this an async generator
+                yield ""
+
+        monkeypatch.setattr(bootstrap, "_installer_lines", delayed_lines)
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+        monkeypatch.setattr(bootstrap, "_watch_installer_activity", watcher)
+
+        install = asyncio.create_task(
+            bootstrap._run_patchright_install(
+                "--no-shell", activity_callback=lambda: None
+            )
+        )
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        install.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await install
+
+    async def test_launches_the_internal_supervisor_and_reads_its_target(
+        self, tmp_path, monkeypatch
     ):
         from linkedin_mcp_server import bootstrap
 
@@ -1364,8 +2064,9 @@ class TestInstallerSupervisorLaunch:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setenv("PYTHONPATH", ".")
+        environment = bootstrap._installer_environment(tmp_path / "private")
 
-        started = await bootstrap._start_installer_supervisor("--no-shell")
+        started = await bootstrap._start_installer_supervisor("--no-shell", environment)
 
         assert started.process is proc
         assert proc.stdin.written == (
@@ -1384,8 +2085,11 @@ class TestInstallerSupervisorLaunch:
         assert kwargs["stdin"] is asyncio.subprocess.PIPE
         assert kwargs["stdout"] is asyncio.subprocess.PIPE
         assert kwargs["stderr"] is asyncio.subprocess.PIPE
-        environment = cast(dict[str, str], kwargs["env"])
+        assert kwargs["env"] is environment
         assert "PYTHONPATH" not in environment
+        assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {
+            str(tmp_path / "private")
+        }
 
     async def test_windows_assigns_the_gate_before_releasing_it(self, monkeypatch):
         from linkedin_mcp_server import bootstrap
@@ -1458,7 +2162,7 @@ class TestInstallerSupervisorLaunch:
         monkeypatch.setattr(bootstrap, "release_windows_gate", release)
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
-        started = await bootstrap._start_installer_supervisor("--no-shell")
+        started = await bootstrap._start_installer_supervisor("--no-shell", {})
 
         assert started.process is proc
         assert started.windows_popen is popen
@@ -1472,7 +2176,9 @@ class TestInstallerSupervisorLaunch:
             "release-gate",
         ]
 
-    async def test_startup_diagnostics_do_not_hide_control_frames(self, monkeypatch):
+    async def test_startup_diagnostics_do_not_hide_control_frames(
+        self, tmp_path, monkeypatch
+    ):
         from linkedin_mcp_server import bootstrap
 
         proc = _FakeProc([], 0)
@@ -1485,8 +2191,9 @@ class TestInstallerSupervisorLaunch:
         monkeypatch.setattr(
             asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
         )
+        environment = bootstrap._installer_environment(tmp_path / "private")
 
-        started = await bootstrap._start_installer_supervisor("--no-shell")
+        started = await bootstrap._start_installer_supervisor("--no-shell", environment)
 
         assert started.process is proc
         assert proc.stdin.written == (
@@ -1520,7 +2227,9 @@ class TestInstallerSupervisorLaunch:
         )
 
         with pytest.raises(BrowserSetupFailedError, match="nested job refused"):
-            await bootstrap._start_installer_supervisor("--no-shell")
+            await bootstrap._start_installer_supervisor(
+                "--no-shell", bootstrap._installer_environment(Path("private"))
+            )
 
     async def test_start_failure_sanitizes_the_final_diagnostic(self, monkeypatch):
         from linkedin_mcp_server import bootstrap
@@ -1594,7 +2303,9 @@ class TestInstallerSupervisorLaunch:
         monkeypatch.setattr(bootstrap, "_INSTALLER_START_SECONDS", 0.01)
 
         with pytest.raises(BrowserSetupFailedError, match=message):
-            await bootstrap._start_installer_supervisor("--no-shell")
+            await bootstrap._start_installer_supervisor(
+                "--no-shell", bootstrap._installer_environment(Path("private"))
+            )
 
         assert proc.stdin.written == written
         assert proc.stdin.closed
@@ -1907,8 +2618,9 @@ class TestPatchrightInstallStreaming:
         """Patch the subprocess and record the exec kwargs and the fake process."""
         spawned = _Spawned()
 
-        async def fake_start(extra_arg: str) -> _FakeProc:
+        async def fake_start(extra_arg: str, environment: dict[str, str]) -> _FakeProc:
             spawned.kwargs["extra_arg"] = extra_arg
+            spawned.kwargs["environment"] = environment
             spawned.proc = _FakeProc(chunks, returncode)
             return spawned.proc
 
@@ -1922,6 +2634,7 @@ class TestPatchrightInstallStreaming:
     ):
         from linkedin_mcp_server import bootstrap
 
+        installer_started = asyncio.Event()
         cleanup_started = asyncio.Event()
         cleanup_completed = asyncio.Event()
         output_cancelled = asyncio.Event()
@@ -1948,7 +2661,10 @@ class TestPatchrightInstallStreaming:
 
         proc = _BlockedProc()
 
-        async def fake_start(_extra_arg: str) -> _BlockedProc:
+        async def fake_start(
+            _extra_arg: str, _environment: dict[str, str]
+        ) -> _BlockedProc:
+            installer_started.set()
             return proc
 
         async def delayed_cleanup(_proc: object) -> None:
@@ -1962,7 +2678,7 @@ class TestPatchrightInstallStreaming:
         installing = asyncio.create_task(
             bootstrap._run_patchright_install("--no-shell")
         )
-        await asyncio.sleep(0)
+        await asyncio.wait_for(installer_started.wait(), timeout=1.0)
         installing.cancel()
 
         cleanup_seen = asyncio.create_task(cleanup_started.wait())
@@ -1982,6 +2698,104 @@ class TestPatchrightInstallStreaming:
         with pytest.raises(asyncio.CancelledError):
             await installing
         assert cleanup_completed.is_set()
+
+    async def test_slow_temporary_root_creation_cannot_block_timeout(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        blocked = threading.Event()
+        release = threading.Event()
+
+        def slow_temporary_root(*, prefix: str) -> str:
+            assert prefix == "linkedin-mcp-installer-"
+            blocked.set()
+            release.wait()
+            return str(tmp_path / "private")
+
+        monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", slow_temporary_root)
+        self._patch_proc(monkeypatch, [], 0)
+        fallback = threading.Timer(0.2, release.set)
+        fallback.start()
+        started = asyncio.get_running_loop().time()
+        try:
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.01):
+                    await bootstrap._run_patchright_install("--no-shell")
+        finally:
+            release.set()
+            fallback.cancel()
+
+        assert blocked.is_set()
+        assert asyncio.get_running_loop().time() - started < 0.1
+
+    async def test_cold_registry_read_cannot_block_timeout(self, tmp_path, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+
+        blocked = threading.Event()
+        release = threading.Event()
+
+        def slow_targets() -> dict[str, str]:
+            blocked.set()
+            release.wait()
+            return {"chromium-": "1217"}
+
+        monkeypatch.setattr(bootstrap, "_patchright_install_targets", slow_targets)
+        monkeypatch.setattr(
+            bootstrap,
+            "_create_installer_temporary_root",
+            lambda: tmp_path / "private",
+        )
+        self._patch_proc(monkeypatch, [], 0)
+        fallback = threading.Timer(0.2, release.set)
+        fallback.start()
+        started = asyncio.get_running_loop().time()
+        try:
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.01):
+                    await bootstrap._run_patchright_install("--no-shell")
+        finally:
+            release.set()
+            fallback.cancel()
+
+        assert blocked.is_set()
+        assert asyncio.get_running_loop().time() - started < 0.1
+
+    async def test_private_temp_environment_is_removed_after_tree_exit(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+
+        def make_temporary_root(*, prefix: str) -> str:
+            assert prefix == "linkedin-mcp-installer-"
+            temporary_root.mkdir()
+            return str(temporary_root)
+
+        monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", make_temporary_root)
+        spawned = self._patch_proc(monkeypatch, [], 0)
+        remove = bootstrap._remove_installer_temporary_root
+        removed_after_exit: list[bool] = []
+
+        def checked_remove(path: Path) -> None:
+            removed_after_exit.append(spawned.proc is not None and spawned.proc.waited)
+            remove(path)
+
+        monkeypatch.setattr(
+            bootstrap, "_remove_installer_temporary_root", checked_remove
+        )
+
+        await bootstrap._run_patchright_install("--no-shell")
+
+        async with asyncio.timeout(1):
+            while temporary_root.exists():
+                await asyncio.sleep(0.001)
+        environment = cast(dict[str, str], spawned.kwargs["environment"])
+        assert {environment[name] for name in ("TMPDIR", "TMP", "TEMP")} == {
+            str(temporary_root)
+        }
+        assert removed_after_exit == [True]
 
     async def test_the_callback_gets_every_line_in_order(self, monkeypatch):
         from linkedin_mcp_server import bootstrap
@@ -2096,7 +2910,7 @@ class TestPatchrightInstallStreaming:
         payload = "A" * (cut - 1) + " " + "B" * bootstrap._MAX_LINE_CHARS
         seen: list[str] = []
 
-        async def fake_start(extra_arg: str):
+        async def fake_start(extra_arg: str, _environment: dict[str, str]):
             proc = _FakeProc([payload.encode() + b"\n"], 0)
             return proc
 
@@ -2225,9 +3039,17 @@ class TestPatchrightInstallStreaming:
         assert spawned.proc.stdin.closed
         assert spawned.proc.waited
 
-    async def test_cancellation_stops_the_installer(self, monkeypatch):
+    async def test_cancellation_stops_the_installer(self, tmp_path, monkeypatch):
         from linkedin_mcp_server import bootstrap
 
+        temporary_root = tmp_path / "private"
+
+        def make_temporary_root(*, prefix: str) -> str:
+            assert prefix == "linkedin-mcp-installer-"
+            temporary_root.mkdir()
+            return str(temporary_root)
+
+        monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", make_temporary_root)
         spawned = self._patch_proc(monkeypatch, [b"downloading\n"], 0)
 
         def cancel(_line: str) -> None:
@@ -2239,6 +3061,71 @@ class TestPatchrightInstallStreaming:
         assert spawned.proc is not None
         assert spawned.proc.stdin.closed
         assert spawned.proc.waited
+        async with asyncio.timeout(1):
+            while temporary_root.exists():
+                await asyncio.sleep(0.001)
+
+    async def test_blocked_temp_cleanup_does_not_hold_cancellation(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+
+        def make_temporary_root(*, prefix: str) -> str:
+            assert prefix == "linkedin-mcp-installer-"
+            temporary_root.mkdir()
+            return str(temporary_root)
+
+        lines_started = asyncio.Event()
+
+        async def hanging_lines(_stream: object):
+            lines_started.set()
+            await asyncio.Event().wait()
+            if False:  # pragma: no cover - makes this an async generator
+                yield ""
+
+        cleanup_started = threading.Event()
+        cleanup_release = threading.Event()
+        cleanup_daemon: list[bool] = []
+        remove = bootstrap._remove_installer_temporary_root
+
+        def blocked_remove(path: Path) -> None:
+            cleanup_daemon.append(threading.current_thread().daemon)
+            cleanup_started.set()
+            cleanup_release.wait(timeout=5)
+            remove(path)
+
+        monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", make_temporary_root)
+        monkeypatch.setattr(bootstrap, "_installer_lines", hanging_lines)
+        monkeypatch.setattr(
+            bootstrap, "_remove_installer_temporary_root", blocked_remove
+        )
+        self._patch_proc(monkeypatch, [], 0)
+
+        install = asyncio.create_task(bootstrap._run_patchright_install("--no-shell"))
+        await asyncio.wait_for(lines_started.wait(), timeout=1)
+        install.cancel()
+        done, _pending = await asyncio.wait({install}, timeout=1)
+        completed_promptly = install in done
+        try:
+            async with asyncio.timeout(1):
+                while not cleanup_started.is_set():
+                    await asyncio.sleep(0.001)
+            assert cleanup_daemon == [True]
+            assert temporary_root.exists()
+        finally:
+            cleanup_release.set()
+            if not install.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await install
+
+        assert completed_promptly
+        with pytest.raises(asyncio.CancelledError):
+            install.result()
+        async with asyncio.timeout(1):
+            while temporary_root.exists():
+                await asyncio.sleep(0.001)
 
     async def test_windows_normal_completion_uses_exit_callback_before_pipe_eof(
         self, monkeypatch
@@ -2584,7 +3471,7 @@ class TestCredentialRedaction:
         payload = "F" * offset + secret + "F" * bootstrap._MAX_LINE_CHARS
         seen: list[str] = []
 
-        async def fake_start(extra_arg: str):
+        async def fake_start(extra_arg: str, _environment: dict[str, str]):
             proc = _FakeProc([payload.encode() + b"\n"], 0)
             return proc
 
@@ -2624,7 +3511,7 @@ class TestQuotedResponseBodiesAreDropped:
 
         seen: list[str] = []
 
-        async def fake_start(extra_arg: str):
+        async def fake_start(extra_arg: str, _environment: dict[str, str]):
             proc = _FakeProc(list(chunks), 0)
             return proc
 
@@ -3976,9 +4863,12 @@ class TestInstallCallbackThreading:
 
         seen: dict[str, object] = {}
 
-        async def fake_install(extra_arg: str, *, line_callback=None) -> None:
+        async def fake_install(
+            extra_arg: str, *, line_callback=None, activity_callback=None
+        ) -> None:
             seen["extra_arg"] = extra_arg
             seen["line_callback"] = line_callback
+            seen["activity_callback"] = activity_callback
 
         monkeypatch.setattr(bootstrap, "_run_patchright_install", fake_install)
         return seen
@@ -4131,6 +5021,28 @@ class TestEnsureBrowserInstalled:
             "linkedin_mcp_server.bootstrap._ensure_browser_installed", fake_install
         )
         return calls
+
+    def test_refuses_unclaimed_root_before_readiness_or_install(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import ProfileRootRefusedError
+
+        profile = tmp_path / "unclaimed-cli" / "profile"
+        unrelated = profile.parent / "patchright-browsers" / "keep.txt"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("keep")
+        monkeypatch.setattr(bootstrap, "get_profile_dir", lambda: profile)
+        monkeypatch.setattr(
+            bootstrap,
+            "browser_ready",
+            lambda: pytest.fail("readiness ran before ownership was proved"),
+        )
+
+        with pytest.raises(ProfileRootRefusedError):
+            ensure_browser_installed()
+
+        assert unrelated.read_text() == "keep"
 
     def test_installs_when_absent(self, isolate_profile_dir, monkeypatch):
         _patch_targets_and_version(monkeypatch)
@@ -4392,6 +5304,46 @@ class TestInvalidateBrowserSetup:
         assert state.setup_state is SetupState.IDLE
         assert state.setup_completed_at is None
 
+    def test_refuses_to_delete_metadata_under_an_unclaimed_root(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        profile = tmp_path / "unclaimed" / "profile"
+        metadata = profile.parent / "browser-install.json"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text("unrelated")
+        monkeypatch.setattr(bootstrap, "get_profile_dir", lambda: profile)
+
+        initialize_bootstrap("managed")
+        state = get_bootstrap_state()
+        state.setup_state = SetupState.READY
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+            invalidate_browser_setup()
+
+        assert metadata.read_text() == "unrelated"
+        assert state.setup_state is SetupState.IDLE
+        assert "unclaimed profile root" in caplog.text
+
+    def test_refuses_to_overwrite_metadata_under_an_unclaimed_root(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import ProfileRootRefusedError
+
+        profile = tmp_path / "unclaimed-write" / "profile"
+        metadata = profile.parent / "browser-install.json"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text("unrelated")
+        monkeypatch.setattr(bootstrap, "get_profile_dir", lambda: profile)
+
+        with pytest.raises(ProfileRootRefusedError):
+            bootstrap._write_install_metadata(
+                tmp_path / "browsers", {"chromium-": True}
+            )
+
+        assert metadata.read_text() == "unrelated"
+
     @pytest.mark.parametrize(
         "leave_state",
         [SetupState.IDLE, SetupState.RUNNING, SetupState.FAILED],
@@ -4414,8 +5366,10 @@ class TestEnsureToolReadyInvalidatesStaleReady:
     async def test_invalidates_when_ready_state_disagrees_with_disk(
         self, isolate_profile_dir, monkeypatch
     ):
-        async def fake_setup() -> None:
-            return None
+        release = asyncio.Event()
+
+        async def fake_setup(**_kwargs: object) -> None:
+            await release.wait()
 
         _patch_inline_wait(monkeypatch, 0)
         # Disk says not-ready, in-memory state cached READY.
@@ -4439,10 +5393,12 @@ class TestEnsureToolReadyInvalidatesStaleReady:
         with pytest.raises(BrowserSetupInProgressError):
             await ensure_tool_ready_or_raise("get_person_profile")
 
-        # Invalidator must have run — metadata gone, state reset, install task spawned.
-        assert not install_metadata_path().exists()
+        # State is reset and setup starts, while stale metadata remains until a
+        # successful install replaces it.
+        assert install_metadata_path().exists()
         assert state.setup_state is SetupState.RUNNING
         assert state.setup_task is not None
+        release.set()
         await state.setup_task
 
 
