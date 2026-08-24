@@ -32,9 +32,43 @@ jobs:
       - name: Optimize uv cache for CI
         run: uv cache prune --ci
 
+  windows-daemon:
+    name: Windows daemon (Python ${{ matrix.python-version }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - run: uv sync --group dev
+
+      - name: Run daemon containment tests
+        run: >-
+          uv run pytest
+          tests/test_daemon_election.py::TestRealOwner::test_an_owner_is_started_and_answers
+          tests/test_daemon_election.py::TestRealOwner::test_a_crashed_owner_is_replaced
+          tests/test_daemon_election.py::TestRealOwner::test_many_clients_starting_at_once_elect_exactly_one_owner
+          tests/test_installer_supervisor.py
+          tests/test_installer_worker.py
+          tests/test_process_tree.py
+
+      - run: uv cache prune --ci
+
   test:
+    needs: windows-daemon
+    if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: Require the Windows daemon tests
+        run: test '${{ needs.windows-daemon.result }}' = success
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
@@ -129,7 +163,7 @@ jobs:
       - run: uv sync --group dev
 
       - name: Run platform behaviour tests
-        run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py tests/test_daemon_lock.py tests/test_greenlet_runtime.py
+        run: uv run pytest tests/test_profile_lease.py tests/test_profile_lease_integration.py tests/test_private_state.py tests/test_daemon_lock.py tests/test_process_tree.py tests/test_greenlet_runtime.py
 
       # The identity gate runs on every leg, because every leg's browser is a
       # different one from the Ubuntu job's. macOS is the only platform with a

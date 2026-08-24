@@ -127,6 +127,13 @@
       "url": "https://github.com/novnc/websockify",
       "branch": "master",
       "specialNotes": "Token-authenticated WebSocket proxy between noVNC and x11vnc."
+    },
+    {
+      "type": "git",
+      "name": "pywin32",
+      "url": "https://github.com/mhammond/pywin32",
+      "branch": "main",
+      "specialNotes": "Windows API bindings. Used for daemon and installer Job Object containment."
     }
   ]
 }

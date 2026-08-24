@@ -67,6 +67,7 @@ from linkedin_mcp_server.daemon_liveness import (
 )
 from linkedin_mcp_server.drivers.browser import set_headless
 from linkedin_mcp_server.logging_config import configure_logging
+from linkedin_mcp_server.process_tree import WindowsJob, hard_exit_process_tree
 from linkedin_mcp_server.server_role import (
     ServerRole,
     set_process_role,
@@ -368,6 +369,7 @@ async def _serve(
     config: AppConfig,
     log_path: Path,
     ready: Handshake,
+    job_name: str | None = None,
 ) -> int:
     """Run the endpoint, publish it, and hold it until shutdown."""
     instance_id = daemon_descriptor.new_instance_id()
@@ -416,6 +418,12 @@ async def _serve(
             _probe(descriptor.url, token), max(deadline - time.monotonic(), 0.0)
         )
 
+        # The parent keeps termination authority until READY. Adopt immediately
+        # before publication so an adopted owner is already committed to serving.
+        if os.name == "nt":
+            if job_name is None:
+                raise RuntimeError("The Windows owner has no Job Object handoff")
+            WindowsJob.adopt_current_process(job_name)
         daemon_descriptor.publish(auth_root, descriptor, token)
         # The idle clock starts here rather than at startup: before the
         # descriptor is published nobody can reach this owner, and counting the
@@ -573,12 +581,8 @@ async def _stop_within(serving: asyncio.Task[None], seconds: float) -> None:
 
 
 def _exit_hard() -> int:  # pragma: no cover - the process does not come back
-    """Leave immediately, without running interpreter cleanup.
-
-    Separated so a test can substitute it. Nothing after this returns.
-    """
-    logging.shutdown()  # flush the log file; the traceback above is the record
-    os._exit(1)
+    """Leave immediately, containing descendants without interpreter cleanup."""
+    hard_exit_process_tree(1)
 
 
 async def _await_started(
@@ -751,11 +755,16 @@ def main(argv: list[str] | None = None) -> int:
         description="Serve one shared LinkedIn browser to local MCP clients.",
     )
     parser.add_argument("--lock-fd", type=int, default=None)
+    parser.add_argument("--job-name", default=None)
     args = parser.parse_args(argv)
 
     # Before anything else can write to it.
     handshake = _Handshake(_claim_handshake_stream())
     try:
+        if os.name == "nt":
+            if args.job_name is None:
+                raise RuntimeError("The Windows owner has no Job Object handoff")
+            WindowsJob.verify_current_process(args.job_name)
         # Read before anything else touches the configuration: the frontend
         # holds the pipe open only until it has written, and the settings decide
         # how this process logs.
@@ -807,6 +816,7 @@ def main(argv: list[str] | None = None) -> int:
                 config=config,
                 log_path=daemon_log_path(auth_root),
                 ready=handshake,
+                job_name=args.job_name,
             )
         )
     except DaemonLockError:

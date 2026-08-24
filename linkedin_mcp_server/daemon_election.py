@@ -57,6 +57,14 @@ from linkedin_mcp_server.daemon import (
     look_up_owner,
 )
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
+from linkedin_mcp_server.process_tree import (
+    ProcessTreeError,
+    WindowsJob,
+    release_nonce,
+    release_windows_gate,
+    terminate_process_group,
+    windows_gate_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -625,40 +633,63 @@ def _spawn(
     log_path = daemon_owner.daemon_log_path(auth_root)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    command = _spawn_command(lock_fd=lock_fd)
+    windows_job = WindowsJob.named("owner") if os.name == "nt" else None
+    nonce = release_nonce() if windows_job is not None else None
+    target = _spawn_command(
+        lock_fd=lock_fd,
+        job_name=windows_job.name if windows_job is not None else None,
+    )
+    command = (
+        windows_gate_command(target, nonce)
+        if windows_job is not None and nonce is not None
+        else target
+    )
 
     # Opened append, so a restart adds to the record rather than erasing the
     # reason the last owner died.
-    with open(log_path, "a", encoding="utf-8") as log:
-        child = subprocess.Popen(
-            command,
-            env=_owner_environment(),
-            stdin=subprocess.PIPE,
-            # The handshake channel. Not a separate inherited descriptor,
-            # because ``pass_fds`` is POSIX-only (``subprocess.py:1464``) and
-            # this path has to work on Windows, where the child competes for the
-            # lock and the frontend has nothing *but* the handshake to go on.
-            stdout=subprocess.PIPE,
-            # To the log file from the first instruction, so an interpreter that
-            # dies during imports still leaves its traceback somewhere. A
-            # detached process has no terminal to write it to.
-            stderr=log,
-            # Empty on Windows, which refuses the argument outright. The lock is
-            # only ever handed over where that works.
-            pass_fds=() if lock_fd is None else (lock_fd,),
-            # Its own session, so a signal aimed at the client's process group
-            # does not take the owner with it. POSIX-only, which is why the
-            # Windows equivalent is passed separately below rather than assumed.
-            start_new_session=True,
-            close_fds=True,
-            # Zero on POSIX, where `subprocess` ignores it, and the real
-            # detachment on Windows, where `start_new_session` is what gets
-            # ignored. Passed positionally rather than unpacked from a mapping,
-            # which would defeat the overload the type checker resolves against.
-            creationflags=_detachment_flags(),
-        )
-
     try:
+        with open(log_path, "a", encoding="utf-8") as log:
+            child = subprocess.Popen(
+                command,
+                env=_owner_environment(),
+                stdin=subprocess.PIPE,
+                # The handshake channel. Not a separate inherited descriptor,
+                # because ``pass_fds`` is POSIX-only (``subprocess.py:1464``) and
+                # this path has to work on Windows, where the child competes for the
+                # lock and the frontend has nothing *but* the handshake to go on.
+                stdout=subprocess.PIPE,
+                # To the log file from the first instruction, so an interpreter that
+                # dies during imports still leaves its traceback somewhere. A
+                # detached process has no terminal to write it to.
+                stderr=log,
+                # Empty on Windows, which refuses the argument outright. The lock is
+                # only ever handed over where that works.
+                pass_fds=() if lock_fd is None else (lock_fd,),
+                # Its own session, so a signal aimed at the client's process group
+                # does not take the owner with it. POSIX-only, which is why the
+                # Windows equivalent is passed separately below rather than assumed.
+                start_new_session=True,
+                close_fds=True,
+                # Zero on POSIX, where `subprocess` ignores it, and the real
+                # detachment on Windows, where `start_new_session` is what gets
+                # ignored. Passed positionally rather than unpacked from a mapping,
+                # which would defeat the overload the type checker resolves against.
+                creationflags=_detachment_flags(),
+            )
+    except BaseException:
+        if windows_job is not None:
+            windows_job.close()
+        raise
+
+    assigned = False
+    cleanup_needed = True
+    try:
+        assert child.stdin is not None
+        if windows_job is not None and nonce is not None:
+            windows_job.assign_popen(child)
+            assigned = True
+            # No target code exists until the parent owns the Job.
+            release_windows_gate(child.stdin, nonce)
         assert child.stdin is not None and child.stdout is not None
         started = time.monotonic()
         try:
@@ -681,7 +712,8 @@ def _spawn(
                 "The daemon never read its configuration; stopping it so the "
                 "lock is not held by a process that cannot serve"
             )
-            _stop_child(child)
+            cleanup_needed = False
+            _stop_child(child, windows_job=windows_job, assigned=assigned)
             return _Started.NO
         # One budget across both halves. Handing the configuration over and
         # waiting for the verdict are two ways of waiting on the same child, and
@@ -710,15 +742,28 @@ def _spawn(
                 "The daemon did not finish starting; stopping it so the lock is "
                 "not held by a process that never served"
             )
-            _stop_child(child)
+            cleanup_needed = False
+            _stop_child(child, windows_job=windows_job, assigned=assigned)
             return _Started.NO
         if verdict is _Started.NO:
             # A failure verdict is terminal. The real owner has already run its
             # bounded shutdown before sending it; EOF means the child exited.
             # Stop a nonconforming child that reports failure and stays alive,
             # or its inherited descriptor keeps the profile locked forever.
-            _stop_child(child)
+            cleanup_needed = False
+            _stop_child(child, windows_job=windows_job, assigned=assigned)
+        else:
+            # READY means the owner detached its own handle immediately before
+            # publication. Closing the parent's handle now leaves it independent.
+            if windows_job is not None:
+                windows_job.close()
+        cleanup_needed = False
         return verdict
+    except BaseException:
+        if cleanup_needed:
+            cleanup_needed = False
+            _stop_child(child, windows_job=windows_job, assigned=assigned)
+        raise
     finally:
         _release_handshake(child)
         _reap(child)
@@ -732,7 +777,12 @@ def _spawn(
 _STOP_CHILD_SECONDS = 2.0
 
 
-def _stop_child(child: subprocess.Popen[bytes]) -> None:
+def _stop_child(
+    child: subprocess.Popen[bytes],
+    *,
+    windows_job: WindowsJob | None = None,
+    assigned: bool = False,
+) -> None:
     """End a child whose startup cannot produce a usable owner, and collect it.
 
     Called after a configuration timeout, an exhausted startup budget, or a
@@ -740,20 +790,47 @@ def _stop_child(child: subprocess.Popen[bytes]) -> None:
     bounded endpoint shutdown, and EOF means the child already exited. The
     timeout cases cannot be left holding the inherited lock indefinitely.
 
-    Killed outright rather than asked politely first. A ``SIGTERM`` grace period
-    is time added *after* the caller's budget is already spent, so a child that
-    ignores the signal turns a half-second election into five and a half, and the
-    documented ceiling stops being a ceiling.
+    The contained tree is killed outright rather than asked politely first. A
+    ``SIGTERM`` grace period is time added after the caller's budget is already
+    spent, so a child that ignores it would make the documented ceiling false.
 
     The wait normally proves process death before this returns: a signalled
     process may still have its descriptors open until the kernel finishes the
     exit. The bounded-wait warning is the explicit exception, and the caller must
     not claim the lock is certainly free after it.
     """
-    with contextlib.suppress(OSError):
-        child.kill()
+    deadline = time.monotonic() + _STOP_CHILD_SECONDS
+    if windows_job is not None:
+        if assigned:
+            windows_job.terminate_and_wait()
+        else:
+            # Before assignment EOF is the only contained stop. If the isolated
+            # gate does not accept it, stop and reap that direct child explicitly.
+            if child.stdin is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    child.stdin.close()
+            try:
+                child.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                child.kill()
+            finally:
+                windows_job.close()
+        try:
+            child.wait(timeout=max(deadline - time.monotonic(), 0.0))
+        except subprocess.TimeoutExpired as exc:
+            raise ProcessTreeError(
+                "The Windows owner gate did not exit after Job drainage"
+            ) from exc
+        return
+
+    stopped_tree = terminate_process_group(
+        child.pid, timeout=_STOP_CHILD_SECONDS, child=child
+    )
+    if not stopped_tree:
+        with contextlib.suppress(OSError):
+            child.kill()
     try:
-        child.wait(timeout=_STOP_CHILD_SECONDS)
+        child.wait(timeout=max(deadline - time.monotonic(), 0.0))
     except subprocess.TimeoutExpired:
         # Uninterruptible sleep, or a kernel that has not finished with it.
         # Reported rather than waited out, since the caller has a deadline and
@@ -819,32 +896,40 @@ def _hand_over_config(
         raise failure
 
 
-def _spawn_command(*, lock_fd: int | None) -> list[str]:
+def _spawn_command(*, lock_fd: int | None, job_name: str | None = None) -> list[str]:
     """How the owner is invoked.
 
-    ``-I`` is isolated mode: it keeps the working directory *and* ``PYTHONPATH``
-    off ``sys.path``. Without it, a directory containing
-    ``linkedin_mcp_server/daemon_owner.py`` is imported in preference to the
-    installed package, and an MCP client started in such a workspace would hand
-    that code the inherited lock descriptor and the whole configuration on
-    standard input, ``proxy_password`` included.
-
-    ``-P`` alone is not enough, which is worth stating because it is the obvious
-    choice and it looks sufficient: it drops the implicit working directory and
-    leaves ``PYTHONPATH`` in force, so the very common ``PYTHONPATH=.`` puts the
-    workspace back at the front. Both were measured from a prepared directory
-    with this project's own interpreter — ``-P`` loaded the local file, ``-I``
-    loaded the installed module.
-
-    That is also what makes ``daemon_config``'s "both ends are the same
-    installation" true rather than hopeful. Isolated mode is safe for the owner
-    because it needs nothing from the environment's import configuration: it is
-    the same interpreter and the same installation, and everything it is
-    configured with arrives on standard input.
+    ``-P`` keeps the working directory off ``sys.path`` while preserving the
+    interpreter's user site, where a supported ``pip install --user`` may have put
+    this package. An explicitly isolated frontend is different: weakening its
+    ``-I``, ``-s`` or ``-E`` mode would restore startup code it refused before the
+    configuration secrets cross stdin. The child environment drops ``PYTHONPATH``
+    separately, so a workspace cannot put a shadow
+    ``linkedin_mcp_server/daemon_owner.py`` back in front and receive the inherited
+    lock descriptor or configuration secrets.
     """
-    command = [sys.executable, "-I", "-m", "linkedin_mcp_server.daemon_owner"]
+    interpreter_flags: list[str] = []
+    if sys.flags.isolated:
+        # ``-I`` already implies ``-E`` and ``-s``. Preserve the mode itself rather
+        # than expanding it, so the child's flags describe the same boundary.
+        interpreter_flags.append("-I")
+    else:
+        if sys.flags.ignore_environment:
+            interpreter_flags.append("-E")
+        if sys.flags.no_user_site:
+            interpreter_flags.append("-s")
+
+    command = [
+        sys.executable,
+        *interpreter_flags,
+        "-P",
+        "-m",
+        "linkedin_mcp_server.daemon_owner",
+    ]
     if lock_fd is not None:
         command += ["--lock-fd", str(lock_fd)]
+    if job_name is not None:
+        command += ["--job-name", job_name]
     return command
 
 
@@ -879,6 +964,7 @@ def _owner_environment() -> dict[str, str]:
     environment = dict(os.environ)
     for name in _SECRETS_TO_DROP:
         environment.pop(name, None)
+    environment.pop("PYTHONPATH", None)
     return environment
 
 

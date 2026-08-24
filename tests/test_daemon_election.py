@@ -16,6 +16,7 @@ would have wedged every recovery.
 from __future__ import annotations
 
 import contextlib
+import importlib
 import os
 import signal
 import socket
@@ -24,7 +25,8 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -36,6 +38,7 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon import Attachment, OwnerState
 from linkedin_mcp_server.daemon_election import (
     _Attempt,
+    _Started,
     ElectionOutcome,
     Reach,
     obtain_owner,
@@ -556,6 +559,36 @@ class TestFailingFast:
         assert time.monotonic() - began < 10
 
     @_POSIX_ONLY
+    def test_group_cleanup_and_fallback_share_one_stop_budget(self, monkeypatch):
+        clock = [0.0]
+        waits: list[float] = []
+
+        class _Child:
+            pid = 4242
+
+            def kill(self) -> None:
+                return None
+
+            def wait(self, timeout: float) -> int:
+                waits.append(timeout)
+                return 0
+
+        def exhaust_group_budget(pgid: int, *, timeout: float, child: object) -> bool:
+            assert (pgid, timeout, child) == (4242, 2.0, process)
+            clock[0] += timeout
+            return False
+
+        process: Any = _Child()
+        monkeypatch.setattr(election_module.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(
+            election_module, "terminate_process_group", exhaust_group_budget
+        )
+
+        election_module._stop_child(process)
+
+        assert waits == [0.0]
+
+    @_POSIX_ONLY
     def test_a_child_that_never_reads_its_configuration_does_not_block_the_spawn(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -597,10 +630,15 @@ class TestFailingFast:
         stopping: list[float] = []
         stop = election_module._stop_child
 
-        def timed(child: subprocess.Popen[bytes]) -> None:
+        def timed(
+            child: subprocess.Popen[bytes],
+            *,
+            windows_job: Any = None,
+            assigned: bool = False,
+        ) -> None:
             at = time.monotonic()
             try:
-                stop(child)
+                stop(child, windows_job=windows_job, assigned=assigned)
             finally:
                 stopping.append(time.monotonic() - at)
 
@@ -767,7 +805,7 @@ class TestFailingFast:
         real = subprocess.Popen
 
         def reports_failure(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
-            if command[1:4] != ["-I", "-m", "linkedin_mcp_server.daemon_owner"]:
+            if command[1:4] != ["-P", "-m", "linkedin_mcp_server.daemon_owner"]:
                 return real(command, **kwargs)
             child = real(
                 [
@@ -804,6 +842,52 @@ class TestFailingFast:
             for child in children:
                 if child.poll() is None:  # pragma: no cover - the stop worked
                     child.kill()
+                    child.wait(timeout=30)
+
+    @_POSIX_ONLY
+    def test_a_failed_owner_leaves_no_grandchild_process_group(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server.process_tree import process_group_exists
+
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        pid_file = tmp_path / "grandchild.pid"
+        children: list[subprocess.Popen[Any]] = []
+        real = subprocess.Popen
+
+        def reports_failure(command: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+            if command[1:4] != ["-P", "-m", "linkedin_mcp_server.daemon_owner"]:
+                return real(command, **kwargs)
+            script = (
+                "import pathlib, subprocess, sys, time\n"
+                "sys.stdin.readline()\n"
+                "grandchild = subprocess.Popen([sys.executable, '-c', "
+                "'import time; time.sleep(600)'])\n"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(grandchild.pid))\n"
+                "sys.stdout.write('failed\\n')\n"
+                "sys.stdout.flush()\n"
+                "time.sleep(600)\n"
+            )
+            child = real([command[0], "-c", script], **kwargs)
+            children.append(child)
+            return child
+
+        monkeypatch.setattr(election_module.subprocess, "Popen", reports_failure)
+
+        try:
+            attempt = election_module._start_owner(
+                auth_root, profile, config, timeout=5.0
+            )
+            assert attempt is _Attempt.FAILED
+            assert children
+            assert pid_file.exists(), "the child never reached its grandchild spawn"
+            assert not process_group_exists(children[0].pid)
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    os.killpg(child.pid, signal.SIGKILL)
                     child.wait(timeout=30)
 
     @_POSIX_ONLY
@@ -1045,8 +1129,29 @@ def _run_frontend(profile: Path) -> dict[str, object]:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def _windows_alive(pid: int) -> bool:
+    """Query a Windows owner without signaling or terminating it."""
+    win32api = importlib.import_module("win32api")
+    win32con = importlib.import_module("win32con")
+    win32process = importlib.import_module("win32process")
+    try:
+        handle = win32api.OpenProcess(
+            win32con.PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
+        )
+    except Exception:
+        return False
+    try:
+        return win32process.GetExitCodeProcess(handle) == win32con.STILL_ACTIVE
+    finally:
+        handle.Close()
+
+
 def _alive(pid: int) -> bool:
-    """Whether a process still exists. Signal 0 checks without delivering one."""
+    """Whether a process still exists, without changing it."""
+    if os.name == "nt":
+        return _windows_alive(pid)
     try:
         os.kill(pid, 0)
     except OSError:
@@ -1067,6 +1172,14 @@ def _resume(pid: object) -> None:
         os.kill(pid, signal.SIGCONT)
 
 
+def _stop_windows(pid: int) -> None:
+    subprocess.run(
+        ["taskkill", "/PID", str(pid), "/T", "/F"],
+        capture_output=True,
+        check=False,
+    )
+
+
 def _stop(pid: object) -> None:
     """Kill an owner, taking the pid as it comes out of the child's JSON.
 
@@ -1077,11 +1190,240 @@ def _stop(pid: object) -> None:
     """
     if not isinstance(pid, int):
         return
+    if os.name == "nt":
+        _stop_windows(pid)
+        return
     with contextlib.suppress(OSError):
         os.kill(pid, signal.SIGKILL)
 
 
+@pytest.mark.parametrize(("exit_code", "expected"), [(259, True), (7, False)])
+def test_windows_owner_liveness_is_a_query(
+    exit_code: int, expected: bool, monkeypatch: pytest.MonkeyPatch
+):
+    class _Handle:
+        closed = False
+
+        def Close(self) -> None:
+            self.closed = True
+
+    handle = _Handle()
+
+    class _Api:
+        @staticmethod
+        def OpenProcess(access: int, inherit: bool, pid: int) -> _Handle:
+            assert (access, inherit, pid) == (0x1000, False, 4242)
+            return handle
+
+    class _Constants:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+
+    class _Process:
+        @staticmethod
+        def GetExitCodeProcess(opened: _Handle) -> int:
+            assert opened is handle
+            return exit_code
+
+    modules = {
+        "win32api": _Api,
+        "win32con": _Constants,
+        "win32process": _Process,
+    }
+    monkeypatch.setattr(importlib, "import_module", modules.__getitem__)
+
+    assert _windows_alive(4242) is expected
+    assert handle.closed
+
+
+def test_windows_owner_cleanup_uses_taskkill(monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs)),
+    )
+
+    _stop_windows(4242)
+
+    assert calls == [
+        (
+            ["taskkill", "/PID", "4242", "/T", "/F"],
+            {"capture_output": True, "check": False},
+        )
+    ]
+
+
 @pytest.mark.slow
+class TestWindowsOwnerHandoff:
+    def test_assignment_precedes_release_and_parent_close_follows_ready(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        events: list[str] = []
+
+        class _Stream:
+            def write(self, _payload: bytes) -> int:
+                return 0
+
+        class _Child:
+            pid = 4242
+            stdin = _Stream()
+            stdout = object()
+
+        child = _Child()
+
+        jobs: list[object] = []
+
+        class _Job:
+            name = "named-owner-job"
+            closed = False
+
+            @classmethod
+            def named(cls, purpose: str):
+                assert purpose == "owner"
+                events.append("create-job")
+                job = cls()
+                jobs.append(job)
+                return job
+
+            def assign_popen(self, process: object) -> None:
+                assert process is child
+                events.append("assign-gate")
+
+            def terminate_and_wait(self) -> None:  # pragma: no cover - success path
+                raise AssertionError("a ready owner was terminated")
+
+            def close(self) -> None:
+                self.closed = True
+                events.append("close-parent-job")
+
+        def gate(target: list[str], nonce: str) -> list[str]:
+            assert target[-2:] == ["--job-name", "named-owner-job"]
+            assert nonce == "nonce"
+            events.append("build-gate")
+            return ["gate", nonce, "--", *target]
+
+        def popen(command: list[str], **_kwargs: object) -> _Child:
+            assert command[:3] == ["gate", "nonce", "--"]
+            events.append("start-gate")
+            return child
+
+        def release(stream: object, nonce: str) -> None:
+            assert stream is child.stdin
+            assert nonce == "nonce"
+            events.append("release-gate")
+
+        def hand_over(process: object, sent: AppConfig, *, timeout: float) -> None:
+            assert process is child
+            assert sent is config
+            assert timeout == 1
+            events.append("config")
+
+        def ready(process: object, *, timeout: float) -> _Started:
+            assert process is child
+            assert timeout <= 1
+            assert jobs and not cast(Any, jobs[0]).closed
+            events.append("ready")
+            return _Started.YES
+
+        monkeypatch.setattr(
+            election_module, "os", SimpleNamespace(name="nt", environ=os.environ)
+        )
+        monkeypatch.setattr(election_module, "WindowsJob", _Job)
+        monkeypatch.setattr(election_module, "release_nonce", lambda: "nonce")
+        monkeypatch.setattr(election_module, "windows_gate_command", gate)
+        monkeypatch.setattr(election_module.subprocess, "Popen", popen)
+        monkeypatch.setattr(election_module, "release_windows_gate", release)
+        monkeypatch.setattr(election_module, "_hand_over_config", hand_over)
+        monkeypatch.setattr(election_module, "_await_ready", ready)
+        monkeypatch.setattr(election_module, "_detachment_flags", lambda: 0)
+        monkeypatch.setattr(election_module, "_release_handshake", lambda _p: None)
+        monkeypatch.setattr(election_module, "_reap", lambda _p: None)
+
+        verdict = election_module._spawn(
+            profile.parent, config, lock_fd=None, timeout=1
+        )
+
+        assert verdict is _Started.YES
+        assert events == [
+            "create-job",
+            "build-gate",
+            "start-gate",
+            "assign-gate",
+            "release-gate",
+            "config",
+            "ready",
+            "close-parent-job",
+        ]
+
+    def test_pre_assignment_cleanup_stops_only_the_gate(self):
+        events: list[str] = []
+
+        class _Stream:
+            def close(self) -> None:
+                events.append("close-gate-stdin")
+
+        class _Child:
+            pid = 4242
+            stdin = _Stream()
+            waits = 0
+
+            def wait(self, timeout: float) -> int:
+                self.waits += 1
+                events.append(f"wait-{self.waits}")
+                if self.waits == 1:
+                    raise subprocess.TimeoutExpired("gate", timeout)
+                return 1
+
+            def kill(self) -> None:
+                events.append("kill-gate")
+
+        class _Job:
+            def close(self) -> None:
+                events.append("close-job")
+
+            def terminate_and_wait(self) -> None:  # pragma: no cover - unassigned
+                raise AssertionError("an unassigned Job was terminated")
+
+        election_module._stop_child(
+            cast(Any, _Child()), windows_job=cast(Any, _Job()), assigned=False
+        )
+
+        assert events == [
+            "close-gate-stdin",
+            "wait-1",
+            "kill-gate",
+            "close-job",
+            "wait-2",
+        ]
+
+    def test_post_assignment_cleanup_drains_the_job(self):
+        events: list[str] = []
+
+        class _Child:
+            pid = 4242
+            stdin = None
+
+            def wait(self, timeout: float) -> int:
+                events.append("reap-gate")
+                return 1
+
+        class _Job:
+            def close(self) -> None:  # pragma: no cover - drain owns close
+                raise AssertionError("assigned cleanup only closed the Job")
+
+            def terminate_and_wait(self) -> None:
+                events.append("drain-job")
+
+        election_module._stop_child(
+            cast(Any, _Child()), windows_job=cast(Any, _Job()), assigned=True
+        )
+
+        assert events == ["drain-job", "reap-gate"]
+
+
 class TestRealOwner:
     """The whole thing, with a real detached process on the other end.
 
@@ -1409,13 +1751,15 @@ class TestRealOwner:
         ]
 
         results = []
-        for frontend in running:
-            out, err = frontend.communicate(timeout=300)
-            assert frontend.returncode == 0, err[-2000:]
-            results.append(json.loads(out.strip().splitlines()[-1]))
-
-        owners = {result["pid"] for result in results}
+        owners: set[object] = set()
         try:
+            for frontend in running:
+                out, err = frontend.communicate(timeout=300)
+                assert frontend.returncode == 0, err[-2000:]
+                result = json.loads(out.strip().splitlines()[-1])
+                results.append(result)
+                owners.add(result["pid"])
+
             assert None not in owners, "a client ended up with no owner"
             assert len(owners) == 1, f"more than one owner was elected: {owners}"
             # Exactly one of them did the starting; the rest attached to it.
@@ -1424,8 +1768,16 @@ class TestRealOwner:
             # And none of them kept the lock they may have taken on the way.
             assert not any(r["frontend_holds_lock"] for r in results)
         finally:
+            for frontend in running:
+                if frontend.poll() is None:
+                    frontend.kill()
+                    frontend.wait(timeout=30)
             for pid in owners:
                 _stop(pid)
+            with contextlib.suppress(Exception):
+                published = daemon_descriptor_module.read(profile.parent)
+                if published is not None:
+                    _stop(published.pid)
 
     @_POSIX_ONLY
     def test_the_owner_outlives_the_client_that_started_it(self, real_state_root: Path):
@@ -1994,7 +2346,121 @@ class TestVersionSkew:
         assert not received, "the request was routed through the proxy"
         assert not any(b"SUPERSECRET" in seen for seen in received)
 
-    def test_the_owner_is_not_started_from_the_working_directory(self, tmp_path: Path):
+    @pytest.mark.parametrize(
+        ("parent_flags", "user_site_started"),
+        [(["-I"], False), (["-s"], False), ([], True)],
+    )
+    def test_the_owner_follows_the_parent_user_site_mode(
+        self, tmp_path: Path, parent_flags: list[str], user_site_started: bool
+    ):
+        """Run the real command from interpreters with explicit startup modes."""
+        import json
+
+        base_executable = getattr(sys, "_base_executable", sys.executable)
+        environment = os.environ.copy()
+        environment.pop("PYTHONNOUSERSITE", None)
+        environment["PYTHONUSERBASE"] = str(tmp_path / "user-base")
+
+        user_site_result = subprocess.run(
+            [
+                base_executable,
+                "-c",
+                "import site; print(site.getusersitepackages())",
+            ],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=60,
+        )
+        assert user_site_result.returncode == 0, user_site_result.stderr
+        user_site = Path(user_site_result.stdout.strip())
+        user_site.mkdir(parents=True)
+        (user_site / "sitecustomize.py").write_text(
+            "import builtins\nbuiltins.OWNER_USER_SITE_STARTED = True\n"
+        )
+
+        startup_probe = (
+            "import builtins; "
+            "print(getattr(builtins, 'OWNER_USER_SITE_STARTED', False))"
+        )
+        control = subprocess.run(
+            [base_executable, "-c", startup_probe],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env=environment,
+            timeout=60,
+        )
+        assert control.returncode == 0, control.stderr
+        assert control.stdout.strip() == "True", "the user-site probe was not armed"
+
+        import_paths = [
+            str(_REPO_ROOT),
+            *(entry for entry in sys.path if "site-packages" in entry),
+        ]
+        inspect_command = (
+            "import json, sys\n"
+            f"sys.path[:0] = {import_paths!r}\n"
+            "from linkedin_mcp_server.daemon_election import _spawn_command\n"
+            "print(json.dumps(_spawn_command(lock_fd=None)))\n"
+        )
+        parent = subprocess.run(
+            [base_executable, *parent_flags, "-c", inspect_command],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env=environment,
+            timeout=60,
+        )
+        assert parent.returncode == 0, parent.stderr[-1000:]
+        command = json.loads(parent.stdout.strip().splitlines()[-1])
+        assert all(flag in command for flag in parent_flags), command
+        assert "-P" in command, command
+        assert command[-2:] == ["-m", "linkedin_mcp_server.daemon_owner"]
+
+        child = subprocess.run(
+            [*command[:-2], "-c", startup_probe],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env=environment,
+            timeout=60,
+        )
+        assert child.returncode == 0, child.stderr[-1000:]
+        assert child.stdout.strip() == str(user_site_started), (
+            "the owner command changed the parent interpreter's user-site mode"
+        )
+
+    def test_the_owner_preserves_parent_ignore_environment_mode(self):
+        import json
+
+        base_executable = getattr(sys, "_base_executable", sys.executable)
+        import_paths = [
+            str(_REPO_ROOT),
+            *(entry for entry in sys.path if "site-packages" in entry),
+        ]
+        inspect_command = (
+            "import json, sys\n"
+            f"sys.path[:0] = {import_paths!r}\n"
+            "from linkedin_mcp_server.daemon_election import _spawn_command\n"
+            "print(json.dumps(_spawn_command(lock_fd=None)))\n"
+        )
+
+        parent = subprocess.run(
+            [base_executable, "-E", "-c", inspect_command],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert parent.returncode == 0, parent.stderr[-1000:]
+        command = json.loads(parent.stdout.strip().splitlines()[-1])
+        assert "-E" in command, command
+        assert "-P" in command, command
+
+    def test_the_owner_is_not_started_from_the_working_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         # `python -m` puts the inherited working directory first on sys.path, so
         # a workspace containing linkedin_mcp_server/daemon_owner.py is imported
         # in preference to the installed package. That code would receive the
@@ -2015,6 +2481,9 @@ class TestVersionSkew:
         # interpreter and its flags — is exactly what production uses.
         command = election_module._spawn_command(lock_fd=None)
         assert command[-2:] == ["-m", "linkedin_mcp_server.daemon_owner"], command
+        monkeypatch.setenv("PYTHONPATH", ".")
+        environment = election_module._owner_environment()
+        assert "PYTHONPATH" not in environment
         result = subprocess.run(
             [
                 *command[:-2],
@@ -2024,12 +2493,7 @@ class TestVersionSkew:
             capture_output=True,
             text=True,
             cwd=workspace,
-            # `PYTHONPATH=.` on purpose, and it is the whole point of the test.
-            # `-P` alone drops only the *implicit* working directory and leaves
-            # PYTHONPATH in force, so this very common setting puts the
-            # workspace back at the front — measured, it loaded the local file.
-            # Isolated mode is what refuses both.
-            env={**os.environ, "PYTHONPATH": "."},
+            env=environment,
             timeout=60,
         )
 
@@ -2376,6 +2840,74 @@ class TestPublishingLast:
         )
 
         assert order == ["probe", "publish"], order
+
+    def test_windows_adopts_the_job_immediately_before_publication(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        import asyncio
+
+        from linkedin_mcp_server import daemon_owner
+
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        auth_root = profile.parent
+        order: list[str] = []
+
+        class _StoppedServer:
+            started = True
+            should_exit = False
+
+            async def serve(self, sockets: object = None) -> None:
+                return None
+
+        class _Handshake:
+            def succeed(self) -> None:
+                order.append("ready")
+
+            def fail(self) -> None:  # pragma: no cover - not reached here
+                order.append("failed")
+
+            def close(self) -> None:
+                return None
+
+        async def probe(url: str, token: str) -> None:
+            order.append("probe")
+
+        monkeypatch.setattr(daemon_owner, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(daemon_owner, "_probe", probe)
+        monkeypatch.setattr(
+            daemon_owner.WindowsJob,
+            "adopt_current_process",
+            lambda name: order.append(f"adopt:{name}"),
+        )
+        monkeypatch.setattr(
+            daemon_owner.daemon_descriptor,
+            "publish",
+            lambda *a, **k: (order.append("publish"), (Path("d"), Path("t")))[1],
+        )
+        monkeypatch.setattr(
+            daemon_owner, "_forget_superseded_tokens", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            daemon_owner, "_bind_loopback", lambda: _FakeSocket(("127.0.0.1", 49152))
+        )
+        monkeypatch.setattr(
+            daemon_owner, "create_owner_server", lambda **kwargs: _StoppedServer()
+        )
+
+        asyncio.run(
+            daemon_owner._serve(
+                lock=DaemonLock(auth_root),
+                auth_root=auth_root,
+                profile=profile,
+                config=config,
+                log_path=auth_root / "daemon.log",
+                ready=_Handshake(),
+                job_name="named-owner-job",
+            )
+        )
+
+        assert order == ["probe", "adopt:named-owner-job", "publish", "ready"]
 
     def test_ready_is_signalled_only_after_the_descriptor_is_readable(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
