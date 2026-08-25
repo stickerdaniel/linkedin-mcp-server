@@ -112,6 +112,18 @@
       "description": "Send a message to a LinkedIn user with explicit confirmation and optional profile URN support"
     },
     {
+      "name": "archive_conversation",
+      "description": "Archive a LinkedIn conversation thread, moving it to the archived folder"
+    },
+    {
+      "name": "unarchive_conversation",
+      "description": "Restore an archived conversation back to the inbox"
+    },
+    {
+      "name": "mark_conversation_read",
+      "description": "Mark a conversation as read without opening it, clearing the unread badge"
+    },
+    {
       "name": "get_feed",
       "description": "Get recent posts from the authenticated user's LinkedIn home feed"
     },

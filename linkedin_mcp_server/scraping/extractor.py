@@ -5027,6 +5027,190 @@ class LinkedInExtractor:
             sent=True,
         )
 
+    async def _voyager_conversation_action(
+        self,
+        thread_id: str,
+        *,
+        action: str,
+        confirm_action: bool = False,
+    ) -> dict[str, Any]:
+        """Perform a Voyager API action on a conversation thread.
+
+        Calls LinkedIn's internal Voyager API from within the authenticated
+        browser session using ``page.evaluate()`` — the same pattern
+        ``send_message`` uses for compose-box interaction. The CSRF token
+        comes from the ``csrf-token`` meta tag, and cookies/TLS fingerprint
+        come from the real browser session.
+
+        Args:
+            thread_id: The conversation thread ID (already normalized).
+            action: One of ``"archive"``, ``"unarchive"``, ``"mark_read"``.
+            confirm_action: When False, reports what would happen without
+                making the API call. Archive/unarchive require this to be
+                True; mark_read always executes (read-only state change).
+
+        Returns:
+            Dict with url, status, message, and action.
+        """
+        # Navigate to the messaging page first so the page origin is
+        # linkedin.com and the Voyager API is reachable with the right
+        # cookies. Using the thread URL ensures the thread exists.
+        thread_url = messaging_thread_url(thread_id, "/")
+        await self._navigate_to_page(thread_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Thread page did not fully load for %s", thread_id)
+
+        # DOM dependency: we need to call fetch() from within the page
+        # context to reach the Voyager API with the session's cookies and
+        # CSRF token. This cannot be done via innerText or URL navigation.
+        # The Voyager conversation endpoint accepts PATCH to flip the
+        # archived flag and POST to mark as seen.
+        if action == "mark_read":
+            # Mark-as-read is not a destructive action; always execute.
+            result = await self._page.evaluate(
+                """async ({ threadId }) => {
+                    const csrfToken = document.querySelector(
+                        'meta[name="csrf-token"]'
+                    )?.getAttribute('content') || '';
+                    try {
+                        const resp = await fetch(
+                            '/voyager/api/messaging/conversations/'
+                            + encodeURIComponent(threadId)
+                            + '/events?action=markAsRead',
+                            {
+                                method: 'POST',
+                                headers: {
+                                    'csrf-token': csrfToken,
+                                    'content-type': 'application/json',
+                                    'x-restli-method': 'CREATE',
+                                },
+                                credentials: 'same-origin',
+                            }
+                        );
+                        return { ok: resp.ok, status: resp.status };
+                    } catch (e) {
+                        return { ok: false, status: 0, error: String(e) };
+                    }
+                }""",
+                {"threadId": thread_id},
+            )
+        else:
+            # Archive / unarchive: flip the archived flag via PATCH.
+            if not confirm_action:
+                return self._message_action_result(
+                    thread_url,
+                    "confirmation_required",
+                    f"Set confirm_action=true to {action} this conversation.",
+                )
+
+            archive_value = action == "archive"
+            result = await self._page.evaluate(
+                """async ({ threadId, archiveValue }) => {
+                    const csrfToken = document.querySelector(
+                        'meta[name="csrf-token"]'
+                    )?.getAttribute('content') || '';
+                    try {
+                        const resp = await fetch(
+                            '/voyager/api/messaging/conversations/'
+                            + encodeURIComponent(threadId),
+                            {
+                                method: 'PATCH',
+                                headers: {
+                                    'csrf-token': csrfToken,
+                                    'content-type': 'application/json',
+                                    'x-restli-method': 'PARTIAL_UPDATE',
+                                },
+                                credentials: 'same-origin',
+                                body: JSON.stringify({
+                                    patch: {
+                                        $set: { archived: archiveValue }
+                                    }
+                                }),
+                            }
+                        );
+                        return { ok: resp.ok, status: resp.status };
+                    } catch (e) {
+                        return { ok: false, status: 0, error: String(e) };
+                    }
+                }""",
+                {"threadId": thread_id, "archiveValue": archive_value},
+            )
+
+        if result.get("ok"):
+            return self._message_action_result(
+                thread_url,
+                action,
+                f"Conversation {action.replace('_', ' ')} successful.",
+            )
+        else:
+            status_code = result.get("status", 0)
+            error_detail = result.get("error", "")
+            return self._message_action_result(
+                thread_url,
+                f"{action}_failed",
+                f"LinkedIn returned status {status_code}"
+                + (f": {error_detail}" if error_detail else ""),
+            )
+
+    async def archive_conversation(
+        self,
+        thread_id: str,
+        *,
+        confirm_action: bool = False,
+    ) -> dict[str, Any]:
+        """Archive a conversation thread.
+
+        Moves the conversation to LinkedIn's archived folder. The thread
+        remains accessible and can be unarchived. Requires explicit
+        confirmation via ``confirm_action=True``.
+
+        Args:
+            thread_id: The conversation thread ID.
+            confirm_action: Must be True to archive. False does a dry run.
+        """
+        thread_id = normalize_thread_id(thread_id)
+        return await self._voyager_conversation_action(
+            thread_id, action="archive", confirm_action=confirm_action
+        )
+
+    async def unarchive_conversation(
+        self,
+        thread_id: str,
+        *,
+        confirm_action: bool = False,
+    ) -> dict[str, Any]:
+        """Restore an archived conversation to the inbox.
+
+        Args:
+            thread_id: The conversation thread ID.
+            confirm_action: Must be True to unarchive. False does a dry run.
+        """
+        thread_id = normalize_thread_id(thread_id)
+        return await self._voyager_conversation_action(
+            thread_id, action="unarchive", confirm_action=confirm_action
+        )
+
+    async def mark_conversation_read(
+        self,
+        thread_id: str,
+    ) -> dict[str, Any]:
+        """Mark a conversation as read without opening it.
+
+        Clears the unread badge on the conversation. Unlike
+        ``get_conversation``, this does not navigate to the thread content
+        and does not mark it read as a side effect of viewing — it calls
+        the Voyager mark-as-read endpoint directly.
+
+        Args:
+            thread_id: The conversation thread ID.
+        """
+        thread_id = normalize_thread_id(thread_id)
+        return await self._voyager_conversation_action(thread_id, action="mark_read")
+
     async def _extract_root_content(
         self,
         selectors: list[str],
