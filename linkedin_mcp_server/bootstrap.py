@@ -78,6 +78,7 @@ from linkedin_mcp_server.server_role import (
     ServerRole,
     ask_this_process_to_stand_down,
     process_role,
+    stand_down_reason,
 )
 from linkedin_mcp_server.session_state import (
     PeerSessionInPlaceError,
@@ -2567,6 +2568,15 @@ async def ensure_tool_ready_or_raise(
     if detail is not None:
         # Surface each completed failure before a later call is allowed to retry.
         raise BrowserSetupFailedError(detail)
+
+    if process_role() is ServerRole.OWNER and stand_down_reason() is not None:
+        # A deadline failure requests owner replacement before it is consumed. A
+        # queued call can enter during the serving loop's next poll, but starting a
+        # task here would only let lifespan shutdown cancel the promised retry.
+        raise BrowserSetupFailedError(
+            "This daemon owner is restarting after browser setup failed. Call this "
+            "tool again so the replacement owner can retry."
+        )
 
     # Before any branch that could reach a browser. A quiescent owner has closed
     # Chromium and is waiting for a client to sign in; every path below would open

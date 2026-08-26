@@ -1505,6 +1505,11 @@ class TestTwoStageInstall:
             "ask_this_process_to_stand_down",
             lambda reason: stood_down.append(reason),
         )
+        monkeypatch.setattr(
+            bootstrap,
+            "stand_down_reason",
+            lambda: stood_down[-1] if stood_down else None,
+        )
 
         initialize_bootstrap("managed")
         await start_background_browser_setup_if_needed()
@@ -1518,6 +1523,10 @@ class TestTwoStageInstall:
         with pytest.raises(BrowserSetupFailedError, match="background deadline"):
             await ensure_tool_ready_or_raise("get_person_profile")
         assert stood_down == ["managed browser setup exceeded its background deadline"]
+
+        with pytest.raises(BrowserSetupFailedError, match="owner is restarting"):
+            await ensure_tool_ready_or_raise("get_person_profile")
+        assert get_bootstrap_state().setup_task is None
 
     async def test_inner_timeout_keeps_its_specific_failure(
         self, isolate_profile_dir, monkeypatch
