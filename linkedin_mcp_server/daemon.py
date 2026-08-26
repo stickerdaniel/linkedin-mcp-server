@@ -38,6 +38,8 @@ from __future__ import annotations
 import enum
 import logging
 import math
+import queue
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +55,11 @@ logger = logging.getLogger(__name__)
 #: that is nearly ready) does not feel like a stall. How *long* to wait belongs
 #: to the caller that lost the lock race, not here.
 _ATTACH_POLL_SECONDS = 0.1
+_DESCRIPTOR_READ_SECONDS = 1.0
+
+
+class _DescriptorReadTimeout(TimeoutError):
+    pass
 
 
 class OwnerState(enum.Enum):
@@ -178,12 +185,52 @@ def _inspect(auth_root: Path, profile: Path, config: AppConfig) -> OwnerLookup:
     )
 
 
+class _DescriptorInspector:
+    """Reuse one native descriptor inspection until it has actually finished."""
+
+    def __init__(self, auth_root: Path, profile: Path, config: AppConfig) -> None:
+        self._auth_root = auth_root
+        self._profile = profile
+        self._config = config
+        self._pending: queue.Queue[OwnerLookup | BaseException] | None = None
+
+    def inspect_until(self, *, timeout: float) -> OwnerLookup:
+        """Wait within one budget without abandoning a blocked native reader."""
+        if self._pending is None:
+            result: queue.Queue[OwnerLookup | BaseException] = queue.Queue(maxsize=1)
+            self._pending = result
+
+            def inspect() -> None:
+                try:
+                    result.put(_inspect(self._auth_root, self._profile, self._config))
+                except BaseException as exc:  # noqa: BLE001 - re-raised by the caller
+                    result.put(exc)
+
+            threading.Thread(
+                target=inspect,
+                name="daemon-descriptor-read",
+                daemon=True,
+            ).start()
+
+        try:
+            value = self._pending.get(timeout=max(timeout, 0.0))
+        except queue.Empty:
+            raise _DescriptorReadTimeout(
+                "Daemon descriptor state could not be read in time"
+            ) from None
+        self._pending = None
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
 def look_up_owner(
     auth_root: Path,
     profile: Path,
     config: AppConfig,
     *,
     wait_seconds: float = 0.0,
+    _inspector: _DescriptorInspector | None = None,
 ) -> OwnerLookup:
     """Read the descriptor until it is compatible or the budget runs out.
 
@@ -215,10 +262,23 @@ def look_up_owner(
     if not math.isfinite(wait_seconds):
         raise ValueError(f"wait_seconds must be a finite number, got {wait_seconds}")
 
-    deadline = time.monotonic() + max(wait_seconds, 0.0)
+    wait_budget = max(wait_seconds, 0.0)
+    deadline = time.monotonic() + wait_budget
+    inspector = _inspector or _DescriptorInspector(auth_root, profile, config)
+    last_lookup: OwnerLookup | None = None
     while True:
+        remaining = deadline - time.monotonic()
+        read_timeout = (
+            _DESCRIPTOR_READ_SECONDS
+            if wait_budget == 0.0
+            else min(_DESCRIPTOR_READ_SECONDS, max(remaining, 0.0))
+        )
         try:
-            lookup = _inspect(auth_root, profile, config)
+            lookup = inspector.inspect_until(timeout=read_timeout)
+        except _DescriptorReadTimeout as exc:
+            return last_lookup or OwnerLookup(
+                state=OwnerState.UNTRUSTED, reason=str(exc)
+            )
         except DescriptorError as exc:
             # Distinct from absence so the file is preserved rather than
             # cleaned up: beside a held lock it belongs to a live daemon. It
@@ -226,6 +286,7 @@ def look_up_owner(
             # this state still allows an election attempt.
             lookup = OwnerLookup(state=OwnerState.UNTRUSTED, reason=str(exc))
 
+        last_lookup = lookup
         if lookup.state is OwnerState.ATTACHABLE:
             return lookup
 

@@ -21,6 +21,7 @@ from linkedin_mcp_server import private_state
 from linkedin_mcp_server.private_state import (
     PrivateStateError,
     harden_directory,
+    harden_directory_entry,
     harden_file,
 )
 
@@ -89,6 +90,36 @@ class TestHardeningOnPosix:
         harden_directory(target)
 
         assert _mode(target) == 0o700
+
+    @posix_only
+    def test_an_owned_child_directory_is_created_private_under_umask_zero(
+        self, tmp_path: Path
+    ):
+        target = tmp_path / "state" / "per-auth"
+        target.parent.mkdir()
+        previous = os.umask(0)
+        try:
+            harden_directory_entry(target)
+        finally:
+            os.umask(previous)
+
+        assert _mode(target) == 0o700
+
+    @posix_only
+    def test_an_owned_child_directory_refuses_a_planted_symlink(self, tmp_path: Path):
+        parent = tmp_path / "state"
+        parent.mkdir(mode=0o777)
+        parent.chmod(0o777)
+        target = parent / "per-auth"
+        elsewhere = tmp_path / "attacker-state"
+        elsewhere.mkdir(mode=0o777)
+        elsewhere.chmod(0o777)
+        target.symlink_to(elsewhere, target_is_directory=True)
+
+        with pytest.raises(PrivateStateError, match="symbolic link"):
+            harden_directory_entry(target)
+
+        assert _mode(elsewhere) == 0o777
 
 
 class TestExtendedAcls:
@@ -391,6 +422,20 @@ class TestRefusals:
 
         with pytest.raises(PrivateStateError, match="Not a directory"):
             harden_directory(occupied)
+        with pytest.raises(PrivateStateError, match="Not a directory"):
+            harden_directory_entry(occupied)
+
+    @posix_only
+    def test_an_owned_child_directory_refuses_another_account_s_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = tmp_path / "per-auth"
+        target.mkdir(mode=0o777)
+        target.chmod(0o777)
+        monkeypatch.setattr(os, "geteuid", lambda: target.stat().st_uid + 1)
+
+        with pytest.raises(PrivateStateError, match="is owned by uid"):
+            harden_directory_entry(target)
 
     @pytest.mark.skipif(
         sys.platform != "darwin", reason="macOS is where an access list needs libc"
@@ -733,6 +778,18 @@ class TestWindowsAcl:
 
         # And released, so nothing is left holding the tree open.
         (tmp_path / "ancestor").rename(tmp_path / "moved")
+    def test_an_owned_child_directory_uses_the_same_acl_contract(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        parent = tmp_path / "state"
+        harden_directory(parent)
+        target = parent / "per-auth"
+
+        harden_directory_entry(target)
+
+        described = describe_dacl(target)
+        assert described.protected is True
+        assert len(described.entries) == 1
 
     @windows_only
     def test_a_file_grants_only_this_account_and_inherits_nothing(self, tmp_path: Path):

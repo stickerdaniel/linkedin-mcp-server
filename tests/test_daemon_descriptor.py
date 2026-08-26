@@ -22,22 +22,30 @@ from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_descriptor import (
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
+    CommitPreflightError,
     DaemonDescriptor,
     DescriptorError,
     build,
+    commit_prepared,
     config_fingerprint,
     daemon_dir,
     daemon_state_root,
     descriptor_path,
+    discard_prepared,
     mismatched_fields,
     new_instance_id,
     new_token,
+    pending_descriptor_path,
+    prepare,
+    prepare_daemon_state,
     profile_identity,
     publish,
     read,
     read_token,
     token_path,
+    validate_prepared,
 )
+from linkedin_mcp_server.private_state import PrivateStateError
 
 posix_only = pytest.mark.skipif(
     os.name == "nt", reason="POSIX permission bits do not exist on Windows"
@@ -106,6 +114,43 @@ class TestRoundTrip:
         assert stat.S_IMODE(file.stat().st_mode) == 0o600
         assert stat.S_IMODE(file.parent.stat().st_mode) == 0o700
 
+    @posix_only
+    def test_existing_descriptor_and_token_are_hardened_before_use(
+        self, tmp_path: Path
+    ):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        publish(tmp_path, descriptor, token)
+        descriptor_file = descriptor_path(tmp_path)
+        token_file = token_path(tmp_path, descriptor.instance_id)
+        descriptor_file.chmod(0o666)
+        token_file.chmod(0o666)
+        descriptor_file.parent.chmod(0o777)
+
+        loaded = read(tmp_path)
+        assert loaded is not None
+        assert read_token(tmp_path, loaded) == token
+
+        assert stat.S_IMODE(descriptor_file.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(descriptor_file.stat().st_mode) == 0o600
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows ACLs are required")
+    def test_descriptor_and_token_use_the_private_file_acl(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        publish(tmp_path, descriptor, token)
+
+        for path in (
+            descriptor_path(tmp_path),
+            token_path(tmp_path, descriptor.instance_id),
+        ):
+            described = describe_dacl(path)
+            assert described.protected is True
+            assert len(described.entries) == 1
+
     def test_the_token_is_not_in_the_descriptor(self, tmp_path: Path):
         # The descriptor is the readable half of the pair on purpose, so the
         # secret must not be in it. Only its digest is.
@@ -114,6 +159,253 @@ class TestRoundTrip:
         publish(tmp_path, _descriptor(tmp_path, token), token)
 
         assert token not in descriptor_path(tmp_path).read_text()
+
+
+class TestPreparedCommit:
+    def test_pending_state_is_invisible_until_committed(self, tmp_path: Path):
+        token = new_token()
+        profile = tmp_path / "profile"
+        config = _config(user_data_dir=str(profile))
+        descriptor = _descriptor(tmp_path, token, profile=profile)
+
+        prepare(tmp_path, descriptor, token)
+
+        assert read(tmp_path) is None
+        assert (
+            validate_prepared(
+                tmp_path,
+                descriptor.instance_id,
+                profile=profile,
+                config=config,
+            )
+            == descriptor
+        )
+
+        commit_prepared(tmp_path, descriptor.instance_id)
+        assert read(tmp_path) == descriptor
+
+    def test_commit_is_one_same_directory_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        prepare(tmp_path, descriptor, token)
+        replacements: list[tuple[object, object]] = []
+        monkeypatch.setattr(
+            daemon_descriptor_module.os,
+            "replace",
+            lambda source, destination: replacements.append((source, destination)),
+        )
+
+        committed = commit_prepared(tmp_path, descriptor.instance_id)
+
+        assert committed == descriptor_path(tmp_path)
+        assert replacements == [
+            (
+                pending_descriptor_path(tmp_path, descriptor.instance_id),
+                descriptor_path(tmp_path),
+            )
+        ]
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            PermissionError("descriptor stat denied"),
+            OSError(5, "descriptor stat failed"),
+        ],
+    )
+    def test_preflight_stat_failure_never_attempts_replacement(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: OSError,
+    ):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        prepare(tmp_path, descriptor, token)
+        published = descriptor_path(tmp_path)
+        real_stat = Path.stat
+        replacements: list[tuple[object, object]] = []
+
+        def stat_path(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+            if path == published:
+                raise failure
+            return real_stat(path, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(Path, "stat", stat_path)
+        monkeypatch.setattr(
+            daemon_descriptor_module.os,
+            "replace",
+            lambda source, destination: replacements.append((source, destination)),
+        )
+
+        with pytest.raises(CommitPreflightError) as stopped:
+            commit_prepared(tmp_path, descriptor.instance_id)
+
+        assert stopped.value.__cause__ is failure
+        assert replacements == []
+        assert pending_descriptor_path(tmp_path, descriptor.instance_id).exists()
+
+    def test_commit_replaces_a_symlink_to_a_directory(self, tmp_path: Path):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        prepare(tmp_path, descriptor, token)
+        target = tmp_path / "directory-target"
+        target.mkdir()
+        published = descriptor_path(tmp_path)
+        try:
+            published.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+        commit_prepared(tmp_path, descriptor.instance_id)
+
+        assert target.is_dir()
+        assert not published.is_symlink()
+        assert read(tmp_path) == descriptor
+
+    def test_publish_keeps_token_when_interrupted_after_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        replace = os.replace
+
+        def replace_then_interrupt(
+            source: str | os.PathLike[str], destination: str | os.PathLike[str]
+        ) -> None:
+            replace(source, destination)
+            if Path(destination) == descriptor_path(tmp_path):
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            daemon_descriptor_module.os, "replace", replace_then_interrupt
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            publish(tmp_path, descriptor, token)
+
+        assert read(tmp_path) == descriptor
+        assert read_token(tmp_path, descriptor) == token
+
+    def test_publish_keeps_token_when_replace_reports_error_after_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        old_token = new_token()
+        old = _descriptor(tmp_path, old_token)
+        publish(tmp_path, old, old_token)
+
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        replace = os.replace
+
+        def replace_then_error(
+            source: str | os.PathLike[str], destination: str | os.PathLike[str]
+        ) -> None:
+            replace(source, destination)
+            if Path(destination) == descriptor_path(tmp_path):
+                raise OSError("rename result was lost")
+
+        monkeypatch.setattr(daemon_descriptor_module.os, "replace", replace_then_error)
+
+        with pytest.raises(OSError, match="rename result was lost"):
+            publish(tmp_path, descriptor, token)
+
+        assert token_path(tmp_path, descriptor.instance_id).read_text() == token
+        assert descriptor.instance_id in descriptor_path(tmp_path).read_text()
+
+    def test_publish_discards_generation_after_structural_replace_error(
+        self, tmp_path: Path
+    ):
+        token = new_token()
+        descriptor = _descriptor(tmp_path, token)
+        daemon_dir(tmp_path).mkdir(parents=True)
+        descriptor_path(tmp_path).mkdir()
+
+        with pytest.raises(IsADirectoryError):
+            publish(tmp_path, descriptor, token)
+
+        assert not pending_descriptor_path(tmp_path, descriptor.instance_id).exists()
+        assert not token_path(tmp_path, descriptor.instance_id).exists()
+
+    def test_validation_rejects_another_profile(self, tmp_path: Path):
+        token = new_token()
+        profile = tmp_path / "profile"
+        descriptor = _descriptor(tmp_path, token, profile=profile)
+        prepare(tmp_path, descriptor, token)
+
+        with pytest.raises(DescriptorError, match="another profile"):
+            validate_prepared(
+                tmp_path,
+                descriptor.instance_id,
+                profile=tmp_path / "other-profile",
+                config=None,
+            )
+
+    def test_validation_rejects_another_configuration(self, tmp_path: Path):
+        token = new_token()
+        profile = tmp_path / "profile"
+        descriptor = _descriptor(tmp_path, token, profile=profile)
+        prepare(tmp_path, descriptor, token)
+        other = _config(user_data_dir=str(profile), headless=False)
+
+        with pytest.raises(DescriptorError, match="different configuration"):
+            validate_prepared(
+                tmp_path,
+                descriptor.instance_id,
+                profile=profile,
+                config=other,
+            )
+
+    def test_validation_rejects_malformed_pending_json(self, tmp_path: Path):
+        instance_id = new_instance_id()
+        pending = pending_descriptor_path(tmp_path, instance_id)
+        pending.parent.mkdir(parents=True, exist_ok=True)
+        pending.write_text("{ not json")
+
+        with pytest.raises(DescriptorError, match="not valid JSON"):
+            validate_prepared(
+                tmp_path,
+                instance_id,
+                profile=tmp_path / "profile",
+                config=None,
+            )
+
+    def test_validation_rejects_a_descriptor_for_another_generation(
+        self, tmp_path: Path
+    ):
+        token = new_token()
+        first = _descriptor(tmp_path, token)
+        second_id = new_instance_id()
+        pending_descriptor_path(tmp_path, second_id).parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        pending_descriptor_path(tmp_path, second_id).write_text(first.to_json())
+
+        with pytest.raises(DescriptorError, match="another generation"):
+            validate_prepared(
+                tmp_path,
+                second_id,
+                profile=Path(first.profile_path),
+                config=None,
+            )
+
+    def test_discard_removes_only_its_generation(self, tmp_path: Path):
+        first_token = new_token()
+        second_token = new_token()
+        first = _descriptor(tmp_path, first_token)
+        second = replace(
+            _descriptor(tmp_path, second_token), instance_id=new_instance_id()
+        )
+        prepare(tmp_path, first, first_token)
+        prepare(tmp_path, second, second_token)
+
+        discard_prepared(tmp_path, first.instance_id)
+
+        assert not pending_descriptor_path(tmp_path, first.instance_id).exists()
+        assert not token_path(tmp_path, first.instance_id).exists()
+        assert pending_descriptor_path(tmp_path, second.instance_id).exists()
+        assert token_path(tmp_path, second.instance_id).exists()
 
 
 class TestRefusals:
@@ -370,6 +662,42 @@ class TestEndpointUrl:
 
 
 class TestStateLocation:
+    @posix_only
+    def test_fresh_state_is_private_under_umask_zero(self, tmp_path: Path):
+        previous = os.umask(0)
+        try:
+            directory = prepare_daemon_state(tmp_path / "auth")
+        finally:
+            os.umask(previous)
+
+        assert stat.S_IMODE(daemon_state_root().stat().st_mode) == 0o700
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+    @posix_only
+    @pytest.mark.parametrize("planted", ["symlink", "file"])
+    def test_a_planted_per_auth_entry_is_refused_after_root_hardening(
+        self, tmp_path: Path, planted: str
+    ):
+        auth_root = tmp_path / "auth"
+        directory = daemon_dir(auth_root)
+        root = daemon_state_root()
+        root.mkdir(parents=True, mode=0o777)
+        root.chmod(0o777)
+        target = tmp_path / "attacker-target"
+        if planted == "symlink":
+            target.mkdir(mode=0o777)
+            target.chmod(0o777)
+            directory.symlink_to(target, target_is_directory=True)
+        else:
+            directory.write_text("attacker state")
+
+        with pytest.raises(PrivateStateError):
+            prepare_daemon_state(auth_root)
+
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        if planted == "symlink":
+            assert stat.S_IMODE(target.stat().st_mode) == 0o777
+
     def test_state_is_outside_the_configured_auth_root(self, tmp_path: Path):
         # The auth root can be /tmp, a home directory, or another shared parent.
         # Daemon state must not change it or trust entries planted inside it.

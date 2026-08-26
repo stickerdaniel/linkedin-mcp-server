@@ -49,13 +49,16 @@ jobs:
 
       - run: uv sync --group dev
 
-      - name: Run daemon containment tests
+      - name: Run daemon protocol and containment tests
         run: >-
           uv run pytest
+          tests/test_daemon_election.py::TestAtomicStartupCommit
+          tests/test_daemon_election.py::TestPublishingLast
           tests/test_daemon_election.py::TestRealOwner::test_an_owner_is_started_and_answers
           tests/test_daemon_election.py::TestRealOwner::test_a_crashed_owner_is_replaced
           tests/test_daemon_election.py::TestRealOwner::test_many_clients_starting_at_once_elect_exactly_one_owner
           tests/test_bootstrap.py::TestInstallerSupervisorLaunch::test_real_cpython_wait_unregister_contract
+          tests/test_daemon_descriptor.py::TestPreparedCommit
           tests/test_installer_supervisor.py
           tests/test_installer_worker.py
           tests/test_process_tree.py

@@ -283,19 +283,19 @@ class TestTheRoleAsProcessState:
         still believed it had a terminal.
 
         Driven rather than read: an earlier version of this asserted on the source
-        text of `main`, which stayed green when the call was made unreachable.
-        `configure_logging` is the first thing after the claim, so it serves as a
-        checkpoint to observe the role at and abort from.
+        text of `main`, which stayed green when the call was made unreachable. The
+        child opens its log before taking the lock, so that boundary records the
+        role before its expected startup failure is translated into a verdict.
         """
         from linkedin_mcp_server import daemon_config, daemon_owner
         from linkedin_mcp_server.config.schema import AppConfig
 
-        class Checkpoint(Exception):
+        class Checkpoint(BaseException):
             pass
 
         seen: list[ServerRole] = []
 
-        def at_checkpoint(**_kwargs):
+        def at_checkpoint(*_args, **_kwargs):
             seen.append(process_role())
             raise Checkpoint
 
@@ -305,14 +305,13 @@ class TestTheRoleAsProcessState:
             lambda: daemon_config.OwnerHandover(AppConfig(), "0123456789abcdef" * 4),
         )
         monkeypatch.setattr(daemon_owner, "set_headless", lambda _headless: None)
-        monkeypatch.setattr(daemon_owner, "configure_logging", at_checkpoint)
+        monkeypatch.setattr(daemon_owner, "_attach_daemon_log", at_checkpoint)
+        monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
         monkeypatch.setattr(
             daemon_owner, "_claim_handshake_stream", lambda: MagicMock()
         )
 
-        with pytest.raises(Checkpoint):
-            daemon_owner.main([])
-
+        assert daemon_owner.main([]) == 1
         assert seen == [ServerRole.OWNER]
 
     def test_the_windows_owner_verifies_membership_before_reading_config(
@@ -340,8 +339,8 @@ class TestTheRoleAsProcessState:
             daemon_owner, "_claim_handshake_stream", lambda: MagicMock()
         )
 
-        with pytest.raises(Checkpoint):
-            daemon_owner.main(["--job-name", "named-job"])
+        assert daemon_owner.main(["--job-name", "named-job"]) == 1
+        assert events == ["verified:named-job"]
 
     def test_the_state_is_readable_without_importing_the_server(self):
         # Same reason the enum lives here: `bootstrap` reads this, and `server`

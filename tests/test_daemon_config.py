@@ -10,7 +10,10 @@ to use it, because the fingerprint it compares covers exactly these fields.
 from __future__ import annotations
 
 import json
+import os
+import stat
 from dataclasses import fields
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -142,6 +145,105 @@ class TestRoundTrip:
         assert restored.server.tool_timeout_seconds == 42.5
 
 
+class TestDaemonLogState:
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are required")
+    def test_fresh_log_state_is_private_under_umask_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
+        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
+        stream = type("Stream", (), {"fileno": lambda self: 1})()
+        monkeypatch.setattr(
+            daemon_owner,
+            "sys",
+            type("Streams", (), {"stdout": stream, "stderr": stream})(),
+        )
+        previous = os.umask(0)
+        try:
+            log_path = daemon_owner._attach_daemon_log(tmp_path / "auth")
+        finally:
+            os.umask(previous)
+
+        assert (
+            stat.S_IMODE(daemon_descriptor.daemon_state_root().stat().st_mode) == 0o700
+        )
+        assert stat.S_IMODE(log_path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows ACLs are required")
+    def test_log_file_uses_the_private_file_acl(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
+        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
+        stream = type("Stream", (), {"fileno": lambda self: 1})()
+        monkeypatch.setattr(
+            daemon_owner,
+            "sys",
+            type("Streams", (), {"stdout": stream, "stderr": stream})(),
+        )
+
+        log_path = daemon_owner._attach_daemon_log(tmp_path / "auth")
+
+        described = describe_dacl(log_path)
+        assert described.protected is True
+        assert len(described.entries) == 1
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics are required")
+    def test_a_planted_log_symlink_is_refused_before_open(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
+        directory = daemon_descriptor.daemon_dir(tmp_path / "auth")
+        directory.mkdir(parents=True, mode=0o777)
+        directory.chmod(0o777)
+        victim = tmp_path / "victim.log"
+        victim.write_text("untouched")
+        victim.chmod(0o644)
+        (directory / "daemon.log").symlink_to(victim)
+
+        with pytest.raises(PrivateStateError, match="symbolic link"):
+            daemon_owner._attach_daemon_log(tmp_path / "auth")
+
+        assert victim.read_text() == "untouched"
+        assert stat.S_IMODE(victim.stat().st_mode) == 0o644
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are required")
+    def test_an_existing_regular_log_is_hardened_before_append(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_descriptor, daemon_owner
+
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
+        monkeypatch.setattr(daemon_owner.os, "dup2", lambda *args: None)
+        stream = type("Stream", (), {"fileno": lambda self: 1})()
+        monkeypatch.setattr(
+            daemon_owner,
+            "sys",
+            type("Streams", (), {"stdout": stream, "stderr": stream})(),
+        )
+        directory = daemon_descriptor.daemon_dir(tmp_path / "auth")
+        directory.mkdir(parents=True, mode=0o777)
+        directory.chmod(0o777)
+        log_path = directory / "daemon.log"
+        log_path.write_text("existing\n")
+        log_path.chmod(0o666)
+
+        attached = daemon_owner._attach_daemon_log(tmp_path / "auth")
+
+        assert attached == log_path
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+
+
 class TestRefusing:
     def test_the_frontends_own_invocation_does_not_cross(self):
         # An owner that adopted the frontend's transport would try to serve
@@ -224,7 +326,9 @@ class TestRefusing:
                 json.dumps({"browser": {}, "server": {"tool_timeout_seconds": -1.0}})
             )
 
-    def test_the_owner_applies_the_browser_mode_it_was_handed(self):
+    def test_the_owner_applies_the_browser_mode_it_was_handed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         # Installing the configuration is not enough. The browser mode lives in
         # a module global that defaults to headless, and `_make_browser` reads
         # that global rather than the configuration — the frontend's own entry
@@ -251,7 +355,12 @@ class TestRefusing:
         original = browser_module.current_headless()
         stdin = sys.stdin
         browser_module.set_headless(True)
-        sys.stdin = io.StringIO(daemon_config.encode_handover(visible, _NONCE))
+        monkeypatch.setattr(
+            daemon_owner,
+            "_attach_daemon_log",
+            lambda auth_root: auth_root / "daemon.log",
+        )
+        sys.stdin = io.StringIO(daemon_config.encode_handover(visible, _NONCE) + "\n")
         try:
             # It gets as far as taking the lock, which fails on the deliberately
             # invalid descriptor and is reported rather than raised. That is
@@ -285,21 +394,31 @@ class TestRefusing:
                 self.closed = True
 
         stream = RecordingStream()
-        daemon_owner._Handshake(cast(Any, stream), _NONCE).succeed()
+        daemon_owner._Handshake(cast(Any, stream), _NONCE).committed()
 
-        assert stream.written == f"owner {_NONCE} ready\n"
+        assert stream.written == f"owner {_NONCE} committed\n"
         assert stream.flushed
         assert stream.closed
 
-    def test_a_configuration_failure_logs_then_closes_without_a_verdict(
+    def test_a_configuration_failure_reports_then_closes_without_a_verdict(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        # Startup output can already contain plain ``ready`` or ``failed``. Until
-        # the configuration yields the post-spawn nonce, the owner has no frame it
-        # can authenticate, so failure is represented only by closing the pipe.
+        # Startup output can already contain status-shaped lines. Until the
+        # configuration yields the post-spawn nonce, the owner has no frame it can
+        # authenticate, so failure is represented by a fixed diagnostic and EOF.
         from linkedin_mcp_server import daemon_owner
 
         events: list[str] = []
+
+        class RecordingBootstrap:
+            def __init__(self, _stream: object) -> None:
+                pass
+
+            def report(self, code: str) -> None:
+                events.append(f"diagnostic:{code}")
+
+            def close(self) -> None:
+                pass
 
         class RecordingStream:
             def close(self) -> None:
@@ -308,6 +427,8 @@ class TestRefusing:
         def reject() -> daemon_config.OwnerHandover:
             raise ValueError("invalid handed-over configuration")
 
+        monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
+        monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
         monkeypatch.setattr(
             daemon_owner, "_claim_handshake_stream", lambda: RecordingStream()
         )
@@ -315,13 +436,222 @@ class TestRefusing:
         monkeypatch.setattr(
             daemon_owner.logger,
             "exception",
-            lambda *_args, **_kwargs: events.append("logged"),
+            lambda *_args, **_kwargs: pytest.fail("bootstrap failure used logging"),
         )
 
-        with pytest.raises(ValueError, match="invalid handed-over configuration"):
-            daemon_owner.main([])
+        assert daemon_owner.main([]) == 1
 
-        assert events == ["logged", "closed"]
+        assert events == [
+            f"diagnostic:{daemon_owner.BOOTSTRAP_CONFIGURATION}",
+            "closed",
+        ]
+
+    @pytest.mark.parametrize(
+        ("stage", "code"),
+        [
+            ("state", "state"),
+            ("log", "log"),
+        ],
+    )
+    def test_prelog_failures_use_the_fixed_bootstrap_channel(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stage: str,
+        code: str,
+    ):
+        from linkedin_mcp_server import daemon_owner
+
+        events: list[str] = []
+        config = AppConfig()
+        config.browser.user_data_dir = str(tmp_path / "profile")
+
+        class RecordingBootstrap:
+            def __init__(self, _stream: object) -> None:
+                pass
+
+            def report(self, candidate: str) -> None:
+                events.append(f"diagnostic:{candidate}")
+
+            def close(self) -> None:
+                pass
+
+        class RecordingHandshake:
+            def __init__(self, _stream: object, _nonce: str) -> None:
+                pass
+
+            def abort(self) -> None:
+                events.append("aborted")
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
+        monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
+        monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
+        monkeypatch.setattr(
+            daemon_owner,
+            "_read_handover",
+            lambda: daemon_config.OwnerHandover(config, _NONCE),
+        )
+        monkeypatch.setattr(
+            daemon_owner.logger,
+            "exception",
+            lambda *_args, **_kwargs: pytest.fail("pre-log failure used logging"),
+        )
+        if stage == "state":
+
+            class UnresolvablePath:
+                def expanduser(self) -> UnresolvablePath:
+                    return self
+
+                def resolve(self) -> Path:
+                    raise OSError("profile state is unavailable")
+
+            monkeypatch.setattr(daemon_owner, "Path", lambda _value: UnresolvablePath())
+        else:
+            monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda profile: tmp_path)
+            monkeypatch.setattr(
+                daemon_owner,
+                "_attach_daemon_log",
+                lambda auth_root: (_ for _ in ()).throw(
+                    OSError("daemon log is unavailable")
+                ),
+            )
+
+        assert daemon_owner.main([]) == 1
+        assert events == [f"diagnostic:{code}", "aborted"]
+
+    def test_log_attachment_closes_bootstrap_with_an_actionable_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_owner
+
+        events: list[str] = []
+        config = AppConfig()
+        config.browser.user_data_dir = str(tmp_path / "profile")
+
+        class RecordingBootstrap:
+            def __init__(self, _stream: object) -> None:
+                pass
+
+            def report(self, code: str) -> None:
+                events.append(f"diagnostic:{code}")
+
+            def close(self) -> None:
+                pass
+
+        class RecordingHandshake:
+            def __init__(self, _stream: object, _nonce: str) -> None:
+                pass
+
+            def retry(self) -> None:
+                events.append("retry")
+
+            def close(self) -> None:
+                pass
+
+        monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
+        monkeypatch.setattr(daemon_owner, "_Handshake", RecordingHandshake)
+        monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
+        monkeypatch.setattr(daemon_owner, "_claim_handshake_stream", lambda: None)
+        monkeypatch.setattr(
+            daemon_owner,
+            "_read_handover",
+            lambda: daemon_config.OwnerHandover(config, _NONCE),
+        )
+        monkeypatch.setattr(daemon_owner, "auth_root_dir", lambda profile: tmp_path)
+        monkeypatch.setattr(
+            daemon_owner,
+            "_attach_daemon_log",
+            lambda auth_root: tmp_path / "daemon.log",
+        )
+        monkeypatch.setattr(daemon_owner, "configure_logging", lambda **kwargs: None)
+        monkeypatch.setattr(daemon_owner, "_take_lock", lambda *args: None)
+
+        assert daemon_owner.main([]) == 0
+        assert events == [
+            f"diagnostic:{daemon_owner.BOOTSTRAP_ATTACHED}",
+            "retry",
+        ]
+
+    def test_a_suspended_starter_cannot_pin_the_owner_on_config_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import threading
+        import time
+
+        from linkedin_mcp_server import daemon_owner
+
+        release = threading.Event()
+
+        class _SuspendedStarter:
+            def readline(self) -> str:
+                release.wait()
+                return ""
+
+        monkeypatch.setattr(daemon_owner.sys, "stdin", _SuspendedStarter())
+        started = time.monotonic()
+        try:
+            with pytest.raises(TimeoutError, match="did not provide its configuration"):
+                daemon_owner._read_handover(timeout=0.01)
+        finally:
+            release.set()
+
+        assert time.monotonic() - started < 1.0
+
+    def test_configuration_timeout_unlocks_the_inherited_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import daemon_lock, daemon_owner
+
+        if not daemon_lock._INHERITED_LOCKS_TRANSFER:
+            pytest.skip("inherited lock handoff is POSIX-only")
+
+        events: list[str] = []
+
+        class RecordingBootstrap:
+            def __init__(self, _stream: object) -> None:
+                pass
+
+            def report(self, code: str) -> None:
+                events.append(f"diagnostic:{code}")
+
+            def close(self) -> None:
+                pass
+
+        class RecordingStream:
+            def close(self) -> None:
+                events.append("closed")
+
+        parent = daemon_lock.DaemonLock(tmp_path)
+        assert parent.try_acquire()
+        inherited = parent.inheritable_copy()
+        monkeypatch.setattr(daemon_owner, "_BootstrapDiagnostics", RecordingBootstrap)
+        monkeypatch.setattr(daemon_owner, "_claim_bootstrap_stream", lambda: None)
+        monkeypatch.setattr(
+            daemon_owner, "_claim_handshake_stream", lambda: RecordingStream()
+        )
+        monkeypatch.setattr(
+            daemon_owner,
+            "_read_handover",
+            lambda: (_ for _ in ()).throw(TimeoutError("starter suspended")),
+        )
+
+        try:
+            assert daemon_owner.main(["--lock-fd", str(inherited)]) == 1
+
+            contender = daemon_lock.DaemonLock(tmp_path)
+            assert contender.try_acquire()
+            contender.release()
+        finally:
+            parent.release()
+
+        assert events == [
+            f"diagnostic:{daemon_owner.BOOTSTRAP_CONFIGURATION}",
+            "closed",
+        ]
 
     def test_the_owner_refuses_to_start_without_a_configuration(self):
         # The owner reads its settings from standard input and must not fall
@@ -339,8 +669,7 @@ class TestRefusing:
         original = sys.stdin
         sys.stdin = io.StringIO("   \n")
         try:
-            with pytest.raises(ValueError, match="without a configuration"):
-                daemon_owner.main([])
+            assert daemon_owner.main([]) == 1
         finally:
             sys.stdin = original
 

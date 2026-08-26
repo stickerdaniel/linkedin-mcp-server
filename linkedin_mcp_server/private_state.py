@@ -148,6 +148,60 @@ def harden_directory(path: Path) -> None:
         _harden_posix(path, _PRIVATE_DIR_MODE)
 
 
+def harden_directory_entry(path: Path) -> None:
+    """Create and harden *path* without following its final component.
+
+    This is for an application-owned child inside a directory that is already
+    private. A symbolic link there is state planted before the parent became
+    private, not part of a user-selected layout, so following it would harden and
+    trust storage somewhere else. Existing non-directory entries are refused for
+    the same reason.
+    """
+    with _as_private_state_error(path, "prepare the private directory"):
+        try:
+            entry = path.lstat()
+        except FileNotFoundError:
+            try:
+                path.mkdir(mode=_PRIVATE_DIR_MODE)
+            except FileExistsError:
+                entry = path.lstat()
+            else:
+                entry = path.lstat()
+
+        if stat.S_ISLNK(entry.st_mode):
+            raise PrivateStateError(
+                f"{path} is a symbolic link rather than a private directory"
+            )
+        if not stat.S_ISDIR(entry.st_mode):
+            raise PrivateStateError(f"Not a directory: {path}")
+
+        if _WINDOWS:
+            from linkedin_mcp_server.windows_acl import restrict_to_current_user
+
+            restrict_to_current_user(path, directory=True)
+            return
+
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        fd = os.open(path, flags)
+        try:
+            if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise PrivateStateError(f"Not a directory: {path}")
+            _harden_posix_fd(fd, path, _PRIVATE_DIR_MODE)
+            if not is_still_at(fd, path):
+                raise PrivateStateError(
+                    f"{path} was replaced while it was being hardened, so it no "
+                    f"longer refers to the directory this made private."
+                )
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
 def harden_file(path: Path) -> None:
     """Leave the existing file *path* readable only by this account.
 

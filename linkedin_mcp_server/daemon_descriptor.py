@@ -61,9 +61,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from linkedin_mcp_server.common_utils import secure_mkdir, secure_write_text, utcnow_iso
+from linkedin_mcp_server.common_utils import (
+    is_still_at,
+    secure_mkdir,
+    secure_write_text,
+    utcnow_iso,
+)
 from linkedin_mcp_server.config.schema import AppConfig, is_loopback_host
-from linkedin_mcp_server.private_state import harden_directory, harden_file
+from linkedin_mcp_server.private_state import (
+    PrivateStateError,
+    harden_directory,
+    harden_directory_entry,
+    harden_file,
+)
 
 #: Bumped when the shape below changes incompatibly. A client that does not
 #: recognise the value refuses rather than guessing at fields it cannot read.
@@ -90,6 +100,7 @@ SCHEMA_VERSION = 2
 PROTOCOL_VERSION = 1
 
 _DESCRIPTOR_FILE = "daemon.json"
+_PENDING_DESCRIPTOR_PREFIX = "pending-"
 _DAEMON_DIR = "daemon"
 _APPLICATION_STATE_DIR = ".mcp-server-linkedin"
 
@@ -126,6 +137,10 @@ SHARED_CONFIG_FIELDS = (
 
 class DescriptorError(RuntimeError):
     """A descriptor could not be trusted, so nothing was sent to it."""
+
+
+class CommitPreflightError(RuntimeError):
+    """Descriptor publication stopped before the replacement was attempted."""
 
 
 def _text(raw: Mapping[Any, Any], name: str) -> str:
@@ -410,6 +425,10 @@ def profile_identity(profile: Path) -> str:
     return f"under\0{info.st_dev}\0{info.st_ino}\0{wanted}"
 
 
+def _daemon_dir_name(auth_root: Path) -> str:
+    return hashlib.sha256(_auth_root_identity(auth_root)).hexdigest()
+
+
 def daemon_dir(auth_root: Path) -> Path:
     """Where daemon state for *auth_root* lives.
 
@@ -420,12 +439,33 @@ def daemon_dir(auth_root: Path) -> Path:
     operating system account's private application directory instead, keyed by
     the physical auth root so sibling profiles still share exactly one election.
     """
-    key = hashlib.sha256(_auth_root_identity(auth_root)).hexdigest()
-    return daemon_state_root() / key
+    return daemon_state_root() / _daemon_dir_name(auth_root)
+
+
+def prepare_daemon_state(auth_root: Path) -> Path:
+    """Establish owner-only storage before trusting any per-auth state entry.
+
+    The shared root is hardened first. A permissive directory from an older start
+    may already contain a planted per-auth entry, so the final component is then
+    established without following a link and is checked for owner-only access in
+    its own right. Files inside are hardened separately before their contents or
+    locking semantics are used.
+    """
+    root = daemon_state_root()
+    harden_directory(root)
+    directory = root / _daemon_dir_name(auth_root)
+    harden_directory_entry(directory)
+    return directory
 
 
 def descriptor_path(auth_root: Path) -> Path:
     return daemon_dir(auth_root) / _DESCRIPTOR_FILE
+
+
+def pending_descriptor_path(auth_root: Path, instance_id: str) -> Path:
+    """Where one uncommitted generation stages its descriptor."""
+    checked = _checked_instance_id(instance_id)
+    return daemon_dir(auth_root) / f"{_PENDING_DESCRIPTOR_PREFIX}{checked}.json"
 
 
 def token_path(auth_root: Path, instance_id: str) -> Path:
@@ -763,43 +803,101 @@ class DaemonDescriptor:
         return profile_identity(profile) == self.profile_identity
 
 
-def publish(
+def prepare(
     auth_root: Path, descriptor: DaemonDescriptor, token: str
 ) -> tuple[Path, Path]:
-    """Write the token and then the descriptor, in that order.
+    """Stage one generation without making it globally discoverable."""
+    directory = prepare_daemon_state(auth_root)
 
-    Order matters. The descriptor is what makes a daemon discoverable, so it is
-    written last: a client that finds one can rely on the token beside it
-    already existing. Written the other way round, discovery would race the
-    token into existence.
-    """
-    directory = daemon_dir(auth_root)
-    harden_directory(daemon_state_root())
-    harden_directory(directory)
-
-    # secure_write_text already creates the file 0600, inside a directory this
-    # just made 0700, so the token is never on disk under wider permissions.
-    # harden_file is what establishes that rather than assuming it: it reads
-    # the mode, the owner and the access list back, and on Windows replaces the
-    # access list outright. If it refuses, the token it refused to vouch for
-    # goes away again rather than staying behind as state nothing verified.
-    token_file = token_path(auth_root, descriptor.instance_id)
+    token_file = directory / f"token-{_checked_instance_id(descriptor.instance_id)}"
     secure_write_text(token_file, token)
     try:
         harden_file(token_file)
     except BaseException:
-        # Best effort, and quiet about its own failure: this runs while another
-        # error is on its way out, and replacing that one with a complaint
-        # about the tidying would hide what actually went wrong. Measured with
-        # the unlink refused: the caller saw PermissionError instead of the
-        # verification failure that caused it.
         with contextlib.suppress(OSError):
             token_file.unlink(missing_ok=True)
         raise
 
-    descriptor_file = descriptor_path(auth_root)
-    secure_write_text(descriptor_file, descriptor.to_json())
-    return descriptor_file, token_file
+    pending_file = directory / (
+        f"{_PENDING_DESCRIPTOR_PREFIX}{_checked_instance_id(descriptor.instance_id)}.json"
+    )
+    try:
+        secure_write_text(pending_file, descriptor.to_json())
+        harden_file(pending_file)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            pending_file.unlink(missing_ok=True)
+            token_file.unlink(missing_ok=True)
+        raise
+    return pending_file, token_file
+
+
+def discard_prepared(auth_root: Path, instance_id: str) -> None:
+    """Remove only the uncommitted files belonging to *instance_id*."""
+    directory = prepare_daemon_state(auth_root)
+    checked = _checked_instance_id(instance_id)
+    for path in (
+        directory / f"{_PENDING_DESCRIPTOR_PREFIX}{checked}.json",
+        directory / f"token-{checked}",
+    ):
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
+def commit_prepared(auth_root: Path, instance_id: str) -> Path:
+    """Make a validated pending generation canonical with one replacement."""
+    directory = prepare_daemon_state(auth_root)
+    checked = _checked_instance_id(instance_id)
+    pending = directory / f"{_PENDING_DESCRIPTOR_PREFIX}{checked}.json"
+    published = directory / _DESCRIPTOR_FILE
+    # Windows reports replacing a directory with a file as WinError 5, the same
+    # code used for transient sharing conflicts. Normalize only an actual directory
+    # entry before the syscall. Following a symlink here would reject a link that
+    # ``os.replace`` can safely replace without touching its target.
+    try:
+        published_mode = published.stat(follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        published_mode = None
+    except OSError as exc:
+        raise CommitPreflightError(
+            f"The daemon descriptor path {published} could not be inspected"
+        ) from exc
+    if published_mode is not None and stat.S_ISDIR(published_mode):
+        raise IsADirectoryError(
+            f"The daemon descriptor path {published} is a directory"
+        )
+    os.replace(pending, published)
+    return published
+
+
+def replace_definitely_failed(exc: BaseException) -> bool:
+    """Whether *exc* proves that ``os.replace`` could not have taken effect.
+
+    Permission and read-only errors are deliberately excluded. After an NFS
+    server applied a rename and lost its reply, a retry can observe changed
+    permissions or mount state and report one even though publication happened.
+    Structural file-versus-directory mismatches cannot be produced that way.
+    """
+    return isinstance(
+        exc, (CommitPreflightError, IsADirectoryError, NotADirectoryError)
+    )
+
+
+def publish(
+    auth_root: Path, descriptor: DaemonDescriptor, token: str
+) -> tuple[Path, Path]:
+    """Prepare and commit a descriptor for callers that need one operation."""
+    prepare(auth_root, descriptor, token)
+    try:
+        descriptor_file = commit_prepared(auth_root, descriptor.instance_id)
+    except BaseException as exc:
+        # NFS can report a failed rename after the server applied it, while the
+        # next lookup still returns an older cached entry. Only structural path
+        # errors prove that this generation never became canonical.
+        if replace_definitely_failed(exc):
+            discard_prepared(auth_root, descriptor.instance_id)
+        raise
+    return descriptor_file, token_path(auth_root, descriptor.instance_id)
 
 
 #: A descriptor is a few hundred bytes of JSON. Bounded for the same reason the
@@ -858,6 +956,20 @@ def _read_own_file(
                     f"{path} is not a regular file, so it is not something this "
                     f"daemon wrote"
                 )
+            # A private parent prevents another account planting anything new, but
+            # it says nothing about an entry left there while an older parent was
+            # permissive. Establish this file's owner and access before using a
+            # byte, then prove the descriptor still names the entry that was
+            # hardened.
+            try:
+                harden_file(path)
+            except PrivateStateError as exc:
+                raise DescriptorError(str(exc)) from exc
+            if not is_still_at(fd, path):
+                raise DescriptorError(
+                    f"{path} was replaced while its private access was being "
+                    f"established"
+                )
             # Size checked before reading rather than by noticing a full
             # buffer afterwards. Truncating instead would hand the caller a
             # fragment, and a fragment of JSON is reported as malformed, which
@@ -891,30 +1003,13 @@ def _read_own_file(
         raise DescriptorError(f"{path} is not text this daemon wrote") from exc
 
 
-def read(auth_root: Path) -> DaemonDescriptor | None:
-    """Return the published descriptor, or None when there is none.
-
-    Raises :class:`DescriptorError` for one that exists but cannot be trusted,
-    which the caller must distinguish from absence: a corrupt descriptor beside
-    a *held* lock means a live daemon this client cannot talk to, and deleting
-    it would strand every other client attached to that daemon.
-    """
-    path = descriptor_path(auth_root)
-    raw = _read_own_file(path, _MAX_DESCRIPTOR_BYTES, missing_is_none=True)
-    if raw is None:
-        return None
-
+def _decode_descriptor(path: Path, raw: str) -> DaemonDescriptor:
+    """Parse and version-check one descriptor read from *path*."""
     try:
         parsed = json.loads(raw)
     except ValueError as exc:
-        # ValueError rather than JSONDecodeError alone: a number with more
-        # digits than sys.int_max_str_digits allows raises a plain ValueError
-        # from inside the parser, and a file well under the size limit can
-        # carry one. Measured with a five thousand digit integer: it crossed
-        # the boundary as ValueError before anything could call it a bad
-        # descriptor. JSONDecodeError is a ValueError, so this covers both.
         raise DescriptorError(
-            f"The daemon descriptor is not valid JSON: {exc}"
+            f"The daemon descriptor at {path} is not valid JSON: {exc}"
         ) from exc
 
     descriptor = DaemonDescriptor.from_mapping(parsed)
@@ -923,15 +1018,66 @@ def read(auth_root: Path) -> DaemonDescriptor | None:
             f"The daemon descriptor is version {descriptor.schema_version}, and "
             f"this client understands version {SCHEMA_VERSION}"
         )
-    # Enforced, not merely recorded. This is the field compatibility is meant
-    # to key on, and a client that attached across a protocol change would be
-    # speaking to an owner whose control routes, call metadata and ping
-    # contract it does not share.
     if descriptor.protocol_version != PROTOCOL_VERSION:
         raise DescriptorError(
             f"The running daemon speaks protocol {descriptor.protocol_version} "
             f"and this client speaks {PROTOCOL_VERSION}. Stop the running "
             f"daemon to let a compatible one start."
+        )
+    return descriptor
+
+
+def _read_descriptor(path: Path, *, missing_is_none: bool) -> DaemonDescriptor | None:
+    raw = _read_own_file(
+        path,
+        _MAX_DESCRIPTOR_BYTES,
+        missing_is_none=missing_is_none,
+        missing_message=f"The prepared daemon descriptor at {path} is missing",
+    )
+    if raw is None:
+        return None
+    return _decode_descriptor(path, raw)
+
+
+def read(auth_root: Path) -> DaemonDescriptor | None:
+    """Return the published descriptor, or None when there is none.
+
+    Raises :class:`DescriptorError` for one that exists but cannot be trusted,
+    which the caller must distinguish from absence: a corrupt descriptor beside
+    a *held* lock means a live daemon this client cannot talk to. Whether the
+    position is free remains the lock's answer.
+    """
+    directory = prepare_daemon_state(auth_root)
+    return _read_descriptor(directory / _DESCRIPTOR_FILE, missing_is_none=True)
+
+
+def validate_prepared(
+    auth_root: Path,
+    instance_id: str,
+    *,
+    profile: Path,
+    config: AppConfig | None,
+) -> DaemonDescriptor:
+    """Validate one pending generation before the parent authorizes commit."""
+    checked = _checked_instance_id(instance_id)
+    directory = prepare_daemon_state(auth_root)
+    pending = directory / f"{_PENDING_DESCRIPTOR_PREFIX}{checked}.json"
+    descriptor = _read_descriptor(pending, missing_is_none=False)
+    if descriptor is None:  # pragma: no cover - absence raises above
+        raise DescriptorError(f"The prepared daemon descriptor at {pending} is missing")
+    if descriptor.instance_id != checked:
+        raise DescriptorError(
+            "The prepared daemon descriptor belongs to another generation"
+        )
+    if not descriptor.serves(profile):
+        raise DescriptorError("The prepared daemon descriptor serves another profile")
+
+    token = read_token(auth_root, descriptor)
+    if config is not None and descriptor.config_fingerprint != config_fingerprint(
+        config, key=token
+    ):
+        raise DescriptorError(
+            "The prepared daemon descriptor uses a different configuration"
         )
     return descriptor
 
@@ -951,7 +1097,8 @@ def read_token(auth_root: Path, descriptor: DaemonDescriptor) -> str:
     still points wherever it likes, and a special file there could block the
     client before any of the checks ran.
     """
-    path = token_path(auth_root, descriptor.instance_id)
+    directory = prepare_daemon_state(auth_root)
+    path = directory / f"token-{_checked_instance_id(descriptor.instance_id)}"
     # None only comes back for a missing file, and this caller asked for that
     # to raise instead: a token missing beside a published descriptor is a
     # daemon in a state it should not be in, not an ordinary absence. Checked

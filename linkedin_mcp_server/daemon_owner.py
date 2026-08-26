@@ -12,28 +12,23 @@ equivalent in this code: ``start_new_session`` is POSIX-only
 that takes its parent down. That is worth revisiting before the flag is turned
 on by default, and it is not a regression today, since the feature is opt-in.
 
-Three orderings in here are load-bearing, and each of them is a way the daemon
-would otherwise wedge:
+The startup boundary is load-bearing. This child listens, proves its own
+authenticated endpoint, and writes only a generation-specific pending descriptor.
+The frontend validates that state and sends one commit record. The lock-holding
+child then performs the same-directory replacement: EOF before the record aborts,
+while parent loss after it cannot revoke an owner that may already be canonical.
 
-*Listen, prove, then publish.* The descriptor is what makes the daemon
-discoverable, so writing it before the endpoint answers advertises a server that
-refuses tokens. The endpoint is proved by an authenticated request against the
-socket, not by the absence of an exception during startup.
+The port is chosen by the kernel, so the socket is bound before the descriptor is
+built. The endpoint is proved through the descriptor's own URL and token before
+the child reports `prepared`; no globally discoverable state exists before that
+proof. Publication belongs to the lock holder, so a stale Windows frontend can
+never outlive its child and overwrite the next winner.
 
-*Bind before publishing, and publish the bound port.* The port is chosen by the
-kernel, so it does not exist until the socket is bound. Binding here rather than
-letting uvicorn do it is what makes the published port the one being served.
-
-*Signal ready last.* The frontend is waiting on a pipe, and everything it does
-next assumes the descriptor is readable. Signalling earlier turns a rare startup
-loss into an attach against a file that is not there yet.
-
-The lock arrives one of two ways, and the split is a platform fact rather than a
-preference. On POSIX the frontend takes the lock first and hands the descriptor
-over, so no window exists in which the position looks free. Windows cannot do
-that (``daemon_lock.py:54-71``, measured), so the frontend takes no lock at all
-and this process competes for it. Losing that race is an ordinary outcome there:
-another owner is starting, and the frontend waits for whoever wins.
+The child opens its own log and competes for the lock on every platform. Keeping
+those potentially blocking state-storage operations behind the process boundary
+lets the frontend enforce its deadline by killing this process. A timed-out
+thread could later acquire the lock or publish over an in-process fallback; a
+process with a pending hard kill cannot return to user space and do either.
 """
 
 from __future__ import annotations
@@ -46,8 +41,11 @@ import hashlib
 import hmac
 import logging
 import os
+import queue
 import socket
+import stat
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -60,6 +58,7 @@ from linkedin_mcp_server.bootstrap import (
     browser_setup_failure_pending,
     browser_setup_in_progress,
 )
+from linkedin_mcp_server.common_utils import is_still_at
 from linkedin_mcp_server.config import set_config
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
@@ -71,7 +70,9 @@ from linkedin_mcp_server.daemon_liveness import (
 )
 from linkedin_mcp_server.drivers.browser import set_headless
 from linkedin_mcp_server.logging_config import configure_logging
+from linkedin_mcp_server.private_state import PrivateStateError, harden_file
 from linkedin_mcp_server.process_tree import WindowsJob, hard_exit_process_tree
+from linkedin_mcp_server.profile_lease import _release_locked_fd
 from linkedin_mcp_server.server_role import (
     ServerRole,
     hard_exit_required,
@@ -82,46 +83,92 @@ from linkedin_mcp_server.session_state import auth_root_dir, get_runtime_id
 
 logger = logging.getLogger(__name__)
 
-#: What the frontend reads from the handshake pipe. The nonce is handed over
-#: only after this process exists, so interpreter startup output cannot forge it.
+#: Records carried by the authenticated startup control and handshake pipes. The
+#: nonce is handed over only after this process exists, so interpreter startup
+#: output cannot forge them.
 HANDSHAKE = "owner"
 READY = "ready"
+COMMIT = "commit"
+PREPARED = "prepared"
+COMMITTED = "committed"
 FAILED = "failed"
+ABORTED = "aborted"
+RETRY = "retry"
+UNCERTAIN = "uncertain"
+
+#: Fixed bootstrap records carried on standard error before the daemon log is
+#: available. They contain no configuration values or exception text.
+BOOTSTRAP_PREFIX = "daemon-bootstrap:"
+BOOTSTRAP_CONFIGURATION = "configuration"
+BOOTSTRAP_STATE = "state"
+BOOTSTRAP_LOG = "log"
+BOOTSTRAP_ATTACHED = "attached"
 
 #: Where the owner serves MCP. Fixed rather than configurable: the frontend
 #: reads it out of the descriptor, and the only thing a second value would do is
 #: give two installations a way to disagree.
 MCP_PATH = "/mcp"
 
-#: How long the owner has to get from a bound socket to a proved endpoint, for
-#: both stages together. Generous, because it covers the first import of the
-#: whole server graph on a cold page cache.
-#:
-#: At most half the frontend's own election budget
-#: (``daemon_election.DEFAULT_ELECTION_SECONDS``), which is what the test
-#: enforces. The frontend stops a child that has said nothing by the time its
-#: budget runs out, so an owner allowed to take longer would be killed on a slow
-#: machine while still inside its own rules. The margin covers what the frontend
-#: spends before this clock even starts: handing the configuration over, and any
-#: lock attempts before that.
+#: How long the owner has to get from a bound socket to a proved endpoint.
+#: Generous, because it covers the first import of the whole server graph on a
+#: cold page cache. Publication gets its own bounded window afterwards: an
+#: endpoint that proves itself near this boundary still deserves a chance to be
+#: validated and committed.
 _STARTUP_PROBE_SECONDS = 30.0
+_COMMIT_AUTH_SECONDS = 30.0
+_UNCERTAIN_PUBLICATION_RETRY_SECONDS = 0.2
+_WINDOWS_REPLACE_RETRY_SECONDS = 0.01
+_WINDOWS_RETRYABLE_REPLACE_ERRORS = frozenset({5, 32, 33})
 
 _LOG_FILE = "daemon.log"
 
 
 def daemon_log_path(auth_root: Path) -> Path:
-    """Where a detached owner's output goes.
-
-    A detached process has no terminal, so anything it writes to standard error
-    is lost. That includes the traceback of a failure before logging is
-    configured, which is exactly the failure a user would need to see. The
-    frontend opens this file and hands it to the child as both streams, so even
-    an interpreter that dies during imports leaves its reason behind.
-
-    Both sides derive the path from the auth root rather than passing it, so
-    they cannot disagree about which file the descriptor names.
-    """
+    """Where a detached owner's output goes."""
     return daemon_descriptor.daemon_dir(auth_root) / _LOG_FILE
+
+
+def _attach_daemon_log(auth_root: Path) -> Path:
+    """Open the daemon log inside the child and attach both output streams.
+
+    This may block on unavailable state storage. It therefore runs only in the
+    owner process, which the frontend can hard-kill without leaving a worker that
+    might later acquire the lock or publish.
+    """
+    directory = daemon_descriptor.prepare_daemon_state(auth_root)
+    log_path = directory / _LOG_FILE
+    try:
+        log_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        # The directory only became private above. An entry planted before then
+        # has to prove its own owner and access before open can append to it.
+        harden_file(log_path)
+
+    flags = (
+        os.O_APPEND
+        | os.O_CREAT
+        | os.O_WRONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor = os.open(log_path, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise PrivateStateError(f"{log_path} is not a regular file")
+        harden_file(log_path)
+        if not is_still_at(descriptor, log_path):
+            raise PrivateStateError(
+                f"{log_path} was replaced while its private access was being "
+                f"established"
+            )
+        os.dup2(descriptor, sys.stdout.fileno())
+        os.dup2(descriptor, sys.stderr.fileno())
+    finally:
+        os.close(descriptor)
+    return log_path
 
 
 def _bind_loopback() -> socket.socket:
@@ -367,6 +414,313 @@ def create_owner_server(
     )
 
 
+class _CommitPublicationUnpublished(RuntimeError):
+    """A bounded replacement retry proved this generation was not published."""
+
+
+def _retryable_windows_replace(exc: OSError) -> bool:
+    return os.name == "nt" and getattr(exc, "winerror", None) in (
+        _WINDOWS_RETRYABLE_REPLACE_ERRORS
+    )
+
+
+def _commit_definitely_failed(exc: BaseException) -> bool:
+    return isinstance(
+        exc, _CommitPublicationUnpublished
+    ) or daemon_descriptor.replace_definitely_failed(exc)
+
+
+async def _commit_prepared_until(
+    auth_root: Path,
+    instance_id: str,
+    deadline: float,
+    *,
+    maintenance: Callable[[], None] | None = None,
+) -> None:
+    """Commit after transient Windows descriptor readers release their handles."""
+    while True:
+        if maintenance is not None:
+            maintenance()
+        try:
+            # Kept in the lock-holding thread deliberately. An abandoned worker
+            # could complete the replacement after this owner released the lock
+            # and a successor started. A hard-mounted remote home can therefore
+            # pin this child in the kernel; bounded parent reads preserve frontend
+            # fallback, and #796 tracks moving coordination state to local storage.
+            daemon_descriptor.commit_prepared(auth_root, instance_id)
+            return
+        except Exception as exc:
+            if not (isinstance(exc, OSError) and _retryable_windows_replace(exc)):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # MoveFileEx returned false for every one of these attempts. Access
+                # and sharing violations are retryable because readers may release
+                # their handles, but the failed calls did not publish anything.
+                raise _CommitPublicationUnpublished(
+                    "Descriptor replacement stayed blocked until its deadline"
+                ) from exc
+            await asyncio.sleep(min(_WINDOWS_REPLACE_RETRY_SECONDS, remaining))
+
+
+def _start_canonical_read(
+    auth_root: Path,
+) -> asyncio.Future[daemon_descriptor.DaemonDescriptor | None]:
+    """Start one canonical read whose native thread is never cancelled."""
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[daemon_descriptor.DaemonDescriptor | None] = (
+        loop.create_future()
+    )
+
+    def read() -> None:
+        try:
+            descriptor = daemon_descriptor.read(auth_root)
+        except BaseException as exc:  # noqa: BLE001 - delivered to the event loop
+
+            def fail(error: BaseException = exc) -> None:
+                if not result.done():
+                    result.set_exception(error)
+
+            complete = fail
+        else:
+
+            def succeed(
+                value: daemon_descriptor.DaemonDescriptor | None = descriptor,
+            ) -> None:
+                if not result.done():
+                    result.set_result(value)
+
+            complete = succeed
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(complete)
+
+    threading.Thread(target=read, name="daemon-canonical-read", daemon=True).start()
+    return result
+
+
+async def _await_canonical_read_until(
+    read: asyncio.Future[daemon_descriptor.DaemonDescriptor | None], deadline: float
+) -> daemon_descriptor.DaemonDescriptor | None:
+    """Wait within one deadline without cancelling the underlying read."""
+    return await asyncio.wait_for(
+        asyncio.shield(read), max(deadline - time.monotonic(), 0.0)
+    )
+
+
+async def _read_canonical_until(
+    auth_root: Path, deadline: float
+) -> daemon_descriptor.DaemonDescriptor | None:
+    """Bound an ordinary finite read while its native thread finishes alone."""
+    return await _await_canonical_read_until(_start_canonical_read(auth_root), deadline)
+
+
+def _exit_uncertain_publication(_reason: str) -> NoReturn:
+    """Exit without I/O or unwinding after an already logged ambiguity."""
+    _exit_hard()
+    raise RuntimeError("The hard exit returned during uncertain publication")
+
+
+def _require_uncertain_endpoint(server: Any, serving: asyncio.Task[None]) -> None:
+    """Refuse to publish an uncertain generation after its endpoint stops."""
+    if getattr(server, "should_exit", False):
+        _exit_uncertain_publication(
+            "The daemon endpoint was asked to stop during publication reconciliation"
+        )
+    if not serving.done():
+        return
+    if not serving.cancelled():
+        with contextlib.suppress(BaseException):
+            serving.exception()
+    _exit_uncertain_publication(
+        "The daemon endpoint stopped during publication reconciliation"
+    )
+
+
+def _maintain_uncertain_publication(
+    server: Any, serving: asyncio.Task[None], turnover: list[str]
+) -> None:
+    """Keep frontend-visible lifecycle controls active before startup completes."""
+    _require_uncertain_endpoint(server, serving)
+    if stand_down_reason() is not None:
+        server.should_exit = True
+        _exit_uncertain_publication(
+            "The daemon became unable to serve during publication reconciliation"
+        )
+    if turnover:
+        server.should_exit = True
+        _exit_uncertain_publication(
+            "A newer build requested stand-down during publication reconciliation"
+        )
+    get_liveness().cancel_the_abandoned()
+
+
+async def _await_uncertain_read_until(
+    read: asyncio.Future[daemon_descriptor.DaemonDescriptor | None],
+    deadline: float,
+    maintenance: Callable[[], None],
+) -> daemon_descriptor.DaemonDescriptor | None:
+    """Wait for canonical state while preserving the owner's maintenance cadence."""
+    while True:
+        maintenance()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(read), min(_STAND_DOWN_POLL_SECONDS, remaining)
+            )
+        except TimeoutError:
+            if read.done():
+                return read.result()
+            if time.monotonic() >= deadline:
+                raise
+
+
+async def _sleep_during_uncertain_publication(
+    seconds: float, maintenance: Callable[[], None]
+) -> None:
+    """Sleep without leaving lifecycle maintenance dormant between retries."""
+    deadline = time.monotonic() + seconds
+    while True:
+        maintenance()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(_STAND_DOWN_POLL_SECONDS, remaining))
+
+
+async def _reconcile_uncertain_publication(
+    auth_root: Path,
+    instance_id: str,
+    *,
+    server: Any,
+    serving: asyncio.Task[None],
+    turnover: list[str] | None = None,
+) -> None:
+    """Keep a live endpoint locked until its publication is provable.
+
+    An error from ``os.replace`` can describe either side of the rename on NFS.
+    Releasing the lock on that evidence lets a successor start before a delayed
+    canonical entry names this endpoint. The lock holder therefore retries the
+    same pending generation until a read observes it or a replacement succeeds.
+
+    Every mutating retry stays synchronously in this task. Once one returns, its
+    storage operation is over; only cached visibility may lag. That ordering lets a
+    later lock holder safely replace this generation after a hard process exit. A
+    worker left running outside this task would break the ordering by publishing
+    after the lock had moved to a successor. Canonical reads are non-mutating, but
+    an unavailable mount can block their native threads, so reconciliation reuses
+    one in-flight read until it settles instead of creating one per retry. Short
+    waits between checks keep call cancellation and stand-down handling alive for
+    a descriptor that became visible before publication could be proved.
+
+    There is deliberately no elapsed-time fallback. A persistent error that is not
+    structurally definitive carries no proof that publication failed, so any timed
+    release can admit a stale generation after its successor. The owner remains
+    undiscoverable and holds the lock until storage recovers. Moving coordination
+    state off remote storage, tracked by #796, is what can add a bounded terminal
+    path without weakening this invariant.
+    """
+    canonical_read: asyncio.Future[daemon_descriptor.DaemonDescriptor | None] | None = (
+        None
+    )
+    requests = [] if turnover is None else turnover
+
+    def maintenance() -> None:
+        _maintain_uncertain_publication(server, serving, requests)
+
+    while True:
+        maintenance()
+        deadline = time.monotonic() + _COMMIT_AUTH_SECONDS
+        if canonical_read is None:
+            canonical_read = _start_canonical_read(auth_root)
+        try:
+            canonical = await _await_uncertain_read_until(
+                canonical_read, deadline, maintenance
+            )
+        except asyncio.CancelledError:
+            _exit_uncertain_publication("Publication reconciliation was cancelled")
+        except Exception:
+            # Retain a read that timed out: its native thread cannot be cancelled,
+            # and starting another on the next pass would leak one thread per retry.
+            if canonical_read.done():
+                with contextlib.suppress(BaseException):
+                    canonical_read.exception()
+                canonical_read = None
+            canonical = None
+        except BaseException:
+            _exit_uncertain_publication("Publication reconciliation was interrupted")
+        else:
+            canonical_read = None
+        maintenance()
+        if canonical is not None and canonical.instance_id == instance_id:
+            return
+
+        try:
+            await _commit_prepared_until(
+                auth_root, instance_id, deadline, maintenance=maintenance
+            )
+        except asyncio.CancelledError:
+            _exit_uncertain_publication("Publication reconciliation was cancelled")
+        except Exception:
+            # No error here authorizes releasing the lock; the next pass asks both
+            # the canonical state and the same pending replacement again.
+            pass
+        except BaseException:
+            _exit_uncertain_publication("Publication reconciliation was interrupted")
+        else:
+            try:
+                # Commit is synchronous. Let the endpoint task and pending
+                # cancellation run before declaring the returned replacement live.
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                _exit_uncertain_publication("Publication reconciliation was cancelled")
+            except BaseException:
+                _exit_uncertain_publication(
+                    "Publication reconciliation was interrupted"
+                )
+            maintenance()
+            return
+
+        try:
+            await _sleep_during_uncertain_publication(
+                _UNCERTAIN_PUBLICATION_RETRY_SECONDS, maintenance
+            )
+        except asyncio.CancelledError:
+            _exit_uncertain_publication("Publication reconciliation was cancelled")
+        except BaseException:
+            _exit_uncertain_publication("Publication reconciliation was interrupted")
+
+
+async def _read_control_until(control: TextIO, deadline: float) -> str:
+    """Read one control record without making event-loop shutdown wait on stdin."""
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[str] = loop.create_future()
+
+    def read() -> None:
+        try:
+            decision = control.readline()
+        except BaseException as exc:  # noqa: BLE001 - delivered to the event loop
+
+            def fail(error: BaseException = exc) -> None:
+                if not result.done():
+                    result.set_exception(error)
+
+            complete = fail
+        else:
+
+            def succeed(value: str = decision) -> None:
+                if not result.done():
+                    result.set_result(value)
+
+            complete = succeed
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(complete)
+
+    threading.Thread(target=read, name="daemon-control", daemon=True).start()
+    return await asyncio.wait_for(result, max(deadline - time.monotonic(), 0.0))
+
+
 async def _serve(
     *,
     lock: DaemonLock,
@@ -374,10 +728,12 @@ async def _serve(
     profile: Path,
     config: AppConfig,
     log_path: Path,
-    ready: Handshake,
+    handshake: Handshake,
+    handshake_nonce: str,
+    control: TextIO,
     job_name: str | None = None,
 ) -> int:
-    """Run the endpoint, publish it, and hold it until shutdown."""
+    """Run the endpoint, prepare it, and serve only after parent commit."""
     instance_id = daemon_descriptor.new_instance_id()
     token = daemon_descriptor.new_token()
 
@@ -414,34 +770,99 @@ async def _serve(
         # total: an allowance each let an owner take twice what the frontend
         # would ever wait for, so it could be following its own rules and still
         # be written off as silent and stopped.
-        deadline = time.monotonic() + _STARTUP_PROBE_SECONDS
+        startup_deadline = time.monotonic() + _STARTUP_PROBE_SECONDS
         await _await_started(server, serving, timeout=_STARTUP_PROBE_SECONDS)
         # Built before it is proved, and proved through its own ``url``: a probe
         # against a URL assembled here would pass while the one clients actually
         # use was malformed. An IPv6 endpoint is exactly that case, since the
         # literal has to be bracketed.
         await asyncio.wait_for(
-            _probe(descriptor.url, token), max(deadline - time.monotonic(), 0.0)
+            _probe(descriptor.url, token),
+            max(startup_deadline - time.monotonic(), 0.0),
         )
 
-        # The parent keeps termination authority until READY. Adopt immediately
-        # before publication so an adopted owner is already committed to serving.
+        commit_deadline = time.monotonic() + _COMMIT_AUTH_SECONDS
+        _forget_superseded_tokens(auth_root)
+        daemon_descriptor.prepare(auth_root, descriptor, token)
+        handshake.prepared(instance_id)
+
+        # The lock holder performs the replacement. That ties commit authority to
+        # the process whose death frees the daemon lock: a suspended or stale
+        # frontend can never publish after its child has died and another child
+        # has won. EOF before this record means the parent never validated us. The
+        # same startup deadline bounds a live but suspended parent, whose pipe
+        # otherwise stays open forever while this child holds the daemon lock.
+        try:
+            decision = await _read_control_until(control, commit_deadline)
+        except TimeoutError:
+            logger.warning("The daemon starter did not authorize commit in time")
+            daemon_descriptor.discard_prepared(auth_root, instance_id)
+            handshake.retry()
+            server.should_exit = True
+            await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+            return 1
+        if decision != f"{HANDSHAKE} {handshake_nonce} {COMMIT}\n":
+            logger.info("The daemon starter exited before committing this owner")
+            daemon_descriptor.discard_prepared(auth_root, instance_id)
+            handshake.abort()
+            server.should_exit = True
+            await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+            return 0
+
+        # The parent retains termination authority until this exact commit record.
+        # Adopt before the first replacement attempt so parent loss cannot kill an
+        # owner whose publication may already have happened on remote storage.
         if os.name == "nt":
             if job_name is None:
                 raise RuntimeError("The Windows owner has no Job Object handoff")
-            WindowsJob.adopt_current_process(job_name)
-        daemon_descriptor.publish(auth_root, descriptor, token)
-        # The idle clock starts here rather than at startup: before the
-        # descriptor is published nobody can reach this owner, and counting the
-        # import and the browser launch as quiet time would let a short timeout
-        # expire before the frontend that asked for it could call.
+            try:
+                WindowsJob.adopt_current_process(job_name)
+            except Exception:
+                logger.exception("The daemon could not adopt its Windows Job Object")
+                with contextlib.suppress(Exception):
+                    daemon_descriptor.discard_prepared(auth_root, instance_id)
+                handshake.abort()
+                server.should_exit = True
+                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+                return 1
+
+        try:
+            await _commit_prepared_until(auth_root, instance_id, commit_deadline)
+        except BaseException as exc:
+            # A preflight failure means replacement was never attempted, so it is
+            # terminal without another state read. An error from the replacement
+            # itself may instead arrive after an NFS server applied the rename; only
+            # that case is reconciled against canonical state.
+            if _commit_definitely_failed(exc):
+                daemon_descriptor.discard_prepared(auth_root, instance_id)
+                logger.exception("Daemon descriptor publication failed definitively")
+                handshake.abort()
+                server.should_exit = True
+                await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
+                raise
+            # The replacement may already name this live endpoint. Preserve both
+            # its token and its process while the existing reconciliation loop
+            # performs the first bounded read. Its maintenance cadence keeps call
+            # cancellation, turnover, wedge detection and endpoint death active
+            # from that first ambiguous-state wait onward.
+            logger.warning(
+                "Daemon descriptor publication is ambiguous; retaining the lock "
+                "while it is reconciled",
+                exc_info=True,
+            )
+            await _reconcile_uncertain_publication(
+                auth_root,
+                instance_id,
+                server=server,
+                serving=serving,
+                turnover=turnover,
+            )
+
+        # Publication is now proved. Only in-memory startup state and the verdict
+        # follow, so a blocked log or state mount cannot strand a canonical owner
+        # before the frontend learns it is ready.
         get_liveness().the_endpoint_is_live()
-        # Only now, and only while the lock is held: a token file that is not
-        # this generation's belongs to an owner that is gone, because a live one
-        # would be holding the lock this process has.
-        _forget_superseded_tokens(auth_root, keeping=instance_id)
-        logger.info("Daemon listening on %s", descriptor.url)
-        ready.succeed()
+        handshake.committed()
     except BaseException:
         server.should_exit = True
         # Through the same bounded stop as the stand-down path, and for the same
@@ -620,11 +1041,7 @@ async def _stop_within(
             _exit_hard(lock)
         return
     except TimeoutError:
-        logger.error(
-            "The daemon did not finish shutting down in %.0fs; exiting hard so "
-            "the lock is released for the next owner",
-            seconds,
-        )
+        pass
     except Exception:
         logger.warning("The daemon endpoint stopped with an error", exc_info=True)
         if hard_exit_required():
@@ -686,45 +1103,80 @@ async def _await_started(
         await asyncio.sleep(0.02)
 
 
-def _forget_superseded_tokens(auth_root: Path, *, keeping: str) -> None:
-    """Remove token files from earlier generations of this daemon.
+def _forget_superseded_tokens(auth_root: Path) -> None:
+    """Bound old credentials before preparing the next generation.
 
-    ``publish`` writes one per instance and removes none
-    (``daemon_descriptor.py:754-790``), so without this every restart leaves
-    another credential file behind. Safe only here: the caller holds the lock,
-    so no other owner exists, and the descriptor for *keeping* is already
-    published, so no client is about to read one of these.
+    The caller holds the lock, so the canonical descriptor can only name the
+    predecessor this process is about to replace. Its token remains until the next
+    owner startup. All of this runs before ``prepared`` and publication, while the
+    frontend can still kill a child blocked on state storage.
     """
-    directory = daemon_descriptor.daemon_dir(auth_root)
-    keep = daemon_descriptor.token_path(auth_root, keeping).name
     try:
+        canonical = daemon_descriptor.read(auth_root)
+        directory = daemon_descriptor.daemon_dir(auth_root)
         entries = list(directory.iterdir())
-    except OSError:
-        logger.debug("Could not list the daemon directory", exc_info=True)
+    except (OSError, daemon_descriptor.DescriptorError):
+        logger.debug("Could not inspect old daemon state", exc_info=True)
         return
+    keep = (
+        None
+        if canonical is None
+        else daemon_descriptor.token_path(auth_root, canonical.instance_id).name
+    )
     for entry in entries:
-        if entry.name.startswith("token-") and entry.name != keep:
+        superseded_token = entry.name.startswith("token-") and entry.name != keep
+        abandoned_pending = entry.name.startswith("pending-")
+        if superseded_token or abandoned_pending:
             with contextlib.suppress(OSError):
                 entry.unlink()
 
 
+class _BootstrapDiagnostics:
+    """One fixed diagnostic record before the daemon log can be used."""
+
+    def __init__(self, stream: TextIO | None) -> None:
+        self._stream = stream
+
+    def report(self, code: str) -> None:
+        stream, self._stream = self._stream, None
+        if stream is None:
+            return
+        try:
+            stream.write(f"{BOOTSTRAP_PREFIX} {code}\n")
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+        finally:
+            with contextlib.suppress(OSError, ValueError):
+                stream.close()
+
+    def close(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            with contextlib.suppress(OSError, ValueError):
+                stream.close()
+
+
 class Handshake(Protocol):
-    """How this process tells the frontend how startup went.
+    """How this process reports both stages of committed startup."""
 
-    Stated as a protocol because the ordering it participates in is the thing
-    worth testing — ready must come after the descriptor is on disk — and a test
-    that can observe when it is called does not need a pipe to do it.
-    """
+    def prepared(self, instance_id: str) -> None: ...
 
-    def succeed(self) -> None: ...
+    def committed(self) -> None: ...
 
     def fail(self) -> None: ...
+
+    def abort(self) -> None: ...
+
+    def retry(self) -> None: ...
+
+    def uncertain(self) -> None: ...
 
     def close(self) -> None: ...
 
 
 class _Handshake:
-    """The pipe the frontend waits on, and the one message that goes through it.
+    """The pipe the frontend waits on through prepare and commit.
 
     Standard output, taken over at startup and closed after the verdict. Not an
     inherited descriptor of its own: ``pass_fds`` is POSIX-only
@@ -741,24 +1193,36 @@ class _Handshake:
         self._stream = stream
         self._nonce = handshake_nonce
 
-    def succeed(self) -> None:
-        self._write(READY)
+    def prepared(self, instance_id: str) -> None:
+        self._write(f"{PREPARED} {instance_id}", close=False)
+
+    def committed(self) -> None:
+        self._write(COMMITTED)
 
     def fail(self) -> None:
         self._write(FAILED)
 
-    def _write(self, message: str) -> None:
-        stream, self._stream = self._stream, None
+    def abort(self) -> None:
+        self._write(ABORTED)
+
+    def retry(self) -> None:
+        self._write(RETRY)
+
+    def uncertain(self) -> None:
+        self._write(UNCERTAIN)
+
+    def _write(self, message: str, *, close: bool = True) -> None:
+        stream = self._stream
         if stream is None:
             return
         try:
             stream.write(f"{HANDSHAKE} {self._nonce} {message}\n")
             stream.flush()
         except (OSError, ValueError):
-            logger.debug("The startup handshake could not be written", exc_info=True)
+            pass
         finally:
-            with contextlib.suppress(OSError, ValueError):
-                stream.close()
+            if close:
+                self.close()
 
     def close(self) -> None:
         """Close without a verdict, so the frontend sees the pipe end."""
@@ -769,38 +1233,44 @@ class _Handshake:
             stream.close()
 
 
+def _claim_bootstrap_stream() -> TextIO | None:
+    """Keep a private copy of standard error until the daemon log is attached."""
+    try:
+        duplicate = os.dup(sys.stderr.fileno())
+    except (OSError, ValueError, AttributeError):
+        return None
+    return os.fdopen(duplicate, "w", encoding="utf-8")
+
+
 def _claim_handshake_stream() -> TextIO | None:
     """Take standard output for the handshake, and point everything else away.
 
-    Two things at once, and both matter. The frontend reads this pipe for one
-    line, so anything else written to it would be read as a verdict. And the
+    Two things at once, and both matter. The frontend reads only startup records
+    from this pipe, so anything else written to it would be read as a verdict. The
     pipe stops being read the moment the frontend has its answer, so a process
     that kept writing there would eventually block on a full buffer or die of a
     broken pipe — for a daemon that outlives its starter by design, that is a
     hang with no visible cause.
 
     So the descriptor is duplicated for this module's use and the original is
-    replaced by the log file, which the frontend opened as standard error. Every
-    later ``print``, every library that greets the terminal, and every logging
-    handler built afterwards goes to the log instead.
+    pointed at standard error. The frontend reads that separate bootstrap pipe for
+    one fixed diagnosis until the child opens the daemon log and attaches both
+    output streams before logging is configured.
     """
     try:
         sys.stdout.flush()
         duplicate = os.dup(sys.stdout.fileno())
     except (OSError, ValueError, AttributeError):
-        # No usable standard output, which means nobody is waiting on a
-        # handshake either: this was started by hand rather than by a frontend.
-        # Running on without one is the right outcome, since the endpoint and
-        # the descriptor do not depend on it.
-        logger.debug("No handshake stream to claim", exc_info=True)
+        # No usable standard output means the required parent handshake is
+        # unavailable. Startup will fail before serving because only the parent
+        # can validate and authorize this owner's prepared descriptor.
         return None
     try:
-        # Onto the log the frontend already gave us, so nothing is lost and
-        # nothing else reaches the handshake pipe.
+        # Keep ordinary output off the handshake pipe until the child attaches
+        # both streams to its own log.
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     except (OSError, ValueError, AttributeError):
         os.close(duplicate)
-        logger.debug("Standard output could not be redirected", exc_info=True)
         return None
     # newline="\n" is load-bearing rather than tidy. The frontend authenticates
     # this frame by comparing exact bytes, and the default translates the line
@@ -818,16 +1288,22 @@ def _close_handshake_stream(stream: TextIO | None) -> None:
 
 
 def _take_lock(auth_root: Path, inherited_fd: int | None) -> DaemonLock | None:
-    """Hold the daemon lock, by adoption on POSIX or by contest on Windows."""
+    """Hold the daemon lock, normally by contesting inside this process."""
     lock = DaemonLock(auth_root)
     if inherited_fd is not None:
         lock.adopt(inherited_fd)
         return lock
-    # Windows, where the frontend cannot hand a lock over. Losing here is not a
-    # defect: another owner is coming up, and the frontend waits for it.
+    # Losing is an ordinary race: another child is coming up, and the frontend
+    # waits for whichever one publishes.
     if not lock.try_acquire():
         return None
     return lock
+
+
+def _abandon_inherited_lock(fd: int) -> None:
+    """Unlock a failed handoff even while the suspended parent keeps a copy."""
+    with contextlib.suppress(OSError):
+        _release_locked_fd(fd)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -840,9 +1316,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--job-name", default=None)
     args = parser.parse_args(argv)
 
-    # Before anything else can write to it. The token that authenticates this
-    # stream arrives in the configuration, so a failure before that read closes
-    # the pipe without emitting a verdict startup code could have forged.
+    # Standard output is the verdict channel. A private duplicate of standard
+    # error carries one fixed, non-secret diagnosis until the real log is ready.
+    # The token authenticating verdicts arrives in the configuration, so a
+    # failure before that read closes the pipe without emitting a forgeable one.
+    bootstrap = _BootstrapDiagnostics(_claim_bootstrap_stream())
     handshake_stream = _claim_handshake_stream()
     try:
         if os.name == "nt":
@@ -850,45 +1328,57 @@ def main(argv: list[str] | None = None) -> int:
                 raise RuntimeError("The Windows owner has no Job Object handoff")
             WindowsJob.verify_current_process(args.job_name)
         # Read before anything else touches the configuration: the frontend
-        # holds the pipe open only until it has written, and the settings decide
-        # how this process logs.
+        # writes one line and keeps the pipe open for the commit decision.
         handover = _read_handover()
     except BaseException:
-        logger.exception("The daemon could not read its configuration")
+        # The inherited descriptor shares one POSIX lock with every parent copy.
+        # Closing only this copy would leave a suspended starter holding it after
+        # this child times out, so a failed handoff explicitly unlocks the shared
+        # open-file description before reporting failure.
+        if args.lock_fd is not None:
+            _abandon_inherited_lock(args.lock_fd)
+            args.lock_fd = None
+        bootstrap.report(BOOTSTRAP_CONFIGURATION)
         _close_handshake_stream(handshake_stream)
-        raise
+        return 1
 
     config = handover.config
     handshake = _Handshake(handshake_stream, handover.handshake_nonce)
-    set_config(config)
-    # Installing the configuration is not enough: the browser mode lives in a
-    # module global that defaults to headless (``drivers/browser.py:63``), and
-    # ``_make_browser`` reads that global rather than the configuration
-    # (``drivers/browser.py:265-283``). The frontend's own entry point sets it
-    # explicitly for the same reason (``cli_main.py:391``).
-    #
-    # Without this, an owner started with ``--no-headless`` publishes a
-    # fingerprint that says so — the frontend compares it and attaches happily —
-    # and then opens headless anyway. A user who asked to watch the browser
-    # would get no window and no error.
-    set_headless(config.browser.headless)
-    # Before anything can reach an auth gate. `create_owner_server` records it
-    # too, but that runs several steps later, inside `_serve`: a failure between
-    # here and there would be handled by a process that still believed it had a
-    # terminal. This process has neither one nor a desktop session for its whole
-    # life, so it says so as early as it says anything.
-    set_process_role(ServerRole.OWNER)
-    configure_logging(log_level=config.server.log_level, json_format=True)
+    try:
+        set_config(config)
+        # Installing the configuration is not enough: the browser mode lives in a
+        # module global that defaults to headless (``drivers/browser.py:63``), and
+        # ``_make_browser`` reads that global rather than the configuration
+        # (``drivers/browser.py:265-283``). The frontend's own entry point sets it
+        # explicitly for the same reason (``cli_main.py:391``).
+        set_headless(config.browser.headless)
+        # Before anything can reach an auth gate. `create_owner_server` records it
+        # too, but that runs several steps later, inside `_serve`.
+        set_process_role(ServerRole.OWNER)
+        profile = Path(config.browser.user_data_dir).expanduser().resolve()
+        auth_root = auth_root_dir(profile)
+    except BaseException:
+        bootstrap.report(BOOTSTRAP_STATE)
+        handshake.abort()
+        handshake.close()
+        return 1
 
-    profile = Path(config.browser.user_data_dir).expanduser().resolve()
-    auth_root = auth_root_dir(profile)
+    try:
+        log_path = _attach_daemon_log(auth_root)
+    except BaseException:
+        bootstrap.report(BOOTSTRAP_LOG)
+        handshake.abort()
+        handshake.close()
+        return 1
+    bootstrap.report(BOOTSTRAP_ATTACHED)
 
     lock: DaemonLock | None = None
     try:
+        configure_logging(log_level=config.server.log_level, json_format=True)
         lock = _take_lock(auth_root, args.lock_fd)
         if lock is None:
             logger.info("Another process won the daemon election")
-            handshake.fail()
+            handshake.retry()
             return 0
         return asyncio.run(
             _serve(
@@ -896,14 +1386,16 @@ def main(argv: list[str] | None = None) -> int:
                 auth_root=auth_root,
                 profile=profile,
                 config=config,
-                log_path=daemon_log_path(auth_root),
-                ready=handshake,
+                log_path=log_path,
+                handshake=handshake,
+                handshake_nonce=handover.handshake_nonce,
+                control=sys.stdin,
                 job_name=args.job_name,
             )
         )
     except DaemonLockError:
         logger.exception("The daemon could not take ownership")
-        handshake.fail()
+        handshake.abort()
         return 1
     except Exception:
         logger.exception("The daemon stopped with an error")
@@ -912,19 +1404,33 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         # After the verdict either way, so a frontend blocked on the pipe is
         # released even by a path that forgot to answer.
+        bootstrap.close()
         handshake.close()
         if lock is not None:
             lock.release()
 
 
-def _read_handover() -> daemon_config.OwnerHandover:
-    """Read the handed-over configuration and startup nonce from standard input.
+def _read_handover(
+    *, timeout: float = _STARTUP_PROBE_SECONDS
+) -> daemon_config.OwnerHandover:
+    """Read one handover record without letting a suspended parent pin the lock."""
+    received: queue.Queue[str | BaseException] = queue.Queue(maxsize=1)
 
-    Read to end of file rather than one line, and the frontend closes its end
-    once written. That is the whole framing: a short read cannot be mistaken for
-    a complete message because a truncated JSON object does not parse.
-    """
-    raw = sys.stdin.read()
+    def read() -> None:
+        try:
+            received.put(sys.stdin.readline())
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the main thread
+            received.put(exc)
+
+    threading.Thread(target=read, name="daemon-config-read", daemon=True).start()
+    try:
+        raw = received.get(timeout=max(timeout, 0.0))
+    except queue.Empty:
+        raise TimeoutError(
+            "The daemon starter did not provide its configuration in time"
+        ) from None
+    if isinstance(raw, BaseException):
+        raise raw
     if not raw.strip():
         raise ValueError("The daemon was started without a configuration")
     return daemon_config.decode_handover(raw)
