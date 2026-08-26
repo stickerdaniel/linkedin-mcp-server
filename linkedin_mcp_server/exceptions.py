@@ -39,6 +39,10 @@ class BrowserSetupFailedError(LinkedInMCPError):
     """Patchright Chromium browser setup failed."""
 
 
+class OwnerStandingDownError(LinkedInMCPError):
+    """The shared browser owner is exiting before it can serve another call."""
+
+
 class AuthenticationStartedError(LinkedInMCPError):
     """Interactive LinkedIn login has been started."""
 

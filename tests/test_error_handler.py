@@ -20,6 +20,7 @@ from linkedin_mcp_server.exceptions import (
     BrowserSetupFailedError,
     CredentialsNotFoundError,
     LinkedInMCPError,
+    OwnerStandingDownError,
     SessionExpiredError,
 )
 
@@ -132,6 +133,18 @@ def test_setup_failure_says_the_retry_starts_the_next_attempt():
     surfaced = str(caught.value)
     assert "Retry this tool to start" in surfaced
     assert "has started" not in surfaced
+
+
+def test_owner_stand_down_keeps_its_replacement_guidance():
+    message = (
+        "This daemon owner is restarting before it can serve this request. Call "
+        "this tool again so the replacement owner can continue."
+    )
+
+    with pytest.raises(ToolError) as caught:
+        raise_tool_error(OwnerStandingDownError(message))
+
+    assert str(caught.value) == message
 
 
 def test_raises_tool_error_for_scraping_error():

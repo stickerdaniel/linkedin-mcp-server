@@ -59,6 +59,7 @@ from linkedin_mcp_server.exceptions import (
     BrowserSetupFailedError,
     BrowserSetupInProgressError,
     DockerHostLoginRequiredError,
+    OwnerStandingDownError,
     ProfileRootRefusedError,
 )
 from linkedin_mcp_server.process_protocol import new_nonce
@@ -2573,9 +2574,9 @@ async def ensure_tool_ready_or_raise(
         # A deadline failure requests owner replacement before it is consumed. A
         # queued call can enter during the serving loop's next poll, but starting a
         # task here would only let lifespan shutdown cancel the promised retry.
-        raise BrowserSetupFailedError(
-            "This daemon owner is restarting after browser setup failed. Call this "
-            "tool again so the replacement owner can retry."
+        raise OwnerStandingDownError(
+            "This daemon owner is restarting before it can serve this request. Call "
+            "this tool again so the replacement owner can continue."
         )
 
     # Before any branch that could reach a browser. A quiescent owner has closed

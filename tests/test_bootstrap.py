@@ -51,6 +51,7 @@ from linkedin_mcp_server.exceptions import (
     DockerHostLoginRequiredError,
     LinkedInMCPError,
     NoLinkedInSessionFoundError,
+    OwnerStandingDownError,
 )
 from linkedin_mcp_server.session_state import (
     PeerSessionInPlaceError,
@@ -1524,7 +1525,7 @@ class TestTwoStageInstall:
             await ensure_tool_ready_or_raise("get_person_profile")
         assert stood_down == ["managed browser setup exceeded its background deadline"]
 
-        with pytest.raises(BrowserSetupFailedError, match="owner is restarting"):
+        with pytest.raises(OwnerStandingDownError, match="owner is restarting"):
             await ensure_tool_ready_or_raise("get_person_profile")
         assert get_bootstrap_state().setup_task is None
 
