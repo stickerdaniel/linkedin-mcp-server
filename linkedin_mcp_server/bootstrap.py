@@ -1132,9 +1132,9 @@ async def _run_patchright_install(
                 await output
         returncode = await waiting
         if proc.windows_job is not None and proc.assigned:
-            # Process.wait() registered before exit is resolved only after pipe EOF
-            # on CPython 3.12-3.14. The direct returncode observation above lets the
-            # Job end descendants that still hold those pipes before awaiting them.
+            # On CPython 3.12, Process.wait() registered before exit resolves only
+            # after pipe EOF. Direct returncode observation lets the Job end
+            # descendants that still hold those pipes before awaiting them.
             deadline = asyncio.get_running_loop().time() + _INSTALLER_STOP_SECONDS
             await asyncio.shield(_assigned_windows_cleanup(proc, deadline))
         await output
