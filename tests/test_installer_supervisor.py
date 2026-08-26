@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
 import pytest
 
@@ -72,7 +72,8 @@ def test_parent_must_open_the_start_gate_before_worker_creation(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setattr("builtins.print", lambda *a, **k: None)
-    monkeypatch.setattr(supervisor, "_await_start", lambda: False)
+    monkeypatch.setattr(supervisor, "_await_nonce", lambda: _NONCE)
+    monkeypatch.setattr(supervisor, "_await_start", lambda nonce: False)
     monkeypatch.setattr(supervisor.threading, "Thread", _IdleThread)
     monkeypatch.setattr(
         supervisor.subprocess,
@@ -96,7 +97,8 @@ def test_broken_started_frame_stops_the_worker_group(
             raise BrokenPipeError
 
     monkeypatch.setattr("builtins.print", report)
-    monkeypatch.setattr(supervisor, "_await_start", lambda: True)
+    monkeypatch.setattr(supervisor, "_await_nonce", lambda: _NONCE)
+    monkeypatch.setattr(supervisor, "_await_start", lambda nonce: nonce == _NONCE)
     monkeypatch.setattr(supervisor.threading, "Thread", _IdleThread)
     monkeypatch.setattr(supervisor.subprocess, "Popen", lambda *a, **k: _Worker())
     monkeypatch.setattr(
@@ -125,10 +127,14 @@ def test_worker_status_preserves_target_result_and_command(
         spawned.append(child)
         return child
 
-    monkeypatch.setattr("builtins.print", lambda *a, **k: None)
+    reports: list[str] = []
+    monkeypatch.setattr(
+        "builtins.print", lambda message, **kwargs: reports.append(message)
+    )
     monkeypatch.setattr(supervisor, "new_nonce", lambda: _NONCE)
     monkeypatch.setenv("PYTHONPATH", ".")
-    monkeypatch.setattr(supervisor, "_await_start", lambda: True)
+    monkeypatch.setattr(supervisor, "_await_nonce", lambda: _NONCE)
+    monkeypatch.setattr(supervisor, "_await_start", lambda nonce: nonce == _NONCE)
     monkeypatch.setattr(supervisor.threading, "Thread", _StatusThread)
     monkeypatch.setattr(supervisor.subprocess, "Popen", spawn)
     monkeypatch.setattr(
@@ -145,6 +151,7 @@ def test_worker_status_preserves_target_result_and_command(
     assert options[0]["stdin"] == supervisor.subprocess.PIPE
     assert options[0]["stderr"] == supervisor.subprocess.PIPE
     assert spawned[0].stdin.written == f"{_NONCE}\n".encode()
+    assert reports == [f"armed {_NONCE}", f"started {_NONCE} {spawned[0].pid}"]
     environment = cast(dict[str, str], options[0]["env"])
     assert "PYTHONPATH" not in environment
 
@@ -240,10 +247,21 @@ def test_real_user_site_hook_cannot_join_the_completion_frame(tmp_path: Path):
         "sys.stderr.flush()\n"
     )
 
+    enabled = subprocess.run(
+        [base_executable, "-c", "import sys; print('sitecustomize' in sys.modules)"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert enabled.stdout.strip() == "True"
+    assert "sitecustomize: checking interpreter" in enabled.stderr
+
     process = subprocess.Popen(
         [
             base_executable,
-            "-s",
             "-m",
             "linkedin_mcp_server.installer_supervisor",
             "--",
@@ -261,10 +279,27 @@ def test_real_user_site_hook_cannot_join_the_completion_frame(tmp_path: Path):
     )
     assert process.stdin is not None and process.stderr is not None
     try:
-        assert process.stderr.readline() == b"armed\n"
-        process.stdin.write(b"start\n")
+        from linkedin_mcp_server.process_protocol import read_authenticated_status
+
+        process.stdin.write(f"{_NONCE}\n".encode())
         process.stdin.flush()
-        assert process.stderr.readline().startswith(b"started ")
+        armed = f"armed {_NONCE}\n".encode()
+        assert read_authenticated_status(
+            cast(BinaryIO, process.stderr),
+            marker=armed[:-1],
+            parse=lambda frame: frame if frame == armed else None,
+        ) == (armed, armed)
+
+        process.stdin.write(f"start {_NONCE}\n".encode())
+        process.stdin.flush()
+        started_marker = f"started {_NONCE} ".encode()
+        started = read_authenticated_status(
+            cast(BinaryIO, process.stderr),
+            marker=started_marker,
+            parse=lambda frame: frame if frame.endswith(b"\n") else None,
+        )
+        assert started is not None
+        assert started[0].startswith(started_marker)
         assert process.wait(timeout=10) == 7
     finally:
         if process.poll() is None:

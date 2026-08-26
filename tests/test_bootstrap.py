@@ -1236,10 +1236,30 @@ class _FakeProtocol:
     async def readline(self) -> bytes:
         return self.lines.pop(0) if self.lines else b""
 
-    async def read(self, _n: int = -1) -> bytes:
-        remaining = b"".join(self.lines)
-        self.lines.clear()
-        return remaining
+    async def read(self, n: int = -1) -> bytes:
+        if not self.lines:
+            return b""
+        head = self.lines[0]
+        if 0 <= n < len(head):
+            self.lines[0] = head[n:]
+            return head[:n]
+        self.lines.pop(0)
+        return head
+
+
+_SUPERVISOR_NONCE = "0123456789abcdef" * 4
+
+
+def _completed_windows_wait() -> SimpleNamespace:
+    return SimpleNamespace(
+        done=lambda: True,
+        _registered=False,
+        _wait_handle=None,
+        _event=None,
+        _event_fut=None,
+        _proactor=None,
+        _ov=None,
+    )
 
 
 class _FakeProc:
@@ -1248,7 +1268,10 @@ class _FakeProc:
     def __init__(self, chunks: list[bytes], returncode: int) -> None:
         self.pid = 424242  # a real Process carries one
         self.stdout = _FakeStdout(chunks)
-        self.stderr = _FakeProtocol(b"armed\n", f"started {self.pid}\n".encode())
+        self.stderr = _FakeProtocol(
+            f"armed {_SUPERVISOR_NONCE}\n".encode(),
+            f"started {_SUPERVISOR_NONCE} {self.pid}\n".encode(),
+        )
         self.stdin = _FakeStdin()
         self.returncode: int | None = None
         self._final = returncode
@@ -1283,6 +1306,12 @@ class _Spawned:
 
 
 class TestInstallerSupervisorLaunch:
+    @pytest.fixture(autouse=True)
+    def _stable_supervisor_nonce(self, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+
+        monkeypatch.setattr(bootstrap, "new_nonce", lambda: _SUPERVISOR_NONCE)
+
     async def test_launches_the_internal_supervisor_and_reads_its_target(
         self, monkeypatch
     ):
@@ -1302,7 +1331,9 @@ class TestInstallerSupervisorLaunch:
         started = await bootstrap._start_installer_supervisor("--no-shell")
 
         assert started.process is proc
-        assert proc.stdin.written == b"start\n"
+        assert proc.stdin.written == (
+            f"{_SUPERVISOR_NONCE}\nstart {_SUPERVISOR_NONCE}\n".encode()
+        )
         args = captured["args"]
         assert isinstance(args, tuple)
         assert args[1:4] == (
@@ -1325,9 +1356,26 @@ class TestInstallerSupervisorLaunch:
         events: list[str] = []
         proc = _FakeProc([], 0)
         managed_proc = cast(Any, proc)
-        popen = SimpleNamespace(_handle=object())
+        popen = SimpleNamespace(_handle=1234)
+        overlapped = SimpleNamespace(address=5678)
+        proactor = SimpleNamespace(_cache={})
+        process_wait = SimpleNamespace(
+            _handle=1234,
+            _proactor=proactor,
+            _ov=overlapped,
+            _event_fut=None,
+            _registered=True,
+            done=lambda: False,
+        )
+        proactor._cache[overlapped.address] = (
+            process_wait,
+            overlapped,
+            0,
+            object(),
+        )
         managed_proc._transport = SimpleNamespace(
-            get_extra_info=lambda name: popen if name == "subprocess" else None
+            _loop=SimpleNamespace(_proactor=proactor),
+            get_extra_info=lambda name: popen if name == "subprocess" else None,
         )
 
         class _Job:
@@ -1377,6 +1425,7 @@ class TestInstallerSupervisorLaunch:
 
         assert started.process is proc
         assert started.windows_popen is popen
+        assert started.windows_wait is process_wait
         assert started.assigned
         assert events == [
             "create-job",
@@ -1391,10 +1440,10 @@ class TestInstallerSupervisorLaunch:
 
         proc = _FakeProc([], 0)
         proc.stderr = _FakeProtocol(
-            b"sitecustomize warning\n",
-            b"armed\n",
-            b"instrumentation warning\n",
-            f"started {proc.pid}\n".encode(),
+            b"armed\nstarted 1\nsitecustomize warning without newline"
+            + f"armed {_SUPERVISOR_NONCE}\n".encode(),
+            b"started 2\ninstrumentation warning" * 10_000
+            + f"started {_SUPERVISOR_NONCE} {proc.pid}\n".encode(),
         )
         monkeypatch.setattr(
             asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
@@ -1403,7 +1452,9 @@ class TestInstallerSupervisorLaunch:
         started = await bootstrap._start_installer_supervisor("--no-shell")
 
         assert started.process is proc
-        assert proc.stdin.written == b"start\n"
+        assert proc.stdin.written == (
+            f"{_SUPERVISOR_NONCE}\nstart {_SUPERVISOR_NONCE}\n".encode()
+        )
 
     async def test_cleanup_drains_output_before_process_collection(self):
         from linkedin_mcp_server import bootstrap
@@ -1435,22 +1486,43 @@ class TestInstallerSupervisorLaunch:
             await bootstrap._start_installer_supervisor("--no-shell")
 
     @pytest.mark.parametrize(
-        ("lines", "message"),
+        ("lines", "message", "written"),
         [
-            ([], "did not become ready before its startup deadline"),
-            ([b"armed\n"], "did not start its worker before its startup deadline"),
+            (
+                [],
+                "did not become ready before its startup deadline",
+                f"{_SUPERVISOR_NONCE}\n".encode(),
+            ),
+            (
+                [f"armed {_SUPERVISOR_NONCE}\n".encode()],
+                "did not start its worker before its startup deadline",
+                f"{_SUPERVISOR_NONCE}\nstart {_SUPERVISOR_NONCE}\n".encode(),
+            ),
+            (
+                [b"armed\n"],
+                "did not become ready before its startup deadline",
+                f"{_SUPERVISOR_NONCE}\n".encode(),
+            ),
+            (
+                [
+                    f"armed {_SUPERVISOR_NONCE}\n".encode(),
+                    b"started 424242\n",
+                ],
+                "did not start its worker before its startup deadline",
+                f"{_SUPERVISOR_NONCE}\nstart {_SUPERVISOR_NONCE}\n".encode(),
+            ),
         ],
     )
     async def test_handshake_timeout_reports_the_missing_stage(
-        self, monkeypatch, lines, message
+        self, monkeypatch, lines, message, written
     ):
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
         class _HangingProtocol(_FakeProtocol):
-            async def readline(self) -> bytes:
+            async def read(self, n: int = -1) -> bytes:
                 if self.lines:
-                    return self.lines.pop(0)
+                    return await super().read(n)
                 await asyncio.Event().wait()
                 raise AssertionError("unreachable")
 
@@ -1464,6 +1536,7 @@ class TestInstallerSupervisorLaunch:
         with pytest.raises(BrowserSetupFailedError, match=message):
             await bootstrap._start_installer_supervisor("--no-shell")
 
+        assert proc.stdin.written == written
         assert proc.stdin.closed
         assert proc.waited
 
@@ -1576,11 +1649,21 @@ class TestInstallerSupervisorLaunch:
                 events.append("drain-job")
                 self.closed = True
 
+        process_wait = SimpleNamespace(
+            done=lambda: True,
+            _registered=False,
+            _wait_handle=None,
+            _event=None,
+            _event_fut=None,
+            _proactor=None,
+            _ov=None,
+        )
         job = _Job()
         managed = bootstrap._InstallerProcess(
             cast(Any, proc),
             windows_job=cast(Any, job),
             windows_popen=cast(Any, popen),
+            windows_wait=cast(Any, process_wait),
             assigned=True,
         )
 
@@ -1592,6 +1675,115 @@ class TestInstallerSupervisorLaunch:
         assert events == ["terminate-job", "release-handle", "drain-job"]
         assert not managed.assigned
         assert managed.windows_popen is None
+
+    async def test_waits_for_the_unregister_completion_callback(self):
+        from linkedin_mcp_server import bootstrap
+
+        event_fut = asyncio.get_running_loop().create_future()
+
+        class _ProcessWait:
+            _registered = False
+            _wait_handle = None
+            _event = object()
+            _proactor = object()
+            _ov = object()
+
+            def __init__(self) -> None:
+                self._event_fut = event_fut
+
+            def done(self) -> bool:
+                return True
+
+            def _unregister_wait_cb(self, _future: object) -> None:
+                self._event = None
+                self._event_fut = None
+                self._proactor = None
+                self._ov = None
+
+        process_wait = _ProcessWait()
+        cast(Any, event_fut)._done_callback = process_wait._unregister_wait_cb
+        event_fut.set_result(True)
+        asyncio.get_running_loop().call_soon(
+            process_wait._unregister_wait_cb, event_fut
+        )
+        managed = bootstrap._InstallerProcess(
+            cast(Any, _FakeProc([], 0)), windows_wait=cast(Any, process_wait)
+        )
+
+        deadline = asyncio.get_running_loop().time() + 1.0
+        await bootstrap._prove_windows_wait_unregistered(managed, deadline)
+
+        assert process_wait._event_fut is None
+        assert process_wait._proactor is None
+        assert process_wait._ov is None
+
+    async def test_missing_unregister_proof_keeps_the_popen_handle(self):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.process_tree import ProcessTreeError
+
+        proc = _FakeProc([], 0)
+        popen = SimpleNamespace(returncode=None, _handle=object())
+        released = False
+
+        class _Job:
+            def terminate(self) -> None:
+                proc.returncode = 1
+                popen.returncode = 1
+
+            def release_popen_handle(self, _process: object) -> None:
+                nonlocal released
+                released = True
+
+        managed = bootstrap._InstallerProcess(
+            cast(Any, proc),
+            windows_job=cast(Any, _Job()),
+            windows_popen=cast(Any, popen),
+            assigned=True,
+        )
+        deadline = asyncio.get_running_loop().time() + 1.0
+
+        with pytest.raises(ProcessTreeError, match="was not retained"):
+            await bootstrap._cleanup_assigned_windows_job_once(managed, deadline)
+
+        assert not released
+        assert managed.assigned
+        assert managed.windows_popen is popen
+
+    @pytest.mark.skipif(os.name != "nt", reason="requires the CPython proactor")
+    async def test_real_cpython_wait_unregister_contract(self):
+        from linkedin_mcp_server import bootstrap
+
+        raw_proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import sys; sys.stdin.buffer.read(1)",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        transport = cast(Any, raw_proc)._transport
+        popen = transport.get_extra_info("subprocess")
+        process_wait = bootstrap._capture_windows_process_wait(raw_proc, popen)
+        wait_contract = cast(Any, process_wait)
+        managed = bootstrap._InstallerProcess(
+            raw_proc,
+            windows_popen=popen,
+            windows_wait=process_wait,
+        )
+        assert type(process_wait).__name__ == "_WaitHandleFuture"
+        assert wait_contract._event_fut is None
+        assert wait_contract._proactor is transport._loop._proactor
+        assert wait_contract._ov is not None
+
+        await bootstrap._close_installer_lease(managed)
+        await bootstrap._wait_for_direct_process_exit(managed)
+        deadline = asyncio.get_running_loop().time() + 5.0
+        await bootstrap._prove_windows_wait_unregistered(managed, deadline)
+        await raw_proc.wait()
+
+        assert wait_contract._event_fut is None
+        assert wait_contract._proactor is None
+        assert wait_contract._ov is None
 
     async def test_unassigned_windows_cleanup_closes_the_gate_and_job(self):
         from linkedin_mcp_server import bootstrap
@@ -1634,6 +1826,72 @@ class TestPatchrightInstallStreaming:
             "linkedin_mcp_server.bootstrap._start_installer_supervisor", fake_start
         )
         return spawned
+
+    async def test_second_cancel_before_task_settlement_cannot_skip_cleanup(
+        self, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        cleanup_started = asyncio.Event()
+        cleanup_completed = asyncio.Event()
+        output_cancelled = asyncio.Event()
+        release = asyncio.Event()
+
+        class _BlockedOutput:
+            async def read(self, _n: int = -1) -> bytes:
+                try:
+                    await asyncio.Event().wait()
+                    raise AssertionError("unreachable")
+                except asyncio.CancelledError:
+                    output_cancelled.set()
+                    await release.wait()
+                    raise
+
+        class _BlockedProc(_FakeProc):
+            def __init__(self) -> None:
+                super().__init__([], 0)
+                self.stdout = cast(Any, _BlockedOutput())
+
+            async def wait(self) -> int:
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        proc = _BlockedProc()
+
+        async def fake_start(_extra_arg: str) -> _BlockedProc:
+            return proc
+
+        async def delayed_cleanup(_proc: object) -> None:
+            cleanup_started.set()
+            await release.wait()
+            cleanup_completed.set()
+
+        monkeypatch.setattr(bootstrap, "_start_installer_supervisor", fake_start)
+        monkeypatch.setattr(bootstrap, "_stop_installer_once", delayed_cleanup)
+
+        installing = asyncio.create_task(
+            bootstrap._run_patchright_install("--no-shell")
+        )
+        await asyncio.sleep(0)
+        installing.cancel()
+
+        cleanup_seen = asyncio.create_task(cleanup_started.wait())
+        output_seen = asyncio.create_task(output_cancelled.wait())
+        done, pending = await asyncio.wait(
+            {cleanup_seen, output_seen},
+            timeout=1.0,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        assert done, "the cancellation path did not reach its first pre-cleanup await"
+        installing.cancel()
+        release.set()
+        for waiter in pending:
+            waiter.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        with pytest.raises(asyncio.CancelledError):
+            await installing
+        assert cleanup_completed.is_set()
 
     async def test_the_callback_gets_every_line_in_order(self, monkeypatch):
         from linkedin_mcp_server import bootstrap
@@ -1971,6 +2229,7 @@ class TestPatchrightInstallStreaming:
             cast(Any, process),
             windows_job=cast(Any, job),
             windows_popen=cast(Any, popen),
+            windows_wait=cast(Any, _completed_windows_wait()),
             assigned=True,
         )
         monkeypatch.setattr(
@@ -2044,6 +2303,7 @@ class TestPatchrightInstallStreaming:
             cast(Any, process),
             windows_job=cast(Any, job),
             windows_popen=cast(Any, popen),
+            windows_wait=cast(Any, _completed_windows_wait()),
             assigned=True,
         )
         monkeypatch.setattr(
@@ -2101,6 +2361,7 @@ class TestPatchrightInstallStreaming:
             cast(Any, proc),
             windows_job=cast(Any, _Job()),
             windows_popen=cast(Any, popen),
+            windows_wait=cast(Any, _completed_windows_wait()),
             assigned=True,
         )
         monkeypatch.setattr(
@@ -2167,6 +2428,7 @@ class TestPatchrightInstallStreaming:
             cast(Any, proc),
             windows_job=cast(Any, _Job()),
             windows_popen=cast(Any, popen),
+            windows_wait=cast(Any, _completed_windows_wait()),
             assigned=True,
         )
         monkeypatch.setattr(

@@ -57,6 +57,7 @@ from linkedin_mcp_server.exceptions import (
     BrowserSetupInProgressError,
     DockerHostLoginRequiredError,
 )
+from linkedin_mcp_server.process_protocol import new_nonce
 from linkedin_mcp_server.process_tree import (
     ProcessTreeError,
     WindowsJob,
@@ -703,6 +704,7 @@ class _InstallerProcess:
     process: asyncio.subprocess.Process
     windows_job: WindowsJob | None = None
     windows_popen: subprocess.Popen[Any] | None = None
+    windows_wait: asyncio.Future[Any] | None = None
     assigned: bool = False
     windows_cleanup: asyncio.Task[None] | None = None
 
@@ -737,6 +739,117 @@ def _managed_installer(proc: Any) -> _InstallerProcess:
     if isinstance(proc, _InstallerProcess):
         return proc
     return _InstallerProcess(proc)
+
+
+def _capture_windows_process_wait(
+    process: asyncio.subprocess.Process, popen: subprocess.Popen[Any]
+) -> asyncio.Future[Any]:
+    """Pin CPython's registered wait for the process handle we will release."""
+    transport = getattr(process, "_transport", None)
+    loop = getattr(transport, "_loop", None)
+    proactor = getattr(loop, "_proactor", None)
+    cache = getattr(proactor, "_cache", None)
+    process_handle = getattr(popen, "_handle", None)
+    if proactor is None or not isinstance(cache, dict) or process_handle is None:
+        raise ProcessTreeError(
+            "Windows asyncio exposed no registered process wait contract"
+        )
+    try:
+        expected_handle = int(process_handle)
+    except (TypeError, ValueError) as exc:
+        raise ProcessTreeError(
+            "Windows asyncio exposed an invalid process wait handle"
+        ) from exc
+
+    matches: list[asyncio.Future[Any]] = []
+    for address, entry in cache.items():
+        if not isinstance(entry, tuple) or len(entry) < 2:
+            continue
+        future, overlapped = entry[:2]
+        if (
+            getattr(future, "_handle", None) == expected_handle
+            and getattr(future, "_proactor", None) is proactor
+            and getattr(future, "_ov", None) is overlapped
+            and getattr(overlapped, "address", None) == address
+            and hasattr(future, "_event_fut")
+        ):
+            matches.append(future)
+    if len(matches) != 1:
+        raise ProcessTreeError(
+            "Windows asyncio did not expose one registered process wait"
+        )
+
+    future = matches[0]
+    if (
+        future.done()
+        or getattr(future, "_registered", None) is not True
+        or getattr(future, "_event_fut", None) is not None
+    ):
+        raise ProcessTreeError(
+            "Windows asyncio process wait was not pending at assignment"
+        )
+    return future
+
+
+def _windows_wait_unregistered(future: asyncio.Future[Any]) -> bool:
+    """Whether CPython's UnregisterWaitEx completion callback has finished."""
+    return (
+        future.done()
+        and getattr(future, "_registered", None) is False
+        and getattr(future, "_wait_handle", object()) is None
+        and getattr(future, "_event", object()) is None
+        and getattr(future, "_event_fut", object()) is None
+        and getattr(future, "_proactor", object()) is None
+        and getattr(future, "_ov", object()) is None
+    )
+
+
+async def _prove_windows_wait_unregistered(
+    proc: _InstallerProcess, deadline: float
+) -> None:
+    """Wait within the stop deadline for CPython's OS unregister completion."""
+    future = proc.windows_wait
+    if future is None:
+        raise ProcessTreeError("Windows asyncio process wait was not retained")
+    if _windows_wait_unregistered(future):
+        return
+    if not future.done():
+        raise ProcessTreeError(
+            "Windows published process exit before completing its registered wait"
+        )
+
+    event_fut = getattr(future, "_event_fut", None)
+    proactor = getattr(future, "_proactor", None)
+    overlapped = getattr(future, "_ov", None)
+    callback = getattr(event_fut, "_done_callback", None)
+    if (
+        not isinstance(event_fut, asyncio.Future)
+        or proactor is None
+        or overlapped is None
+        or getattr(callback, "__self__", None) is not future
+    ):
+        raise ProcessTreeError(
+            "Windows asyncio process wait unregister contract was incomplete"
+        )
+
+    remaining = _installer_stop_remaining(deadline)
+    if remaining <= 0:
+        raise ProcessTreeError(
+            "Windows process wait unregister exceeded the cleanup deadline"
+        )
+    done, _pending = await asyncio.wait({event_fut}, timeout=remaining)
+    if event_fut not in done:
+        raise ProcessTreeError(
+            "Windows process wait unregister exceeded the cleanup deadline"
+        )
+    # CPython 3.12-3.14 invokes the owner callback synchronously from
+    # _WaitCancelFuture.set_result. Yield once as well so a callback already
+    # queued when the future completed cannot be mistaken for OS completion.
+    await asyncio.sleep(0)
+    if not _windows_wait_unregistered(future):
+        raise ProcessTreeError(
+            "Windows process wait unregister completion could not be proved"
+        )
 
 
 async def _close_installer_lease(proc: _InstallerProcess) -> None:
@@ -786,11 +899,13 @@ async def _cleanup_assigned_windows_job_once(
             "The browser installer supervisor did not exit after Job termination"
         )
 
-    # CPython 3.12-3.14 registers a proactor wait on this exact Popen handle.
-    # Seeing Process.returncode proves its callback has run; closing any earlier
-    # can invalidate the handle while wait_for_handle still owns a pending wait.
+    # CPython 3.12-3.14 publishes Process.returncode from the registered wait's
+    # result callback before the UnregisterWaitEx completion callback clears its
+    # proactor and Overlapped ownership. The handle stays live through that proof.
+    await _prove_windows_wait_unregistered(proc, deadline)
     job.release_popen_handle(popen)
     proc.windows_popen = None
+    proc.windows_wait = None
     await asyncio.to_thread(
         job.wait_until_empty,
         timeout=_installer_stop_remaining(deadline),
@@ -912,6 +1027,24 @@ async def _stop_installer(proc: _InstallerProcess | Any) -> None:
     cleanup.result()
 
 
+async def _settle_installer_tasks(
+    tasks: tuple[asyncio.Task[Any], ...],
+) -> asyncio.CancelledError | None:
+    """Cancel and retrieve installer tasks without letting another cancel skip them."""
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    settling = asyncio.gather(*tasks, return_exceptions=True)
+    cancellation: asyncio.CancelledError | None = None
+    while not settling.done():
+        try:
+            await asyncio.shield(settling)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+    settling.result()
+    return cancellation
+
+
 async def _supervisor_start_error(
     proc: _InstallerProcess, first: bytes
 ) -> BrowserSetupFailedError:
@@ -935,34 +1068,65 @@ async def _supervisor_start_error(
 
 async def _read_supervisor_frame(
     stream: asyncio.StreamReader,
+    *,
+    marker: bytes,
     accept: Callable[[bytes], bool],
     timeout: float,
 ) -> tuple[bytes | None, bytes]:
-    """Read through startup diagnostics until one framed control record arrives."""
+    """Extract one authenticated frame from bounded arbitrary startup bytes."""
+    if not marker or len(marker) >= 128:
+        raise ValueError("invalid supervisor status marker")
     deadline = asyncio.get_running_loop().time() + max(timeout, 0.0)
     captured = bytearray()
+    buffered = bytearray()
     while True:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
             raise TimeoutError
-        line = await asyncio.wait_for(stream.readline(), remaining)
-        if not line:
+        chunk = await asyncio.wait_for(stream.read(_READ_CHUNK), remaining)
+        if not chunk:
             return None, bytes(captured)
-        captured.extend(line)
+        captured.extend(chunk)
         if len(captured) > 8192:
             del captured[:-8192]
-        if accept(line):
-            return line, bytes(captured)
+        buffered.extend(chunk)
+
+        while True:
+            start = buffered.find(marker)
+            if start < 0:
+                keep = min(len(buffered), len(marker) - 1)
+                if len(buffered) > keep:
+                    del buffered[: len(buffered) - keep]
+                break
+            if start:
+                del buffered[:start]
+
+            newline = buffered.find(b"\n", len(marker))
+            if newline < 0:
+                if len(buffered) <= 128:
+                    break
+                del buffered[0]
+                continue
+
+            candidate = bytes(buffered[: newline + 1])
+            if accept(candidate):
+                return candidate, bytes(captured)
+            del buffered[0]
 
 
-def _started_worker_pid(frame: bytes) -> int | None:
-    text = frame.decode("utf-8", "replace").strip()
-    prefix = "started "
-    if not text.startswith(prefix):
+def _armed_supervisor(frame: bytes, nonce: str) -> bool:
+    return frame == f"armed {nonce}\n".encode("ascii")
+
+
+def _started_worker_pid(frame: bytes, nonce: str) -> int | None:
+    if not frame.endswith(b"\n"):
         return None
     try:
-        worker_pid = int(text.removeprefix(prefix))
-    except ValueError:
+        label, reported_nonce, value = frame.decode("ascii").strip().split(maxsplit=2)
+        worker_pid = int(value)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if label != "started" or reported_nonce != nonce:
         return None
     return worker_pid if worker_pid > 0 else None
 
@@ -985,10 +1149,10 @@ async def _start_installer_supervisor(
         extra_arg,
     ]
     windows_job = WindowsJob.anonymous() if os.name == "nt" else None
-    nonce = release_nonce() if windows_job is not None else None
+    gate_nonce = release_nonce() if windows_job is not None else None
     command = (
-        windows_gate_command(target, nonce)
-        if windows_job is not None and nonce is not None
+        windows_gate_command(target, gate_nonce)
+        if windows_job is not None and gate_nonce is not None
         else target
     )
     environment = os.environ.copy()
@@ -1015,32 +1179,50 @@ async def _start_installer_supervisor(
         raise
     proc = _InstallerProcess(raw_proc, windows_job=windows_job)
     assert proc.stdin is not None and proc.stderr is not None
+    supervisor_nonce = new_nonce()
     waiting_for = "become ready"
     try:
-        if windows_job is not None and nonce is not None:
+        if windows_job is not None and gate_nonce is not None:
             proc.windows_popen = windows_job.assign_asyncio_process(raw_proc)
             proc.assigned = True
+            proc.windows_wait = _capture_windows_process_wait(
+                raw_proc, proc.windows_popen
+            )
             # The supervisor cannot import or spawn until assignment is verified.
-            release_windows_gate(proc.stdin, nonce)
+            release_windows_gate(proc.stdin, gate_nonce)
             await proc.stdin.drain()
+
+        # This nonce exists only after Popen returns. Interpreter startup hooks can
+        # write diagnostics before the supervisor imports, but cannot pre-frame an
+        # acknowledgement carrying a value absent from argv and the environment.
+        proc.stdin.write(f"{supervisor_nonce}\n".encode("ascii"))
+        await proc.stdin.drain()
+        armed_marker = f"armed {supervisor_nonce}".encode("ascii")
         armed, startup_output = await _read_supervisor_frame(
-            proc.stderr, lambda line: line.strip() == b"armed", _INSTALLER_START_SECONDS
+            proc.stderr,
+            marker=armed_marker,
+            accept=lambda frame: _armed_supervisor(frame, supervisor_nonce),
+            timeout=_INSTALLER_START_SECONDS,
         )
         if armed is None:
             raise await _supervisor_start_error(proc, startup_output)
 
-        proc.stdin.write(b"start\n")
+        proc.stdin.write(f"start {supervisor_nonce}\n".encode("ascii"))
         await proc.stdin.drain()
 
         waiting_for = "start its worker"
+        started_marker = f"started {supervisor_nonce} ".encode("ascii")
         started, startup_output = await _read_supervisor_frame(
             proc.stderr,
-            lambda line: _started_worker_pid(line) is not None,
-            _INSTALLER_START_SECONDS,
+            marker=started_marker,
+            accept=lambda frame: (
+                _started_worker_pid(frame, supervisor_nonce) is not None
+            ),
+            timeout=_INSTALLER_START_SECONDS,
         )
         if started is None:
             raise await _supervisor_start_error(proc, startup_output)
-        worker_pid = _started_worker_pid(started)
+        worker_pid = _started_worker_pid(started, supervisor_nonce)
         if worker_pid is None:  # pragma: no cover - predicate proved it above
             raise ValueError("invalid worker pid")
     except BrowserSetupFailedError:
@@ -1140,21 +1322,36 @@ async def _run_patchright_install(
         await output
         await stderr
     except BaseException as original:
+        # Request task cancellation first so no reader keeps competing for the
+        # same pipes. Start tree cleanup before awaiting task settlement: a second
+        # cancellation can interrupt either await, while _stop_installer keeps its
+        # own cleanup task shielded until the containment work is done.
         for task in tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        # Cancellation and callback failures use the same shielded Job drainage.
+        cleanup_error: BaseException | None = None
+        cleanup_cancellation: asyncio.CancelledError | None = None
         try:
             await _stop_installer(proc)
-        except BaseException as cleanup_error:
-            if isinstance(original, asyncio.CancelledError):
+        except asyncio.CancelledError as exc:
+            cleanup_cancellation = exc
+        except BaseException as exc:
+            cleanup_error = exc
+
+        settle_cancellation = await _settle_installer_tasks(tasks)
+        if isinstance(original, asyncio.CancelledError):
+            if cleanup_error is not None:
                 logger.error(
                     "Browser installer cleanup failed while cancellation was pending",
                     exc_info=cleanup_error,
                 )
-                raise original
-            raise
+            raise original
+        if cleanup_error is not None:
+            raise cleanup_error
+        if cleanup_cancellation is not None:
+            raise cleanup_cancellation
+        if settle_cancellation is not None:
+            raise settle_cancellation
         raise
     await _close_installer_lease(proc)
     if returncode != 0:

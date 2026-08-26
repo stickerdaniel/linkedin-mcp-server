@@ -8,7 +8,12 @@ import sys
 import threading
 from typing import BinaryIO
 
-from linkedin_mcp_server.process_protocol import new_nonce, read_authenticated_status
+from linkedin_mcp_server.process_protocol import (
+    NONCE_LENGTH,
+    new_nonce,
+    read_authenticated_status,
+    valid_nonce,
+)
 from linkedin_mcp_server.process_tree import (
     child_exited_without_reaping,
     terminate_process_group,
@@ -17,7 +22,6 @@ from linkedin_mcp_server.process_tree import (
 _ARMED = "armed"
 _STARTED = "started"
 _FINISHED = "finished"
-_START = b"start\n"
 
 
 def _parent_eof(reached: threading.Event) -> None:
@@ -53,17 +57,34 @@ def _target_command(argv: list[str]) -> list[str]:
     return args
 
 
-def _await_start() -> bool:
-    """Read the exact launch gate without buffering past it."""
+def _read_control_frame(max_bytes: int) -> bytes | None:
+    """Read one bounded control frame without buffering past its newline."""
     frame = bytearray()
-    while len(frame) <= len(_START):
+    while len(frame) <= max_bytes:
         piece = os.read(sys.stdin.fileno(), 1)
         if not piece:
-            return False
+            return None
         frame.extend(piece)
         if piece == b"\n":
-            return bytes(frame) == _START
-    return False
+            return bytes(frame)
+    return None
+
+
+def _await_nonce() -> str | None:
+    frame = _read_control_frame(NONCE_LENGTH + 1)
+    if frame is None or not frame.endswith(b"\n"):
+        return None
+    try:
+        nonce = frame[:-1].decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    return nonce if valid_nonce(nonce) else None
+
+
+def _await_start(nonce: str) -> bool:
+    """Read the authenticated launch gate without buffering past it."""
+    expected = f"start {nonce}\n".encode("ascii")
+    return _read_control_frame(len(expected)) == expected
 
 
 def _terminate_worker(worker: subprocess.Popen[bytes], *, result: int) -> int:
@@ -90,14 +111,17 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
 
     # The parent may be cancelled while asyncio is still constructing its
-    # subprocess transport. No managed target exists until it has received this
-    # frame and replied through stdin, so transport teardown can only end an
-    # empty supervisor.
+    # subprocess transport. No managed target exists until it has delivered the
+    # post-Popen nonce and then opened the authenticated start gate, so transport
+    # teardown can only end an empty supervisor.
+    nonce = _await_nonce()
+    if nonce is None:
+        return 1
     try:
-        print(_ARMED, file=sys.stderr, flush=True)
+        print(f"{_ARMED} {nonce}", file=sys.stderr, flush=True)
     except OSError:
         return 1
-    if not _await_start():
+    if not _await_start(nonce):
         return 1
 
     parent_gone = threading.Event()
@@ -134,9 +158,9 @@ def main(argv: list[str] | None = None) -> int:
     # Generated only after the process exists and delivered through the pipe that
     # remains its lifetime lease. Interpreter startup diagnostics run before the
     # worker module and can imitate a plain status line, but cannot know this frame.
-    nonce = new_nonce()
+    worker_nonce = new_nonce()
     try:
-        worker.stdin.write(f"{nonce}\n".encode("ascii"))
+        worker.stdin.write(f"{worker_nonce}\n".encode("ascii"))
         worker.stdin.flush()
     except OSError:
         if os.name == "nt":
@@ -147,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     worker_frame: list[bytes] = []
     threading.Thread(
         target=_worker_status,
-        args=(worker.stderr, worker_done, worker_frame, nonce),
+        args=(worker.stderr, worker_done, worker_frame, worker_nonce),
         name="installer-worker-status",
         daemon=True,
     ).start()
@@ -158,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         return _terminate_worker(worker, result=1)
 
     try:
-        print(f"{_STARTED} {worker.pid}", file=sys.stderr, flush=True)
+        print(f"{_STARTED} {nonce} {worker.pid}", file=sys.stderr, flush=True)
     except OSError:
         if os.name == "nt":
             return 1
@@ -167,7 +191,9 @@ def main(argv: list[str] | None = None) -> int:
     while True:
         if worker_done.is_set():
             reported = (
-                _reported_returncode(worker_frame[0], nonce) if worker_frame else None
+                _reported_returncode(worker_frame[0], worker_nonce)
+                if worker_frame
+                else None
             )
             result = reported if reported is not None else 70
             if os.name == "nt":

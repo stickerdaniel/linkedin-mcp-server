@@ -19,6 +19,7 @@ from typing import Any, cast
 import pytest
 
 import linkedin_mcp_server.process_gate as process_gate
+from linkedin_mcp_server.process_protocol import new_nonce
 import linkedin_mcp_server.process_tree as process_tree
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -206,10 +207,22 @@ def _supervisor(target_script: str) -> subprocess.Popen[str]:
         cwd=_REPO_ROOT,
     )
     assert process.stdin is not None and process.stderr is not None
-    assert process.stderr.readline().strip() == "armed"
-    process.stdin.write("start\n")
+    nonce = new_nonce()
+    process.stdin.write(f"{nonce}\n")
     process.stdin.flush()
+    assert process.stderr.readline().strip() == f"armed {nonce}"
+    process.stdin.write(f"start {nonce}\n")
+    process.stdin.flush()
+    cast(Any, process)._supervisor_nonce = nonce
     return process
+
+
+def _started_pid(process: subprocess.Popen[str]) -> int:
+    assert process.stderr is not None
+    parts = process.stderr.readline().split()
+    assert parts[:2] == ["started", cast(Any, process)._supervisor_nonce]
+    assert len(parts) == 3
+    return int(parts[2])
 
 
 class _JobHandle:
@@ -820,7 +833,7 @@ class TestPosixProcessGroups:
             assert supervisor.stderr is not None
             assert supervisor.stdout is not None
             assert supervisor.stdin is not None
-            worker_pid = int(supervisor.stderr.readline().split()[1])
+            worker_pid = _started_pid(supervisor)
             target_pid, grandchild_pid = map(int, supervisor.stdout.readline().split())
             assert os.getpgid(target_pid) == worker_pid
 
@@ -849,7 +862,7 @@ class TestPosixProcessGroups:
             assert supervisor.stderr is not None
             assert supervisor.stdout is not None
             assert supervisor.stdin is not None
-            worker_pid = int(supervisor.stderr.readline().split()[1])
+            worker_pid = _started_pid(supervisor)
             target_pid, grandchild_pid = map(int, supervisor.stdout.readline().split())
 
             os.kill(supervisor.pid, signal.SIGKILL)
@@ -875,7 +888,7 @@ class TestPosixProcessGroups:
         try:
             assert supervisor.stderr is not None
             assert supervisor.stdout is not None
-            worker_pid = int(supervisor.stderr.readline().split()[1])
+            worker_pid = _started_pid(supervisor)
             target_pid, grandchild_pid = map(int, supervisor.stdout.readline().split())
 
             os.kill(worker_pid, signal.SIGKILL)
@@ -904,7 +917,7 @@ class TestPosixProcessGroups:
         try:
             assert supervisor.stderr is not None
             assert supervisor.stdout is not None
-            worker_pid = int(supervisor.stderr.readline().split()[1])
+            worker_pid = _started_pid(supervisor)
             target_pid, grandchild_pid = map(int, supervisor.stdout.readline().split())
 
             # Cleanup waits for the orphaned descendant's zombie to be collected,
@@ -919,7 +932,7 @@ class TestPosixProcessGroups:
     @_POSIX_ONLY
     def test_hard_parent_exit_triggers_the_supervisor_lease(self):
         parent_script = r"""
-import json, os, subprocess, sys
+import json, os, secrets, subprocess, sys
 repo, target = sys.argv[1], sys.argv[2]
 proc = subprocess.Popen(
     [sys.executable, "-I", "-m", "linkedin_mcp_server.installer_supervisor",
@@ -927,10 +940,15 @@ proc = subprocess.Popen(
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     text=True, start_new_session=True, cwd=repo,
 )
-assert proc.stderr.readline().strip() == "armed"
-proc.stdin.write("start\n")
+nonce = secrets.token_hex(32)
+proc.stdin.write(nonce + "\n")
 proc.stdin.flush()
-worker_pid = int(proc.stderr.readline().split()[1])
+assert proc.stderr.readline().strip() == "armed " + nonce
+proc.stdin.write("start " + nonce + "\n")
+proc.stdin.flush()
+started, reported_nonce, worker_pid = proc.stderr.readline().split()
+assert started == "started" and reported_nonce == nonce
+worker_pid = int(worker_pid)
 target_pid, grandchild_pid = map(int, proc.stdout.readline().split())
 print(json.dumps([proc.pid, worker_pid, target_pid, grandchild_pid]), flush=True)
 os._exit(0)
