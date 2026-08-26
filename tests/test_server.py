@@ -287,7 +287,7 @@ class TestTheRoleAsProcessState:
         `configure_logging` is the first thing after the claim, so it serves as a
         checkpoint to observe the role at and abort from.
         """
-        from linkedin_mcp_server import daemon_owner
+        from linkedin_mcp_server import daemon_config, daemon_owner
         from linkedin_mcp_server.config.schema import AppConfig
 
         class Checkpoint(Exception):
@@ -299,7 +299,11 @@ class TestTheRoleAsProcessState:
             seen.append(process_role())
             raise Checkpoint
 
-        monkeypatch.setattr(daemon_owner, "_read_config", lambda: AppConfig())
+        monkeypatch.setattr(
+            daemon_owner,
+            "_read_handover",
+            lambda: daemon_config.OwnerHandover(AppConfig(), "0123456789abcdef" * 4),
+        )
         monkeypatch.setattr(daemon_owner, "set_headless", lambda _headless: None)
         monkeypatch.setattr(daemon_owner, "configure_logging", at_checkpoint)
         monkeypatch.setattr(
@@ -331,7 +335,7 @@ class TestTheRoleAsProcessState:
             "verify_current_process",
             lambda name: events.append(f"verified:{name}"),
         )
-        monkeypatch.setattr(daemon_owner, "_read_config", read_config)
+        monkeypatch.setattr(daemon_owner, "_read_handover", read_config)
         monkeypatch.setattr(
             daemon_owner, "_claim_handshake_stream", lambda: MagicMock()
         )

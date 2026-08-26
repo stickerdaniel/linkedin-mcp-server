@@ -77,8 +77,9 @@ from linkedin_mcp_server.session_state import auth_root_dir, get_runtime_id
 
 logger = logging.getLogger(__name__)
 
-#: What the frontend reads from the handshake pipe. One line, so a partially
-#: written message cannot be mistaken for a complete one.
+#: What the frontend reads from the handshake pipe. The nonce is handed over
+#: only after this process exists, so interpreter startup output cannot forge it.
+HANDSHAKE = "owner"
 READY = "ready"
 FAILED = "failed"
 
@@ -668,8 +669,9 @@ class _Handshake:
     reaches a verdict is reported as a failed election rather than waited out.
     """
 
-    def __init__(self, stream: TextIO | None) -> None:
+    def __init__(self, stream: TextIO | None, handshake_nonce: str) -> None:
         self._stream = stream
+        self._nonce = handshake_nonce
 
     def succeed(self) -> None:
         self._write(READY)
@@ -682,7 +684,7 @@ class _Handshake:
         if stream is None:
             return
         try:
-            stream.write(f"{message}\n")
+            stream.write(f"{HANDSHAKE} {self._nonce} {message}\n")
             stream.flush()
         except (OSError, ValueError):
             logger.debug("The startup handshake could not be written", exc_info=True)
@@ -735,6 +737,13 @@ def _claim_handshake_stream() -> TextIO | None:
     return os.fdopen(duplicate, "w", encoding="utf-8")
 
 
+def _close_handshake_stream(stream: TextIO | None) -> None:
+    """End an unarmed handshake without making any startup claim."""
+    if stream is not None:
+        with contextlib.suppress(OSError, ValueError):
+            stream.close()
+
+
 def _take_lock(auth_root: Path, inherited_fd: int | None) -> DaemonLock | None:
     """Hold the daemon lock, by adoption on POSIX or by contest on Windows."""
     lock = DaemonLock(auth_root)
@@ -758,8 +767,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--job-name", default=None)
     args = parser.parse_args(argv)
 
-    # Before anything else can write to it.
-    handshake = _Handshake(_claim_handshake_stream())
+    # Before anything else can write to it. The token that authenticates this
+    # stream arrives in the configuration, so a failure before that read closes
+    # the pipe without emitting a verdict startup code could have forged.
+    handshake_stream = _claim_handshake_stream()
     try:
         if os.name == "nt":
             if args.job_name is None:
@@ -768,16 +779,14 @@ def main(argv: list[str] | None = None) -> int:
         # Read before anything else touches the configuration: the frontend
         # holds the pipe open only until it has written, and the settings decide
         # how this process logs.
-        config = _read_config()
+        handover = _read_handover()
     except BaseException:
-        # A failed verdict is terminal to the frontend, which may hard-stop this
-        # process as soon as it reads one. Put the diagnosis in the daemon log
-        # before making that verdict visible rather than relying on the
-        # interpreter to print an unhandled traceback afterwards.
         logger.exception("The daemon could not read its configuration")
-        handshake.fail()
+        _close_handshake_stream(handshake_stream)
         raise
 
+    config = handover.config
+    handshake = _Handshake(handshake_stream, handover.handshake_nonce)
     set_config(config)
     # Installing the configuration is not enough: the browser mode lives in a
     # module global that defaults to headless (``drivers/browser.py:63``), and
@@ -835,8 +844,8 @@ def main(argv: list[str] | None = None) -> int:
             lock.release()
 
 
-def _read_config() -> AppConfig:
-    """Read the handed-over configuration from standard input.
+def _read_handover() -> daemon_config.OwnerHandover:
+    """Read the handed-over configuration and startup nonce from standard input.
 
     Read to end of file rather than one line, and the frontend closes its end
     once written. That is the whole framing: a short read cannot be mistaken for
@@ -845,7 +854,7 @@ def _read_config() -> AppConfig:
     raw = sys.stdin.read()
     if not raw.strip():
         raise ValueError("The daemon was started without a configuration")
-    return daemon_config.decode(raw)
+    return daemon_config.decode_handover(raw)
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point

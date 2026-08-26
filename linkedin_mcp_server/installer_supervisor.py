@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
-import secrets
 import subprocess
 import sys
 import threading
 from typing import BinaryIO
 
+from linkedin_mcp_server.process_protocol import new_nonce, read_authenticated_status
 from linkedin_mcp_server.process_tree import (
     child_exited_without_reaping,
     terminate_process_group,
@@ -18,7 +18,6 @@ _ARMED = "armed"
 _STARTED = "started"
 _FINISHED = "finished"
 _START = b"start\n"
-_NONCE_BYTES = 32
 
 
 def _parent_eof(reached: threading.Event) -> None:
@@ -32,11 +31,15 @@ def _parent_eof(reached: threading.Event) -> None:
 def _worker_status(
     stream: BinaryIO, reached: threading.Event, frame: list[bytes], nonce: str
 ) -> None:
+    marker = f"{_FINISHED} {nonce} ".encode("ascii")
     try:
-        while line := stream.readline(128):
-            if _reported_returncode(line, nonce) is not None:
-                frame.append(line)
-                return
+        reported = read_authenticated_status(
+            stream,
+            marker=marker,
+            parse=lambda candidate: _reported_returncode(candidate, nonce),
+        )
+        if reported is not None:
+            frame.append(reported[0])
     finally:
         reached.set()
 
@@ -131,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     # Generated only after the process exists and delivered through the pipe that
     # remains its lifetime lease. Interpreter startup diagnostics run before the
     # worker module and can imitate a plain status line, but cannot know this frame.
-    nonce = secrets.token_hex(_NONCE_BYTES)
+    nonce = new_nonce()
     try:
         worker.stdin.write(f"{nonce}\n".encode("ascii"))
         worker.stdin.flush()

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -48,6 +52,7 @@ class _Pipe:
 
 
 _NONCE = "0123456789abcdef" * 4
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _Worker:
@@ -121,7 +126,7 @@ def test_worker_status_preserves_target_result_and_command(
         return child
 
     monkeypatch.setattr("builtins.print", lambda *a, **k: None)
-    monkeypatch.setattr(supervisor.secrets, "token_hex", lambda _size: _NONCE)
+    monkeypatch.setattr(supervisor, "new_nonce", lambda: _NONCE)
     monkeypatch.setenv("PYTHONPATH", ".")
     monkeypatch.setattr(supervisor, "_await_start", lambda: True)
     monkeypatch.setattr(supervisor.threading, "Thread", _StatusThread)
@@ -174,6 +179,25 @@ def test_worker_status_rejects_a_pre_token_completion_diagnostic():
     assert frame == [authentic]
 
 
+def test_worker_status_extracts_a_frame_after_an_unterminated_startup_hook():
+    reached = supervisor.threading.Event()
+    frame: list[bytes] = []
+    authentic = f"finished {_NONCE} 7\n".encode()
+
+    # This is the real shape produced by a sitecustomize hook that calls
+    # ``sys.stderr.write`` and flushes without a newline. The worker's first
+    # module-level status write continues on that same physical line.
+    supervisor._worker_status(
+        cast(Any, _Pipe(b"sitecustomize: checking interpreter" + authentic)),
+        reached,
+        frame,
+        _NONCE,
+    )
+
+    assert reached.is_set()
+    assert frame == [authentic]
+
+
 def test_worker_status_accepts_a_frame_after_large_startup_noise():
     reached = supervisor.threading.Event()
     frame: list[bytes] = []
@@ -189,3 +213,60 @@ def test_worker_status_accepts_a_frame_after_large_startup_noise():
 
     assert reached.is_set()
     assert frame == [authentic]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the cleanup uses POSIX process groups")
+def test_real_user_site_hook_cannot_join_the_completion_frame(tmp_path: Path):
+    base_executable = getattr(sys, "_base_executable", sys.executable)
+    environment = os.environ.copy()
+    environment.pop("PYTHONNOUSERSITE", None)
+    environment.pop("PYTHONPATH", None)
+    environment["PYTHONUSERBASE"] = str(tmp_path / "user-base")
+
+    located = subprocess.run(
+        [base_executable, "-c", "import site; print(site.getusersitepackages())"],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+        check=True,
+    )
+    user_site = Path(located.stdout.strip())
+    user_site.mkdir(parents=True)
+    (user_site / "linkedin-mcp-source.pth").write_text(f"{_REPO_ROOT}\n")
+    (user_site / "sitecustomize.py").write_text(
+        "import sys\n"
+        "sys.stderr.write('sitecustomize: checking interpreter')\n"
+        "sys.stderr.flush()\n"
+    )
+
+    process = subprocess.Popen(
+        [
+            base_executable,
+            "-s",
+            "-m",
+            "linkedin_mcp_server.installer_supervisor",
+            "--",
+            base_executable,
+            "-s",
+            "-c",
+            "raise SystemExit(7)",
+        ],
+        cwd=_REPO_ROOT,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert process.stdin is not None and process.stderr is not None
+    try:
+        assert process.stderr.readline() == b"armed\n"
+        process.stdin.write(b"start\n")
+        process.stdin.flush()
+        assert process.stderr.readline().startswith(b"started ")
+        assert process.wait(timeout=10) == 7
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=30)

@@ -9,9 +9,9 @@ import sys
 import threading
 from typing import NoReturn
 
+from linkedin_mcp_server.process_protocol import NONCE_LENGTH, valid_nonce
+
 _FINISHED = "finished"
-_NONCE_BYTES = 32
-_NONCE_LENGTH = _NONCE_BYTES * 2
 
 
 def _supervisor_eof(reached: threading.Event) -> None:
@@ -24,19 +24,16 @@ def _supervisor_eof(reached: threading.Event) -> None:
 def _await_nonce() -> str | None:
     """Consume the status token without buffering past the stdin lease frame."""
     frame = bytearray()
-    while len(frame) <= _NONCE_LENGTH:
+    while len(frame) <= NONCE_LENGTH:
         piece = os.read(sys.stdin.fileno(), 1)
         if not piece:
             return None
         if piece == b"\n":
             try:
                 nonce = frame.decode("ascii")
-                decoded = bytes.fromhex(nonce)
-            except (UnicodeDecodeError, ValueError):
+            except UnicodeDecodeError:
                 return None
-            if len(nonce) == _NONCE_LENGTH and len(decoded) == _NONCE_BYTES:
-                return nonce
-            return None
+            return nonce if valid_nonce(nonce) else None
         frame.extend(piece)
     return None
 

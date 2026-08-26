@@ -42,6 +42,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO, cast
 
 from linkedin_mcp_server import (
     __version__,
@@ -57,6 +58,7 @@ from linkedin_mcp_server.daemon import (
     look_up_owner,
 )
 from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
+from linkedin_mcp_server.process_protocol import new_nonce, read_authenticated_status
 from linkedin_mcp_server.process_tree import (
     ProcessTreeError,
     WindowsJob,
@@ -681,6 +683,10 @@ def _spawn(
             windows_job.close()
         raise
 
+    # Created only after Popen returns and carried only by the existing
+    # configuration pipe. Startup output written before that delivery cannot know
+    # the token the parent will accept.
+    handshake_nonce = new_nonce()
     assigned = False
     cleanup_needed = True
     try:
@@ -693,7 +699,9 @@ def _spawn(
         assert child.stdin is not None and child.stdout is not None
         started = time.monotonic()
         try:
-            _hand_over_config(child, config, timeout=timeout)
+            _hand_over_config(
+                child, config, handshake_nonce=handshake_nonce, timeout=timeout
+            )
         except TimeoutError:
             # Killed rather than left to itself, and the difference is a wedge
             # that never heals. A child still waiting on its configuration is
@@ -719,7 +727,11 @@ def _spawn(
         # waiting for the verdict are two ways of waiting on the same child, and
         # giving each the full budget would let a slow one spend twice what the
         # caller allowed.
-        verdict = _await_ready(child, timeout=timeout - (time.monotonic() - started))
+        verdict = _await_ready(
+            child,
+            handshake_nonce=handshake_nonce,
+            timeout=timeout - (time.monotonic() - started),
+        )
         if verdict is _Started.STILL_TRYING:
             # Stopped, not left to itself, and this is the last of the lock
             # wedges. "Still trying" reads as generous — the child may yet come
@@ -853,7 +865,11 @@ def _stop_child(
 
 
 def _hand_over_config(
-    child: subprocess.Popen[bytes], config: AppConfig, *, timeout: float
+    child: subprocess.Popen[bytes],
+    config: AppConfig,
+    *,
+    handshake_nonce: str,
+    timeout: float,
 ) -> None:
     """Write the configuration to the child, without waiting on it forever.
 
@@ -882,7 +898,7 @@ def _hand_over_config(
     """
     stream = child.stdin
     assert stream is not None
-    payload = daemon_config.encode(config).encode()
+    payload = daemon_config.encode_handover(config, handshake_nonce).encode()
 
     done: queue.Queue[BaseException | None] = queue.Queue()
 
@@ -1059,19 +1075,32 @@ def _reap(child: subprocess.Popen[bytes]) -> None:
         child.poll()
 
 
-def _await_ready(child: subprocess.Popen[bytes], *, timeout: float) -> _Started:
-    """Wait for the child's verdict, or for it to die trying.
+def _reported_owner_verdict(frame: bytes, handshake_nonce: str) -> str | None:
+    ready = f"{daemon_owner.HANDSHAKE} {handshake_nonce} {daemon_owner.READY}\n".encode(
+        "ascii"
+    )
+    failed = (
+        f"{daemon_owner.HANDSHAKE} {handshake_nonce} {daemon_owner.FAILED}\n".encode(
+            "ascii"
+        )
+    )
+    if frame == ready:
+        return daemon_owner.READY
+    if frame == failed:
+        return daemon_owner.FAILED
+    return None
 
-    Three outcomes, and the third is why this is a pipe rather than a file.
-    ``ready`` means the endpoint answered a real request and the descriptor is
-    on disk. ``failed`` means the child said so. End of file with neither means
-    the child is gone, which covers a crash during imports and a kill from
-    outside, and it arrives at once instead of after the timeout.
 
-    Lines are scanned rather than only the first one read. The child redirects
-    its standard output away as soon as it can, but that is not the very first
-    thing it does, and a library that greets the terminal on import would
-    otherwise turn a healthy owner into a failed election.
+def _await_ready(
+    child: subprocess.Popen[bytes], *, handshake_nonce: str, timeout: float
+) -> _Started:
+    """Wait for the child's authenticated verdict, or for it to die trying.
+
+    End of file without a valid frame covers a crash during imports, a config-read
+    failure and a kill from outside. Startup hooks may write arbitrary bytes first,
+    including plain ``ready`` or ``failed`` and an unterminated prefix. They ran
+    before the post-spawn nonce existed, so bounded scanning can discard them and
+    extract only the exact frame written by the owner module.
 
     Read on a thread rather than with a readiness check on the descriptor.
     ``select`` accepts only sockets on Windows, so the obvious portable-looking
@@ -1086,27 +1115,19 @@ def _await_ready(child: subprocess.Popen[bytes], *, timeout: float) -> _Started:
 
     def collect() -> None:
         try:
-            seen = 0
-            for line in stream:
-                verdict = line.decode("utf-8", "replace").strip()
-                if verdict in (daemon_owner.READY, daemon_owner.FAILED):
-                    verdicts.put(verdict)
-                    return
-                # Bounded, so a child stuck printing cannot keep this thread
-                # alive for the owner's whole lifetime.
-                seen += len(line)
-                if seen > 4096:
-                    break
+            marker = f"{daemon_owner.HANDSHAKE} {handshake_nonce} ".encode("ascii")
+            reported = read_authenticated_status(
+                cast(BinaryIO, stream),
+                marker=marker,
+                parse=lambda frame: _reported_owner_verdict(frame, handshake_nonce),
+                max_diagnostic_bytes=4096,
+            )
+            verdicts.put(reported[1] if reported is not None else None)
         except OSError:  # pragma: no cover - the stream closed under us
-            pass
-        finally:
-            # End of file, or a child that talked without ever answering. Either
-            # way the caller must stop waiting, so absence is a message too.
             verdicts.put(None)
 
     # A daemon thread: if the child neither answers nor exits, the frontend must
-    # still be able to shut down. It holds only this pipe, which the caller
-    # closes.
+    # still be able to shut down. It holds only this pipe, which the caller closes.
     reader = threading.Thread(target=collect, name="daemon-handshake", daemon=True)
     reader.start()
 

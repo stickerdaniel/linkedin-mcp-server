@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import io
 import os
 import signal
 import socket
@@ -811,9 +812,10 @@ class TestFailingFast:
                 [
                     command[0],
                     "-c",
-                    "import sys, time\n"
-                    "sys.stdin.read()\n"
-                    "sys.stdout.write('failed\\n')\n"
+                    "import json, sys, time\n"
+                    "handover = json.load(sys.stdin)\n"
+                    "nonce = handover['handshake_nonce']\n"
+                    "sys.stdout.write(f'owner {nonce} failed\\n')\n"
                     "sys.stdout.flush()\n"
                     "time.sleep(600)\n",
                 ],
@@ -861,12 +863,13 @@ class TestFailingFast:
             if command[1:4] != ["-P", "-m", "linkedin_mcp_server.daemon_owner"]:
                 return real(command, **kwargs)
             script = (
-                "import pathlib, subprocess, sys, time\n"
-                "sys.stdin.readline()\n"
+                "import json, pathlib, subprocess, sys, time\n"
+                "handover = json.load(sys.stdin)\n"
+                "nonce = handover['handshake_nonce']\n"
                 "grandchild = subprocess.Popen([sys.executable, '-c', "
                 "'import time; time.sleep(600)'])\n"
                 f"pathlib.Path({str(pid_file)!r}).write_text(str(grandchild.pid))\n"
-                "sys.stdout.write('failed\\n')\n"
+                "sys.stdout.write(f'owner {nonce} failed\\n')\n"
                 "sys.stdout.flush()\n"
                 "time.sleep(600)\n"
             )
@@ -1254,6 +1257,59 @@ def test_windows_owner_cleanup_uses_taskkill(monkeypatch: pytest.MonkeyPatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("startup_output", "authenticated", "expected"),
+    [
+        (b"ready\nfailed\n", "failed", _Started.NO),
+        (b"failed\nready\n", "ready", _Started.YES),
+        (b"sitecustomize: ready", "ready", _Started.YES),
+    ],
+)
+def test_owner_startup_verdicts_require_the_post_spawn_nonce(
+    startup_output: bytes, authenticated: str, expected: _Started
+):
+    nonce = "0123456789abcdef" * 4
+    frame = f"owner {nonce} {authenticated}\n".encode()
+    child = SimpleNamespace(stdout=io.BytesIO(startup_output + frame))
+
+    assert (
+        election_module._await_ready(cast(Any, child), handshake_nonce=nonce, timeout=1)
+        is expected
+    )
+
+
+def test_owner_rejects_unauthenticated_startup_verdicts_at_eof():
+    nonce = "0123456789abcdef" * 4
+    child = SimpleNamespace(stdout=io.BytesIO(b"ready\nfailed\n"))
+
+    assert (
+        election_module._await_ready(cast(Any, child), handshake_nonce=nonce, timeout=1)
+        is _Started.NO
+    )
+
+
+def test_owner_startup_diagnostics_are_bounded():
+    class _NoisyStartup:
+        reads = 0
+
+        def readline(self, size: int = -1) -> bytes:
+            self.reads += 1
+            return b"x" * size
+
+    stream = _NoisyStartup()
+    child = SimpleNamespace(stdout=stream)
+
+    assert (
+        election_module._await_ready(
+            cast(Any, child),
+            handshake_nonce="0123456789abcdef" * 4,
+            timeout=1,
+        )
+        is _Started.NO
+    )
+    assert stream.reads <= 34
+
+
 @pytest.mark.slow
 class TestWindowsOwnerHandoff:
     def test_assignment_precedes_release_and_parent_close_follows_ready(
@@ -1262,6 +1318,7 @@ class TestWindowsOwnerHandoff:
         profile = _profile(tmp_path)
         config = _config(profile)
         events: list[str] = []
+        handshake_nonce = "0123456789abcdef" * 4
 
         class _Stream:
             def write(self, _payload: bytes) -> int:
@@ -1315,14 +1372,26 @@ class TestWindowsOwnerHandoff:
             assert nonce == "nonce"
             events.append("release-gate")
 
-        def hand_over(process: object, sent: AppConfig, *, timeout: float) -> None:
+        def make_handshake_nonce() -> str:
+            events.append("create-handshake-nonce")
+            return handshake_nonce
+
+        def hand_over(
+            process: object,
+            sent: AppConfig,
+            *,
+            handshake_nonce: str,
+            timeout: float,
+        ) -> None:
             assert process is child
             assert sent is config
+            assert handshake_nonce == "0123456789abcdef" * 4
             assert timeout == 1
             events.append("config")
 
-        def ready(process: object, *, timeout: float) -> _Started:
+        def ready(process: object, *, handshake_nonce: str, timeout: float) -> _Started:
             assert process is child
+            assert handshake_nonce == "0123456789abcdef" * 4
             assert timeout <= 1
             assert jobs and not cast(Any, jobs[0]).closed
             events.append("ready")
@@ -1333,6 +1402,7 @@ class TestWindowsOwnerHandoff:
         )
         monkeypatch.setattr(election_module, "WindowsJob", _Job)
         monkeypatch.setattr(election_module, "release_nonce", lambda: "nonce")
+        monkeypatch.setattr(election_module, "new_nonce", make_handshake_nonce)
         monkeypatch.setattr(election_module, "windows_gate_command", gate)
         monkeypatch.setattr(election_module.subprocess, "Popen", popen)
         monkeypatch.setattr(election_module, "release_windows_gate", release)
@@ -1351,6 +1421,7 @@ class TestWindowsOwnerHandoff:
             "create-job",
             "build-gate",
             "start-gate",
+            "create-handshake-nonce",
             "assign-gate",
             "release-gate",
             "config",
@@ -2851,7 +2922,7 @@ class TestPublishingLast:
             daemon_owner, "create_owner_server", lambda **kwargs: _StoppedServer()
         )
 
-        handshake = daemon_owner._Handshake(None)
+        handshake = daemon_owner._Handshake(None, "0123456789abcdef" * 4)
         asyncio.run(
             daemon_owner._serve(
                 lock=DaemonLock(auth_root),
