@@ -1292,7 +1292,7 @@ class TestWindowsOwnerHandoff:
                 assert process is child
                 events.append("assign-gate")
 
-            def terminate_and_wait(self) -> None:  # pragma: no cover - success path
+            def terminate(self) -> None:  # pragma: no cover - success path
                 raise AssertionError("a ready owner was terminated")
 
             def close(self) -> None:
@@ -1384,7 +1384,7 @@ class TestWindowsOwnerHandoff:
             def close(self) -> None:
                 events.append("close-job")
 
-            def terminate_and_wait(self) -> None:  # pragma: no cover - unassigned
+            def terminate(self) -> None:  # pragma: no cover - unassigned
                 raise AssertionError("an unassigned Job was terminated")
 
         election_module._stop_child(
@@ -1399,29 +1399,53 @@ class TestWindowsOwnerHandoff:
             "wait-2",
         ]
 
-    def test_post_assignment_cleanup_drains_the_job(self):
+    def test_post_assignment_cleanup_releases_gate_handle_before_drain(self):
         events: list[str] = []
+
+        class _ProcessHandle:
+            closed = False
+
+            def Close(self) -> None:
+                self.closed = True
+                events.append("close-gate-handle")
 
         class _Child:
             pid = 4242
             stdin = None
+            returncode: int | None = None
+            _handle = _ProcessHandle()
 
             def wait(self, timeout: float) -> int:
                 events.append("reap-gate")
+                self.returncode = 1
                 return 1
 
-        class _Job:
-            def close(self) -> None:  # pragma: no cover - drain owns close
-                raise AssertionError("assigned cleanup only closed the Job")
+        child = _Child()
 
-            def terminate_and_wait(self) -> None:
+        class _Job:
+            def terminate(self) -> None:
+                events.append("terminate-job")
+
+            def release_popen_handle(self, process: object) -> None:
+                assert process is child
+                assert child.returncode == 1
+                child._handle.Close()
+
+            def wait_until_empty(self, *, timeout: float) -> None:
+                assert timeout <= 2
+                assert child._handle.closed
                 events.append("drain-job")
 
         election_module._stop_child(
-            cast(Any, _Child()), windows_job=cast(Any, _Job()), assigned=True
+            cast(Any, child), windows_job=cast(Any, _Job()), assigned=True
         )
 
-        assert events == ["drain-job", "reap-gate"]
+        assert events == [
+            "terminate-job",
+            "reap-gate",
+            "close-gate-handle",
+            "drain-job",
+        ]
 
 
 class TestRealOwner:

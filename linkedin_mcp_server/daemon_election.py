@@ -802,7 +802,18 @@ def _stop_child(
     deadline = time.monotonic() + _STOP_CHILD_SECONDS
     if windows_job is not None:
         if assigned:
-            windows_job.terminate_and_wait()
+            windows_job.terminate()
+            try:
+                child.wait(timeout=max(deadline - time.monotonic(), 0.0))
+            except subprocess.TimeoutExpired as exc:
+                raise ProcessTreeError(
+                    "The Windows owner gate did not exit after Job termination"
+                ) from exc
+            # ActiveProcesses includes an exited member until every process-handle
+            # reference is released. CPython retains this direct gate handle after
+            # wait(), so release it before asking the Job to prove it is empty.
+            windows_job.release_popen_handle(child)
+            windows_job.wait_until_empty(timeout=max(deadline - time.monotonic(), 0.0))
         else:
             # Before assignment EOF is the only contained stop. If the isolated
             # gate does not accept it, stop and reap that direct child explicitly.
@@ -815,12 +826,12 @@ def _stop_child(
                 child.kill()
             finally:
                 windows_job.close()
-        try:
-            child.wait(timeout=max(deadline - time.monotonic(), 0.0))
-        except subprocess.TimeoutExpired as exc:
-            raise ProcessTreeError(
-                "The Windows owner gate did not exit after Job drainage"
-            ) from exc
+            try:
+                child.wait(timeout=max(deadline - time.monotonic(), 0.0))
+            except subprocess.TimeoutExpired as exc:
+                raise ProcessTreeError(
+                    "The Windows owner gate did not exit after cleanup"
+                ) from exc
         return
 
     stopped_tree = terminate_process_group(

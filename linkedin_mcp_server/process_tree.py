@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import importlib
 import logging
@@ -18,6 +19,7 @@ from typing import Any, NoReturn
 logger = logging.getLogger(__name__)
 
 _adopted_windows_job: int | None = None
+_retained_windows_jobs: list[WindowsJob] = []
 _JOB_API_FAILURE_LIMIT = 3
 _JOB_POLL_SECONDS = 0.01
 _JOB_NAME_ATTEMPTS = 8
@@ -189,17 +191,45 @@ class WindowsJob:
                 "Windows did not retain the managed process in its Job"
             )
 
-    def terminate_and_wait(self) -> None:
-        """Terminate the Job and return only after it has no active process."""
+    def terminate(self) -> None:
+        """Request unconditional termination of every process in the Job."""
         handle = self._require_handle()
-        consecutive_failures = 0
-        while True:
-            termination_error: BaseException | None = None
+        last_error: BaseException | None = None
+        for attempt in range(_JOB_API_FAILURE_LIMIT):
             try:
                 self._win32job.TerminateJobObject(handle, 1)
+                return
             except BaseException as exc:  # noqa: BLE001 - wrapped after retries
-                termination_error = exc
+                last_error = exc
+            if attempt + 1 < _JOB_API_FAILURE_LIMIT:
+                time.sleep(_JOB_POLL_SECONDS)
+        raise ProcessTreeError("Windows could not terminate the managed Job") from (
+            last_error
+        )
 
+    def release_popen_handle(self, child: subprocess.Popen[Any]) -> None:
+        """Release an exited CPython ``Popen`` process-object reference."""
+        if child.returncode is None:
+            raise ProcessTreeError(
+                "Windows cannot release a process handle before process exit"
+            )
+        process_handle = getattr(child, "_handle", None)
+        close = getattr(process_handle, "Close", None)
+        if not callable(close):
+            raise ProcessTreeError("Windows Popen exposed no releasable process handle")
+        try:
+            close()
+        except Exception as exc:
+            raise ProcessTreeError(
+                "Windows could not release the managed process handle"
+            ) from exc
+
+    def wait_until_empty(self, *, timeout: float) -> None:
+        """Close the Job after bounded proof that no process remains associated."""
+        handle = self._require_handle()
+        deadline = time.monotonic() + max(timeout, 0.0)
+        consecutive_failures = 0
+        while True:
             try:
                 accounting = self._win32job.QueryInformationJobObject(
                     handle, self._win32job.JobObjectBasicAccountingInformation
@@ -208,30 +238,35 @@ class WindowsJob:
             except BaseException as exc:  # noqa: BLE001 - never treated as empty
                 consecutive_failures += 1
                 if consecutive_failures >= _JOB_API_FAILURE_LIMIT:
+                    self._retain()
                     raise ProcessTreeError(
                         "Windows could not verify that the managed Job drained"
                     ) from exc
-                time.sleep(_JOB_POLL_SECONDS)
-                continue
-
-            if active == 0:
-                self.close()
-                return
-            if termination_error is None:
-                consecutive_failures = 0
             else:
-                consecutive_failures += 1
-                if consecutive_failures >= _JOB_API_FAILURE_LIMIT:
-                    raise ProcessTreeError(
-                        "Windows could not terminate the managed Job"
-                    ) from termination_error
-            time.sleep(_JOB_POLL_SECONDS)
+                consecutive_failures = 0
+                if active == 0:
+                    self.close()
+                    return
+
+            if time.monotonic() >= deadline:
+                self._retain()
+                raise ProcessTreeError(
+                    "The managed Windows Job did not drain before its deadline"
+                )
+            time.sleep(min(_JOB_POLL_SECONDS, max(deadline - time.monotonic(), 0.0)))
+
+    def _retain(self) -> None:
+        """Keep containment authority alive after drainage cannot be proved."""
+        if self not in _retained_windows_jobs:
+            _retained_windows_jobs.append(self)
 
     def close(self) -> None:
         """Close this owner handle without claiming the Job drained."""
         handle, self._handle = self._handle, None
         if handle is not None:
             handle.Close()
+        with contextlib.suppress(ValueError):
+            _retained_windows_jobs.remove(self)
 
     def _require_handle(self) -> Any:
         if self._handle is None:

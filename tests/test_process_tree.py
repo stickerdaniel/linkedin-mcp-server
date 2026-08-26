@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 from collections.abc import Iterator
+from itertools import repeat
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -276,6 +277,7 @@ class TestWindowsJobSetup:
             ) -> dict[str, Any]:
                 if info_class == _Win32Job.JobObjectExtendedLimitInformation:
                     return {"BasicLimitInformation": {"LimitFlags": 16}}
+                events.append(("accounting", (_handle, info_class)))
                 value = next(accounting)
                 if isinstance(value, BaseException):
                     raise value
@@ -450,7 +452,7 @@ class TestWindowsJobSetup:
 
         assert job.name == f"Local\\linkedin-mcp-owner-{'b' * 32}"
 
-    def test_terminate_retries_until_active_processes_are_zero(
+    def test_termination_and_drain_are_separate_and_bounded(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         events: list[tuple[str, Any]] = []
@@ -460,12 +462,54 @@ class TestWindowsJobSetup:
         monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
         job = process_tree.WindowsJob.anonymous()
 
-        job.terminate_and_wait()
+        job.terminate()
+        assert len([event for event in events if event[0] == "terminate"]) == 1
+        assert not handle.closed
 
-        assert len([event for event in events if event[0] == "terminate"]) == 3
+        job.wait_until_empty(timeout=1)
+
         assert handle.closed
 
-    def test_query_failures_never_mean_empty_and_retain_the_handle(
+    def test_exited_popen_handle_is_released_before_job_drain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        events: list[tuple[str, Any]] = []
+        modules = self._modules(events, _JobHandle())
+        self._patch_modules(monkeypatch, modules)
+        job = process_tree.WindowsJob.anonymous()
+
+        class _ProcessHandle:
+            closed = False
+
+            def Close(self) -> None:
+                self.closed = True
+
+        process_handle = _ProcessHandle()
+        child = cast(
+            subprocess.Popen[Any],
+            SimpleNamespace(returncode=7, _handle=process_handle),
+        )
+
+        job.release_popen_handle(child)
+
+        assert process_handle.closed
+
+    def test_live_popen_handle_cannot_be_released(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        events: list[tuple[str, Any]] = []
+        modules = self._modules(events, _JobHandle())
+        self._patch_modules(monkeypatch, modules)
+        job = process_tree.WindowsJob.anonymous()
+        child = cast(
+            subprocess.Popen[Any],
+            SimpleNamespace(returncode=None, _handle=_JobHandle()),
+        )
+
+        with pytest.raises(process_tree.ProcessTreeError, match="before process exit"):
+            job.release_popen_handle(child)
+
+    def test_query_failures_never_mean_empty_and_retain_containment(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         events: list[tuple[str, Any]] = []
@@ -474,19 +518,37 @@ class TestWindowsJobSetup:
         modules = self._modules(events, handle, active=failures)
         self._patch_modules(monkeypatch, modules)
         monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(process_tree, "_retained_windows_jobs", [])
         job = process_tree.WindowsJob.anonymous()
 
         with pytest.raises(process_tree.ProcessTreeError, match="verify"):
-            job.terminate_and_wait()
+            job.wait_until_empty(timeout=1)
 
         assert not handle.closed
+        assert process_tree._retained_windows_jobs == [job]
 
-    def test_failed_termination_retries_while_members_remain(
+    def test_positive_active_count_hits_deadline_and_retains_containment(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         events: list[tuple[str, Any]] = []
         handle = _JobHandle()
-        modules = self._modules(events, handle, active=iter([2, 1, 0]))
+        modules = self._modules(events, handle, active=repeat(1))
+        self._patch_modules(monkeypatch, modules)
+        monkeypatch.setattr(process_tree, "_retained_windows_jobs", [])
+        job = process_tree.WindowsJob.anonymous()
+
+        with pytest.raises(process_tree.ProcessTreeError, match="deadline"):
+            job.wait_until_empty(timeout=0)
+
+        assert not handle.closed
+        assert process_tree._retained_windows_jobs == [job]
+
+    def test_failed_termination_retries_without_polling_the_job(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        events: list[tuple[str, Any]] = []
+        handle = _JobHandle()
+        modules = self._modules(events, handle, active=iter([0]))
         job_api = cast(Any, modules["win32job"])
         attempts = 0
 
@@ -502,17 +564,18 @@ class TestWindowsJobSetup:
         monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
         job = process_tree.WindowsJob.anonymous()
 
-        job.terminate_and_wait()
+        job.terminate()
 
-        assert attempts == 3
-        assert handle.closed
+        assert attempts == 2
+        assert not [event for event in events if event[0] == "accounting"]
+        assert not handle.closed
 
     def test_persistent_termination_failure_is_fatal_and_retains_the_handle(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         events: list[tuple[str, Any]] = []
         handle = _JobHandle()
-        modules = self._modules(events, handle, active=iter([2, 2, 2]))
+        modules = self._modules(events, handle)
         job_api = cast(Any, modules["win32job"])
 
         def fail_termination(*_args: object) -> None:
@@ -524,7 +587,7 @@ class TestWindowsJobSetup:
         job = process_tree.WindowsJob.anonymous()
 
         with pytest.raises(process_tree.ProcessTreeError, match="terminate"):
-            job.terminate_and_wait()
+            job.terminate()
 
         assert not handle.closed
 
@@ -1006,7 +1069,10 @@ time.sleep(600)
             assert _wait_gone(owner_pid, descendant_pid)
         finally:
             if not job.closed:
-                job.terminate_and_wait()
+                job.terminate()
+                process.wait(timeout=30)
+                job.release_popen_handle(process)
+                job.wait_until_empty(timeout=30)
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=30)
@@ -1060,12 +1126,17 @@ print(os.getpid(), child.pid, file=control, flush=True)
 
             assert process.wait(timeout=30) == 0
             assert _alive(descendant_pid)
-            job.terminate_and_wait()
+            job.terminate()
+            job.release_popen_handle(process)
+            job.wait_until_empty(timeout=30)
             assert held.read() == b""
             assert _wait_gone(target_pid, descendant_pid)
         finally:
             if not job.closed:
-                job.terminate_and_wait()
+                job.terminate()
+                process.wait(timeout=30)
+                job.release_popen_handle(process)
+                job.wait_until_empty(timeout=30)
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=30)
@@ -1132,12 +1203,19 @@ time.sleep(600)
                 pytest.fail("the assigned target did not create its descendants")
             target_pid, descendant_pid = map(int, marker.read_text().split())
 
-            await asyncio.to_thread(job.terminate_and_wait)
-            await asyncio.wait_for(process.wait(), timeout=30)
+            await asyncio.to_thread(job.terminate)
+            while process.returncode is None:
+                await asyncio.sleep(0.01)
+            job.release_popen_handle(popen)
+            await asyncio.to_thread(job.wait_until_empty, timeout=30)
             assert _wait_gone(target_pid, descendant_pid)
         finally:
             if not job.closed:
-                await asyncio.to_thread(job.terminate_and_wait)
+                await asyncio.to_thread(job.terminate)
+                while process.returncode is None:
+                    await asyncio.sleep(0.01)
+                job.release_popen_handle(popen)
+                await asyncio.to_thread(job.wait_until_empty, timeout=30)
             if process.returncode is None:
                 process.kill()
                 await process.wait()
@@ -1169,11 +1247,16 @@ time.sleep(600)
             job.assign_popen(process)
             assert process.stdin is not None
             process_tree.release_windows_gate(process.stdin, nonce)
-            job.terminate_and_wait()
+            job.terminate()
             assert process.wait(timeout=30) != 0
+            job.release_popen_handle(process)
+            job.wait_until_empty(timeout=30)
         finally:
             if not job.closed:
-                job.terminate_and_wait()
+                job.terminate()
+                process.wait(timeout=30)
+                job.release_popen_handle(process)
+                job.wait_until_empty(timeout=30)
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=30)

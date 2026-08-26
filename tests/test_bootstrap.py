@@ -1376,6 +1376,7 @@ class TestInstallerSupervisorLaunch:
         started = await bootstrap._start_installer_supervisor("--no-shell")
 
         assert started.process is proc
+        assert started.windows_popen is popen
         assert started.assigned
         assert events == [
             "create-job",
@@ -1534,31 +1535,63 @@ class TestInstallerSupervisorLaunch:
         assert exit_waits == [6.0, 4.0]
         assert observed_remaining == [10.0, 6.0, 4.0, 0.0, 0.0]
 
-    async def test_assigned_windows_cleanup_drains_the_job_off_loop(self, monkeypatch):
+    async def test_assigned_windows_cleanup_releases_handle_before_drain_off_loop(
+        self,
+    ):
         from linkedin_mcp_server import bootstrap
 
         main_thread = threading.get_ident()
-        drained_on: list[int] = []
+        worker_threads: list[int] = []
+        events: list[str] = []
         proc = _FakeProc([], 0)
+
+        class _Handle:
+            closed = False
+
+            def Close(self) -> None:
+                self.closed = True
+                events.append("release-handle")
+
+        popen = SimpleNamespace(returncode=None, _handle=_Handle())
 
         class _Job:
             closed = False
 
-            def terminate_and_wait(self) -> None:
-                drained_on.append(threading.get_ident())
+            def terminate(self) -> None:
+                worker_threads.append(threading.get_ident())
+                events.append("terminate-job")
+                proc.returncode = 1
+                popen.returncode = 1
                 proc.stdout.exhausted = True
+
+            def release_popen_handle(self, process: object) -> None:
+                assert process is popen
+                assert popen.returncode == 1
+                popen._handle.Close()
+
+            def wait_until_empty(self, *, timeout: float) -> None:
+                worker_threads.append(threading.get_ident())
+                assert timeout <= bootstrap._INSTALLER_STOP_SECONDS
+                assert popen._handle.closed
+                events.append("drain-job")
                 self.closed = True
 
         job = _Job()
         managed = bootstrap._InstallerProcess(
-            cast(Any, proc), windows_job=cast(Any, job), assigned=True
+            cast(Any, proc),
+            windows_job=cast(Any, job),
+            windows_popen=cast(Any, popen),
+            assigned=True,
         )
 
         await bootstrap._stop_installer_once(managed)
 
-        assert drained_on and drained_on != [main_thread]
+        assert worker_threads and all(
+            thread != main_thread for thread in worker_threads
+        )
+        assert events == ["terminate-job", "release-handle", "drain-job"]
         assert not managed.assigned
-        assert proc.waited
+        assert managed.windows_popen is None
 
     async def test_unassigned_windows_cleanup_closes_the_gate_and_job(self):
         from linkedin_mcp_server import bootstrap
@@ -1859,74 +1892,118 @@ class TestPatchrightInstallStreaming:
         assert spawned.proc.stdin.closed
         assert spawned.proc.waited
 
-    async def test_windows_normal_completion_drains_before_pipe_eof(self, monkeypatch):
+    async def test_windows_normal_completion_uses_exit_callback_before_pipe_eof(
+        self, monkeypatch
+    ):
         from linkedin_mcp_server import bootstrap
 
         events: list[str] = []
+        pipe_eof = asyncio.Event()
+
+        class _Handle:
+            closed = False
+
+            def Close(self) -> None:
+                self.closed = True
+                events.append("release-handle")
+
+        popen = SimpleNamespace(returncode=None, _handle=_Handle())
 
         class _Job:
             closed = False
             terminated = False
 
-            def terminate_and_wait(self) -> None:
-                events.append("drain-job")
+            def terminate(self) -> None:
+                events.append("terminate-job")
                 self.terminated = True
+
+            def release_popen_handle(self, process: object) -> None:
+                assert process is popen
+                assert popen.returncode == 0
+                popen._handle.Close()
+
+            def wait_until_empty(self, *, timeout: float) -> None:
+                assert timeout <= bootstrap._INSTALLER_STOP_SECONDS
+                assert popen._handle.closed
+                events.append("drain-job")
                 self.closed = True
 
         job = _Job()
 
-        class _HeldStream:
-            sent = False
-
-            async def read(self, _n: int = -1) -> bytes:
-                if not self.sent:
-                    self.sent = True
-                    return b"complete\n"
-                while not job.terminated:
-                    await asyncio.sleep(0)
-                events.append("stdout-eof")
-                return b""
-
         class _Process:
             pid = 424242
             stdin = _FakeStdin()
-            stdout = _HeldStream()
             stderr = _FakeProtocol()
             returncode: int | None = None
 
+            def __init__(self) -> None:
+                self.stdout = _HeldStream(self)
+                self.wait_calls = 0
+
             async def wait(self) -> int:
-                events.append("gate-exit")
-                self.returncode = 0
+                self.wait_calls += 1
+                await pipe_eof.wait()
                 return 0
 
             def kill(self) -> None:  # pragma: no cover - success path
                 raise AssertionError("normal completion killed the gate")
 
+        class _HeldStream:
+            def __init__(self, process: _Process) -> None:
+                self.process = process
+                self.sent = False
+
+            async def read(self, _n: int = -1) -> bytes:
+                if not self.sent:
+                    self.sent = True
+                    self.process.returncode = 0
+                    popen.returncode = 0
+                    events.append("proactor-exit")
+                    return b"complete\n"
+                while not job.terminated:
+                    await asyncio.sleep(0)
+                events.append("stdout-eof")
+                pipe_eof.set()
+                return b""
+
+        process = _Process()
         managed = bootstrap._InstallerProcess(
-            cast(Any, _Process()), windows_job=cast(Any, job), assigned=True
+            cast(Any, process),
+            windows_job=cast(Any, job),
+            windows_popen=cast(Any, popen),
+            assigned=True,
         )
         monkeypatch.setattr(
             bootstrap, "_start_installer_supervisor", AsyncMock(return_value=managed)
         )
+        process_wait = asyncio.create_task(process.wait())
+        await asyncio.sleep(0)
+        assert not process_wait.done()
 
         await asyncio.wait_for(
             bootstrap._run_patchright_install("--no-shell"), timeout=1
         )
 
-        assert events.index("drain-job") < events.index("stdout-eof")
+        assert await process_wait == 0
+        assert process.wait_calls == 1
+        assert events.index("proactor-exit") < events.index("terminate-job")
+        assert events.index("terminate-job") < events.index("stdout-eof")
+        assert events.index("release-handle") < events.index("drain-job")
         assert not managed.assigned
 
     async def test_windows_callback_failure_drains_the_job(self, monkeypatch):
         from linkedin_mcp_server import bootstrap
 
-        drained = asyncio.Event()
+        events: list[str] = []
 
-        class _Job:
+        class _Handle:
             closed = False
 
-            def terminate_and_wait(self) -> None:
+            def Close(self) -> None:
                 self.closed = True
-                loop.call_soon_threadsafe(drained.set)
+                events.append("release-handle")
+
+        popen = SimpleNamespace(returncode=None, _handle=_Handle())
 
         class _Process:
             pid = 424242
@@ -1935,18 +2012,39 @@ class TestPatchrightInstallStreaming:
             stderr = _FakeProtocol()
             returncode: int | None = None
 
-            async def wait(self) -> int:
-                await drained.wait()
-                self.returncode = 1
-                return 1
+            async def wait(self) -> int:  # pragma: no cover - Windows uses callback
+                raise AssertionError("cleanup waited for pipe EOF before termination")
 
             def kill(self) -> None:  # pragma: no cover - assigned Job owns cleanup
                 raise AssertionError("callback cleanup killed only the gate")
 
-        loop = asyncio.get_running_loop()
+        process = _Process()
+
+        class _Job:
+            closed = False
+
+            def terminate(self) -> None:
+                events.append("terminate-job")
+                process.returncode = 1
+                popen.returncode = 1
+                process.stdout.exhausted = True
+
+            def release_popen_handle(self, child: object) -> None:
+                assert child is popen
+                popen._handle.Close()
+
+            def wait_until_empty(self, *, timeout: float) -> None:
+                assert timeout <= bootstrap._INSTALLER_STOP_SECONDS
+                assert popen._handle.closed
+                events.append("drain-job")
+                self.closed = True
+
         job = _Job()
         managed = bootstrap._InstallerProcess(
-            cast(Any, _Process()), windows_job=cast(Any, job), assigned=True
+            cast(Any, process),
+            windows_job=cast(Any, job),
+            windows_popen=cast(Any, popen),
+            assigned=True,
         )
         monkeypatch.setattr(
             bootstrap, "_start_installer_supervisor", AsyncMock(return_value=managed)
@@ -1958,26 +2056,118 @@ class TestPatchrightInstallStreaming:
         with pytest.raises(RuntimeError, match="consumer died"):
             await bootstrap._run_patchright_install("--no-shell", line_callback=explode)
 
-        assert drained.is_set()
+        assert events == ["terminate-job", "release-handle", "drain-job"]
         assert not managed.assigned
 
-    async def test_windows_drain_failure_is_not_swallowed(self, monkeypatch):
+    async def test_windows_cancellation_during_normal_drain_reuses_one_cleanup(
+        self, monkeypatch
+    ):
         from linkedin_mcp_server import bootstrap
-        from linkedin_mcp_server.process_tree import ProcessTreeError
 
-        calls = 0
+        events: list[str] = []
+        drain_started = threading.Event()
+        release_drain = threading.Event()
+
+        class _Handle:
+            closed = False
+
+            def Close(self) -> None:
+                self.closed = True
+                events.append("release-handle")
+
+        popen = SimpleNamespace(returncode=0, _handle=_Handle())
 
         class _Job:
             closed = False
 
-            def terminate_and_wait(self) -> None:
-                nonlocal calls
-                calls += 1
+            def terminate(self) -> None:
+                events.append("terminate-job")
+
+            def release_popen_handle(self, child: object) -> None:
+                assert child is popen
+                popen._handle.Close()
+
+            def wait_until_empty(self, *, timeout: float) -> None:
+                assert timeout <= bootstrap._INSTALLER_STOP_SECONDS
+                events.append("drain-start")
+                drain_started.set()
+                assert release_drain.wait(timeout)
+                events.append("drain-finish")
+                self.closed = True
+
+        proc = _FakeProc([], 0)
+        proc.returncode = 0
+        managed = bootstrap._InstallerProcess(
+            cast(Any, proc),
+            windows_job=cast(Any, _Job()),
+            windows_popen=cast(Any, popen),
+            assigned=True,
+        )
+        monkeypatch.setattr(
+            bootstrap, "_start_installer_supervisor", AsyncMock(return_value=managed)
+        )
+
+        install = asyncio.create_task(bootstrap._run_patchright_install("--no-shell"))
+        assert await asyncio.to_thread(drain_started.wait, 1)
+        cleanup = managed.windows_cleanup
+        assert cleanup is not None
+        install.cancel()
+        await asyncio.sleep(0)
+
+        assert not install.done()
+        assert managed.windows_cleanup is cleanup
+        assert events == ["terminate-job", "release-handle", "drain-start"]
+
+        release_drain.set()
+        with pytest.raises(asyncio.CancelledError):
+            await install
+
+        assert managed.windows_cleanup is cleanup
+        assert events == [
+            "terminate-job",
+            "release-handle",
+            "drain-start",
+            "drain-finish",
+        ]
+        assert not managed.assigned
+
+    async def test_windows_drain_failure_is_not_swallowed_or_retried(self, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.process_tree import ProcessTreeError
+
+        events: list[str] = []
+
+        class _Handle:
+            closed = False
+
+            def Close(self) -> None:
+                self.closed = True
+                events.append("release-handle")
+
+        popen = SimpleNamespace(returncode=0, _handle=_Handle())
+
+        class _Job:
+            closed = False
+
+            def terminate(self) -> None:
+                events.append("terminate-job")
+
+            def release_popen_handle(self, child: object) -> None:
+                assert child is popen
+                popen._handle.Close()
+
+            def wait_until_empty(self, *, timeout: float) -> None:
+                assert timeout <= bootstrap._INSTALLER_STOP_SECONDS
+                events.append("drain-job")
                 raise ProcessTreeError("drain failed")
 
         proc = _FakeProc([], 0)
+        proc.returncode = 0
         managed = bootstrap._InstallerProcess(
-            cast(Any, proc), windows_job=cast(Any, _Job()), assigned=True
+            cast(Any, proc),
+            windows_job=cast(Any, _Job()),
+            windows_popen=cast(Any, popen),
+            assigned=True,
         )
         monkeypatch.setattr(
             bootstrap, "_start_installer_supervisor", AsyncMock(return_value=managed)
@@ -1986,7 +2176,7 @@ class TestPatchrightInstallStreaming:
         with pytest.raises(ProcessTreeError, match="drain failed"):
             await bootstrap._run_patchright_install("--no-shell")
 
-        assert calls == 2
+        assert events == ["terminate-job", "release-handle", "drain-job"]
         assert managed.assigned
 
 

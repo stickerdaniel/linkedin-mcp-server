@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import time
 from typing import Any, NoReturn
@@ -57,6 +58,7 @@ from linkedin_mcp_server.exceptions import (
     DockerHostLoginRequiredError,
 )
 from linkedin_mcp_server.process_tree import (
+    ProcessTreeError,
     WindowsJob,
     release_nonce,
     release_windows_gate,
@@ -700,7 +702,9 @@ _INSTALLER_STOP_SECONDS = 10.0
 class _InstallerProcess:
     process: asyncio.subprocess.Process
     windows_job: WindowsJob | None = None
+    windows_popen: subprocess.Popen[Any] | None = None
     assigned: bool = False
+    windows_cleanup: asyncio.Task[None] | None = None
 
     @property
     def pid(self) -> int:
@@ -744,6 +748,69 @@ async def _close_installer_lease(proc: _InstallerProcess) -> None:
         await stream.wait_closed()
 
 
+async def _wait_for_direct_process_exit(proc: _InstallerProcess) -> int:
+    """Observe the proactor exit callback without waiting for inherited pipe EOF."""
+    while proc.returncode is None:
+        await asyncio.sleep(0.01)
+    return proc.returncode
+
+
+async def _wait_for_direct_process_exit_within(
+    proc: _InstallerProcess, seconds: float
+) -> int | None:
+    if proc.returncode is not None:
+        return proc.returncode
+    if seconds <= 0:
+        return None
+    try:
+        return await asyncio.wait_for(_wait_for_direct_process_exit(proc), seconds)
+    except TimeoutError:
+        return None
+
+
+async def _cleanup_assigned_windows_job_once(
+    proc: _InstallerProcess, deadline: float
+) -> None:
+    """Terminate, release, and drain one assigned Windows process tree."""
+    job = proc.windows_job
+    popen = proc.windows_popen
+    if job is None or popen is None or not proc.assigned:
+        return
+
+    await asyncio.to_thread(job.terminate)
+    returncode = await _wait_for_direct_process_exit_within(
+        proc, _installer_stop_remaining(deadline)
+    )
+    if returncode is None:
+        raise ProcessTreeError(
+            "The browser installer supervisor did not exit after Job termination"
+        )
+
+    # CPython 3.12-3.14 registers a proactor wait on this exact Popen handle.
+    # Seeing Process.returncode proves its callback has run; closing any earlier
+    # can invalidate the handle while wait_for_handle still owns a pending wait.
+    job.release_popen_handle(popen)
+    proc.windows_popen = None
+    await asyncio.to_thread(
+        job.wait_until_empty,
+        timeout=_installer_stop_remaining(deadline),
+    )
+    proc.assigned = False
+
+
+def _assigned_windows_cleanup(
+    proc: _InstallerProcess, deadline: float
+) -> asyncio.Task[None]:
+    cleanup = proc.windows_cleanup
+    if cleanup is None:
+        cleanup = asyncio.create_task(
+            _cleanup_assigned_windows_job_once(proc, deadline),
+            name="drain-browser-installer-job",
+        )
+        proc.windows_cleanup = cleanup
+    return cleanup
+
+
 async def _wait_for_installer_exit(proc: _InstallerProcess, seconds: float) -> bool:
     try:
         await asyncio.wait_for(proc.wait(), seconds)
@@ -780,11 +847,10 @@ async def _stop_installer_once(proc: _InstallerProcess | Any) -> None:
     ]
     try:
         if proc.windows_job is not None and proc.assigned:
-            # Job polling is synchronous. Keep it off the event loop and do not
-            # collect the gate in place of proving every Job member is gone.
-            await asyncio.to_thread(proc.windows_job.terminate_and_wait)
-            proc.assigned = False
-            await proc.wait()
+            # Shield one shared cleanup task. A cancellation during to_thread does
+            # not stop that worker; starting a second drain would race the same Job
+            # handle while the first still owns it.
+            await asyncio.shield(_assigned_windows_cleanup(proc, deadline))
         else:
             try:
                 await asyncio.wait_for(
@@ -835,9 +901,15 @@ async def _stop_installer(proc: _InstallerProcess | Any) -> None:
         except asyncio.CancelledError as exc:
             cancellation = exc
 
-    cleanup.result()
     if cancellation is not None:
+        cleanup_error = cleanup.exception()
+        if cleanup_error is not None:
+            logger.error(
+                "Browser installer cleanup failed while cancellation was pending",
+                exc_info=cleanup_error,
+            )
         raise cancellation
+    cleanup.result()
 
 
 async def _supervisor_start_error(
@@ -946,7 +1018,7 @@ async def _start_installer_supervisor(
     waiting_for = "become ready"
     try:
         if windows_job is not None and nonce is not None:
-            windows_job.assign_asyncio_process(raw_proc)
+            proc.windows_popen = windows_job.assign_asyncio_process(raw_proc)
             proc.assigned = True
             # The supervisor cannot import or spawn until assignment is verified.
             release_windows_gate(proc.stdin, nonce)
@@ -1041,7 +1113,12 @@ async def _run_patchright_install(
     stderr = asyncio.create_task(
         _drain_installer_stream(proc.stderr), name="browser-installer-control"
     )
-    waiting = asyncio.create_task(proc.wait(), name="browser-installer-process")
+    wait_for_exit = (
+        _wait_for_direct_process_exit(proc)
+        if proc.windows_job is not None and proc.assigned
+        else proc.wait()
+    )
+    waiting = asyncio.create_task(wait_for_exit, name="browser-installer-process")
     tasks = (output, stderr, waiting)
     try:
         while not waiting.done():
@@ -1053,24 +1130,34 @@ async def _run_patchright_install(
             )
             if output in done:
                 await output
-        await waiting
+        returncode = await waiting
         if proc.windows_job is not None and proc.assigned:
-            # The gate can exit while descendants still own its output handles.
-            # Drain the Job first, then wait for stream EOF.
-            await asyncio.to_thread(proc.windows_job.terminate_and_wait)
-            proc.assigned = False
+            # Process.wait() registered before exit is resolved only after pipe EOF
+            # on CPython 3.12-3.14. The direct returncode observation above lets the
+            # Job end descendants that still hold those pipes before awaiting them.
+            deadline = asyncio.get_running_loop().time() + _INSTALLER_STOP_SECONDS
+            await asyncio.shield(_assigned_windows_cleanup(proc, deadline))
         await output
         await stderr
-    except BaseException:
+    except BaseException as original:
         for task in tasks:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         # Cancellation and callback failures use the same shielded Job drainage.
-        await _stop_installer(proc)
+        try:
+            await _stop_installer(proc)
+        except BaseException as cleanup_error:
+            if isinstance(original, asyncio.CancelledError):
+                logger.error(
+                    "Browser installer cleanup failed while cancellation was pending",
+                    exc_info=cleanup_error,
+                )
+                raise original
+            raise
         raise
     await _close_installer_lease(proc)
-    if proc.returncode != 0:
+    if returncode != 0:
         raise BrowserSetupFailedError(
             "\n".join(lines) or "Patchright Chromium browser setup failed."
         )
