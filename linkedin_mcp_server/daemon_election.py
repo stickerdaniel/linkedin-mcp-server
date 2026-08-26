@@ -45,7 +45,7 @@ from linkedin_mcp_server.daemon import (
     _DescriptorInspector,
     look_up_owner,
 )
-from linkedin_mcp_server.daemon_lock import DaemonLock, DaemonLockError
+from linkedin_mcp_server.daemon_lock import DaemonLockError
 from linkedin_mcp_server.process_protocol import new_nonce, read_authenticated_status
 from linkedin_mcp_server.process_tree import (
     ProcessTreeError,

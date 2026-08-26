@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -425,6 +426,75 @@ class TestRefusals:
         with pytest.raises(PrivateStateError, match="Not a directory"):
             harden_directory_entry(occupied)
 
+    def test_a_windows_reparse_directory_is_refused_before_acl_hardening(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "per-auth"
+        target.mkdir()
+        entry = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700,
+            st_dev=1,
+            st_ino=2,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+            st_reparse_tag=0x8000001B,
+        )
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lambda path: entry)
+        monkeypatch.setattr(
+            windows_acl,
+            "restrict_to_current_user",
+            lambda *args, **kwargs: pytest.fail("a reparse target was hardened"),
+        )
+
+        with pytest.raises(PrivateStateError, match="Windows reparse point"):
+            harden_directory_entry(target)
+
+    def test_windows_directory_replacement_during_acl_hardening_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "per-auth"
+        target.mkdir()
+        entries = iter(
+            [
+                SimpleNamespace(
+                    st_mode=stat.S_IFDIR | 0o700,
+                    st_dev=1,
+                    st_ino=2,
+                    st_file_attributes=0,
+                ),
+                SimpleNamespace(
+                    st_mode=stat.S_IFDIR | 0o700,
+                    st_dev=1,
+                    st_ino=3,
+                    st_file_attributes=0,
+                ),
+            ]
+        )
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lambda path: next(entries))
+        monkeypatch.setattr(
+            windows_acl, "restrict_to_current_user", lambda *a, **k: None
+        )
+
+        with pytest.raises(PrivateStateError, match="was replaced"):
+            harden_directory_entry(target)
+
+    def test_windows_missing_reparse_attributes_fail_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        target = tmp_path / "per-auth"
+        target.mkdir()
+        entry = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_dev=1, st_ino=2)
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lambda path: entry)
+
+        with pytest.raises(PrivateStateError, match="did not report file attributes"):
+            harden_directory_entry(target)
+
     @posix_only
     def test_an_owned_child_directory_refuses_another_account_s_entry(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -790,6 +860,40 @@ class TestWindowsAcl:
         described = describe_dacl(target)
         assert described.protected is True
         assert len(described.entries) == 1
+
+    @windows_only
+    def test_an_owned_child_directory_refuses_an_ntfs_junction(self, tmp_path: Path):
+        from linkedin_mcp_server.windows_acl import describe_dacl
+
+        parent = tmp_path / "state"
+        harden_directory(parent)
+        elsewhere = tmp_path / "redirected-state"
+        elsewhere.mkdir()
+        subprocess.run(
+            ["icacls", str(elsewhere), "/grant", "*S-1-1-0:(OI)(CI)F"],
+            check=True,
+            capture_output=True,
+        )
+        junction = parent / "per-auth"
+        subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(elsewhere)],
+            check=True,
+            capture_output=True,
+        )
+        try:
+            assert junction.is_junction()
+            assert "S-1-1-0" in {
+                entry.sid for entry in describe_dacl(elsewhere).entries
+            }
+
+            with pytest.raises(PrivateStateError, match="Windows reparse point"):
+                harden_directory_entry(junction)
+
+            assert "S-1-1-0" in {
+                entry.sid for entry in describe_dacl(elsewhere).entries
+            }
+        finally:
+            junction.rmdir()
 
     @windows_only
     def test_a_file_grants_only_this_account_and_inherits_nothing(self, tmp_path: Path):

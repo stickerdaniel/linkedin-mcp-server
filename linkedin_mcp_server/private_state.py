@@ -55,6 +55,29 @@ class PrivateStateError(RuntimeError):
     """
 
 
+def _refuse_windows_reparse_point(path: Path, entry: os.stat_result) -> None:
+    """Reject a Windows entry whose pathname can redirect directory access."""
+    attributes = getattr(entry, "st_file_attributes", None)
+    if attributes is None:
+        raise PrivateStateError(
+            f"Windows did not report file attributes for {path}, so it cannot be "
+            f"established that this is an ordinary private directory"
+        )
+    if not attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return
+
+    tag = getattr(entry, "st_reparse_tag", None)
+    tag_detail = "" if tag is None else f" (reparse tag {tag:#x})"
+    raise PrivateStateError(
+        f"{path} is a Windows reparse point{tag_detail} rather than a private directory"
+    )
+
+
+def _same_entry(first: os.stat_result, second: os.stat_result) -> bool:
+    """Whether two metadata reads identify the same filesystem entry."""
+    return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+
 @contextmanager
 def _as_private_state_error(path: Path, action: str) -> Iterator[None]:
     """Turn a filesystem failure into this module's own error.
@@ -172,6 +195,8 @@ def harden_directory_entry(path: Path) -> None:
             raise PrivateStateError(
                 f"{path} is a symbolic link rather than a private directory"
             )
+        if _WINDOWS:
+            _refuse_windows_reparse_point(path, entry)
         if not stat.S_ISDIR(entry.st_mode):
             raise PrivateStateError(f"Not a directory: {path}")
 
@@ -179,6 +204,13 @@ def harden_directory_entry(path: Path) -> None:
             from linkedin_mcp_server.windows_acl import restrict_to_current_user
 
             restrict_to_current_user(path, directory=True)
+            current = path.lstat()
+            _refuse_windows_reparse_point(path, current)
+            if not _same_entry(entry, current):
+                raise PrivateStateError(
+                    f"{path} was replaced while it was being hardened, so it no "
+                    f"longer refers to the directory this made private."
+                )
             return
 
         flags = (

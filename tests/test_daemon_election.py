@@ -47,6 +47,7 @@ from linkedin_mcp_server.daemon_election import (
     obtain_owner,
 )
 from linkedin_mcp_server.daemon_descriptor import (
+    CommitPreflightError,
     build,
     new_instance_id,
     new_token,
@@ -4302,6 +4303,7 @@ class TestPublishingLast:
         track_cleanup: bool = False,
         server_factory: Callable[[Callable[[], None]], object] | None = None,
         job_name: str | None = None,
+        commit_implementation: Callable[[Path, str], object] | None = None,
     ) -> int:
         import asyncio
 
@@ -4372,7 +4374,9 @@ class TestPublishingLast:
                 raise commit_error
 
         monkeypatch.setattr(
-            daemon_owner.daemon_descriptor, "commit_prepared", commit_prepared
+            daemon_owner.daemon_descriptor,
+            "commit_prepared",
+            commit_prepared if commit_implementation is None else commit_implementation,
         )
         if canonical_after_reads is not None:
             reads = 0
@@ -4386,11 +4390,6 @@ class TestPublishingLast:
                 return None
 
             monkeypatch.setattr(daemon_owner.daemon_descriptor, "read", read)
-        monkeypatch.setattr(
-            daemon_owner.daemon_descriptor,
-            "discard_prepared",
-            lambda *a, **k: order.append("discard"),
-        )
         monkeypatch.setattr(
             daemon_owner,
             "_forget_superseded_tokens",
@@ -4545,14 +4544,13 @@ class TestPublishingLast:
             "prepared",
             "control",
             "adopt:named-owner-job",
-            "discard",
             "aborted",
         ]
         assert "commit" not in order
         assert "committed" not in order
         assert "uncertain" not in order
 
-    def test_parent_eof_before_commit_discards_the_pending_generation(
+    def test_parent_eof_before_commit_aborts_the_owner(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         order: list[str] = []
@@ -4566,9 +4564,48 @@ class TestPublishingLast:
             "prepared",
             "control",
             "logged",
-            "discard",
             "aborted",
         ]
+
+    @pytest.mark.parametrize(
+        "record",
+        ["commit\n", f"owner {'f' * 64} commit\n"],
+        ids=["plain", "wrong-nonce"],
+    )
+    def test_commit_authorization_requires_the_handed_over_nonce(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        record: str,
+    ):
+        order: list[str] = []
+
+        class _UnauthenticatedParent:
+            def readline(self) -> str:
+                order.append("control")
+                return record
+
+        monkeypatch.setattr(
+            daemon_owner.logger, "info", lambda *args, **kwargs: order.append("logged")
+        )
+
+        outcome = self._run_serve(
+            tmp_path,
+            monkeypatch,
+            order,
+            control=_UnauthenticatedParent(),
+        )
+
+        assert outcome == 0
+        assert order == [
+            "probe",
+            "prepare",
+            "prepared",
+            "control",
+            "logged",
+            "aborted",
+        ]
+        assert "commit" not in order
 
     def test_commit_authorization_expires_while_parent_pipe_stays_open(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4605,9 +4642,103 @@ class TestPublishingLast:
             "prepared",
             "control",
             "logged",
-            "discard",
             "retry",
         ]
+
+    @pytest.mark.parametrize("failure", ["abort", "retry", "definitive"])
+    def test_failed_start_does_not_reenter_blocked_cleanup_storage(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+    ):
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+        release_control = threading.Event()
+        finished = threading.Event()
+        order: list[str] = []
+        outcomes: list[int] = []
+        errors: list[BaseException] = []
+
+        def discard(root: Path, instance_id: str) -> None:
+            cleanup_started.set()
+            release_cleanup.wait()
+
+        class _SuspendedParent:
+            def readline(self) -> str:
+                order.append("control")
+                release_control.wait()
+                return "commit\n"
+
+        monkeypatch.setattr(
+            daemon_owner.daemon_descriptor,
+            "discard_prepared",
+            discard,
+        )
+        if failure == "retry":
+            monkeypatch.setattr(daemon_owner, "_COMMIT_AUTH_SECONDS", 0.05)
+        if failure == "definitive":
+            monkeypatch.setattr(
+                daemon_owner.logger,
+                "exception",
+                lambda *args, **kwargs: order.append("logged"),
+            )
+
+        def run() -> None:
+            try:
+                if failure == "abort":
+                    outcomes.append(
+                        self._run_serve(
+                            tmp_path,
+                            monkeypatch,
+                            order,
+                            commit=False,
+                        )
+                    )
+                elif failure == "retry":
+                    outcomes.append(
+                        self._run_serve(
+                            tmp_path,
+                            monkeypatch,
+                            order,
+                            control=_SuspendedParent(),
+                        )
+                    )
+                else:
+                    outcomes.append(
+                        self._run_serve(
+                            tmp_path,
+                            monkeypatch,
+                            order,
+                            commit_error=CommitPreflightError("definitive"),
+                        )
+                    )
+            except BaseException as exc:  # noqa: BLE001 - asserted by this test
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        child = threading.Thread(target=run, daemon=True)
+        child.start()
+        try:
+            assert finished.wait(1), "failed-start cleanup pinned the owner child"
+            assert not cleanup_started.is_set(), (
+                "failed start re-entered cleanup storage"
+            )
+            assert ("retry" if failure == "retry" else "aborted") in order
+        finally:
+            release_control.set()
+            release_cleanup.set()
+            child.join(timeout=5)
+
+        assert not child.is_alive()
+        if failure == "definitive":
+            assert outcomes == []
+            assert len(errors) == 1
+            assert isinstance(errors[0], CommitPreflightError)
+        else:
+            assert errors == []
+            assert outcomes == [1 if failure == "retry" else 0]
 
     def test_windows_replace_classifier_accepts_only_sharing_errors(
         self, monkeypatch: pytest.MonkeyPatch
@@ -4688,7 +4819,7 @@ class TestPublishingLast:
 
         assert order.count("commit") >= 1
         assert order[:4] == ["probe", "prepare", "prepared", "control"]
-        assert order[-3:] == ["discard", "logged", "aborted"]
+        assert order[-2:] == ["logged", "aborted"]
 
     def test_unreadable_state_after_commit_interrupt_is_uncertain(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4840,7 +4971,6 @@ class TestPublishingLast:
             "control",
             "commit",
             "commit",
-            "discard",
             "logged",
             "aborted",
         ]
@@ -5395,7 +5525,52 @@ class TestPublishingLast:
             "prepared",
             "control",
             "commit",
-            "discard",
+            "logged",
+            "aborted",
+        ]
+
+    def test_initial_state_preparation_failure_aborts_without_reconciliation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        order: list[str] = []
+        failure = OSError("account home is unavailable")
+
+        def fail_preparation(root: Path) -> Path:
+            order.append("commit")
+            raise failure
+
+        monkeypatch.setattr(
+            daemon_owner.daemon_descriptor,
+            "prepare_daemon_state",
+            fail_preparation,
+        )
+        monkeypatch.setattr(
+            daemon_owner.daemon_descriptor,
+            "read",
+            lambda root: pytest.fail("state preparation failure was reconciled"),
+        )
+        monkeypatch.setattr(
+            daemon_owner.logger,
+            "exception",
+            lambda *args, **kwargs: order.append("logged"),
+        )
+        implementation = daemon_owner.daemon_descriptor.commit_prepared
+
+        with pytest.raises(CommitPreflightError) as stopped:
+            self._run_serve(
+                tmp_path,
+                monkeypatch,
+                order,
+                commit_implementation=implementation,
+            )
+
+        assert stopped.value.__cause__ is failure
+        assert order == [
+            "probe",
+            "prepare",
+            "prepared",
+            "control",
+            "commit",
             "logged",
             "aborted",
         ]
@@ -5427,7 +5602,6 @@ class TestPublishingLast:
             "prepared",
             "control",
             "commit",
-            "discard",
             "logged",
             "aborted",
         ]

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import unicodedata
 from dataclasses import replace
@@ -49,6 +50,9 @@ from linkedin_mcp_server.private_state import PrivateStateError
 
 posix_only = pytest.mark.skipif(
     os.name == "nt", reason="POSIX permission bits do not exist on Windows"
+)
+windows_only = pytest.mark.skipif(
+    os.name != "nt", reason="Windows reparse points do not exist on POSIX"
 )
 _REAL_ACCOUNT_HOME = daemon_descriptor_module._account_home
 
@@ -245,6 +249,86 @@ class TestPreparedCommit:
         assert stopped.value.__cause__ is failure
         assert replacements == []
         assert pending_descriptor_path(tmp_path, descriptor.instance_id).exists()
+
+    def test_initial_state_preparation_failure_is_commit_preflight(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        failure = OSError("account home is unavailable")
+        replacements: list[tuple[object, object]] = []
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "prepare_daemon_state",
+            lambda root: (_ for _ in ()).throw(failure),
+        )
+        monkeypatch.setattr(
+            daemon_descriptor_module.os,
+            "replace",
+            lambda source, destination: replacements.append((source, destination)),
+        )
+
+        with pytest.raises(CommitPreflightError) as stopped:
+            commit_prepared(tmp_path, new_instance_id())
+
+        assert stopped.value.__cause__ is failure
+        assert replacements == []
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            CommitPreflightError("already classified"),
+            IsADirectoryError("descriptor path is a directory"),
+            NotADirectoryError("state root is not a directory"),
+        ],
+    )
+    def test_an_existing_commit_failure_classification_is_preserved(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: BaseException,
+    ):
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "prepare_daemon_state",
+            lambda root: (_ for _ in ()).throw(failure),
+        )
+
+        with pytest.raises(type(failure)) as stopped:
+            commit_prepared(tmp_path, new_instance_id())
+
+        assert stopped.value is failure
+
+    @windows_only
+    def test_a_junction_cannot_redirect_commit_or_pending_cleanup(self, tmp_path: Path):
+        instance_id = new_instance_id()
+        directory = daemon_dir(tmp_path)
+        directory.parent.mkdir(parents=True)
+        redirected = tmp_path / "redirected-daemon-state"
+        redirected.mkdir()
+        published = redirected / "daemon.json"
+        pending = redirected / pending_descriptor_path(tmp_path, instance_id).name
+        token = redirected / token_path(tmp_path, instance_id).name
+        published.write_text("predecessor")
+        pending.write_text("replacement")
+        token.write_text("secret")
+        subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(directory), str(redirected)],
+            check=True,
+            capture_output=True,
+        )
+        try:
+            assert directory.is_junction()
+
+            with pytest.raises(CommitPreflightError) as commit_failure:
+                commit_prepared(tmp_path, instance_id)
+            with pytest.raises(PrivateStateError, match="Windows reparse point"):
+                discard_prepared(tmp_path, instance_id)
+
+            assert isinstance(commit_failure.value.__cause__, PrivateStateError)
+            assert published.read_text() == "predecessor"
+            assert pending.read_text() == "replacement"
+            assert token.read_text() == "secret"
+        finally:
+            directory.rmdir()
 
     def test_commit_replaces_a_symlink_to_a_directory(self, tmp_path: Path):
         token = new_token()

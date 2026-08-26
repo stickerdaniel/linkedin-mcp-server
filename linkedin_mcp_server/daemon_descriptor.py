@@ -846,26 +846,30 @@ def discard_prepared(auth_root: Path, instance_id: str) -> None:
 
 def commit_prepared(auth_root: Path, instance_id: str) -> Path:
     """Make a validated pending generation canonical with one replacement."""
-    directory = prepare_daemon_state(auth_root)
-    checked = _checked_instance_id(instance_id)
-    pending = directory / f"{_PENDING_DESCRIPTOR_PREFIX}{checked}.json"
-    published = directory / _DESCRIPTOR_FILE
-    # Windows reports replacing a directory with a file as WinError 5, the same
-    # code used for transient sharing conflicts. Normalize only an actual directory
-    # entry before the syscall. Following a symlink here would reject a link that
-    # ``os.replace`` can safely replace without touching its target.
     try:
-        published_mode = published.stat(follow_symlinks=False).st_mode
-    except FileNotFoundError:
-        published_mode = None
-    except OSError as exc:
+        directory = prepare_daemon_state(auth_root)
+        checked = _checked_instance_id(instance_id)
+        pending = directory / f"{_PENDING_DESCRIPTOR_PREFIX}{checked}.json"
+        published = directory / _DESCRIPTOR_FILE
+        # Windows reports replacing a directory with a file as WinError 5, the same
+        # code used for transient sharing conflicts. Normalize only an actual
+        # directory entry before the syscall. Following a symlink here would reject
+        # a link that ``os.replace`` can safely replace without touching its target.
+        try:
+            published_mode = published.stat(follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            published_mode = None
+        if published_mode is not None and stat.S_ISDIR(published_mode):
+            raise IsADirectoryError(
+                f"The daemon descriptor path {published} is a directory"
+            )
+    except (CommitPreflightError, IsADirectoryError, NotADirectoryError):
+        raise
+    except BaseException as exc:
         raise CommitPreflightError(
-            f"The daemon descriptor path {published} could not be inspected"
+            "The daemon descriptor replacement could not be prepared"
         ) from exc
-    if published_mode is not None and stat.S_ISDIR(published_mode):
-        raise IsADirectoryError(
-            f"The daemon descriptor path {published} is a directory"
-        )
+
     os.replace(pending, published)
     return published
 

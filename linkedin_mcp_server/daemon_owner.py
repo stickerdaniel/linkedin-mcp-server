@@ -786,6 +786,11 @@ async def _serve(
         daemon_descriptor.prepare(auth_root, descriptor, token)
         handshake.prepared(instance_id)
 
+        # Failed starts deliberately leave this generation's unique pending files.
+        # Removing them re-enters account-home storage and can pin this process in
+        # the kernel while it still owns the lock. The next successful lock holder's
+        # pre-publication sweep removes every superseded generation instead.
+
         # The lock holder performs the replacement. That ties commit authority to
         # the process whose death frees the daemon lock: a suspended or stale
         # frontend can never publish after its child has died and another child
@@ -796,14 +801,12 @@ async def _serve(
             decision = await _read_control_until(control, commit_deadline)
         except TimeoutError:
             logger.warning("The daemon starter did not authorize commit in time")
-            daemon_descriptor.discard_prepared(auth_root, instance_id)
             handshake.retry()
             server.should_exit = True
             await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
             return 1
         if decision != f"{HANDSHAKE} {handshake_nonce} {COMMIT}\n":
             logger.info("The daemon starter exited before committing this owner")
-            daemon_descriptor.discard_prepared(auth_root, instance_id)
             handshake.abort()
             server.should_exit = True
             await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
@@ -819,8 +822,6 @@ async def _serve(
                 WindowsJob.adopt_current_process(job_name)
             except Exception:
                 logger.exception("The daemon could not adopt its Windows Job Object")
-                with contextlib.suppress(Exception):
-                    daemon_descriptor.discard_prepared(auth_root, instance_id)
                 handshake.abort()
                 server.should_exit = True
                 await _stop_within(serving, _FAILED_STARTUP_SHUTDOWN_SECONDS)
@@ -834,7 +835,6 @@ async def _serve(
             # itself may instead arrive after an NFS server applied the rename; only
             # that case is reconciled against canonical state.
             if _commit_definitely_failed(exc):
-                daemon_descriptor.discard_prepared(auth_root, instance_id)
                 logger.exception("Daemon descriptor publication failed definitively")
                 handshake.abort()
                 server.should_exit = True
