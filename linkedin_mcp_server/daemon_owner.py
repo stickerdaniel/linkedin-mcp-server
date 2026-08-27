@@ -70,7 +70,11 @@ from linkedin_mcp_server.daemon_liveness import (
 )
 from linkedin_mcp_server.drivers.browser import set_headless
 from linkedin_mcp_server.logging_config import configure_logging
-from linkedin_mcp_server.private_state import PrivateStateError, harden_file
+from linkedin_mcp_server.private_state import (
+    PrivateStateError,
+    harden_created_file,
+    harden_file,
+)
 from linkedin_mcp_server.process_tree import WindowsJob, hard_exit_process_tree
 from linkedin_mcp_server.profile_lease import _release_locked_fd
 from linkedin_mcp_server.server_role import (
@@ -140,8 +144,9 @@ def _attach_daemon_log(auth_root: Path) -> Path:
     try:
         log_path.lstat()
     except FileNotFoundError:
-        pass
+        existed = False
     else:
+        existed = True
         # The directory only became private above. An entry planted before then
         # has to prove its own owner and access before open can append to it.
         harden_file(log_path)
@@ -158,7 +163,8 @@ def _attach_daemon_log(auth_root: Path) -> Path:
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise PrivateStateError(f"{log_path} is not a regular file")
-        harden_file(log_path)
+        if not existed:
+            harden_created_file(log_path)
         if not is_still_at(descriptor, log_path):
             raise PrivateStateError(
                 f"{log_path} was replaced while its private access was being "

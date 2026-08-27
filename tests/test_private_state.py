@@ -21,6 +21,7 @@ import pytest
 from linkedin_mcp_server import private_state
 from linkedin_mcp_server.private_state import (
     PrivateStateError,
+    harden_created_file,
     harden_directory,
     harden_directory_entry,
     harden_file,
@@ -529,6 +530,69 @@ class TestRefusals:
 
         assert verified == [(target, False)]
 
+    def test_new_windows_file_replaces_its_inherited_acl(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "token"
+        target.touch()
+        entry = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_dev=1,
+            st_ino=2,
+            st_file_attributes=0,
+        )
+        restricted: list[tuple[Path, bool]] = []
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lambda path: entry)
+        monkeypatch.setattr(
+            windows_acl,
+            "restrict_to_current_user",
+            lambda path, *, directory: restricted.append((path, directory)),
+        )
+        monkeypatch.setattr(
+            windows_acl,
+            "verify_owner_only",
+            lambda *args, **kwargs: pytest.fail("a created file used verify-only"),
+        )
+
+        harden_created_file(target)
+
+        assert restricted == [(target, False)]
+
+    def test_new_windows_file_replacement_during_acl_hardening_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "token"
+        target.touch()
+        entries = iter(
+            [
+                SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o600,
+                    st_dev=1,
+                    st_ino=2,
+                    st_file_attributes=0,
+                ),
+                SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o600,
+                    st_dev=1,
+                    st_ino=3,
+                    st_file_attributes=0,
+                ),
+            ]
+        )
+        monkeypatch.setattr(private_state, "_WINDOWS", True)
+        monkeypatch.setattr(Path, "lstat", lambda path: next(entries))
+        monkeypatch.setattr(
+            windows_acl, "restrict_to_current_user", lambda *a, **k: None
+        )
+
+        with pytest.raises(PrivateStateError, match="was replaced"):
+            harden_created_file(target)
+
     def test_new_windows_child_uses_created_directory_hardening(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -938,6 +1002,7 @@ class TestWindowsAcl:
 
         # And released, so nothing is left holding the tree open.
         (tmp_path / "ancestor").rename(tmp_path / "moved")
+
     def test_an_owned_child_directory_uses_the_same_acl_contract(self, tmp_path: Path):
         from linkedin_mcp_server.windows_acl import describe_dacl
 
@@ -993,7 +1058,7 @@ class TestWindowsAcl:
         harden_directory(parent)
         target = parent / "token"
         target.touch()
-        harden_file(target)
+        harden_created_file(target)
 
         described = describe_dacl(target)
         assert described.protected is True
@@ -1431,6 +1496,88 @@ class TestWindowsAclOffWindows:
 
         windows_acl.verify_children_cannot_be_replaced(tmp_path)
         windows_acl.verify_ancestry_cannot_be_replaced(tmp_path / "child")
+
+    @pytest.mark.parametrize(
+        ("inheritance", "right_name"),
+        [
+            ("OBJECT_INHERIT_ACE", "FILE_WRITE_DATA"),
+            ("OBJECT_INHERIT_ACE", "FILE_APPEND_DATA"),
+            ("OBJECT_INHERIT_ACE", "DELETE"),
+            ("OBJECT_INHERIT_ACE", "WRITE_DAC"),
+            ("CONTAINER_INHERIT_ACE", "DELETE"),
+            ("CONTAINER_INHERIT_ACE", "WRITE_DAC"),
+        ],
+    )
+    def test_inherit_only_child_replacement_permission_is_refused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        inheritance: str,
+        right_name: str,
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (object(), object())
+        )
+        monkeypatch.setattr(
+            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "current-account")
+        monkeypatch.setattr(
+            windows_acl,
+            "describe_dacl",
+            lambda _path: windows_acl.Dacl(
+                protected=True,
+                entries=(
+                    windows_acl.AccessEntry(
+                        sid="another-account",
+                        type=windows_acl.ACCESS_ALLOWED_ACE_TYPE,
+                        flags=(
+                            windows_acl.INHERIT_ONLY_ACE
+                            | getattr(windows_acl, inheritance)
+                        ),
+                        mask=getattr(windows_acl, right_name),
+                    ),
+                ),
+            ),
+        )
+
+        with pytest.raises(PrivateStateError, match="replace private state"):
+            windows_acl.verify_children_cannot_be_replaced(tmp_path)
+
+    def test_file_inheritance_does_not_treat_read_ea_as_delete_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (object(), object())
+        )
+        monkeypatch.setattr(
+            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "current-account")
+        monkeypatch.setattr(
+            windows_acl,
+            "describe_dacl",
+            lambda _path: windows_acl.Dacl(
+                protected=True,
+                entries=(
+                    windows_acl.AccessEntry(
+                        sid="another-account",
+                        type=windows_acl.ACCESS_ALLOWED_ACE_TYPE,
+                        flags=(
+                            windows_acl.INHERIT_ONLY_ACE
+                            | windows_acl.OBJECT_INHERIT_ACE
+                        ),
+                        mask=windows_acl.FILE_DELETE_CHILD,
+                    ),
+                ),
+            ),
+        )
+
+        windows_acl.verify_children_cannot_be_replaced(tmp_path)
 
     def test_inheriting_temporary_parent_is_refused(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

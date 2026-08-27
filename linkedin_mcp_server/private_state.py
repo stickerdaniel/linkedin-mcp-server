@@ -251,6 +251,35 @@ def harden_directory_entry(path: Path) -> None:
                 os.close(fd)
 
 
+def harden_created_file(path: Path) -> None:
+    """Harden a file just created under an already verified private parent.
+
+    Existing Windows files are verify-only because another account may retain a
+    handle opened before their DACL was narrowed. A file this process has just
+    created below a private parent has no such history, so its inherited DACL can
+    be replaced with the stricter project DACL and read back before use.
+    """
+    if not _WINDOWS:
+        harden_file(path)
+        return
+
+    with _as_private_state_error(path, "prepare the new private file"):
+        entry = path.lstat()
+        if stat.S_ISLNK(entry.st_mode):
+            raise PrivateStateError(f"{path} is a symbolic link rather than a file")
+        if not stat.S_ISREG(entry.st_mode):
+            raise PrivateStateError(f"{path} is not a regular file")
+        _refuse_windows_reparse_point(path, entry)
+
+        from linkedin_mcp_server.windows_acl import restrict_to_current_user
+
+        restrict_to_current_user(path, directory=False)
+        current = path.lstat()
+        _refuse_windows_reparse_point(path, current)
+        if not _same_entry(entry, current):
+            raise PrivateStateError(f"{path} was replaced while it was being hardened")
+
+
 def harden_file(path: Path) -> None:
     """Establish that the existing file *path* is owner-only.
 

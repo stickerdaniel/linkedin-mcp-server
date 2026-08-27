@@ -54,7 +54,7 @@ from linkedin_mcp_server.daemon_descriptor import (
     prepare_daemon_state,
 )
 from linkedin_mcp_server.common_utils import is_still_at
-from linkedin_mcp_server.private_state import harden_file
+from linkedin_mcp_server.private_state import harden_created_file, harden_file
 from linkedin_mcp_server.profile_lease import (
     acquire_locked_fd,
     open_lock_file,
@@ -194,7 +194,7 @@ class DaemonLock:
             # it as the account's ownership record. Existing entries were checked
             # before open so links and special files never reach the lock backend.
             if not existed:
-                harden_file(self._path)
+                harden_created_file(self._path)
             if not is_still_at(fd, self._path):
                 raise DaemonLockError(
                     "The daemon lock file changed while its private access was "

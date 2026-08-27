@@ -1171,6 +1171,19 @@ def verify_owner_only(path: Path, *, directory: bool) -> None:
         )
 
 
+def _can_replace_child(entry: AccessEntry) -> bool:
+    """Whether an ACE grants replacement rights on this directory or its children."""
+    applies_here = not entry.flags & INHERIT_ONLY_ACE
+    if applies_here and entry.mask & _DIRECTORY_REPLACEMENT_RIGHTS:
+        return True
+    if entry.flags & OBJECT_INHERIT_ACE and entry.mask & _FILE_REPLACEMENT_RIGHTS:
+        return True
+    return bool(
+        entry.flags & CONTAINER_INHERIT_ACE
+        and entry.mask & _DIRECTORY_REPLACEMENT_RIGHTS
+    )
+
+
 def verify_children_cannot_be_replaced(path: Path) -> None:
     """Refuse a parent that lets an unprivileged account replace its children."""
     sid, sid_buffer = current_user_sid()
@@ -1191,8 +1204,6 @@ def verify_children_cannot_be_replaced(path: Path) -> None:
         )
 
     for entry in describe_dacl(path).entries:
-        if entry.flags & INHERIT_ONLY_ACE:
-            continue
         if entry.type == ACCESS_DENIED_ACE_TYPE:
             continue
         if entry.type != ACCESS_ALLOWED_ACE_TYPE:
@@ -1201,7 +1212,7 @@ def verify_children_cannot_be_replaced(path: Path) -> None:
             )
         if entry.sid in trusted:
             continue
-        if entry.mask & _CHILD_REPLACEMENT_RIGHTS:
+        if _can_replace_child(entry):
             raise PrivateStateError(
                 f"{path} grants {entry.sid} permission to replace private state "
                 "below the account home"

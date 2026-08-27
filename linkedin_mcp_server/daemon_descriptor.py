@@ -70,6 +70,7 @@ from linkedin_mcp_server.common_utils import (
 from linkedin_mcp_server.config.schema import AppConfig, is_loopback_host
 from linkedin_mcp_server.private_state import (
     PrivateStateError,
+    harden_created_file,
     harden_directory,
     harden_directory_entry,
     harden_file,
@@ -513,9 +514,7 @@ def _ensure_legacy_windows_tombstone(home: Path) -> None:
     finally:
         os.close(descriptor)
 
-    from linkedin_mcp_server.windows_acl import restrict_to_current_user
-
-    restrict_to_current_user(legacy, directory=False)
+    harden_created_file(legacy)
     _verify_legacy_tombstone(legacy)
 
 
@@ -901,7 +900,7 @@ def prepare(
     token_file = directory / f"token-{_checked_instance_id(descriptor.instance_id)}"
     secure_write_text(token_file, token)
     try:
-        harden_file(token_file)
+        harden_created_file(token_file)
     except BaseException:
         with contextlib.suppress(OSError):
             token_file.unlink(missing_ok=True)
@@ -912,7 +911,7 @@ def prepare(
     )
     try:
         secure_write_text(pending_file, descriptor.to_json())
-        harden_file(pending_file)
+        harden_created_file(pending_file)
     except BaseException:
         with contextlib.suppress(OSError):
             pending_file.unlink(missing_ok=True)
