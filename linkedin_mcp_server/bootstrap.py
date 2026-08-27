@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 from typing import Any, NoReturn, TypeVar
+from urllib.parse import urlsplit, urlunsplit
 
 from fastmcp import Context
 from rich.console import Console
@@ -574,11 +575,21 @@ _ThreadResult = TypeVar("_ThreadResult")
 
 
 async def _run_in_daemon_thread(
-    function: Callable[..., _ThreadResult], *args: Any
+    function: Callable[..., _ThreadResult],
+    *args: Any,
+    discard: Callable[[_ThreadResult], None] | None = None,
 ) -> _ThreadResult:
-    """Run blocking filesystem work without making interpreter exit wait for it."""
+    """Run blocking work without waiting for its thread during interpreter exit."""
     loop = asyncio.get_running_loop()
     result: asyncio.Future[_ThreadResult] = loop.create_future()
+
+    def discard_safely(value: _ThreadResult) -> None:
+        if discard is None:
+            return
+        try:
+            discard(value)
+        except BaseException:  # noqa: BLE001 - cleanup must not escape the thread
+            logger.warning("Discarding late browser setup work failed", exc_info=True)
 
     def run() -> None:
         try:
@@ -593,12 +604,17 @@ async def _run_in_daemon_thread(
         else:
 
             def succeed(answer: _ThreadResult = value) -> None:
-                if not result.done():
+                if result.done():
+                    discard_safely(answer)
+                else:
                     result.set_result(answer)
 
             complete = succeed
-        with contextlib.suppress(RuntimeError):
+        try:
             loop.call_soon_threadsafe(complete)
+        except RuntimeError:
+            if "value" in locals():
+                discard_safely(value)
 
     threading.Thread(target=run, name="browser-setup-io", daemon=True).start()
     return await result
@@ -1617,6 +1633,51 @@ def _windows_private_temp_creation_supported() -> bool:
     return os.name != "nt" or sys.version_info >= (3, 12, 4)
 
 
+def _installer_temporary_parent() -> Path:
+    """Return a temp parent whose pathname other local accounts cannot replace."""
+    parent = Path(tempfile.gettempdir()).resolve(strict=True)
+    if os.name == "nt":
+        return parent
+
+    trusted_owners = {0, os.geteuid()}
+    parent_info = parent.stat()
+    if not stat.S_ISDIR(parent_info.st_mode):
+        raise PrivateStateError(
+            f"Installer temporary parent is not a directory: {parent}"
+        )
+    if parent_info.st_uid not in trusted_owners:
+        raise PrivateStateError(
+            f"Installer temporary parent {parent} is controlled by another account"
+        )
+    if parent_info.st_mode & 0o022 and not parent_info.st_mode & stat.S_ISVTX:
+        raise PrivateStateError(
+            f"Installer temporary roots can be replaced by another account in {parent}"
+        )
+
+    current = parent
+    while current.parent != current:
+        container = current.parent
+        container_info = container.stat()
+        if not stat.S_ISDIR(container_info.st_mode):
+            raise PrivateStateError(
+                f"Installer temporary parent is not a directory: {container}"
+            )
+        if container_info.st_uid not in trusted_owners:
+            raise PrivateStateError(
+                f"Installer temporary parent {container} is controlled by another account"
+            )
+        if container_info.st_mode & 0o022:
+            current_info = current.stat()
+            sticky = bool(container_info.st_mode & stat.S_ISVTX)
+            if not sticky or current_info.st_uid not in trusted_owners:
+                raise PrivateStateError(
+                    f"Installer temporary path {current} can be replaced by another "
+                    f"account through {container}"
+                )
+        current = container
+    return parent
+
+
 def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
     if not _windows_private_temp_creation_supported():
         raise PrivateStateError(
@@ -1624,7 +1685,8 @@ def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
             "newer because earlier 3.12 releases create temporary directories "
             "with inherited access."
         )
-    path = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-"))
+    parent = _installer_temporary_parent()
+    path = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-", dir=parent))
     pin: Any | None = None
     try:
         if os.name == "nt":
@@ -1669,6 +1731,22 @@ def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
     return temporary_root
 
 
+def _close_installer_temporary_root_pin(
+    temporary_root: _InstallerTemporaryRoot,
+) -> None:
+    pin = temporary_root.pin
+    if pin is None:
+        return
+    if os.name == "nt":
+        from linkedin_mcp_server.windows_acl import close_directory_pin
+
+        with contextlib.suppress(OSError, PrivateStateError):
+            close_directory_pin(pin)
+    else:
+        with contextlib.suppress(OSError):
+            os.close(pin)
+
+
 def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) -> None:
     path = temporary_root.path
     pin = temporary_root.pin
@@ -1678,8 +1756,6 @@ def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) ->
         return
 
     if os.name == "nt":
-        from linkedin_mcp_server.windows_acl import close_directory_pin
-
         try:
             try:
                 details = path.stat()
@@ -1694,8 +1770,7 @@ def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) ->
             # creation. rmtree can remove only this directory's children.
             shutil.rmtree(path, ignore_errors=True)
         finally:
-            with contextlib.suppress(OSError, PrivateStateError):
-                close_directory_pin(pin)
+            _close_installer_temporary_root_pin(temporary_root)
     else:
         try:
             details = os.fstat(pin)
@@ -1708,8 +1783,7 @@ def _remove_installer_temporary_root(temporary_root: _InstallerTemporaryRoot) ->
             # pathname substitution cannot redirect recursive deletion elsewhere.
             shutil.rmtree(".", dir_fd=pin, ignore_errors=True)
         finally:
-            with contextlib.suppress(OSError):
-                os.close(pin)
+            _close_installer_temporary_root_pin(temporary_root)
 
     # Recursive deletion deliberately leaves the pinned root itself behind.
     # Once the pin is released, remove only an empty directory at the pathname;
@@ -1728,8 +1802,15 @@ def _start_installer_temporary_root_cleanup(
         name="browser-installer-temp-cleanup",
         daemon=True,
     )
-    with contextlib.suppress(RuntimeError):
+    try:
         cleanup.start()
+    except RuntimeError:
+        logger.warning(
+            "Could not start browser installer temp cleanup; leaving %s for later removal",
+            temporary_root.path,
+            exc_info=True,
+        )
+        _close_installer_temporary_root_pin(temporary_root)
 
 
 async def _run_patchright_install(
@@ -1752,7 +1833,10 @@ async def _run_patchright_install(
     *line_callback* (``print`` for the CLI modes) receives each line too, so
     those modes show progress regardless of the log level.
     """
-    temporary = await _run_in_daemon_thread(_create_installer_temporary_root)
+    temporary = await _run_in_daemon_thread(
+        _create_installer_temporary_root,
+        discard=_remove_installer_temporary_root,
+    )
     temporary_root = temporary.path
     activity: asyncio.Task[None] | None = None
     try:
@@ -2358,6 +2442,23 @@ def _cli_progress() -> Iterator[Callable[[str], None]]:
         _finish(progress, task)
 
 
+def _redacted_download_host(configured: str) -> str:
+    """Preserve a mirror's origin while removing its configured private path."""
+    parsed = urlsplit(configured)
+    hostname = parsed.hostname
+    if not parsed.scheme or hostname is None:
+        return "***"
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        return "***"
+    netloc = hostname if port is None else f"{hostname}:{port}"
+    path = "/***" if parsed.path.rstrip("/") else ""
+    return urlunsplit((parsed.scheme, netloc, path, "", ""))
+
+
 def _safe_to_print(text: str) -> str:
     """Text with its terminal controls and its URL credentials taken out.
 
@@ -2366,12 +2467,19 @@ def _safe_to_print(text: str) -> str:
     ``//us\x1b[0mer:pw@host`` unmatched and then hand the stripper a whole
     credential to put back together.
 
-    What survives here is the download URL patchright echoes, with its userinfo
-    and its query replaced. A credential the operator put in the *path* of
-    ``PLAYWRIGHT_DOWNLOAD_HOST`` still prints: the path is also where the
-    browser build lives, and blanking it would take the diagnostic with it.
+    The configured mirror base is handled separately because operators sometimes
+    encode access tokens in its path. Patchright appends the public browser build
+    path to that private base, so replacing the exact configured prefix preserves
+    the useful suffix without disclosing the credential.
     """
     text = _TERMINAL_CONTROLS.sub("", text)
+    configured = os.getenv("PLAYWRIGHT_DOWNLOAD_HOST", "").strip()
+    if configured:
+        redacted = _redacted_download_host(configured)
+        text = text.replace(configured, redacted)
+        without_slash = configured.rstrip("/")
+        if without_slash != configured:
+            text = text.replace(without_slash, redacted.rstrip("/"))
     text = _CREDENTIALS_IN_URL.sub("//***@", text)
     return _QUERY_IN_URL.sub(r"\1?***", text)
 

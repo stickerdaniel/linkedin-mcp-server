@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import sys
+import tempfile
 import threading
 from types import SimpleNamespace
 from typing import IO, Any, Callable, cast
@@ -2752,12 +2753,18 @@ class TestPatchrightInstallStreaming:
 
         blocked = threading.Event()
         release = threading.Event()
+        created = threading.Event()
 
-        def slow_temporary_root(*, prefix: str) -> str:
+        private = tmp_path / "private"
+
+        def slow_temporary_root(*, prefix: str, dir: Path) -> str:
             assert prefix == "linkedin-mcp-installer-"
+            assert dir == Path(tempfile.gettempdir()).resolve()
             blocked.set()
             release.wait()
-            return str(tmp_path / "private")
+            private.mkdir()
+            created.set()
+            return str(private)
 
         monkeypatch.setattr(bootstrap.tempfile, "mkdtemp", slow_temporary_root)
         self._patch_proc(monkeypatch, [], 0)
@@ -2774,6 +2781,12 @@ class TestPatchrightInstallStreaming:
 
         assert blocked.is_set()
         assert asyncio.get_running_loop().time() - started < 0.1
+        assert await asyncio.to_thread(created.wait, 1.0)
+        for _ in range(100):
+            if not private.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert not private.exists(), "the canceled thread discarded its pinned root"
 
     async def test_cold_registry_read_cannot_block_timeout(self, tmp_path, monkeypatch):
         from linkedin_mcp_server import bootstrap
@@ -2825,6 +2838,26 @@ class TestPatchrightInstallStreaming:
         with pytest.raises(PrivateStateError, match="Python 3.12.4"):
             bootstrap._create_installer_temporary_root()
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes are required")
+    def test_replaceable_temporary_parent_is_refused_before_creation(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        shared = tmp_path / "shared"
+        shared.mkdir(mode=0o777)
+        shared.chmod(0o777)
+        monkeypatch.setattr(bootstrap.tempfile, "gettempdir", lambda: str(shared))
+        monkeypatch.setattr(
+            bootstrap.tempfile,
+            "mkdtemp",
+            lambda **_kwargs: pytest.fail("a replaceable root was created"),
+        )
+
+        with pytest.raises(PrivateStateError, match="can be replaced"):
+            bootstrap._create_installer_temporary_root()
+
     def test_installer_temporary_root_is_hardened_before_use(
         self, tmp_path, monkeypatch
     ):
@@ -2833,7 +2866,7 @@ class TestPatchrightInstallStreaming:
         temporary_root = tmp_path / "private"
         events: list[tuple[str, Path]] = []
 
-        def make_temporary_root(*, prefix: str) -> str:
+        def make_temporary_root(*, prefix: str, dir: Path) -> str:
             assert prefix == "linkedin-mcp-installer-"
             temporary_root.mkdir()
             events.append(("create", temporary_root))
@@ -2862,7 +2895,7 @@ class TestPatchrightInstallStreaming:
 
         temporary_root = tmp_path / "private"
 
-        def make_temporary_root(*, prefix: str) -> str:
+        def make_temporary_root(*, prefix: str, dir: Path) -> str:
             assert prefix == "linkedin-mcp-installer-"
             temporary_root.mkdir()
             return str(temporary_root)
@@ -2882,7 +2915,7 @@ class TestPatchrightInstallStreaming:
 
         temporary_root = tmp_path / "private"
 
-        def make_temporary_root(*, prefix: str) -> str:
+        def make_temporary_root(*, prefix: str, dir: Path) -> str:
             assert prefix == "linkedin-mcp-installer-"
             temporary_root.mkdir()
             return str(temporary_root)
@@ -2899,6 +2932,36 @@ class TestPatchrightInstallStreaming:
 
         assert victim.read_text() == "unrelated"
         assert moved.is_dir()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptors are required")
+    def test_cleanup_thread_start_failure_closes_the_root_pin(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+        temporary_root.mkdir()
+        details = temporary_root.stat()
+        pin = os.open(temporary_root, os.O_RDONLY | os.O_DIRECTORY)
+        created = bootstrap._InstallerTemporaryRoot(
+            temporary_root, details.st_dev, details.st_ino, pin
+        )
+
+        class RefusingThread:
+            def __init__(self, **_kwargs):
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("thread limit")
+
+        monkeypatch.setattr(bootstrap.threading, "Thread", RefusingThread)
+        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+            bootstrap._start_installer_temporary_root_cleanup(created)
+
+        with pytest.raises(OSError):
+            os.fstat(pin)
+        assert temporary_root.is_dir()
+        assert "Could not start browser installer temp cleanup" in caplog.text
 
     @pytest.mark.skipif(os.name == "nt", reason="dir_fd anchors POSIX cleanup")
     def test_cleanup_stays_on_the_open_root_during_path_replacement(
@@ -2947,7 +3010,7 @@ class TestPatchrightInstallStreaming:
 
         temporary_root = tmp_path / "private"
 
-        def make_temporary_root(*, prefix: str) -> str:
+        def make_temporary_root(*, prefix: str, dir: Path) -> str:
             assert prefix == "linkedin-mcp-installer-"
             temporary_root.mkdir()
             return str(temporary_root)
@@ -3133,13 +3196,7 @@ class TestPatchrightInstallStreaming:
         assert seen == ["no trailing newline"]
 
     async def test_mirror_credentials_are_not_logged(self, monkeypatch, caplog):
-        """Userinfo in a download URL reaches neither the terminal nor the log.
-
-        Userinfo and the query only. A credential an operator put in the *path*
-        still prints, on purpose and by a decision `_safe_to_print` records:
-        the path is also where the browser build is named, and blanking it
-        would take the diagnostic with it.
-        """
+        """Userinfo in a download URL reaches neither the terminal nor the log."""
         from linkedin_mcp_server import bootstrap
 
         url = "https://ci-bot:s3cr3t@mirror.example/chromium.zip"
@@ -3155,6 +3212,24 @@ class TestPatchrightInstallStreaming:
         assert "s3cr3t" not in everything
         assert "ci-bot" not in everything
         assert "mirror.example/chromium.zip" in everything
+
+    async def test_mirror_path_credentials_are_not_reported(self, monkeypatch, caplog):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        token = "private-access-token"
+        host = f"https://mirror.example/{token}"
+        url = f"{host}/builds/chromium.zip"
+        monkeypatch.setenv("PLAYWRIGHT_DOWNLOAD_HOST", host)
+        self._patch_proc(monkeypatch, [f"Downloading from {url}\n".encode()], 1)
+
+        with caplog.at_level(logging.DEBUG, logger="linkedin_mcp_server.bootstrap"):
+            with pytest.raises(BrowserSetupFailedError) as excinfo:
+                await bootstrap._run_patchright_install("--no-shell")
+
+        everything = str(excinfo.value) + " ".join(r.message for r in caplog.records)
+        assert token not in everything
+        assert "mirror.example/***/builds/chromium.zip" in everything
 
     async def test_the_failure_message_is_bounded(self, monkeypatch):
         """A pathological installer must not be quoted back in full."""
@@ -3223,7 +3298,7 @@ class TestPatchrightInstallStreaming:
 
         temporary_root = tmp_path / "private"
 
-        def make_temporary_root(*, prefix: str) -> str:
+        def make_temporary_root(*, prefix: str, dir: Path) -> str:
             assert prefix == "linkedin-mcp-installer-"
             temporary_root.mkdir()
             return str(temporary_root)
@@ -3251,7 +3326,7 @@ class TestPatchrightInstallStreaming:
 
         temporary_root = tmp_path / "private"
 
-        def make_temporary_root(*, prefix: str) -> str:
+        def make_temporary_root(*, prefix: str, dir: Path) -> str:
             assert prefix == "linkedin-mcp-installer-"
             temporary_root.mkdir()
             return str(temporary_root)
