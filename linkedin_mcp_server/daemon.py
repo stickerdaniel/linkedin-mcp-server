@@ -193,27 +193,26 @@ class _DescriptorInspector:
         self._profile = profile
         self._config = config
         self._pending: queue.Queue[OwnerLookup | BaseException] | None = None
+        self._settled = threading.Event()
+
+    @property
+    def settled(self) -> bool:
+        """Whether an inspection here has reached an outcome, of either kind.
+
+        An outcome and never a verdict: a reader that raised has finished
+        touching state storage just as much as one that returned, and this
+        question is only ever asked about what the reader may still be doing.
+        Stays true once an inspection completes, because what a later caller
+        needs to know is that this inspector is no longer the first to touch
+        that state, not which of its reads is currently in flight.
+        """
+        return self._settled.is_set()
 
     def inspect_until(self, *, timeout: float) -> OwnerLookup:
         """Wait within one budget without abandoning a blocked native reader."""
-        if self._pending is None:
-            result: queue.Queue[OwnerLookup | BaseException] = queue.Queue(maxsize=1)
-            self._pending = result
-
-            def inspect() -> None:
-                try:
-                    result.put(_inspect(self._auth_root, self._profile, self._config))
-                except BaseException as exc:  # noqa: BLE001 - re-raised by the caller
-                    result.put(exc)
-
-            threading.Thread(
-                target=inspect,
-                name="daemon-descriptor-read",
-                daemon=True,
-            ).start()
-
+        pending = self._begin()
         try:
-            value = self._pending.get(timeout=max(timeout, 0.0))
+            value = pending.get(timeout=max(timeout, 0.0))
         except queue.Empty:
             raise _DescriptorReadTimeout(
                 "Daemon descriptor state could not be read in time"
@@ -222,6 +221,48 @@ class _DescriptorInspector:
         if isinstance(value, BaseException):
             raise value
         return value
+
+    def settle_within(self, *, timeout: float) -> bool:
+        """Wait for the inspection in flight to finish, without consuming it.
+
+        The reading itself belongs to :meth:`inspect_until`; this is for a caller
+        that must know the reader is no longer inside state storage before it
+        does something of its own. It reuses the one pending inspection rather
+        than starting a reader of its own, so waiting for the answer can never be
+        what makes a second process touch that state.
+        """
+        self._begin()
+        return self._settled.wait(max(timeout, 0.0))
+
+    def _begin(self) -> queue.Queue[OwnerLookup | BaseException]:
+        pending = self._pending
+        if pending is not None:
+            return pending
+        result: queue.Queue[OwnerLookup | BaseException] = queue.Queue(maxsize=1)
+        self._pending = result
+
+        def inspect() -> None:
+            try:
+                try:
+                    value: OwnerLookup | BaseException = _inspect(
+                        self._auth_root, self._profile, self._config
+                    )
+                except BaseException as exc:  # noqa: BLE001 - re-raised by the caller
+                    value = exc
+                result.put(value)
+            finally:
+                # In the finally, so a reader that could not even hand its answer
+                # back still reports that it has stopped. A waiter that hung on
+                # such a reader would be waiting for something that has already
+                # happened.
+                self._settled.set()
+
+        threading.Thread(
+            target=inspect,
+            name="daemon-descriptor-read",
+            daemon=True,
+        ).start()
+        return result
 
 
 def look_up_owner(

@@ -94,6 +94,11 @@ _FAILURE_VERDICT_SECONDS = 0.2
 _PREPARED_READ_SECONDS = 1.0
 _PREPARED_CLEANUP_SECONDS = 1.0
 
+#: How long one pass waits for the Windows exclusion namespace before looking
+#: again. The election deadline is what bounds the whole wait; this only keeps
+#: the loop observing the descriptor while it waits.
+_EXCLUSION_SETTLE_SECONDS = 1.0
+
 #: Retry quickly through the initial race, then back off so a later lock release
 #: remains discoverable without creating one short-lived child per polling pass.
 _OWNER_START_BURST = 3
@@ -107,6 +112,98 @@ def _owner_start_delay_after(starts: int, current: float) -> float:
     return min(
         max(current * 2, _OWNER_START_RETRY_SECONDS),
         _MAX_OWNER_START_RETRY_SECONDS,
+    )
+
+
+class _Exclusion(enum.Enum):
+    """What the legacy Windows exclusion permits an election to do right now."""
+
+    #: The tombstone exists. A child started now cannot take that name.
+    READY = "ready"
+
+    #: The inspection that would establish it is still running. Nothing may be
+    #: started yet, and waiting is the thing to do.
+    PENDING = "pending"
+
+    #: The inspection stopped without establishing it. Waiting changes nothing,
+    #: and starting anything is the hazard itself.
+    UNAVAILABLE = "unavailable"
+
+
+def _settled_exclusion(inspector: _DescriptorInspector) -> _Exclusion:
+    """Read the exclusion's state without waiting for anything.
+
+    ``READY`` comes only from the tombstone being known to exist, never from the
+    inspection having stopped. Those are not the same claim and treating them as
+    one is the whole defect: a reader can settle on a transient failure, an ACL
+    that answered once, a descriptor that ran out, with no legacy directory
+    anywhere, and a child started on the strength of that creates the very
+    directory this guard exists to keep out of existence.
+
+    The tombstone rather than the inspector is also what survives an election
+    replacing its inspector, because it is a fact about a file and not about a
+    thread.
+    """
+    if daemon_descriptor.windows_exclusion_established():
+        return _Exclusion.READY
+    if inspector.settled:
+        return _Exclusion.UNAVAILABLE
+    return _Exclusion.PENDING
+
+
+def _exclusion_state(inspector: _DescriptorInspector, *, deadline: float) -> _Exclusion:
+    """Whether an owner may be spawned yet, on this platform, right now.
+
+    Only Windows has anything to wait for. There, ``prepare_daemon_state`` pins
+    the account home and publishes the exclusion object that keeps every pre-v2
+    release out of ``.mcp-server-linkedin``, and it does that inside the
+    inspector's reader thread. A one second read budget expiring does not stop
+    that thread; it only stops the *frontend* from hearing about it, and the old
+    loop went straight on to spawn a child. Under a package rolled back on disk
+    that child is a predecessor, which creates the legacy directory for itself
+    and blocks the v2 namespace for good, invisibly to every current frontend.
+
+    So the spawn waits for the reader instead of racing it, bounded by the
+    caller's own deadline. A reader that stops having established nothing is not
+    a reason to go ahead: it is a reason to stop, because this election cannot
+    tell a transient failure from a permanent one and only one of those is safe
+    to spawn against. The frontend falls back to its own browser and a later
+    election, with private state readable again, elects an owner normally.
+    """
+    if not _IS_WINDOWS:
+        return _Exclusion.READY
+    state = _settled_exclusion(inspector)
+    if state is not _Exclusion.PENDING:
+        return state
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return _Exclusion.PENDING
+    logger.debug("Waiting for private daemon state before starting an owner")
+    inspector.settle_within(timeout=min(remaining, _EXCLUSION_SETTLE_SECONDS))
+    return _settled_exclusion(inspector)
+
+
+def _report_unusable_exclusion(inspector: _DescriptorInspector) -> None:
+    """Say why no owner can be started, in the reader's own words.
+
+    The settled inspection is consumed here purely for its diagnosis. On Windows
+    a reader that returns normally has already published the tombstone, so this
+    state means it raised, and that exception names the thing to fix: a legacy
+    directory to remove, or a permission that answered once and may not next
+    time.
+    """
+    try:
+        inspector.inspect_until(timeout=0.0)
+    except Exception:
+        logger.warning(
+            "Private daemon state could not be established, so no shared owner "
+            "can be started safely; this client will use its own browser",
+            exc_info=True,
+        )
+        return
+    logger.warning(  # pragma: no cover - a normal return publishes the tombstone
+        "Private daemon state was read without establishing the exclusion a "
+        "shared owner needs; this client will use its own browser"
     )
 
 
@@ -238,8 +335,25 @@ def obtain_owner(
         if remaining <= 0:
             return ElectionOutcome(lookup, started_owner=started)
 
+        # Asked only where a start is otherwise due, so the retry pacing is
+        # unchanged, and asked before the clock is read for that pacing, because
+        # the answer can involve waiting for an inspector still inside state
+        # storage and a start scheduled off a stale reading would be paced from
+        # before that wait.
+        may_start = time.monotonic() >= next_start
+        if may_start:
+            exclusion = _exclusion_state(inspector, deadline=deadline)
+            if exclusion is _Exclusion.UNAVAILABLE:
+                # Nothing can be started against state this process cannot
+                # establish, and nothing later in this election changes that.
+                # Returning now is the fallback; the next election gets a fresh
+                # reader and may find the same state perfectly usable.
+                _report_unusable_exclusion(inspector)
+                return ElectionOutcome(lookup, started_owner=started)
+            may_start = exclusion is _Exclusion.READY
         now = time.monotonic()
-        if now >= next_start:
+        remaining = deadline - now
+        if may_start and remaining > 0:
             starts += 1
             start_retry_seconds = _owner_start_delay_after(starts, start_retry_seconds)
             next_start = now + start_retry_seconds
@@ -258,7 +372,8 @@ def obtain_owner(
                 logger.warning("The daemon could not be started", exc_info=True)
                 attempt = _Attempt.FAILED
         else:
-            # A delayed attempt remains scheduled. Descriptor observation continues
+            # A delayed attempt remains scheduled, or private state is not ready
+            # to have a child started against it. Descriptor observation continues
             # in the meantime without one process per polling pass.
             attempt = _Attempt.CONTENDED
 

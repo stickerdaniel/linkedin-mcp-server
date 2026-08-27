@@ -123,6 +123,11 @@ _LEGACY_WINDOWS_TOMBSTONE = b"mcp-server-linkedin-v2\n"
 _WINDOWS = os.name == "nt"
 _windows_account_home_pins: dict[str, tuple[tuple[int, int], tuple[Any, ...]]] = {}
 
+#: Whether this process has seen the legacy exclusion object exist. Set once the
+#: tombstone is published or verified, and never cleared, because the object it
+#: records is a file on disk rather than anything held in this process.
+_windows_exclusion_established: bool = False
+
 # Enough that guessing is not a strategy. Read straight from the OS source.
 _TOKEN_BYTES = 32
 
@@ -610,8 +615,27 @@ def _pin_windows_account_home(home: Path) -> None:
         raise
 
 
+def windows_exclusion_established() -> bool:
+    """Whether the legacy Windows namespace is already excluded on this account.
+
+    The exclusion is one file, ``.mcp-server-linkedin``, standing where every
+    pre-v2 release would otherwise create its state directory. Publishing it is
+    what stops a predecessor from taking that name, and until it exists a
+    predecessor started now can take it permanently: v2 then refuses to run
+    beside it, and the frontends of the day cannot see it at all.
+
+    So this is the question a caller asks before doing anything that could start
+    such a predecessor. It answers about this process's own knowledge, which is
+    all it can honestly answer: another process may have published the tombstone
+    a moment ago, and a false here only costs a wait.
+    """
+    return _windows_exclusion_established
+
+
 def reset_daemon_descriptor_for_testing() -> None:
     """Release process-lifetime Windows pins between isolated tests."""
+    global _windows_exclusion_established
+    _windows_exclusion_established = False
     if not _windows_account_home_pins:
         return
     from linkedin_mcp_server.windows_acl import close_directory_pin
@@ -633,6 +657,7 @@ def prepare_daemon_state(auth_root: Path) -> Path:
     its own right. Files inside are hardened separately before their contents or
     locking semantics are used.
     """
+    global _windows_exclusion_established
     root = daemon_state_root()
     if _WINDOWS:
         home = _account_home()
@@ -648,6 +673,10 @@ def prepare_daemon_state(auth_root: Path) -> Path:
         harden_directory_entry(application_root)
         if not legacy_exists:
             _ensure_legacy_windows_tombstone(home, application_root)
+        # Recorded here rather than at the end, because this is the line the
+        # tombstone is known to exist at. What follows hardens directories and
+        # can fail on its own without putting the exclusion back in doubt.
+        _windows_exclusion_established = True
         harden_directory_entry(root)
     else:
         harden_directory(root)

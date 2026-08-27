@@ -19,6 +19,7 @@ import contextlib
 import importlib
 import io
 import json
+import logging
 import os
 import signal
 import socket
@@ -629,6 +630,25 @@ class TestFailingFast:
         assert blocked.is_set()
         assert outcome.worth_connecting
         assert inspections == 2
+
+    def test_a_posix_election_never_waits_for_an_exclusion(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # There is no legacy namespace to exclude off Windows, so the gate is not
+        # a gate there: an inspection that never finishes still leaves the
+        # election free to start an owner, exactly as before.
+        profile = _profile(tmp_path)
+        inspector = daemon_module._DescriptorInspector(
+            profile.parent, profile, _config(profile)
+        )
+        monkeypatch.setattr(election_module, "_IS_WINDOWS", False)
+
+        began = time.monotonic()
+        exclusion = election_module._exclusion_state(inspector, deadline=began + 30.0)
+
+        assert exclusion is election_module._Exclusion.READY
+        assert not inspector.settled, "the inspection was started to answer this"
+        assert time.monotonic() - began < 1.0
 
     def test_a_frontend_that_lost_the_race_takes_over_when_the_winner_dies(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1596,6 +1616,249 @@ class TestSaturatedControlQueue:
         assert child.attached_at is not None
         assert child.attached_at - began < 8.0
         assert elapsed < 8.0, "the spawn spent its whole budget on the queue"
+
+
+class TestWindowsExclusionNamespace:
+    """No owner is started while the legacy exclusion object is still pending.
+
+    Windows keeps daemon state under ``.mcp-server-linkedin-v2``, and every
+    release before it kept it under ``.mcp-server-linkedin``. What stops those
+    releases from ever creating that directory again is a *file* published at the
+    same name, and ``prepare_daemon_state`` publishes it inside the inspector's
+    reader thread.
+
+    The frontend's one second read budget expiring does not stop that thread. It
+    only stops the frontend from hearing about it, and the election went straight
+    on to spawn. Under a package rolled back on disk that child is a predecessor,
+    which creates the legacy directory for itself: v2 refuses to run beside it
+    from then on, and the frontends that could report it are exactly the ones
+    that no longer run.
+
+    The child here is that predecessor, taking the name if it is free, and the
+    inspection is blocked where the real one blocks.
+    """
+
+    @staticmethod
+    def _legacy(home: Path) -> Path:
+        return home / daemon_descriptor_module._LEGACY_WINDOWS_STATE_DIR
+
+    def _predecessor(self, home: Path, taken: list[str]) -> Callable[..., _Attempt]:
+        """A child from a rolled-back package, competing for the legacy name."""
+
+        def start(*_args: object, **_kwargs: object) -> _Attempt:
+            try:
+                self._legacy(home).mkdir()
+            except FileExistsError:
+                taken.append("excluded")
+            else:
+                taken.append("took-the-name")
+            return _Attempt.FAILED
+
+        return start
+
+    def test_no_owner_is_started_while_the_exclusion_is_pending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = _profile(tmp_path)
+        home = daemon_descriptor_module._account_home()
+        blocked = threading.Event()
+        release = threading.Event()
+        taken: list[str] = []
+        inspections = 0
+
+        def inspect(*_args: object) -> OwnerLookup:
+            nonlocal inspections
+            inspections += 1
+            blocked.set()
+            release.wait()
+            # What prepare_daemon_state does on Windows, at the moment it does
+            # it: the tombstone lands, and only then is the name excluded.
+            self._legacy(home).write_bytes(
+                daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
+            )
+            daemon_descriptor_module._windows_exclusion_established = True
+            return OwnerLookup(state=OwnerState.ABSENT)
+
+        monkeypatch.setattr(election_module, "_IS_WINDOWS", True)
+        monkeypatch.setattr(daemon_module, "_inspect", inspect)
+        monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.05)
+        monkeypatch.setattr(
+            election_module, "_start_owner", self._predecessor(home, taken)
+        )
+
+        try:
+            outcome = obtain_owner(
+                profile.parent,
+                profile,
+                _config(profile),
+                deadline_seconds=0.4,
+                connect=lambda attachment: Reach.REFUSED,
+            )
+            observed = list(taken)
+            legacy_exists = self._legacy(home).exists()
+        finally:
+            release.set()
+
+        assert blocked.is_set()
+        assert observed == [], "an owner was started before the exclusion existed"
+        assert not legacy_exists
+        # Bounded all the same: the election spends its budget and falls back,
+        # which is a slow start rather than an installation nothing can repair.
+        assert not outcome.worth_connecting
+        # And one reader for the whole of it. Asking again would put a second
+        # process into the state storage the first is still inside.
+        assert inspections == 1
+
+    def test_an_owner_started_after_the_exclusion_cannot_take_the_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = _profile(tmp_path)
+        home = daemon_descriptor_module._account_home()
+        taken: list[str] = []
+
+        def inspect(*_args: object) -> OwnerLookup:
+            self._legacy(home).write_bytes(
+                daemon_descriptor_module._LEGACY_WINDOWS_TOMBSTONE
+            )
+            daemon_descriptor_module._windows_exclusion_established = True
+            return OwnerLookup(state=OwnerState.ABSENT)
+
+        monkeypatch.setattr(election_module, "_IS_WINDOWS", True)
+        monkeypatch.setattr(daemon_module, "_inspect", inspect)
+        monkeypatch.setattr(
+            election_module, "_start_owner", self._predecessor(home, taken)
+        )
+
+        obtain_owner(
+            profile.parent,
+            profile,
+            _config(profile),
+            deadline_seconds=0.4,
+            connect=lambda attachment: Reach.REFUSED,
+        )
+
+        # Startup proceeds the moment the inspection is safely done, and the
+        # predecessor that used to win this race now finds the name occupied.
+        assert taken, "the election never started an owner"
+        assert set(taken) == {"excluded"}
+        assert self._legacy(home).is_file()
+
+    def _failing_election(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: BaseException,
+    ) -> tuple[ElectionOutcome | None, BaseException | None, list[str], float]:
+        """Run an election whose reader stops without excluding anything.
+
+        Anything that escapes comes back rather than being raised, so a caller
+        asserts on what the election *did* before it asserts on what it said.
+        Under the guard nothing escapes and the election reports a fallback; a
+        guard that treats a stopped reader as permission spawns first and then
+        raises on the next read, and the spawn is the part that matters.
+        """
+        profile = _profile(tmp_path)
+        home = daemon_descriptor_module._account_home()
+        taken: list[str] = []
+
+        def inspect(*_args: object) -> OwnerLookup:
+            # After the read budget rather than before it, so the election
+            # reaches the gate while this reader is still in flight and has to
+            # decide on a reading it did not have when the budget expired.
+            time.sleep(0.05)
+            raise failure
+
+        monkeypatch.setattr(election_module, "_IS_WINDOWS", True)
+        monkeypatch.setattr(daemon_module, "_inspect", inspect)
+        monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.01)
+        monkeypatch.setattr(
+            election_module, "_start_owner", self._predecessor(home, taken)
+        )
+
+        outcome: ElectionOutcome | None = None
+        escaped: BaseException | None = None
+        began = time.monotonic()
+        try:
+            outcome = obtain_owner(
+                profile.parent,
+                profile,
+                _config(profile),
+                deadline_seconds=30.0,
+                connect=lambda attachment: Reach.REFUSED,
+            )
+        except Exception as exc:  # noqa: BLE001 - returned for the caller to judge
+            escaped = exc
+        return outcome, escaped, taken, time.monotonic() - began
+
+    def test_a_transient_state_failure_starts_no_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The case a stopped reader must never be read as permission. An ACL that
+        # answered once, a descriptor that ran out, a read that failed and would
+        # succeed on the next attempt: the reader settles having established
+        # nothing, and there is no legacy directory anywhere. A child started on
+        # the strength of that stopping is a predecessor that creates the
+        # directory itself, which is this guard's whole subject rather than an
+        # outcome it may permit.
+        home = daemon_descriptor_module._account_home()
+
+        outcome, escaped, taken, elapsed = self._failing_election(
+            tmp_path, monkeypatch, OSError("private state is temporarily unreadable")
+        )
+
+        assert taken == [], "a child was started against unestablished state"
+        assert not self._legacy(home).exists(), (
+            "a predecessor took the legacy name a transient failure left free"
+        )
+        assert escaped is None, escaped
+        assert outcome is not None and not outcome.worth_connecting
+        # And it says so at once rather than spending the deadline on a reader
+        # whose answer cannot change; the next election reads the state afresh.
+        assert elapsed < 5.0
+
+    def test_a_permanent_conflict_starts_no_child(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The legacy directory already standing, which is the failure an operator
+        # has to clear by hand. No child either: one would fail the same way, and
+        # this election cannot tell this case from the transient one above, which
+        # is exactly why neither may start anything.
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        home = daemon_descriptor_module._account_home()
+        self._legacy(home).mkdir()
+
+        outcome, escaped, taken, elapsed = self._failing_election(
+            tmp_path,
+            monkeypatch,
+            PrivateStateError("Legacy Windows daemon state still exists"),
+        )
+
+        assert taken == []
+        # Untouched, so the directory an operator is told to remove is the one
+        # that was already there.
+        assert self._legacy(home).is_dir()
+        assert escaped is None, escaped
+        assert outcome is not None and not outcome.worth_connecting
+        assert elapsed < 5.0
+
+    def test_the_reason_no_owner_could_start_is_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: Any
+    ):
+        # The reader's own diagnosis, which is the only thing that names what to
+        # fix. Dropped, the fallback is silent and reads as a machine that simply
+        # never shares a browser.
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        with caplog.at_level(logging.WARNING):
+            self._failing_election(
+                tmp_path,
+                monkeypatch,
+                PrivateStateError("Legacy Windows daemon state still exists at C:/x"),
+            )
+
+        assert "will use its own browser" in caplog.text
+        assert "Legacy Windows daemon state still exists at C:/x" in caplog.text
 
 
 class TestWindowsAtomicOwnerHandoff:

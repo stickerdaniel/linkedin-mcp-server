@@ -892,6 +892,65 @@ class TestStateLocation:
         with pytest.raises(NotADirectoryError):
             secure_mkdir(legacy / "daemon")
 
+    def test_windows_records_the_exclusion_only_once_it_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The question the election asks before it may start a child, so the
+        # answer has to follow the file rather than the intention to write it.
+        # Yes before the tombstone lands puts the whole guard back where it was.
+        from linkedin_mcp_server import windows_acl
+
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "restrict_to_current_user", lambda *args, **kwargs: None
+        )
+
+        assert not daemon_descriptor_module.windows_exclusion_established()
+
+        prepare_daemon_state(tmp_path / "auth")
+
+        assert daemon_descriptor_module.windows_exclusion_established()
+        assert (tmp_path / ".mcp-server-linkedin").is_file()
+
+    def test_windows_claims_no_exclusion_while_legacy_state_stands(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The permanent migration error. Nothing was excluded, and saying so is
+        # what lets a caller tell this apart from a namespace it may build on.
+        from linkedin_mcp_server import windows_acl
+
+        (tmp_path / ".mcp-server-linkedin").mkdir()
+        monkeypatch.setattr(daemon_descriptor_module, "_WINDOWS", True)
+        monkeypatch.setattr(
+            daemon_descriptor_module,
+            "_APPLICATION_STATE_DIR",
+            ".mcp-server-linkedin-v2",
+        )
+        monkeypatch.setattr(
+            windows_acl, "verify_children_cannot_be_replaced", lambda _path: None
+        )
+
+        with pytest.raises(PrivateStateError, match="Stop every mcp-server-linkedin"):
+            prepare_daemon_state(tmp_path / "auth")
+
+        assert not daemon_descriptor_module.windows_exclusion_established()
+
+    @posix_only
+    def test_no_exclusion_is_claimed_off_windows(self, tmp_path: Path):
+        # There is no second namespace to exclude anywhere else, so the answer
+        # stays no and the election's wait for it never applies.
+        prepare_daemon_state(tmp_path / "auth")
+
+        assert not daemon_descriptor_module.windows_exclusion_established()
+
     def test_windows_tombstone_is_hardened_before_publication(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

@@ -107,9 +107,10 @@ _DRAIN_POLL_SECONDS = 0.05
 
 #: How long :meth:`ControlListener.close` waits for the drain to leave the socket
 #: it owns. Deliberately short: the worker is safe by construction once the
-#: channel is closed — it can no longer publish a connection and it closes its own
-#: listener — so this only buys the common case where the port is released before
-#: ``close`` returns, and never lengthens the caller's own deadline by much.
+#: channel is closed (it can no longer publish a connection, and it closes its
+#: own listener), so this only buys the common case where the port is released
+#: before ``close`` returns, and never lengthens the caller's own deadline by
+#: much.
 _DRAIN_JOIN_SECONDS = 0.2
 
 
