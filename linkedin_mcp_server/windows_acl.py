@@ -67,20 +67,11 @@ SE_FILE_OBJECT = 1
 OWNER_SECURITY_INFORMATION = 0x00000001
 DACL_SECURITY_INFORMATION = 0x00000004
 PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
-# Replace the DACL *and* stop the parent's entries being inherited back in.
-# Without the second flag the first one is close to cosmetic.
-#
-# The owner goes with them, because a DACL is only as good as who may rewrite
-# it. Windows grants an object's owner READ_CONTROL and WRITE_DAC implicitly,
-# with no ACE saying so, so a directory this account merely had permission to
-# modify would keep its previous owner and that owner could widen the DACL
-# straight back. Taking ownership is what makes the entry we just wrote the
-# last word.
-REPLACE_PROTECTED_DACL = (
-    OWNER_SECURITY_INFORMATION
-    | DACL_SECURITY_INFORMATION
-    | PROTECTED_DACL_SECURITY_INFORMATION
-)
+# Replace the DACL and stop the parent's entries being inherited back in.
+# Ownership is deliberately excluded. Content created by another account does
+# not become trusted merely because that account granted this process enough
+# access to rewrite the security descriptor.
+REPLACE_PROTECTED_DACL = DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
 
 SE_DACL_PROTECTED = 0x1000
 FILE_ALL_ACCESS = 0x001F01FF
@@ -382,15 +373,24 @@ def _build_owner_only_acl(sid: _PSID, *, directory: bool) -> _PACL:
 
 
 def restrict_to_current_user(path: Path, *, directory: bool) -> None:
-    """Give only this account access to *path*, and verify it afterwards."""
+    """Give only this account access to its own *path*, and verify it."""
     _advapi32, _kernel32 = _load()
     _require_acl_capable_volume(path)
 
     sid, sid_buffer = current_user_sid()
+    expected_owner = _sid_to_string(sid)
+    actual_owner = read_owner(path)
+    if actual_owner != expected_owner:
+        del sid_buffer
+        raise PrivateStateError(
+            f"{path} is owned by {actual_owner}, not by this account. Refusing "
+            f"to convert another account's content into trusted private state."
+        )
+
     acl = _build_owner_only_acl(sid, directory=directory)
     try:
         code = _advapi32.SetNamedSecurityInfoW(
-            str(path), SE_FILE_OBJECT, REPLACE_PROTECTED_DACL, sid, None, acl, None
+            str(path), SE_FILE_OBJECT, REPLACE_PROTECTED_DACL, None, None, acl, None
         )
         # This one returns the error code rather than setting the thread's last
         # error, so checking GetLastError here would read a stale value from

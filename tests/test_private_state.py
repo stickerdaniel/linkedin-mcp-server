@@ -533,11 +533,9 @@ class TestWindowsAcl:
         assert "S-1-5-11" not in granted  # Authenticated Users
 
     @windows_only
-    def test_hardening_takes_ownership(self, tmp_path: Path):
-        # Windows grants an owner READ_CONTROL and WRITE_DAC implicitly, with
-        # no ACE saying so. A DACL naming only this account is therefore worth
-        # nothing while someone else owns the path: that owner can widen it
-        # again between hardening the directory and writing the token into it.
+    def test_hardening_preserves_current_ownership(self, tmp_path: Path):
+        # The entry is created by this account and remains owned by it. Hardening
+        # refuses foreign content instead of laundering its ownership.
         from linkedin_mcp_server.windows_acl import (
             current_user_sid,
             read_owner,
@@ -556,22 +554,18 @@ class TestWindowsAcl:
         assert read_owner(target) == expected
 
     @windows_only
-    def test_a_foreign_owner_is_refused(self, tmp_path: Path):
-        # The verification has to fail rather than report success, since the
-        # DACL alone looks correct in exactly this case.
-        from unittest.mock import patch
-
-        from linkedin_mcp_server.windows_acl import verify_owner_only
+    def test_a_foreign_initial_owner_is_refused_before_acl_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
 
         target = tmp_path / "daemon"
-        harden_directory(target)
-
-        with patch(
-            "linkedin_mcp_server.windows_acl.read_owner",
-            return_value="S-1-5-21-0-0-0-1234",
-        ):
-            with pytest.raises(PrivateStateError, match="owned by"):
-                verify_owner_only(target, directory=True)
+        target.mkdir()
+        monkeypatch.setattr(
+            windows_acl, "read_owner", lambda _path: "S-1-5-21-0-0-0-1234"
+        )
+        with pytest.raises(PrivateStateError, match="another account's content"):
+            windows_acl.restrict_to_current_user(target, directory=True)
 
     @windows_only
     def test_the_struct_layouts_match_the_windows_headers(self):
@@ -591,6 +585,35 @@ class TestWindowsAcl:
 
 
 class TestWindowsAclOffWindows:
+    def test_foreign_initial_owner_is_refused_before_acl_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        target = tmp_path / "foreign"
+        target.touch()
+        monkeypatch.setattr(windows_acl, "_load", lambda: (object(), object()))
+        monkeypatch.setattr(
+            windows_acl, "_require_acl_capable_volume", lambda _path: None
+        )
+        monkeypatch.setattr(
+            windows_acl, "current_user_sid", lambda: (object(), object())
+        )
+        monkeypatch.setattr(
+            windows_acl, "_sid_to_string", lambda _sid: "current-account"
+        )
+        monkeypatch.setattr(windows_acl, "read_owner", lambda _path: "another-account")
+        monkeypatch.setattr(
+            windows_acl,
+            "_build_owner_only_acl",
+            lambda *_args, **_kwargs: pytest.fail(
+                "foreign content reached ACL replacement"
+            ),
+        )
+
+        with pytest.raises(PrivateStateError, match="another account's content"):
+            windows_acl.restrict_to_current_user(target, directory=False)
+
     @posix_only
     def test_the_windows_helpers_refuse_rather_than_pretend(self, tmp_path: Path):
         # Importable everywhere so the module can be reasoned about and typed on

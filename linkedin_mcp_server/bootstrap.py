@@ -62,7 +62,7 @@ from linkedin_mcp_server.exceptions import (
     OwnerStandingDownError,
     ProfileRootRefusedError,
 )
-from linkedin_mcp_server.private_state import harden_directory
+from linkedin_mcp_server.private_state import PrivateStateError, harden_directory
 from linkedin_mcp_server.process_protocol import new_nonce
 from linkedin_mcp_server.process_tree import (
     ProcessTreeError,
@@ -1591,7 +1591,17 @@ async def _watch_installer_activity(
             previous = current
 
 
+def _windows_private_temp_creation_supported() -> bool:
+    return os.name != "nt" or sys.version_info >= (3, 12, 4)
+
+
 def _create_installer_temporary_root() -> Path:
+    if not _windows_private_temp_creation_supported():
+        raise PrivateStateError(
+            "Private browser installation on Windows requires Python 3.12.4 or "
+            "newer because earlier 3.12 releases create temporary directories "
+            "with inherited access."
+        )
     temporary_root = Path(tempfile.mkdtemp(prefix="linkedin-mcp-installer-"))
     try:
         # Python before 3.12.4 ignores mkdtemp's 0o700 mode on Windows, and a

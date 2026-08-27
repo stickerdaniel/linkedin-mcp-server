@@ -2771,6 +2771,24 @@ class TestPatchrightInstallStreaming:
         assert blocked.is_set()
         assert asyncio.get_running_loop().time() - started < 0.1
 
+    def test_old_windows_patch_is_refused_before_creating_a_temp_root(
+        self, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        monkeypatch.setattr(bootstrap.os, "name", "nt")
+        monkeypatch.setattr(bootstrap.sys, "version_info", (3, 12, 3))
+        assert not bootstrap._windows_private_temp_creation_supported()
+        monkeypatch.setattr(
+            bootstrap.tempfile,
+            "mkdtemp",
+            lambda **_kwargs: pytest.fail("an unsafe root was created"),
+        )
+
+        with pytest.raises(PrivateStateError, match="Python 3.12.4"):
+            bootstrap._create_installer_temporary_root()
+
     def test_installer_temporary_root_is_hardened_before_use(
         self, tmp_path, monkeypatch
     ):
