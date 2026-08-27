@@ -605,6 +605,35 @@ class TestWindowsAcl:
 
 
 class TestWindowsAclOffWindows:
+    def test_directory_pin_opens_the_entry_without_following_reparse_points(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from linkedin_mcp_server import windows_acl
+
+        captured: list[int] = []
+
+        class Kernel:
+            @staticmethod
+            def CreateFileW(
+                path: str,
+                access: int,
+                sharing: int,
+                security: object,
+                disposition: int,
+                flags: int,
+                template: object,
+            ) -> int:
+                captured.append(flags)
+                return 123
+
+        monkeypatch.setattr(windows_acl, "_load", lambda: (object(), Kernel()))
+
+        assert windows_acl.pin_directory(tmp_path) == 123
+        assert captured == [
+            windows_acl.FILE_FLAG_BACKUP_SEMANTICS
+            | windows_acl.FILE_FLAG_OPEN_REPARSE_POINT
+        ]
+
     def test_foreign_initial_owner_is_refused_before_acl_construction(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

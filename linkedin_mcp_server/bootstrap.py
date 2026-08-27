@@ -64,7 +64,11 @@ from linkedin_mcp_server.exceptions import (
     OwnerStandingDownError,
     ProfileRootRefusedError,
 )
-from linkedin_mcp_server.private_state import PrivateStateError, harden_directory
+from linkedin_mcp_server.private_state import (
+    PrivateStateError,
+    harden_directory,
+    verify_no_extended_acl,
+)
 from linkedin_mcp_server.process_protocol import new_nonce
 from linkedin_mcp_server.process_tree import (
     ProcessTreeError,
@@ -1649,6 +1653,8 @@ def _installer_temporary_parent() -> Path:
         raise PrivateStateError(
             f"Installer temporary parent {parent} is controlled by another account"
         )
+    if sys.platform == "darwin":
+        verify_no_extended_acl(parent)
     if parent_info.st_mode & 0o022 and not parent_info.st_mode & stat.S_ISVTX:
         raise PrivateStateError(
             f"Installer temporary roots can be replaced by another account in {parent}"
@@ -1666,6 +1672,8 @@ def _installer_temporary_parent() -> Path:
             raise PrivateStateError(
                 f"Installer temporary parent {container} is controlled by another account"
             )
+        if sys.platform == "darwin":
+            verify_no_extended_acl(container)
         if container_info.st_mode & 0o022:
             current_info = current.stat()
             sticky = bool(container_info.st_mode & stat.S_ISVTX)
@@ -1693,7 +1701,23 @@ def _create_installer_temporary_root() -> _InstallerTemporaryRoot:
             from linkedin_mcp_server.windows_acl import pin_directory
 
             pin = pin_directory(path)
-            details = path.stat()
+            details = path.lstat()
+            attributes = getattr(details, "st_file_attributes", None)
+            if attributes is None:
+                raise PrivateStateError(
+                    f"Windows did not report file attributes for installer root {path}"
+                )
+            if (
+                stat.S_ISLNK(details.st_mode)
+                or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise PrivateStateError(
+                    f"Installer temporary root {path} is a Windows reparse point"
+                )
+            if not stat.S_ISDIR(details.st_mode):
+                raise PrivateStateError(
+                    f"Installer temporary root is not a directory: {path}"
+                )
         else:
             flags = (
                 os.O_RDONLY
@@ -2473,8 +2497,13 @@ def _safe_to_print(text: str) -> str:
     the useful suffix without disclosing the credential.
     """
     text = _TERMINAL_CONTROLS.sub("", text)
-    configured = os.getenv("PLAYWRIGHT_DOWNLOAD_HOST", "").strip()
-    if configured:
+    for variable in (
+        "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST",
+        "PLAYWRIGHT_DOWNLOAD_HOST",
+    ):
+        configured = os.getenv(variable, "").strip()
+        if not configured:
+            continue
         redacted = _redacted_download_host(configured)
         text = text.replace(configured, redacted)
         without_slash = configured.rstrip("/")

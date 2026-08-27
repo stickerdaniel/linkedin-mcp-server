@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import threading
@@ -2858,6 +2859,67 @@ class TestPatchrightInstallStreaming:
         with pytest.raises(PrivateStateError, match="can be replaced"):
             bootstrap._create_installer_temporary_root()
 
+    def test_windows_reparse_temporary_root_is_refused_after_pinning(
+        self, tmp_path, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap, windows_acl
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        temporary_root = tmp_path / "private"
+        temporary_root.mkdir()
+        entry = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700,
+            st_dev=1,
+            st_ino=2,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        )
+        closed: list[object] = []
+        pin = object()
+        monkeypatch.setattr(bootstrap.os, "name", "nt")
+        monkeypatch.setattr(bootstrap, "_installer_temporary_parent", lambda: tmp_path)
+        monkeypatch.setattr(
+            bootstrap.tempfile,
+            "mkdtemp",
+            lambda **_kwargs: str(temporary_root),
+        )
+        monkeypatch.setattr(bootstrap.Path, "lstat", lambda _path: entry)
+        monkeypatch.setattr(windows_acl, "pin_directory", lambda _path: pin)
+        monkeypatch.setattr(
+            windows_acl, "close_directory_pin", lambda handle: closed.append(handle)
+        )
+
+        with pytest.raises(PrivateStateError, match="reparse point"):
+            bootstrap._create_installer_temporary_root()
+
+        assert closed == [pin]
+
+    def test_mac_extended_acl_on_temp_parent_is_refused(self, tmp_path, monkeypatch):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.private_state import PrivateStateError
+
+        parent = tmp_path / "temporary"
+        parent.mkdir()
+        checked: list[Path] = []
+        monkeypatch.setattr(bootstrap.sys, "platform", "darwin")
+        monkeypatch.setattr(bootstrap.tempfile, "gettempdir", lambda: str(parent))
+
+        def refuse(path: Path) -> None:
+            checked.append(path)
+            if path == parent:
+                raise PrivateStateError("access control list")
+
+        monkeypatch.setattr(bootstrap, "verify_no_extended_acl", refuse)
+        monkeypatch.setattr(
+            bootstrap.tempfile,
+            "mkdtemp",
+            lambda **_kwargs: pytest.fail("an ACL-replaceable root was created"),
+        )
+
+        with pytest.raises(PrivateStateError, match="access control list"):
+            bootstrap._create_installer_temporary_root()
+
+        assert checked == [parent]
+
     def test_installer_temporary_root_is_hardened_before_use(
         self, tmp_path, monkeypatch
     ):
@@ -2910,6 +2972,7 @@ class TestPatchrightInstallStreaming:
             bootstrap._create_installer_temporary_root()
         assert not temporary_root.exists()
 
+    @pytest.mark.skipif(os.name == "nt", reason="the Windows pin prevents replacement")
     def test_cleanup_refuses_a_replaced_temporary_root(self, tmp_path, monkeypatch):
         from linkedin_mcp_server import bootstrap
 
@@ -3213,14 +3276,20 @@ class TestPatchrightInstallStreaming:
         assert "ci-bot" not in everything
         assert "mirror.example/chromium.zip" in everything
 
-    async def test_mirror_path_credentials_are_not_reported(self, monkeypatch, caplog):
+    @pytest.mark.parametrize(
+        "variable",
+        ["PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST", "PLAYWRIGHT_DOWNLOAD_HOST"],
+    )
+    async def test_mirror_path_credentials_are_not_reported(
+        self, monkeypatch, caplog, variable: str
+    ):
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
         token = "private-access-token"
         host = f"https://mirror.example/{token}"
         url = f"{host}/builds/chromium.zip"
-        monkeypatch.setenv("PLAYWRIGHT_DOWNLOAD_HOST", host)
+        monkeypatch.setenv(variable, host)
         self._patch_proc(monkeypatch, [f"Downloading from {url}\n".encode()], 1)
 
         with caplog.at_level(logging.DEBUG, logger="linkedin_mcp_server.bootstrap"):

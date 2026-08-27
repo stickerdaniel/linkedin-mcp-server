@@ -469,6 +469,12 @@ def _drop_extended_acl_via(
         library.acl_free(empty)
 
 
+def verify_no_extended_acl(path: Path) -> None:
+    """Refuse when an existing path carries access outside its mode bits."""
+    with _as_private_state_error(path, "verify the access list on"):
+        _verify_no_extended_acl(path)
+
+
 def _verify_no_extended_acl(path: Path) -> None:
     """Refuse when an extended ACL still grants access the mode does not show."""
     if _has_extended_acl(path):
