@@ -1953,6 +1953,21 @@ class TestInstallerSupervisorLaunch:
         assert after_unrelated == before
         assert after_expected != after_unrelated
 
+    def test_a_direct_download_archive_reports_activity(self, tmp_path):
+        from linkedin_mcp_server import bootstrap
+
+        temporary_root = tmp_path / "private"
+        temporary_root.mkdir()
+        archive = temporary_root / "playwright-download-current.zip"
+        archive.write_bytes(b"a")
+        before = bootstrap._installer_download_snapshot(temporary_root, ())
+
+        archive.write_bytes(b"ab")
+        after = bootstrap._installer_download_snapshot(temporary_root, ())
+
+        assert before != after
+        assert after == ((str(archive), 2, archive.stat().st_mtime_ns),)
+
     def test_activity_scanner_matches_patchright_temp_layout(self):
         from importlib.metadata import distribution
 

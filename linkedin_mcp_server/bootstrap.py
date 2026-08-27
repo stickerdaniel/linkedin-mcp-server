@@ -1555,6 +1555,15 @@ def _installer_download_snapshot(
     for root in roots:
         if root.is_symlink():
             continue
+        try:
+            root_details = root.stat()
+        except OSError:
+            continue
+        if stat.S_ISREG(root_details.st_mode):
+            entries.append((str(root), root_details.st_size, root_details.st_mtime_ns))
+            continue
+        if not stat.S_ISDIR(root_details.st_mode):
+            continue
         for current, directories, files in os.walk(root, followlinks=False):
             current_path = Path(current)
             try:
