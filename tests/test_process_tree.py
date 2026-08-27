@@ -976,6 +976,57 @@ os._exit(0)
                     os.kill(pid, signal.SIGKILL)
 
 
+def test_detached_kill_revalidates_kernel_identity(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    killed: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(
+        process_tree,
+        "_posix_detached_descendants",
+        lambda _pid, _group: ((123, "old"), (456, "same")),
+    )
+    monkeypatch.setattr(
+        process_tree,
+        "_kernel_start_identity",
+        lambda pid: "new" if pid == 123 else "same",
+    )
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    process_tree._kill_detached_descendants(1, 1)
+
+    assert killed == [(456, signal.SIGKILL)]
+
+
+def test_linux_detached_discovery_does_not_need_ps(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(process_tree.sys, "platform", "linux")
+    monkeypatch.setattr(
+        process_tree,
+        "_linux_process_rows",
+        lambda: {
+            10: (1, 10, "proc:owner"),
+            20: (10, 20, "proc:browser"),
+        },
+    )
+    monkeypatch.setattr(
+        process_tree,
+        "_ps_process_rows",
+        lambda: pytest.fail("Linux hard exit called ps"),
+    )
+
+    assert process_tree._posix_detached_descendants(10, 10) == ((20, "proc:browser"),)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux procfs")
+def test_linux_snapshot_needs_no_ps_binary():
+    rows = process_tree._linux_process_rows()
+
+    assert rows[os.getpid()] == (
+        os.getppid(),
+        os.getpgrp(),
+        process_tree._kernel_start_identity(os.getpid()),
+    )
+
+
 @_POSIX_ONLY
 def test_daemon_hard_exit_terminates_a_detached_descendant(tmp_path: Path):
     marker = tmp_path / "daemon-descendant.txt"

@@ -31,8 +31,32 @@ class ProcessTreeError(RuntimeError):
     """The operating system could not establish descendant containment."""
 
 
-def _posix_detached_descendants(pid: int, process_group: int) -> tuple[int, ...]:
-    """Snapshot descendants that escaped *process_group*, deepest first."""
+def _linux_process_rows() -> dict[int, tuple[int, int, str | None]]:
+    """Read ancestry, groups and kernel start identities directly from procfs."""
+    rows: dict[int, tuple[int, int, str | None]] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "stat").read_text()
+        except (OSError, UnicodeError):
+            continue
+        closing = raw.rfind(")")
+        fields = raw[closing + 2 :].split() if closing >= 0 else []
+        if len(fields) <= 19:
+            continue
+        try:
+            process = int(entry.name)
+            parent = int(fields[1])
+            group = int(fields[2])
+        except ValueError:
+            continue
+        rows[process] = (parent, group, f"proc:{fields[19]}")
+    return rows
+
+
+def _ps_process_rows() -> dict[int, tuple[int, int, str | None]]:
+    """Read process ancestry on POSIX systems without procfs."""
     ps = next(
         (
             candidate
@@ -42,7 +66,7 @@ def _posix_detached_descendants(pid: int, process_group: int) -> tuple[int, ...]
         None,
     )
     if ps is None:
-        return ()
+        return {}
     try:
         snapshot = subprocess.run(
             [ps, "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid="],
@@ -52,22 +76,38 @@ def _posix_detached_descendants(pid: int, process_group: int) -> tuple[int, ...]
             timeout=_POSIX_PROCESS_SNAPSHOT_SECONDS,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return ()
+        return {}
 
-    rows: dict[int, tuple[int, int]] = {}
-    children: dict[int, list[int]] = {}
+    rows: dict[int, tuple[int, int, str | None]] = {}
     for line in snapshot.splitlines():
         fields = line.split()
         if len(fields) != 3:
             continue
         try:
-            child, parent, group = map(int, fields)
+            process, parent, group = map(int, fields)
         except ValueError:
             continue
-        rows[child] = (parent, group)
-        children.setdefault(parent, []).append(child)
+        rows[process] = (parent, group, None)
+    return rows
 
-    detached: list[tuple[int, int]] = []
+
+def _posix_detached_descendants(
+    pid: int, process_group: int
+) -> tuple[tuple[int, str], ...]:
+    """Snapshot escaped descendants and their kernel start identities."""
+    try:
+        rows = (
+            _linux_process_rows()
+            if sys.platform.startswith("linux")
+            else _ps_process_rows()
+        )
+    except OSError:
+        return ()
+    children: dict[int, list[int]] = {}
+    for process, (parent, _group, _identity) in rows.items():
+        children.setdefault(parent, []).append(process)
+
+    detached: list[tuple[int, int, str]] = []
     pending = [(pid, 0)]
     seen = {pid}
     while pending:
@@ -77,9 +117,23 @@ def _posix_detached_descendants(pid: int, process_group: int) -> tuple[int, ...]
                 continue
             seen.add(child)
             pending.append((child, depth + 1))
-            if rows[child][1] != process_group:
-                detached.append((depth + 1, child))
-    return tuple(child for _depth, child in sorted(detached, reverse=True))
+            _parent, group, identity = rows[child]
+            if group == process_group:
+                continue
+            identity = identity or _kernel_start_identity(child)
+            if identity is not None:
+                detached.append((depth + 1, child, identity))
+    return tuple(
+        (child, identity) for _depth, child, identity in sorted(detached, reverse=True)
+    )
+
+
+def _kill_detached_descendants(pid: int, process_group: int) -> None:
+    for descendant, identity in _posix_detached_descendants(pid, process_group):
+        if _kernel_start_identity(descendant) != identity:
+            continue
+        with contextlib.suppress(OSError):
+            os.kill(descendant, signal.SIGKILL)
 
 
 def hard_exit_process_tree(status: int) -> NoReturn:
@@ -92,9 +146,7 @@ def hard_exit_process_tree(status: int) -> NoReturn:
                 # Chromium is deliberately spawned detached by Patchright. Snapshot
                 # it while the Node parent still makes ancestry observable, then kill
                 # escaped descendants before the owner's own group.
-                for descendant in _posix_detached_descendants(pid, process_group):
-                    with contextlib.suppress(OSError):
-                        os.kill(descendant, signal.SIGKILL)
+                _kill_detached_descendants(pid, process_group)
                 os.killpg(process_group, signal.SIGKILL)
         except OSError:
             pass
