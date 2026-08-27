@@ -15,6 +15,7 @@ before it validates must not leave a child that publishes anyway.
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import threading
 import time
@@ -43,13 +44,26 @@ def _attach(channel: ControlListener, nonce: str = _NONCE) -> Any:
     return process_control.attach(channel.host, channel.port, nonce=nonce, timeout=5.0)
 
 
+def _collect(channel: ControlListener, *, timeout: float, nonce: str = _NONCE) -> None:
+    """Drain and then take the attachment, the way ``_spawn`` does.
+
+    Two calls rather than one, because the whole point of the split is that they
+    happen at different times: the drain starts as soon as the nonce exists and
+    the collection waits on the result much later. Tests that only care about
+    what is authorized use both at once; the ones about the queue place the drain
+    themselves.
+    """
+    channel.start_accepting(nonce=nonce, timeout=timeout)
+    channel.attached_within(timeout=timeout)
+
+
 class TestAuthorization:
     def test_the_record_reaches_the_child_that_presented_the_nonce(
         self, listener: ControlListener
     ):
         child = _attach(listener)
         try:
-            listener.accept_within(nonce=_NONCE, timeout=5.0)
+            _collect(listener, timeout=5.0)
             listener.send(_RECORD)
 
             assert child.readline() == _RECORD
@@ -65,7 +79,7 @@ class TestAuthorization:
         stranger = _attach(listener, _OTHER_NONCE)
         child = _attach(listener)
         try:
-            listener.accept_within(nonce=_NONCE, timeout=5.0)
+            _collect(listener, timeout=5.0)
             listener.send(_RECORD)
 
             assert child.readline() == _RECORD
@@ -84,7 +98,7 @@ class TestAuthorization:
         child = _attach(listener)
         try:
             began = time.monotonic()
-            listener.accept_within(nonce=_NONCE, timeout=30.0)
+            _collect(listener, timeout=30.0)
             elapsed = time.monotonic() - began
             listener.send(_RECORD)
 
@@ -107,9 +121,7 @@ class TestAuthorization:
         child = _attach(listener)
         try:
             began = time.monotonic()
-            listener.accept_within(
-                nonce=_NONCE, timeout=daemon_election._PREPARED_READ_SECONDS
-            )
+            _collect(listener, timeout=daemon_election._PREPARED_READ_SECONDS)
             elapsed = time.monotonic() - began
             listener.send(_RECORD)
 
@@ -140,9 +152,7 @@ class TestAuthorization:
         child = _attach(listener)
         try:
             began = time.monotonic()
-            listener.accept_within(
-                nonce=_NONCE, timeout=daemon_election._PREPARED_READ_SECONDS
-            )
+            _collect(listener, timeout=daemon_election._PREPARED_READ_SECONDS)
             elapsed = time.monotonic() - began
             listener.send(_RECORD)
 
@@ -162,8 +172,9 @@ class TestAuthorization:
     ):
         began = time.monotonic()
 
+        listener.start_accepting(nonce=_NONCE, timeout=0.2)
         with pytest.raises(TimeoutError, match="control channel"):
-            listener.accept_within(nonce=_NONCE, timeout=0.2)
+            listener.attached_within(timeout=0.2)
 
         assert time.monotonic() - began < 5.0
 
@@ -207,11 +218,211 @@ class TestPeerAllowance:
 
         assert remaining > 0.0
 
+    def test_a_full_queue_is_emptied_inside_the_production_attachment_wait(self):
+        # The drain runs for the whole spawn, but a peer's allowance comes out of
+        # the window the parent will actually wait for an attachment in, and not
+        # out of the drain's own budget. Keyed to the drain instead, each peer
+        # grows with it: measured against an eight second spawn, a full queue of
+        # silent peers took three seconds against a one second wait.
+        assert (
+            process_control._PEER_WINDOW_SECONDS
+            <= daemon_election._PREPARED_READ_SECONDS
+        )
+        remaining = process_control._PEER_WINDOW_SECONDS
+        for _ in range(process_control._BACKLOG):
+            remaining -= process_control._peer_allowance(remaining)
+
+        spent = process_control._PEER_WINDOW_SECONDS - remaining
+        assert spent < daemon_election._PREPARED_READ_SECONDS / 2
+
+    def test_a_long_drain_does_not_make_each_peer_proportionally_longer(
+        self, listener: ControlListener
+    ):
+        # The same property through the socket. The drain is given thirty
+        # seconds, which is the shape of a real spawn, and the peers ahead of the
+        # child still cost a share of the attachment window rather than of that.
+        silent = [
+            socket.create_connection((listener.host, listener.port)) for _ in range(3)
+        ]
+        child = _attach(listener)
+        try:
+            listener.start_accepting(nonce=_NONCE, timeout=30.0)
+            began = time.monotonic()
+            listener.attached_within(timeout=daemon_election._PREPARED_READ_SECONDS)
+            elapsed = time.monotonic() - began
+            listener.send(_RECORD)
+
+            assert child.readline() == _RECORD
+            assert elapsed < daemon_election._PREPARED_READ_SECONDS / 2, (
+                "the peers ahead were paid out of the drain's own budget"
+            )
+        finally:
+            for peer in silent:
+                peer.close()
+            child.close()
+
     def test_a_long_wait_is_still_capped_absolutely(self):
         # The ceiling binds only past thirty-two seconds; no caller has a wait
         # like that today, and the cap is what keeps one from handing a stranger
         # a share proportional to it.
         assert process_control._peer_allowance(60.0) == process_control._PEER_SECONDS
+
+
+class TestSaturatedQueue:
+    """A queue already full when the child goes looking for a slot.
+
+    The case the per-peer allowance does not reach. That bound divides the wait
+    among peers *ahead of a connection that is already queued*, and it therefore
+    assumes the child got into the queue. Nothing guarantees that: the rendezvous
+    is bound before the child exists, anything running as this account can reach
+    it, and the queue holds sixteen. A child that finds it full does not fail, it
+    blocks in connect for its own thirty second timeout, so a parent that starts
+    accepting only after the child has reported something is waiting for a report
+    from a process it has stopped from reaching it.
+    """
+
+    def _saturate(self, channel: ControlListener) -> list[socket.socket]:
+        return [
+            socket.create_connection((channel.host, channel.port))
+            for _ in range(process_control._BACKLOG)
+        ]
+
+    def test_a_queue_full_before_the_child_exists_still_lets_it_attach(
+        self, listener: ControlListener
+    ):
+        # Production order: every slot taken while the parent is still spawning,
+        # and the child arriving afterwards. It attaches because the drain has
+        # been emptying the queue since the nonce existed; without that it waits
+        # out its connect timeout and never reports the prepared generation the
+        # parent is waiting for before it would accept.
+        silent = self._saturate(listener)
+        try:
+            listener.start_accepting(nonce=_NONCE, timeout=2.0)
+            began = time.monotonic()
+            child = _attach(listener)
+            try:
+                listener.attached_within(timeout=5.0)
+                listener.send(_RECORD)
+
+                assert child.readline() == _RECORD
+                assert time.monotonic() - began < 5.0
+            finally:
+                child.close()
+        finally:
+            for peer in silent:
+                peer.close()
+
+    def test_a_full_queue_of_strangers_is_emptied_rather_than_waited_out(
+        self, listener: ControlListener
+    ):
+        # The drain is what makes room, so it has to discard rather than park on
+        # the first stranger. Every slot holds a peer that says nothing at all,
+        # and the queue is empty again well inside the drain's own budget.
+        silent = self._saturate(listener)
+        try:
+            listener.start_accepting(nonce=_NONCE, timeout=2.0)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if all(peer.recv(1) == b"" for peer in silent):
+                    break
+                time.sleep(0.01)
+            else:  # pragma: no cover - the drain kept a stranger
+                pytest.fail("the strangers were never discarded")
+        finally:
+            for peer in silent:
+                peer.close()
+
+
+class TestWorkerLifetime:
+    """What the accept worker may still do once the channel is closed.
+
+    It runs on its own thread and the parent walks away from it, so the two
+    questions are whether it can touch state the parent has finished with, and
+    whether it can touch a descriptor the parent has reissued.
+    """
+
+    def test_a_worker_never_publishes_into_a_closed_channel(
+        self, listener: ControlListener
+    ):
+        # The guard itself, called the way the worker calls it: an authenticated
+        # connection arriving after close is closed rather than published.
+        # Publishing it would hand a record-carrying socket to a channel whose
+        # abort has already been decided.
+        listener.start_accepting(nonce=_NONCE, timeout=5.0)
+        listener.close()
+        first, second = socket.socketpair()
+        try:
+            listener._keep(first)
+
+            assert listener._connection is None
+            with pytest.raises(OSError, match="No daemon is attached"):
+                listener.send(_RECORD)
+            assert second.recv(16) == b"", "the refused peer was left open"
+        finally:
+            first.close()
+            second.close()
+
+    def test_a_peer_that_authenticates_late_gets_the_abort(
+        self, listener: ControlListener
+    ):
+        # The same thing through the socket rather than the method. Whether the
+        # worker was between accepts or already reading this peer, the peer ends
+        # up with end of file and the channel with nothing attached.
+        peer = socket.create_connection((listener.host, listener.port))
+        try:
+            listener.start_accepting(nonce=_NONCE, timeout=5.0)
+            listener.close()
+            with contextlib.suppress(OSError):
+                peer.sendall(f"attach {_NONCE}\n".encode("ascii"))
+            peer.settimeout(5.0)
+
+            assert peer.recv(16) == b""
+            assert listener._connection is None
+        finally:
+            peer.close()
+
+    def test_the_worker_and_its_socket_are_gone_after_close(
+        self, listener: ControlListener
+    ):
+        # The listener is closed by the worker and never under it: a descriptor
+        # closed while a thread is blocked in accept can be reissued to an
+        # unrelated socket in this process, and the accept would then return a
+        # connection belonging to that one.
+        listener.start_accepting(nonce=_NONCE, timeout=30.0)
+        worker = listener._drain
+        assert worker is not None
+        assert listener._listener is None, (
+            "the channel kept a socket close would race the worker for"
+        )
+        host, port = listener.host, listener.port
+
+        listener.close()
+
+        deadline = time.monotonic() + 5.0
+        while worker.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not worker.is_alive(), "the accept worker outlived the closed channel"
+        with pytest.raises(OSError):
+            socket.create_connection((host, port), timeout=5.0).close()
+
+    def test_a_second_drain_is_never_started(self, listener: ControlListener):
+        # Idempotent, so a caller that cannot tell whether it already started the
+        # drain does not leave a second thread accepting on a socket the first
+        # one owns.
+        listener.start_accepting(nonce=_NONCE, timeout=5.0)
+        worker = listener._drain
+        listener.start_accepting(nonce=_NONCE, timeout=5.0)
+
+        assert listener._drain is worker
+
+    def test_collecting_before_the_drain_exists_is_refused(
+        self, listener: ControlListener
+    ):
+        # An attachment can only be required of a channel that was told to look
+        # for one. Waiting on a channel that never started would report a silent
+        # child where the parent simply never asked.
+        with pytest.raises(OSError, match="not accepting"):
+            listener.attached_within(timeout=0.1)
 
 
 class TestAbortAuthority:
@@ -223,7 +434,7 @@ class TestAbortAuthority:
         # be able to tell that from a commit.
         child = _attach(listener)
         try:
-            listener.accept_within(nonce=_NONCE, timeout=5.0)
+            _collect(listener, timeout=5.0)
             listener.close()
 
             assert child.readline() == ""
@@ -251,7 +462,7 @@ class TestAbortAuthority:
         # mean the same thing: nothing was authorized.
         child = _attach(listener)
         try:
-            listener.accept_within(nonce=_NONCE, timeout=5.0)
+            _collect(listener, timeout=5.0)
             connection = listener._connection
             assert connection is not None
             connection.setsockopt(
@@ -294,7 +505,7 @@ class TestRendezvous:
         channel.close()
 
         with pytest.raises(OSError, match="closed"):
-            channel.accept_within(nonce=_NONCE, timeout=0.1)
+            channel.start_accepting(nonce=_NONCE, timeout=0.1)
 
     def test_closing_twice_is_not_an_error(self, listener: ControlListener):
         listener.close()
@@ -306,7 +517,7 @@ class TestRendezvous:
         # The commit record follows a whole endpoint startup, so the child's read
         # must not carry the connect timeout into it.
         child = _attach(listener)
-        listener.accept_within(nonce=_NONCE, timeout=5.0)
+        _collect(listener, timeout=5.0)
         received: list[str] = []
         reader = threading.Thread(target=lambda: received.append(child.readline()))
         reader.start()

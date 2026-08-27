@@ -39,6 +39,7 @@ import errno
 import logging
 import secrets
 import socket
+import threading
 import time
 from typing import Protocol
 
@@ -85,6 +86,32 @@ _PEER_SECONDS = 1.0
 #: wait, and the backlog holds sixteen.
 _PEER_SHARE = 1.0 / (2 * _BACKLOG)
 
+#: The window a queued child has to be reached inside, and therefore the basis
+#: for what one unauthenticated peer ahead of it may spend. It is the wait the
+#: parent gives the attachment once a prepared generation exists
+#: (``daemon_election._PREPARED_READ_SECONDS``), and a test pins the pair.
+#:
+#: The basis is this window and not the drain's own budget, which is far longer.
+#: Only the peers *ahead* of the child's connection can delay it and the queue
+#: holds ``_BACKLOG`` of those, so a share of this window empties a full queue
+#: well inside it however long the drain itself is allowed to keep running. A
+#: share of the drain's budget instead makes each peer proportionally larger:
+#: measured against an eight second spawn, sixteen silent peers took three
+#: seconds and the owner behind them was killed inside a one second wait.
+_PEER_WINDOW_SECONDS = 1.0
+
+#: How long the drain blocks in one ``accept`` before rechecking whether it has
+#: been stopped. Short, so a closed channel leaves no worker behind for long, and
+#: long enough that an idle rendezvous is not a spin.
+_DRAIN_POLL_SECONDS = 0.05
+
+#: How long :meth:`ControlListener.close` waits for the drain to leave the socket
+#: it owns. Deliberately short: the worker is safe by construction once the
+#: channel is closed — it can no longer publish a connection and it closes its own
+#: listener — so this only buys the common case where the port is released before
+#: ``close`` returns, and never lengthens the caller's own deadline by much.
+_DRAIN_JOIN_SECONDS = 0.2
+
 
 def _peer_allowance(remaining: float) -> float:
     """How long to give one unauthenticated peer, out of the wait that is left.
@@ -116,11 +143,28 @@ class ControlListener:
     Bound before the spawn on purpose. The address travels in the configuration
     record, so it has to be settled before that record is written, and a bind
     that fails then has cost nothing: there is no child to stop.
+
+    Bound before the spawn also means reachable before the child exists, and the
+    queue is what that costs. Accepting only once the child has reported a
+    prepared generation was the defect: the listen queue is finite, anything
+    running as this account can fill it, and a child whose connect finds it full
+    blocks until its own connect timeout. It then cannot report the very thing
+    the parent was waiting for before it would accept, so the parent kills a
+    healthy owner for never attaching. The per-peer allowance does not reach
+    this, because it bounds peers ahead of a connection that is already queued.
+    So the queue is drained from the moment the nonce exists
+    (:meth:`start_accepting`) and the attachment is collected later
+    (:meth:`attached_within`).
     """
 
     def __init__(self, sock: socket.socket) -> None:
+        self._lock = threading.Lock()
         self._listener: socket.socket | None = sock
         self._connection: socket.socket | None = None
+        self._drain: threading.Thread | None = None
+        self._attached = threading.Event()
+        self._stop = threading.Event()
+        self._closed = False
         address = sock.getsockname()
         self.host: str = str(address[0])
         self.port: int = int(address[1])
@@ -145,38 +189,116 @@ class ControlListener:
             return cls(sock)
         raise OSError("No loopback address could be bound for the owner control")
 
-    def accept_within(self, *, nonce: str, timeout: float) -> None:
-        """Take the connection that proves it read the configuration record.
+    def start_accepting(self, *, nonce: str, timeout: float) -> None:
+        """Begin emptying the listen queue, before anything waits on the child.
 
-        Anything else on this port is refused and the wait continues, because a
-        stranger reaching a loopback port cannot be prevented and must not be
-        able to spend the child's rendezvous. The deadline is what bounds that:
-        the child's own connection is already queued by the time this is called,
-        so a full backlog of strangers still leaves it reachable, and each one
-        of them may spend only a share of what is left rather than all of it.
+        Started as soon as the post-spawn nonce exists, which is the earliest
+        moment a peer can be authenticated at all, and a whole child startup
+        before the parent has anything to wait for. Strangers are read and
+        discarded as they arrive rather than accumulating, so the child's own
+        connect finds room in the queue whenever it gets there.
+
+        The listener socket moves to the worker and only the worker closes it. A
+        descriptor closed under a blocked ``accept`` can be reissued to an
+        unrelated socket in this process, and the accept would then return a
+        connection belonging to that one.
+
+        Idempotent, so a caller that cannot tell whether it already started the
+        drain does not start a second one. *timeout* bounds the whole drain: past
+        it the worker stops, exactly as the old single accept did.
         """
-        listener = self._listener
-        if listener is None:
-            raise OSError("The owner control channel is closed")
         expected = _attach_frame(nonce)
         deadline = time.monotonic() + max(timeout, 0.0)
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("The daemon did not attach to its control channel")
-            listener.settimeout(remaining)
-            try:
-                connection, _ = listener.accept()
-            except TimeoutError:
-                raise TimeoutError(
-                    "The daemon did not attach to its control channel"
-                ) from None
-            if self._proves_itself(connection, expected, deadline):
-                self._connection = connection
-                self._close_listener()
+        with self._lock:
+            if self._drain is not None:
                 return
-            logger.debug("An unauthenticated peer reached the owner control channel")
-            connection.close()
+            listener = self._listener
+            if self._closed or listener is None:
+                raise OSError("The owner control channel is closed")
+            self._listener = None
+            drain = threading.Thread(
+                target=self._drain_queue,
+                args=(listener, expected, deadline),
+                name="daemon-control-accept",
+                daemon=True,
+            )
+            self._drain = drain
+        drain.start()
+
+    def attached_within(self, *, timeout: float) -> None:
+        """Wait for the attachment the drain authenticated.
+
+        Only a wait: the accepting happened while the child was starting, so in
+        the ordinary case this returns at once. It is still the parent's
+        pre-commit requirement, because nothing may be authorized before a peer
+        has presented the nonce.
+        """
+        with self._lock:
+            if self._drain is None:
+                raise OSError("The owner control channel is not accepting")
+            if self._closed:
+                raise OSError("The owner control channel is closed")
+        if not self._attached.wait(max(timeout, 0.0)):
+            raise TimeoutError("The daemon did not attach to its control channel")
+
+    def _drain_queue(
+        self, listener: socket.socket, expected: bytes, deadline: float
+    ) -> None:
+        """Accept and authenticate until the child is found, or time runs out.
+
+        Anything that is not the child is refused and the drain continues,
+        because a stranger reaching a loopback port cannot be prevented and must
+        not be able to spend the child's rendezvous. Each one may spend only a
+        share of ``_PEER_WINDOW_SECONDS``, and less than that once the drain has
+        less than a window left to run.
+        """
+        try:
+            while not self._stop.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.debug("The owner control channel stopped accepting in time")
+                    return
+                listener.settimeout(min(remaining, _DRAIN_POLL_SECONDS))
+                try:
+                    connection, _ = listener.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    logger.debug(
+                        "The owner control channel could not accept", exc_info=True
+                    )
+                    return
+                window = min(deadline - time.monotonic(), _PEER_WINDOW_SECONDS)
+                if self._proves_itself(connection, expected, time.monotonic() + window):
+                    self._keep(connection)
+                    return
+                logger.debug(
+                    "An unauthenticated peer reached the owner control channel"
+                )
+                with contextlib.suppress(OSError):
+                    connection.close()
+        finally:
+            with contextlib.suppress(OSError):
+                listener.close()
+
+    def _keep(self, connection: socket.socket) -> None:
+        """Publish the authenticated connection, unless the channel is gone.
+
+        The one place the worker touches shared state, and it declines to touch
+        it after :meth:`close`. A worker that published into a closed channel
+        would hand a record-carrying socket to a listener object the caller has
+        already finished with, and the abort that close is supposed to be would
+        never reach the child.
+        """
+        with self._lock:
+            keeping = not self._closed and self._connection is None
+            if keeping:
+                self._connection = connection
+        if not keeping:
+            with contextlib.suppress(OSError):
+                connection.close()
+            return
+        self._attached.set()
 
     def send(self, record: str) -> None:
         """Deliver one authorization record to the attached child."""
@@ -186,18 +308,31 @@ class ControlListener:
         connection.sendall(record.encode("ascii"))
 
     def close(self) -> None:
-        """End the channel. Without a record first, this is the abort."""
-        self._close_listener()
-        connection, self._connection = self._connection, None
-        if connection is not None:
-            with contextlib.suppress(OSError):
-                connection.close()
+        """End the channel. Without a record first, this is the abort.
 
-    def _close_listener(self) -> None:
-        listener, self._listener = self._listener, None
+        The drain is told to stop and joined briefly, but the listener it owns is
+        never closed from here: see :meth:`start_accepting` for why closing a
+        descriptor under a blocked ``accept`` is not a shortcut. A worker that
+        outlives the join is harmless, because :meth:`_keep` refuses to publish
+        into a closed channel and the worker closes its own socket on the way
+        out.
+        """
+        with self._lock:
+            self._closed = True
+            drain = self._drain
+            listener, self._listener = self._listener, None
+            connection, self._connection = self._connection, None
+        self._stop.set()
         if listener is not None:
             with contextlib.suppress(OSError):
                 listener.close()
+        if connection is not None:
+            with contextlib.suppress(OSError):
+                connection.close()
+        if drain is not None:
+            drain.join(timeout=_DRAIN_JOIN_SECONDS)
+            if drain.is_alive():
+                logger.debug("The owner control channel worker is still unwinding")
 
     @staticmethod
     def _proves_itself(

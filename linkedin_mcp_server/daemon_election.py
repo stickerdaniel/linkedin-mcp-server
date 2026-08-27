@@ -760,6 +760,13 @@ def _spawn(
 
     try:
         assert child.stdin is not None and child.stdout is not None
+        # Before the configuration record, and therefore before the child can
+        # reach the port at all. The rendezvous has been bound since before the
+        # spawn, so anything running as this account may already be sitting in
+        # its queue; a parent that only accepts once the child has reported a
+        # prepared generation waits for a report the child cannot make, because
+        # the child is blocked connecting into a queue nobody is emptying.
+        control.start_accepting(nonce=handshake_nonce, timeout=timeout)
         if windows_job is not None and nonce is not None:
             windows_job.assign_popen(child)
             assigned = True
@@ -863,12 +870,12 @@ def _spawn(
             max(timeout - (time.monotonic() - started), 0.0),
         )
         try:
-            # Already queued: the child attaches before it prepares anything, so
-            # a prepared generation proves the connection exists to accept.
-            control.accept_within(
-                nonce=handshake_nonce,
-                timeout=prepared_deadline - time.monotonic(),
-            )
+            # Already collected: the child attaches before it prepares anything
+            # and the queue has been drained since before the child could reach
+            # it, so a prepared generation means the authenticated connection is
+            # in hand. Still required before commit, because nothing may be
+            # authorized until a peer has presented the post-spawn nonce.
+            control.attached_within(timeout=prepared_deadline - time.monotonic())
         except (TimeoutError, OSError):
             # Nothing was authorized, so this child cannot publish and stopping it
             # frees the lock for the next attempt. Not terminal: another election

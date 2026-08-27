@@ -1446,6 +1446,158 @@ def test_owner_accepts_a_verdict_after_large_finite_startup_output():
     )
 
 
+@_POSIX_ONLY
+class TestSaturatedControlQueue:
+    """The child's rendezvous, already full when the child goes looking for it.
+
+    The listener is bound before the spawn, because its address travels in the
+    configuration record. Anything running as this account can therefore queue on
+    it before the child exists, and the queue holds sixteen. A child that finds it
+    full does not fail: it blocks in connect for its own thirty second timeout, so
+    it never reports the prepared generation the parent waited for before it would
+    accept anything. The parent then killed a healthy owner for never attaching,
+    on every attempt, for as long as the strangers sat there.
+
+    Real sockets and a real protocol-3 exchange, because the defect is in the
+    order two processes reach one kernel queue. The Windows path puts a Job Object
+    in front of the same exchange, and its ordering is pinned by the doubles in
+    ``TestWindowsAtomicOwnerHandoff``.
+    """
+
+    class _Child:
+        """A protocol-3 owner, in a thread, doing what one does and in that order.
+
+        It attaches before it prepares anything, which is the ordering the whole
+        defect turns on: nothing it says can reach the parent until it is through
+        the queue.
+        """
+
+        def __init__(self, instance_id: str) -> None:
+            configuration_read, configuration_write = os.pipe()
+            report_read, report_write = os.pipe()
+            self.pid = 424242
+            self.stdin = os.fdopen(configuration_write, "wb")
+            self.stdout = os.fdopen(report_read, "rb")
+            self.stderr = None
+            self.returncode: int | None = None
+            self.killed = False
+            self.attached_at: float | None = None
+            self.failure: BaseException | None = None
+            self._instance_id = instance_id
+            self._configuration = os.fdopen(configuration_read, "rb")
+            self._report = os.fdopen(report_write, "wb")
+            self._nonce = ""
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+        def _run(self) -> None:
+            try:
+                with self._configuration as stream:
+                    record = json.loads(stream.readline())
+                self._nonce = record["handshake_nonce"]
+                channel = process_control.attach(
+                    record["control_host"],
+                    record["control_port"],
+                    nonce=self._nonce,
+                    timeout=20.0,
+                )
+                self.attached_at = time.monotonic()
+                try:
+                    self._say(f"prepared {self._instance_id}")
+                    commit = f"owner {self._nonce} commit\n"
+                    self._say("committed" if channel.readline() == commit else "failed")
+                finally:
+                    cast(Any, channel).close()
+            except BaseException as exc:  # noqa: BLE001 - reported to the test
+                self.failure = exc
+            finally:
+                with contextlib.suppress(OSError, ValueError):
+                    self._report.close()
+
+        def _say(self, message: str) -> None:
+            self._report.write(f"owner {self._nonce} {message}\n".encode("ascii"))
+            self._report.flush()
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode if self.returncode is not None else 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def close(self) -> None:
+            self.thread.join(timeout=30.0)
+            # ``stdout`` is None once the parent has released the handshake pipe.
+            for stream in (self.stdin, self.stdout, self._report):
+                if stream is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        cast(Any, stream).close()
+
+    def test_a_queue_saturated_before_the_child_still_reaches_commit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        profile = _profile(tmp_path)
+        config = _config(profile)
+        instance_id = new_instance_id()
+        child = self._Child(instance_id)
+        silent: list[socket.socket] = []
+        opened = election_module.ControlListener.open
+
+        def open_and_saturate() -> election_module.ControlListener:
+            # Every slot taken before the child exists, by peers that say
+            # nothing: the cheapest way to occupy the rendezvous and the one the
+            # per-peer allowance alone does not answer, because that bound
+            # divides the wait among peers ahead of a connection that is already
+            # queued.
+            listener = opened()
+            silent.extend(
+                socket.create_connection((listener.host, listener.port))
+                for _ in range(process_control._BACKLOG)
+            )
+            return listener
+
+        monkeypatch.setattr(
+            election_module.ControlListener, "open", staticmethod(open_and_saturate)
+        )
+        monkeypatch.setattr(election_module.subprocess, "Popen", lambda *a, **k: child)
+        monkeypatch.setattr(
+            election_module,
+            "terminate_process_group",
+            lambda *a, **k: pytest.fail("the healthy owner was stopped"),
+        )
+        monkeypatch.setattr(
+            election_module.daemon_descriptor,
+            "validate_prepared",
+            lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            election_module.daemon_descriptor, "discard_prepared", lambda *a, **k: None
+        )
+
+        began = time.monotonic()
+        try:
+            outcome = election_module._spawn(
+                profile.parent, config, lock_fd=None, timeout=8.0
+            )
+            elapsed = time.monotonic() - began
+        finally:
+            child.close()
+            for peer in silent:
+                peer.close()
+
+        assert child.failure is None, child.failure
+        assert outcome is election_module._Started.YES
+        assert not child.killed, "a child that could not reach the queue was killed"
+        # And it got there while the strangers were still standing in front of
+        # it, rather than after its own connect timeout gave up on them.
+        assert child.attached_at is not None
+        assert child.attached_at - began < 8.0
+        assert elapsed < 8.0, "the spawn spent its whole budget on the queue"
+
+
 class TestWindowsAtomicOwnerHandoff:
     def test_owner_requests_breakaway_from_the_host_job(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1560,9 +1712,10 @@ class TestWindowsAtomicOwnerHandoff:
         class _Control:
             """The rendezvous, stubbed so no real socket is bound here.
 
-            Only the accept is recorded. Where it sits relative to the Job is
-            what this class is about; the channel's own behaviour is pinned in
-            ``TestOwnerControlChannel``.
+            Only the ordering is recorded. Where the drain and the attachment sit
+            relative to the Job and to the child's own report is what this class
+            is about; the channel's own behaviour is pinned in
+            ``tests/test_process_control.py``.
             """
 
             host = "127.0.0.1"
@@ -1572,9 +1725,14 @@ class TestWindowsAtomicOwnerHandoff:
             def open(cls) -> _Control:
                 return cls()
 
-            def accept_within(self, *, nonce: str, timeout: float) -> None:
+            def start_accepting(self, *, nonce: str, timeout: float) -> None:
                 assert nonce == handshake_nonce
+                assert timeout == 1.0
+                events.append("drain")
+
+            def attached_within(self, *, timeout: float) -> None:
                 assert timeout <= 1.0
+                assert "drain" in events, "the attachment was taken without a drain"
                 events.append("attach")
 
             def close(self) -> None:
@@ -1689,6 +1847,12 @@ class TestWindowsAtomicOwnerHandoff:
             "build-gate",
             "start-gate",
             "create-handshake-nonce",
+            # The drain begins on the nonce and before the configuration record,
+            # so the queue is being emptied from before the child can reach the
+            # port. It is parent-side work and changes nothing about the Job,
+            # which is still assigned before the gate is released, so no owner
+            # code exists until the parent owns the Job.
+            "drain",
             "assign-gate",
             "release-gate",
             "config",
@@ -2028,14 +2192,24 @@ class TestAtomicStartupCommit:
         monkeypatch.setattr(election_module, "new_nonce", lambda: _HANDSHAKE_NONCE)
 
     @pytest.fixture(autouse=True)
-    def control_peers(self, monkeypatch: pytest.MonkeyPatch):
+    def control_peers(
+        self, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+    ):
         """Give each control channel the peer a real child would attach.
 
         The real listener rather than a stub, so these tests keep exercising the
         authentication they depend on. A connect completes against the backlog
         without an accept, so this needs no thread: the parent finds the peer
         waiting exactly as it does in production.
+
+        Not for a case whose child is a real process. The drain takes the first
+        peer that presents the nonce and closes the rendezvous behind it, exactly
+        as the single accept did, so a stand-in planted alongside a real owner
+        would win the attachment that owner is there to make.
         """
+        if request.node.get_closest_marker("real_control_peer"):
+            yield []
+            return
         opened = election_module.ControlListener.open
         peers: list[process_control.ControlChannel] = []
 
@@ -2533,6 +2707,7 @@ class TestAtomicStartupCommit:
         assert calls == [(profile.parent, None)]
 
     @_POSIX_ONLY
+    @pytest.mark.real_control_peer
     def test_planted_child_log_fifo_is_refused_without_blocking(
         self,
         tmp_path: Path,
